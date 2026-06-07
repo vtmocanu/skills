@@ -24,10 +24,10 @@ This project adheres to a [Code of Conduct](CODE_OF_CONDUCT.md). By participatin
 
 ## Adding or Editing a Skill
 
-Each skill is a single Markdown file:
+Each skill is a single Markdown file at the **repository root** (dot-ai's `?repo=` override reads prompts from the root):
 
-- **Flat skill**: `skills/<name>.md`
-- **Folder skill** (with supporting files): `skills/<name>/SKILL.md`
+- **Flat skill**: `<name>.md`
+- **Folder skill** (with supporting files): `<name>/SKILL.md`
 
 Every skill starts with YAML frontmatter:
 
@@ -39,14 +39,14 @@ description: <one line: what it does and when to use it>
 ```
 
 1. Fork the repository and create a branch: `git checkout -b add-<skill>`.
-2. Add or edit the skill file under `skills/`.
+2. Add or edit the skill file at the repository root.
 3. Run the validator (below).
 4. Open a pull request.
 
 ## Validating
 
 ```bash
-python3 scripts/validate_skills.py skills/
+python3 scripts/validate_skills.py .
 ```
 
 CI runs the same check on every push and pull request.

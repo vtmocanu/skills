@@ -6,7 +6,7 @@ A public collection of agent skills for [dot-ai](https://github.com/vfarcic/dot-
 [![Release](https://img.shields.io/github/v/release/vtmocanu/skills)](https://github.com/vtmocanu/skills/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-Each skill is a single Markdown file under [`skills/`](skills/) with YAML frontmatter (`name` + `description`). dot-ai serves them to your agent: it fetches a skills repo and generates one skill file per entry into your agent's skills directory.
+Each skill is a single Markdown file at the repository root with YAML frontmatter (`name` + `description`). dot-ai serves them to your agent: it fetches this repo and generates one skill file per entry into your agent's skills directory. (Skills live at the root because dot-ai's `?repo=` override reads prompts from the repository root.)
 
 ## Quick Start
 
@@ -22,11 +22,11 @@ dot-ai skills generate --agent claude-code --repo https://github.com/vtmocanu/sk
 
 | Skill | What it does |
 |---|---|
-| [reflect](skills/reflect.md) | Analyze the current session and propose improvements to the skill that was used, then edit and commit it. |
+| [reflect](reflect.md) | Analyze the current session and propose improvements to the skill that was used, then edit and commit it. |
 
 ## Contributing
 
-Issues and PRs welcome. See [CONTRIBUTING](CONTRIBUTING.md), the [Code of Conduct](CODE_OF_CONDUCT.md), and the [Security Policy](SECURITY.md).
+Issues and PRs welcome. See [CONTRIBUTING](.github/CONTRIBUTING.md), the [Code of Conduct](.github/CODE_OF_CONDUCT.md), and the [Security Policy](.github/SECURITY.md).
 
 ## License
 

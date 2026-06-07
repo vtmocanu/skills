@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """Validate agent skill files for dot-ai / Claude Code.
 
-Checks each skills/*.md (flat) and skills/*/SKILL.md (folder) for:
+Skills live at the repository root (a flat ``<name>.md`` per skill, or a
+``<name>/SKILL.md`` for folder skills). dot-ai's ``?repo=`` override reads
+prompts from the repo root, so that is where skills must live.
+
+Checks each skill for:
   - a YAML frontmatter block delimited by ---
   - non-empty `name`: lowercase letters/digits/hyphens, <= 64 chars,
     no reserved substrings ('anthropic', 'claude'); matches the filename
@@ -9,9 +13,12 @@ Checks each skills/*.md (flat) and skills/*/SKILL.md (folder) for:
   - non-empty single-line `description`, <= 1024 chars (rejects multi-line
     YAML block scalars, which render empty downstream)
 
+Repository meta files (README, CHANGELOG, governance docs) are not skills and
+are skipped.
+
 Exits non-zero with a report if any skill is invalid.
 
-Usage: python3 scripts/validate_skills.py [skills_dir]   (default: skills)
+Usage: python3 scripts/validate_skills.py [root_dir]   (default: .)
 """
 from __future__ import annotations
 
@@ -22,10 +29,19 @@ from pathlib import Path
 NAME_RE = re.compile(r"^[a-z0-9-]{1,64}$")
 RESERVED = ("anthropic", "claude")
 BLOCK_SCALARS = {">", ">-", ">+", "|", "|-", "|+"}
+META = {
+    "README.md",
+    "CHANGELOG.md",
+    "CONTRIBUTING.md",
+    "CODE_OF_CONDUCT.md",
+    "SECURITY.md",
+}
 
 
 def find_skill_files(root: Path) -> list[Path]:
-    return sorted(root.glob("*.md")) + sorted(root.glob("*/SKILL.md"))
+    flat = [p for p in sorted(root.glob("*.md")) if p.name not in META]
+    folder = sorted(root.glob("*/SKILL.md"))
+    return flat + folder
 
 
 def parse_frontmatter(text: str) -> dict[str, str] | None:
@@ -78,7 +94,7 @@ def validate(path: Path) -> list[str]:
 
 
 def main(argv: list[str]) -> int:
-    root = Path(argv[1]) if len(argv) > 1 else Path("skills")
+    root = Path(argv[1]) if len(argv) > 1 else Path(".")
     if not root.is_dir():
         print(f"error: {root} is not a directory", file=sys.stderr)
         return 2

@@ -22,4 +22,4 @@ jobs:
           persist-credentials: false
 
       - name: Validate skill frontmatter
-        run: python3 scripts/validate_skills.py skills/
+        run: python3 scripts/validate_skills.py .
