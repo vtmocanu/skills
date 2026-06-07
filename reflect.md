@@ -32,8 +32,13 @@ Scan the conversation for these signals:
 | **Successes** | MEDIUM | User said "perfect", "great", "exactly"; accepted output without modification; built on top of the output |
 | **Edge Cases** | MEDIUM | Questions the skill didn't anticipate; scenarios requiring workarounds; features not covered |
 | **Preferences** | LOW | Repeated patterns in user choices; implicit style/tool preferences |
+| **Trigger misfire** | HIGH | The skill should have fired but didn't, or the wrong skill fired for the request (a `description`/trigger problem, not a body problem) |
+
+**Do not capture** as skill changes: one-off or context-specific instructions ("just this time", "only in this repo"), questions, vague praise with no identifiable cause, or anything that would not generalize to future runs. Reflect durable, generalizable signals only.
 
 ### 3. Propose Changes
+
+A change can target the skill **body** (its behavior and instructions) or its **`description` / trigger phrases** (when the signal is a trigger misfire). Pick whichever the evidence points to.
 
 If no actionable signals are found, report that the skill performed well and end:
 
@@ -68,6 +73,16 @@ Apply these changes? [Y/n] or describe tweaks
 
 If declined, acknowledge and end.
 
+### 5. Consolidate (when the skill is getting bloated)
+
+Reflection should not only add. When the skill's body has grown long or accumulated overlapping guidance (rule of thumb: it exceeds ~100 lines, or you notice redundant or contradictory entries), do a consolidation pass:
+
+- Merge duplicate or near-duplicate entries into one.
+- Remove guidance that is outdated or superseded by a newer entry.
+- Regroup related points under the right section.
+
+Present it through the same propose/approve flow (Steps 3-4). A net reduction in length is a good outcome.
+
 ## Example
 
 User runs `/reflect` after a frontend-design session where they corrected gradient usage and dark background colors:
@@ -98,3 +113,4 @@ Apply these changes? [Y/n] or describe tweaks
 - Never modify skills without explicit user approval.
 - Push only after a successful commit.
 - Edit the source file in its repository, never the generated copy in your agent's skills directory (it is overwritten on the next regeneration).
+- Prefer editing or merging an existing entry over appending a new one; keep the skill tight.
