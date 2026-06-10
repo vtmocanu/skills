@@ -290,7 +290,10 @@ Notes:
 
 - Wait for coder's completion message via the automatic mailbox notifications (do NOT poll).
 - On coder done: SendMessage to reviewer and auditor with the diff summary, file paths changed, and the coder's report. They claim their tasks and report findings.
+- **Pin review scope to explicit commit SHAs** in the review dispatch, and if the worker adds commits after the review was dispatched (a follow-up fix, a crossed-in-flight reconciliation), immediately SendMessage the reviewer the new tip and require explicit confirmation that ALL commits were covered. Observed failure mode: a reviewer's report cited only the first of two commits on the branch; the second commit was verified only after a direct "did you cover SHA X?" follow-up.
 - On reviewer + auditor both done: synthesize findings for the user. If any blocking finding, route back to coder via SendMessage.
+- **Trust but verify teammate-reported gate results against artifacts** when the result matters beyond the report: a teammate's "task build green" can be stale-cache luck or a partial run. Cheap checks: binary timestamp/version after a build claim, `git log` tip after a commit claim. (Observed: a release agent reported the build gate green while the installed binary was left months stale.)
+- A teammate going idle WITHOUT reporting, right after being asked for a small fix, may be stalled mid-fix rather than working: check `git -C <their-worktree> status` — idle + uncommitted edits = stalled; send a targeted "finish the loop: run the gate, commit, report the SHA" nudge.
 - Before release (if applicable): present an end-to-end verification summary and STOP. Ask the user to confirm before spawning the release teammate.
 - When you spawn release, put the changelog requirement in its prompt (see Step 3): the releaser must ensure the version's `CHANGELOG.md` entries are folded into the cut and that the published release page carries them.
 
@@ -325,6 +328,10 @@ Do NOT send `shutdown_request` directly. SendMessage a plain question instead: "
 #### After verification
 
 Send `{type: "shutdown_request", reason: "<reason>"}` via SendMessage. Wait for `shutdown_response approve: true`. After all teammates confirm, call `TeamDelete`. Do NOT call TeamDelete with active teammates; it will fail.
+
+#### Worktree cleanup after TeamDelete
+
+TeamDelete does NOT remove the worktrees your spawn prompts told workers to create (the explicit `git worktree add` pattern from Step 3) — only worktrees the Agent tool itself created via `isolation`. After the wave's branches are merged, the lead must `git worktree remove <path>` each milestone worktree and delete the merged branches. Two follow-on gotchas: (1) removing a worktree can poison the shared golangci-lint cache — later `task lint` runs in surviving worktrees fail on phantom issues whose paths point into the removed worktree; fix with `golangci-lint cache clean`. (2) A single follow-up role task after TeamDelete (e.g. release) does not need a new team — spawn it standalone via `Agent(subagent_type: <role>)`.
 
 #### Pane-capture caveat
 
@@ -439,6 +446,8 @@ The full role library is in `./roles.yaml`. Read it during init/update to see th
 - **Never pin `model: haiku`** (or Sonnet 4.5) for any role. Auto-mode is docs-gated to Sonnet 4.6 / Opus 4.6 / Opus 4.7; a haiku teammate cannot do auto-mode and stalls on every shared-system write (e.g. a release tag push needs a manual confirmation round-trip). Default documenter/release to `sonnet`; bump the reasoning-heavy roles (coder, reviewer, auditor, tester, researcher) to `opus`. Tester is included because adversarial/scenario validation (the common testing shape here) is reasoning-heavy; keep it on `sonnet` only for a purely mechanical unit-test-suite repo. See the Step 5 model note for the full rationale.
 - **Idle is normal**: teammates go idle after every turn. Do not interpret idle as "done" or "stuck". Only act when a teammate sends a message or completes a task.
 - **Tasks vs SendMessage**: use TaskUpdate to mark progress (shared task list); use SendMessage for human-readable communication. Do not send structured JSON status payloads via SendMessage.
+- **The shared task list can vanish mid-run** (observed: lead's `TaskUpdate` returned "Task not found" and a teammate saw its task entry disappear, mid-session, with the team still healthy). Treat git state + SendMessage reports as the source of truth; the task list is a coordination convenience. Teammates should report findings via SendMessage directly when their task entry is missing instead of stalling, and the lead should not block any flow step on task-list bookkeeping succeeding.
+- **Teammate-environment-only failures**: a teammate may hit build/tool failures specific to its sandboxed session (observed: bare `go build` failing with buildvcs "exit status 128" in every worktree because the go toolchain's git subprocess was blocked — while the same command succeeded in the lead's shell). Before accepting workaround changes to shared build files, reproduce the failure in the lead's shell; if it doesn't reproduce, it's the teammate's environment — have them use a local env workaround (e.g. `GOFLAGS=-buildvcs=false`) and keep it out of the tree.
 
 ## Examples
 
