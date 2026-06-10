@@ -6,7 +6,7 @@ A public collection of agent skills for [dot-ai](https://github.com/vfarcic/dot-
 [![Release](https://img.shields.io/github/v/release/vtmocanu/skills)](https://github.com/vtmocanu/skills/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-Each skill is a single Markdown file at the repository root with YAML frontmatter (`name` + `description`). dot-ai serves them to your agent: it fetches this repo and generates one skill file per entry into your agent's skills directory. (Skills live at the root because dot-ai's `?repo=` override reads prompts from the repository root.)
+Each skill lives at the repository root, either as a single Markdown file (`<name>.md`) or as a folder (`<name>/SKILL.md` plus supporting files; supported since dot-ai v1.21.0), with YAML frontmatter (`name` + `description`). dot-ai serves them to your agent: it fetches this repo and generates the skill files into your agent's skills directory. (Skills live at the root because dot-ai's `?repo=` override reads prompts from the repository root.)
 
 ## Quick Start
 
@@ -22,6 +22,7 @@ dot-ai skills generate --agent claude-code --repo https://github.com/vtmocanu/sk
 
 | Skill | What it does |
 |---|---|
+| [agent-team](agent-team/SKILL.md) | Auto-generate and run a per-repo Claude Code agent team: probe the repo, write `.claude/agents/{role}.md` subagent definitions from a role library, then orchestrate tasks with TeamCreate plus spawned teammates. |
 | [reflect](reflect.md) | Analyze the current session and propose improvements to the skill that was used, then edit and commit it. |
 
 ## Contributing
