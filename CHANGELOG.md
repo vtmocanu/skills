@@ -4,6 +4,12 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-06-12
+
+### Added
+
+- `agent-team`: new `fact-checker` role for adversarial claim verification. Opt-in and read-only: extracts checkable claims from docs, reports, diffs, and teammate outputs, verifies each against the most authoritative source (code over prose, command output for behavior claims, primary sources for external facts), and reports per-claim verdicts (VERIFIED / REFUTED / UNVERIFIABLE) with evidence. Run-mode dispatches it in the reviewer/auditor wave; refuted claims are blocking.
+
 ## [0.2.0] - 2026-06-11
 
 ### Added
@@ -34,6 +40,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `reflect` skill: analyze a session and propose, then apply, improvements to the skill that was used.
 - Skill frontmatter validator (`scripts/validate_skills.py`), run in CI on every push and pull request.
 
+[0.3.0]: https://github.com/vtmocanu/skills/releases/tag/v0.3.0
 [0.2.0]: https://github.com/vtmocanu/skills/releases/tag/v0.2.0
 [0.1.0]: https://github.com/vtmocanu/skills/releases/tag/v0.1.0
 [0.0.1]: https://github.com/vtmocanu/skills/releases/tag/v0.0.1
