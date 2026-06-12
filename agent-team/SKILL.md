@@ -278,7 +278,7 @@ For `spec-keeper`, do NOT spawn at start; spawn after blocking review/audit find
 
 When the session runs inside **cmux** (the `cmux claude-teams` launcher installs a tmux shim that turns each teammate spawn into a `cmux new-split`, so every teammate becomes its own pane), the spawn splits land wherever the shim puts them, not where the user wants them.
 
-**Target layout (user-validated 2026-06-12):** the team-lead pane sits ALONE on the LEFT half, full height; ALL teammate panes are equal HORIZONTAL strips stacked on the RIGHT half. This holds regardless of what the workspace looked like before spawning — if other panes/surfaces existed (extra shells, old sessions), they live as TABS inside the lead pane, never as panes competing with the layout. Tabs are fine for non-agent surfaces; the teammates themselves stay panes (one each).
+**Target layout (user-validated 2026-06-12):** the team-lead pane sits on the LEFT half; ALL teammate panes are equal HORIZONTAL strips stacked on the RIGHT half. Non-agent panes (extra shells, old sessions) stacked horizontally above/below the lead in the LEFT column are FINE — leave them alone (user-clarified 2026-06-12; do not consolidate them into lead-pane tabs, that's an unwanted disruption). What's NOT ok: a non-agent pane in the right teammate stack, a teammate pane in the left column, or the lead squeezed into a full-width stack. Teammates stay panes (one each), never tabs, in the END state.
 
 After EVERY spawn wave (the initial Step 3 spawns, the post-coder reviewer/auditor/tester wave, and any respawn in Step 6 or the recycle flow):
 
@@ -298,7 +298,7 @@ cmux rpc pane.list "$(jq -nc --arg ws "$WS" '{workspace_id: $ws}')" \
   | jq -r '.panes[] | "\(.ref) \(.selected_surface_ref) x=\(.pixel_frame.x) w=\(.pixel_frame.width) h=\(.pixel_frame.height)"'
 ```
 
-Correct = lead has w≈half-container and h=full; every agent pane shares the same x (≈ lead-x + lead-w), same w, equal h.
+Correct = lead in the left column at w≈half-container (full height OR sharing the left column with non-agent panes — both fine); every agent pane shares the same x (≈ lead-x + lead-w), same w, equal h. Identify agent panes by their surface refs (match against the spawn-created surfaces), not by position — a low-numbered/pre-existing surface in the left column is a bystander, not a layout defect.
 
 3. **Rebuild if wrong** (validated recipe). `workspace.equalize_splits` only evens SIZES at each split level; it cannot fix a wrong tree SHAPE. Rebuild the shape with transient tab-consolidation (the panes-not-tabs rule is about the END state; using tabs as an intermediate step is exactly how you fix the shape):
 
