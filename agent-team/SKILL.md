@@ -276,9 +276,13 @@ For `spec-keeper`, do NOT spawn at start; spawn after blocking review/audit find
 
 ### Step 3.5: cmux pane layout (keep the team-lead un-squeezed)
 
-When the session runs inside **cmux** (the `cmux claude-teams` launcher installs a tmux shim that turns each teammate spawn into a `cmux new-split`, so every teammate becomes its own pane), the team-lead pane gets progressively squeezed as the team grows (lead collapses toward ~20% while the agent panes hog the rest). After EVERY spawn wave (the initial Step 3 spawns, the post-coder reviewer/auditor/tester wave, and any respawn in Step 6 or the recycle flow), equalize the workspace so the lead keeps the left half and the teammate panes share the right half evenly.
+When the session runs inside **cmux** (the `cmux claude-teams` launcher installs a tmux shim that turns each teammate spawn into a `cmux new-split`, so every teammate becomes its own pane), the spawn splits land wherever the shim puts them, not where the user wants them.
 
-Keep agents as PANES, not tabs. Run this one-liner (a clean no-op outside cmux):
+**Target layout (user-validated 2026-06-12):** the team-lead pane sits ALONE on the LEFT half, full height; ALL teammate panes are equal HORIZONTAL strips stacked on the RIGHT half. This holds regardless of what the workspace looked like before spawning — if other panes/surfaces existed (extra shells, old sessions), they live as TABS inside the lead pane, never as panes competing with the layout. Tabs are fine for non-agent surfaces; the teammates themselves stay panes (one each).
+
+After EVERY spawn wave (the initial Step 3 spawns, the post-coder reviewer/auditor/tester wave, and any respawn in Step 6 or the recycle flow):
+
+1. **Equalize** (cheap first step; clean no-op outside cmux):
 
 ```bash
 if command -v cmux >/dev/null 2>&1 && cmux identify --json >/dev/null 2>&1; then
@@ -287,11 +291,34 @@ if command -v cmux >/dev/null 2>&1 && cmux identify --json >/dev/null 2>&1; then
 fi
 ```
 
+2. **Verify with pixel frames — `cmux tree` does NOT show split orientation.** A tree that lists [lead, agent, agent, …] can render as one full-width vertical stack (observed: every pane w=container-width, lead = top strip). Check:
+
+```bash
+cmux rpc pane.list "$(jq -nc --arg ws "$WS" '{workspace_id: $ws}')" \
+  | jq -r '.panes[] | "\(.ref) \(.selected_surface_ref) x=\(.pixel_frame.x) w=\(.pixel_frame.width) h=\(.pixel_frame.height)"'
+```
+
+Correct = lead has w≈half-container and h=full; every agent pane shares the same x (≈ lead-x + lead-w), same w, equal h.
+
+3. **Rebuild if wrong** (validated recipe). `workspace.equalize_splits` only evens SIZES at each split level; it cannot fix a wrong tree SHAPE. Rebuild the shape with transient tab-consolidation (the panes-not-tabs rule is about the END state; using tabs as an intermediate step is exactly how you fix the shape):
+
+```bash
+# 1. collapse every agent surface into the lead pane as tabs
+cmux move-surface --surface <agent-surface> --pane <lead-pane>   # repeat per agent
+# 2. split the FIRST agent off to the RIGHT of the lead -> root becomes [lead | agent]
+cmux split-off --surface <first-agent-surface> right
+# 3. each remaining agent: move into the LAST agent pane, then split DOWN
+cmux move-surface --surface <next-agent-surface> --pane <last-agent-pane>
+cmux split-off --surface <next-agent-surface> down
+# 4. re-run equalize, then re-verify with pane.list (step 2)
+```
+
+Surface identity is stable across move/split-off, so teammate sessions are untouched. Then `cmux focus-pane` back to the lead.
+
 Notes:
-- `workspace.equalize_splits` evens every split level at once: the top-level `[lead | agent-column]` becomes 50/50 and the agent panes split the right half evenly. This is the validated fix for the "lead squeezed to ~20%" tiling.
-- Do NOT consolidate teammate surfaces into tabs (`cmux move-surface --surface … --pane …` followed by `split-off` is the tabs route, and the lead-vs-agents goal does not want it). The user wants stacked panes on the right half.
-- Re-run the one-liner after each later spawn wave; every new pane re-skews the splits until you equalize again.
-- Fallback only if a non-`[lead | column]` tree leaves the lead off ~half after equalizing: pin it with `cmux rpc pane.resize` on the lead pane ref (`cmux identify --json | jq -r '.caller.pane_ref'`). Equalize is the default; resize is the exception.
+- Naive `split-off down` on a pane that lives inside a column splits WITHIN the column — chains of those build one full-width stack including the lead. Always anchor the right half with a single `split-off right` from the lead first.
+- Re-run equalize after each later spawn wave; every new pane re-skews the splits.
+- `cmux rpc pane.resize` on the lead pane is a last-resort size pin only; it cannot fix shape either.
 
 ### Step 4: drive the flow
 
@@ -458,6 +485,7 @@ The full role library is in `./roles.yaml`. Read it during init/update to see th
 - **Idle is normal**: teammates go idle after every turn. Do not interpret idle as "done" or "stuck". Only act when a teammate sends a message or completes a task.
 - **Tasks vs SendMessage**: use TaskUpdate to mark progress (shared task list); use SendMessage for human-readable communication. Do not send structured JSON status payloads via SendMessage.
 - **The shared task list can vanish mid-run** (observed: lead's `TaskUpdate` returned "Task not found" and a teammate saw its task entry disappear, mid-session, with the team still healthy). Treat git state + SendMessage reports as the source of truth; the task list is a coordination convenience. Teammates should report findings via SendMessage directly when their task entry is missing instead of stalling, and the lead should not block any flow step on task-list bookkeeping succeeding.
+- **Stale duplicate message re-deliveries** (observed ~5x in one session, 2026-06-12): teammates can receive a re-delivered copy of an earlier dispatch AFTER completing it — sometimes minutes later, sometimes after the task entry has vanished from the store. Correct teammate behavior: recognize it (HEAD unchanged, work already reported), take NO action, and reply that the prior verdict stands. Correct lead behavior: confirm "stale duplicate, no re-dispatch — your verdict stands" and never treat the re-delivery as new scope or respawn-worthy. A side effect to watch: a re-delivered pre-flag list can wake the coder into an UNREQUESTED extra work round — if uncommitted WIP appears with no dispatch behind it, check pane activity, then require the standard finish-the-loop (gate, commit, report tip SHA) rather than aborting it.
 - **Teammate-environment-only failures**: a teammate may hit build/tool failures specific to its sandboxed session (observed: bare `go build` failing with buildvcs "exit status 128" in every worktree because the go toolchain's git subprocess was blocked — while the same command succeeded in the lead's shell). Before accepting workaround changes to shared build files, reproduce the failure in the lead's shell; if it doesn't reproduce, it's the teammate's environment — have them use a local env workaround (e.g. `GOFLAGS=-buildvcs=false`) and keep it out of the tree.
 
 ## Examples
