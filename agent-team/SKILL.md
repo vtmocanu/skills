@@ -325,10 +325,12 @@ Notes:
 - Wait for coder's completion message via the automatic mailbox notifications (do NOT poll).
 - On coder done: SendMessage to reviewer and auditor with the diff summary, file paths changed, and the coder's report. They claim their tasks and report findings.
 - **Pin review scope to explicit commit SHAs** in the review dispatch, and if the worker adds commits after the review was dispatched (a follow-up fix, a crossed-in-flight reconciliation), immediately SendMessage the reviewer the new tip and require explicit confirmation that ALL commits were covered. Observed failure mode: a reviewer's report cited only the first of two commits on the branch; the second commit was verified only after a direct "did you cover SHA X?" follow-up.
+- **No amends after review dispatch — put this rule in the coder's INITIAL spawn prompt.** Workers may amend freely BEFORE a SHA is dispatched for review; once dispatched, fixes must land as follow-up commits, never amends. An amend orphans the pinned SHA (it stops being an ancestor of HEAD), invalidates in-flight review scope, and forces a re-confirmation round-trip with every validator. Observed twice in one run (2026-06-12): both amends crossed the reviewer's/auditor's reports in flight, and each validator had to re-diff and re-confirm coverage of the new tip; after the rule was sent mid-run, all later fixes stacked cleanly. Stating it at spawn time costs one sentence; correcting it mid-run costs a round per validator per amend.
 - On reviewer + auditor both done: synthesize findings for the user. If any blocking finding, route back to coder via SendMessage.
 - **Trust but verify teammate-reported gate results against artifacts** when the result matters beyond the report: a teammate's "task build green" can be stale-cache luck or a partial run. Cheap checks: binary timestamp/version after a build claim, `git log` tip after a commit claim. (Observed: a release agent reported the build gate green while the installed binary was left months stale.)
 - A teammate going idle WITHOUT reporting, right after being asked for a small fix, may be stalled mid-fix rather than working: check `git -C <their-worktree> status` — idle + uncommitted edits = stalled; send a targeted "finish the loop: run the gate, commit, report the SHA" nudge. Prevent it at dispatch time too: any message that sends NEW requirements to a worker that already reported done MUST explicitly end with "run the gate, commit, and report the new tip SHA" (observed 2026-06-10: a coder applied forwarded security hardening but went idle with it uncommitted — the "release-ready" branch tip lacked the fix, and only the auditor's `git status` check caught it).
 - **Standby reviewers/auditors often surface baseline pre-flags while priming** (they read the target code before the coder finishes). Forward actionable pre-flags to the coder MID-implementation instead of holding them for the review round — requirements are cheaper upstream than as blocking findings (observed: an auditor's pre-flags became the spec for a hardening commit, avoiding a full fix-and-re-review cycle).
+- **If the tester role exists and the change alters behavior, dispatch it by default** on the scenario surface (the real runtime path: live conversation, real container/deploy entrypoint, the spec's stated success criteria). Coder-authored unit/security suites are NOT a substitute for end-to-end scenario proof — they test components, not the user-visible criterion. Observed (2026-06-12): a PRD's headline success criterion ("answers question X end-to-end via the real docker path") sat unproven through four reviewed milestones because the test matrix looked comprehensive; the user caught the missing tester, whose E2E run then produced the only direct evidence of the criterion (plus an adversarial injection probe and live doc-example verification the suites couldn't provide).
 - If the fact-checker role exists: dispatch it in the same wave as reviewer/auditor, scoped to the change's claim-bearing artifacts (docs, README, CHANGELOG, report prose), with explicit pointers to which claims matter. Treat REFUTED claims as blocking findings; UNVERIFIABLE ones go to the user with what would be needed to verify.
 - If the spec-keeper role exists: once blocking findings are resolved, dispatch it with the change summary plus the user-vs-AI provenance breakdown (see Step 3). It applies `specs/ai.md` updates directly and sends proposed `specs/human.md` edits back; relay those to the user for confirmation before telling the spec-keeper to apply them. The task is not complete until specs are in sync — the bar is that the code could be rebuilt from `specs/` alone, with `specs/human.md` treated as the binding contract.
 - Before release (if applicable): present an end-to-end verification summary and STOP. Ask the user to confirm before spawning the release teammate.
@@ -366,6 +368,13 @@ Do NOT send `shutdown_request` directly. SendMessage a plain question instead: "
 #### After verification
 
 Send `{type: "shutdown_request", reason: "<reason>"}` via SendMessage. Wait for `shutdown_response approve: true`. After all teammates confirm, call `TeamDelete`. Do NOT call TeamDelete with active teammates; it will fail.
+
+**Stale `isActive` after a GRACEFUL shutdown** (observed 2026-06-12): even with `shutdown_approved` received and the teammate terminated, its config entry can stay `isActive: true`, making TeamDelete fail with "Cannot cleanup team with N active member(s)". Verify the pane is actually dead (`tmux list-panes -a -F '#{pane_id}' | grep -x '<paneId>'` — paneId from the config), then flip the flag and retry:
+
+```bash
+jq '.members |= map(if .name == "<name>" then .isActive = false else . end)' \
+  ~/.claude/teams/<team>/config.json > /tmp/tc.json && mv /tmp/tc.json ~/.claude/teams/<team>/config.json
+```
 
 #### Worktree cleanup after TeamDelete
 
@@ -414,6 +423,8 @@ tmux capture-pane -p -t "$PANE_ID" 2>/dev/null | grep -E '% of [0-9]+k'
 ```
 
 Output: `▰▰▰▱▱▱▱ 51% of 1000k`: the live context budget. Run this check before EVERY new-task dispatch (it gates the >30% threshold below).
+
+**cmux caveat** (observed 2026-06-12): under the cmux shim, `tmux capture-pane` on a teammate pane can return EMPTY (no error, no output), and no cmux text-capture RPC exists (`surface.get_text` is not a method) — so the % budget check silently fails. Fall back to judgment: count task boundaries since spawn (the heavy worker typically crosses 30% within a milestone or two), keep spawn prompts self-contained so a recycle costs little, and don't block dispatch on an unobtainable number.
 
 ### When to recycle (heuristic)
 
