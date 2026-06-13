@@ -34,6 +34,10 @@ dot-ai skills generate --agent claude-code --repo https://github.com/vtmocanu/sk
 | [cmux-workspace](cmux-workspace/SKILL.md) | Work inside the current cmux workspace and terminal: caller surface, panes, surfaces, socket targeting, and non-interfering automation. |
 | [reflect](reflect.md) | Analyze the current session and propose improvements to the skill that was used, then edit and commit it. |
 
+## Other files
+
+- [`CLAUDE.example.md`](CLAUDE.example.md) — a generic starter for `~/.claude/CLAUDE.md` (Claude Code's global instructions): general AI-collaboration guidance only, no setup specifics. Not a skill; copy what's useful into your own config.
+
 ## Contributing
 
 Issues and PRs welcome. See [CONTRIBUTING](.github/CONTRIBUTING.md), the [Code of Conduct](.github/CODE_OF_CONDUCT.md), and the [Security Policy](.github/SECURITY.md).
