@@ -22,6 +22,7 @@ dot-ai skills generate --agent claude-code --repo https://github.com/vtmocanu/sk
 
 | Skill | What it does |
 |---|---|
+| [agent-permissions](agent-permissions/SKILL.md) | Manage an AI coding agent's permissions via Dippy (Bash/MCP allow/ask/deny + the auto-mode `[ASK]` fallback wrapper, bundled) and settings.json (Read/WebFetch/Skill). |
 | [agent-team](agent-team/SKILL.md) | Auto-generate and run a per-repo Claude Code agent team: probe the repo, write `.claude/agents/{role}.md` subagent definitions from a role library, then orchestrate tasks with TeamCreate plus spawned teammates. |
 | [cmux](cmux/SKILL.md) | Control [cmux](https://github.com/manaflow-ai/cmux) topology and routing: windows, workspaces, panes/surfaces, focus, moves, reorder, identify, trigger flash. |
 | [cmux-browser](cmux-browser/SKILL.md) | Browser automation with cmux: open sites, interact with pages, wait for state changes, and extract data from cmux browser surfaces. |
