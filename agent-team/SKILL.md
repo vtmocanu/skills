@@ -235,6 +235,11 @@ Use when `/agent-team <task description>` is invoked with a non-keyword first ar
 - Confirm `.claude/agents/` exists. If not, suggest running `/agent-team init` first.
 - Confirm `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`.
 - Read `.claude/agent-team.md` for the workflow + project signals.
+- **Put the agent-team artifacts on the work branch, NEVER the default branch.** Decide the feature branch (and, in a bare-clone-with-worktrees repo, which worktree) BEFORE writing any `.claude/agent-team-tasks/` brief or spawning a teammate, then operate from there:
+  - **Single shared worktree:** if the session opened on the default branch (`main`/`master`), `git checkout -b <feature>` in THIS worktree first, so the briefs and every commit land on `<feature>`.
+  - **Dedicated work worktree (bare-clone layout / parallel waves):** create the feature worktree (per the `git-worktrees` skill) and write the `.claude/agent-team-tasks/` briefs INTO that worktree — do not write them in a default-branch worktree the agents will not be in.
+
+  Always name the exact branch in every spawn prompt, and ensure the lead itself is on/in the work branch before it authors briefs. Stranding these artifacts on the default branch breaks context handoff (the brief is invisible from the work branch/worktree) and pollutes the default branch. Observed 2026-06-13: a session started on `main` while its agents worked on another branch left the `.claude/agent-team-tasks/` ("agents dir") stranded on `main`, invisible from the work branch.
 
 ### Step 2: TeamCreate + plan tasks
 
@@ -491,6 +496,7 @@ The full role library is in `./roles.yaml`. Read it during init/update to see th
 ## Gotchas
 
 - **Team config is global**, not per-repo. Multiple repos can each have their own `.claude/agents/`, but only one team can be active at a time across the whole Claude Code instance. If a team is already running for a different repo, ask the user to clean it up first.
+- **Never delete another session's team state.** `~/.claude/teams/` (and `~/.claude/tasks/`) is shared across ALL Claude Code sessions on the host. A team dir you did NOT create in THIS session may belong to a different, still-running session — do not `rm -rf` it, and do not `TeamDelete` it, to "clear a slate" before spawning. Detecting "orphaned" from your own session is unreliable: `cmux pane.list` / `cmux rpc` are scoped to the CALLER's workspace, so a session running in a different cmux window/workspace has live teammate panes you cannot enumerate from here, and `tmux list-panes -a` under the cmux shim can return empty. Safe to remove unprompted: a team dir with NO `config.json` (empty junk). NOT proven dead by your workspace failing to see its panes: a populated `config.json` with `isActive: true` members — treat it as possibly-live and ASK the user (it is likely their other session) before touching it. Observed 2026-06-13: a populated PRD team dir was deleted as "orphaned" on workspace-scoped pane evidence; it actually belonged to another live session, disrupting it.
 - **Single-line description in `.claude/agents/<role>.md`**: multi-line YAML (`>-`, `|`) breaks Claude Code's parser.
 - **`tools: []` field**: omit entirely if inheriting. Do not write an empty array.
 - **Team-coordination tools on every non-empty `tools:` allowlist**: include `SendMessage, TaskUpdate, TaskList, TaskGet`. The role library enforces this; check survives any prompt-body or schema-tuning edits. A teammate spawned without these cannot report findings, claim/complete tasks, or respond to `shutdown_request`, even though its `prompt_body` says "Report via SendMessage". Symptom on first surface: teammate renders the report in its pane and goes idle; lead has to scrape and apply the hotfix in Step 6.A.
