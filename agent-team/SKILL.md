@@ -282,19 +282,22 @@ When the session runs inside **cmux** (the `cmux claude-teams` launcher installs
 
 After EVERY spawn wave (the initial Step 3 spawns, the post-coder reviewer/auditor/tester wave, and any respawn in Step 6 or the recycle flow):
 
-1. **Equalize** (cheap first step; clean no-op outside cmux):
+1. **Resolve the cmux CLI, then equalize** (cheap first step; clean no-op outside cmux). Do NOT gate on `command -v cmux`: the `claude-teams` launcher puts only shim dirs on PATH (a `tmux`/`claude` shim), so the cmux CLI is usually ABSENT from PATH even though you ARE under cmux — gating on it silently skips the entire layout fix (observed 2026-06-13: lead left squeezed in a full-width stack because the check fell through to "outside cmux"). Detect the launcher by its `$TMUX` socket and resolve the real binary explicitly (app-bundle fallback):
 
 ```bash
-if command -v cmux >/dev/null 2>&1 && cmux identify --json >/dev/null 2>&1; then
-  WS=$(cmux identify --json | jq -r '.caller.workspace_ref')
-  cmux rpc workspace.equalize_splits "$(jq -nc --arg ws "$WS" '{workspace_id: $ws}')"
+CMUX=$(command -v cmux || echo /Applications/cmux.app/Contents/Resources/bin/cmux)
+if [[ "${TMUX:-}" == *cmux-claude-teams* ]] && [[ -x "$CMUX" ]]; then
+  WS=$("$CMUX" identify --json | jq -r '.caller.workspace_ref')
+  "$CMUX" rpc workspace.equalize_splits "$(jq -nc --arg ws "$WS" '{workspace_id: $ws}')"
 fi
 ```
+
+Use `"$CMUX"` (the resolved path), not bare `cmux`, for every cmux call in steps 2-3.
 
 2. **Verify with pixel frames — `cmux tree` does NOT show split orientation.** A tree that lists [lead, agent, agent, …] can render as one full-width vertical stack (observed: every pane w=container-width, lead = top strip). Check:
 
 ```bash
-cmux rpc pane.list "$(jq -nc --arg ws "$WS" '{workspace_id: $ws}')" \
+"$CMUX" rpc pane.list "$(jq -nc --arg ws "$WS" '{workspace_id: $ws}')" \
   | jq -r '.panes[] | "\(.ref) \(.selected_surface_ref) x=\(.pixel_frame.x) w=\(.pixel_frame.width) h=\(.pixel_frame.height)"'
 ```
 
@@ -304,21 +307,21 @@ Correct = lead in the left column at w≈half-container (full height OR sharing 
 
 ```bash
 # 1. collapse every agent surface into the lead pane as tabs
-cmux move-surface --surface <agent-surface> --pane <lead-pane>   # repeat per agent
+"$CMUX" move-surface --surface <agent-surface> --pane <lead-pane>   # repeat per agent
 # 2. split the FIRST agent off to the RIGHT of the lead -> root becomes [lead | agent]
-cmux split-off --surface <first-agent-surface> right
+"$CMUX" split-off --surface <first-agent-surface> right
 # 3. each remaining agent: move into the LAST agent pane, then split DOWN
-cmux move-surface --surface <next-agent-surface> --pane <last-agent-pane>
-cmux split-off --surface <next-agent-surface> down
+"$CMUX" move-surface --surface <next-agent-surface> --pane <last-agent-pane>
+"$CMUX" split-off --surface <next-agent-surface> down
 # 4. re-run equalize, then re-verify with pane.list (step 2)
 ```
 
-Surface identity is stable across move/split-off, so teammate sessions are untouched. Then `cmux focus-pane` back to the lead.
+Surface identity is stable across move/split-off, so teammate sessions are untouched. Then `"$CMUX" focus-pane <lead-pane>` back to the lead.
 
 Notes:
 - Naive `split-off down` on a pane that lives inside a column splits WITHIN the column — chains of those build one full-width stack including the lead. Always anchor the right half with a single `split-off right` from the lead first.
 - Re-run equalize after each later spawn wave; every new pane re-skews the splits.
-- `cmux rpc pane.resize` on the lead pane is a last-resort size pin only; it cannot fix shape either.
+- `"$CMUX" rpc pane.resize` on the lead pane is a last-resort size pin only; it cannot fix shape either.
 
 ### Step 4: drive the flow
 
