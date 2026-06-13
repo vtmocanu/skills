@@ -23,6 +23,14 @@ dot-ai skills generate --agent claude-code --repo https://github.com/vtmocanu/sk
 | Skill | What it does |
 |---|---|
 | [agent-team](agent-team/SKILL.md) | Auto-generate and run a per-repo Claude Code agent team: probe the repo, write `.claude/agents/{role}.md` subagent definitions from a role library, then orchestrate tasks with TeamCreate plus spawned teammates. |
+| [cmux](cmux/SKILL.md) | Control [cmux](https://github.com/manaflow-ai/cmux) topology and routing: windows, workspaces, panes/surfaces, focus, moves, reorder, identify, trigger flash. |
+| [cmux-browser](cmux-browser/SKILL.md) | Browser automation with cmux: open sites, interact with pages, wait for state changes, and extract data from cmux browser surfaces. |
+| [cmux-customization](cmux-customization/SKILL.md) | Customize cmux: `cmux.json` actions, custom commands, workspace layouts, buttons, Command Palette, shortcuts, notifications, browser routing, and presets. |
+| [cmux-diagnostics](cmux-diagnostics/SKILL.md) | Run cmux diagnostics and health checks when hooks, notifications, session restore, settings, socket access, or CLI control are not working. |
+| [cmux-keyboard-shortcuts](cmux-keyboard-shortcuts/SKILL.md) | Customize, rebind, unbind, reset, audit, or template cmux keyboard shortcuts (tmux-style, Vim-style, terminal-first, and more). |
+| [cmux-markdown](cmux-markdown/SKILL.md) | Open markdown files in a formatted viewer panel with live reload, alongside the terminal. |
+| [cmux-settings](cmux-settings/SKILL.md) | View and edit cmux settings in `~/.config/cmux/cmux.json`: set values by JSON path, validate the file, and look up recognized keys. |
+| [cmux-workspace](cmux-workspace/SKILL.md) | Work inside the current cmux workspace and terminal: caller surface, panes, surfaces, socket targeting, and non-interfering automation. |
 | [reflect](reflect.md) | Analyze the current session and propose improvements to the skill that was used, then edit and commit it. |
 
 ## Contributing
