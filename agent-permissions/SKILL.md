@@ -82,6 +82,8 @@ Worked example from the current config: `ask git push "[ASK] Confirm push target
 
 ## Dippy Config Format
 
+A ready-to-adapt starter config ships with this skill as [`config.example`](config.example) — generic safe-defaults (read-only allows, write/destructive `ask`/`deny`, secret-write `deny-redirect` guards, the no-interpreter rule, and the auto-mode `[ASK]` convention). Copy it to `~/.dippy/config` (or a project `.dippy`) and tailor it to your toolchain.
+
 ### Directives Reference
 
 | Directive | Syntax | Behavior |

@@ -1,0 +1,239 @@
+# Example Dippy config for the agent-permissions skill.
+# Dippy gates an AI coding agent's Bash + MCP tool calls via allow / ask / deny rules.
+# Docs: https://github.com/ldayton/Dippy/wiki
+#
+# This is a STARTER template — adapt it to your own toolchain. It ships only
+# generic, public-CLI rules; add or remove blocks to match the tools you use.
+# Copy it to ~/.dippy/config (or a project-level .dippy) and edit.
+#
+# Rule precedence: LAST MATCH WINS. Put broad allows first, specific asks/denies after.
+# Pattern matching: prefix by default (`allow git status` covers `git status -s`);
+# `|` anchors an exact match; `*`/`?`/`[abc]` are globs. A pattern containing any
+# glob char must match the WHOLE command, so add a trailing ` *` to keep matching
+# commands that have extra args (e.g. `ask curl * -X POST *`).
+#
+# AUTO-MODE [ASK] CONVENTION (see dippy-with-auto-fallback.sh, bundled with this skill):
+#   In `auto` permission mode the wrapper forwards only `allow`/`deny` verdicts and
+#   `ask` rules whose message contains the literal token `[ASK]`. Every other `ask`
+#   is dropped and handled by the agent's own classifier (usually without prompting).
+#   So tag with `[ASK]` every write/destructive rule you want to ALWAYS reach a human,
+#   even during unattended/agent runs. Asks without `[ASK]` only prompt in interactive modes.
+
+# =============================================================================
+# Default: ask for anything not matched below
+# =============================================================================
+set default ask
+
+# =============================================================================
+# File-redirect guards — never let the agent write secrets / keys
+# =============================================================================
+deny-redirect **/.env*         "Never write env files; do it manually"
+deny-redirect **/*credentials* "Never write credentials; do it manually"
+deny-redirect **/*secret*      "Never write secrets; do it manually"
+deny-redirect **/*.pem         "Never write key files; do it manually"
+deny-redirect **/*.key         "Never write key files; do it manually"
+deny-redirect **/id_rsa*       "Never write SSH keys; do it manually"
+allow-redirect /tmp/**         # safe scratch space
+
+# =============================================================================
+# Shell basics (read-only / safe)
+# =============================================================================
+allow cat
+allow echo
+allow jq
+allow wc
+allow sort
+allow head
+allow grep
+allow rg
+allow ls
+allow pwd
+allow find
+allow fd
+allow basename
+allow file
+allow base64
+allow tree
+allow test
+allow date
+allow mkdir
+allow cp
+
+# SECURITY: never `allow` interpreters (bash, sh, python3, node, ruby, perl).
+# A prefix `allow bash` auto-approves `bash -c '...'`, bypassing every inner rule —
+# Dippy does not trace into -c/-e arguments. Leave interpreters to `set default ask`.
+
+# gsed/sed: read-only allowed; in-place edits prompt (the -i flag can appear anywhere)
+allow gsed *
+ask gsed -i *    "in-place edit — confirm target file(s)"
+ask gsed * -i *  "in-place edit (flag after other args) — confirm target file(s)"
+ask gsed * -i.* * "in-place edit with backup suffix — confirm target file(s)"
+allow sed *
+ask sed -i *     "in-place edit — confirm target file(s)"
+ask sed * -i *   "in-place edit (flag after other args) — confirm target file(s)"
+ask sed * -i.* * "in-place edit with backup suffix — confirm target file(s)"
+
+# =============================================================================
+# Git — read-only allowed, writes/destructive prompt
+# =============================================================================
+allow git status
+allow git log
+allow git diff
+allow git show
+allow git fetch
+allow git remote
+allow git branch
+allow git tag
+allow git rev-parse
+allow git ls-files
+allow git config
+allow git worktree list
+allow git blame
+allow git pull
+allow git clone
+ask git push "[ASK] Confirm push target"
+ask git commit "Confirm commit"
+ask git add "Confirm staging"
+ask git merge "Confirm merge"
+ask git checkout "Confirm checkout"
+ask git rebase "[ASK] WARNING: rebase rewrites history; confirm target branch"
+ask git push --force "[ASK] WARNING: force-push can destroy remote history"
+ask git push -f "[ASK] WARNING: force-push can destroy remote history"
+ask git reset --hard "[ASK] WARNING: discards uncommitted changes permanently"
+ask git clean -f "WARNING: permanently deletes untracked files"
+ask git branch -D "WARNING: force-deletes branch; consider git branch -d"
+
+# =============================================================================
+# Kubernetes — read-only allowed, mutations prompt
+# =============================================================================
+allow kubectl get
+allow kubectl describe
+allow kubectl logs
+allow kubectl explain
+allow kubectl events
+allow kubectl top
+allow kubectl diff
+allow kubectl api-resources
+allow kubectl cluster-info
+ask kubectl delete "[ASK] WARNING: will delete cluster resources"
+ask kubectl apply "[ASK] Confirm resource apply"
+ask kubectl edit "[ASK] Confirm resource edit"
+ask kubectl patch "[ASK] Confirm resource patch"
+ask kubectl scale "WARNING: will change replica count"
+ask kubectl drain "[ASK] WARNING: will evict all pods from node"
+
+# =============================================================================
+# Helm — read-only allowed.
+# If you run GitOps, deny direct install/upgrade and point at your repo instead.
+# =============================================================================
+allow helm template
+allow helm show
+allow helm get
+allow helm list
+allow helm search repo
+allow helm history
+allow helm pull
+deny helm install "Use GitOps: create the HelmRelease in your GitOps repo instead"
+deny helm upgrade "Use GitOps: update the HelmRelease in your GitOps repo instead"
+ask helm rollback "WARNING: will rollback release"
+
+# =============================================================================
+# Docker — read-only allowed, removals prompt
+# =============================================================================
+allow docker ps
+allow docker logs
+allow docker images
+allow docker inspect
+allow docker info
+allow docker build
+allow docker pull
+ask docker run
+ask docker rm "Confirm container removal"
+ask docker rmi "Confirm image removal"
+ask docker system prune "WARNING: removes all unused data"
+
+# =============================================================================
+# Infrastructure-as-code — read-only allowed, apply/destroy prompt
+# =============================================================================
+allow tofu plan
+allow tofu show
+allow tofu state
+ask tofu apply "[ASK] Confirm tofu apply"
+ask tofu destroy "[ASK] WARNING: will destroy infrastructure"
+allow terraform plan
+allow terraform show
+ask terraform apply "[ASK] Confirm terraform apply"
+ask terraform destroy "[ASK] WARNING: will destroy infrastructure"
+
+# =============================================================================
+# Build / dev tools (read-only / safe)
+# =============================================================================
+allow go build
+allow go test
+allow go vet
+allow gofmt
+allow golangci-lint
+allow cargo test
+allow npm
+allow npx
+allow yamllint
+allow kustomize build
+
+# =============================================================================
+# Git-host CLIs — read allow, write ask.
+# Shown for `gh`; the same read-allow / write-ask split applies to `glab`, `tea`, etc.
+# =============================================================================
+allow gh issue view
+allow gh issue list
+allow gh pr view
+allow gh release list
+allow gh repo view
+allow gh search
+allow gh api
+ask gh pr create "[ASK] Confirm PR creation"
+ask gh issue create "[ASK] Confirm issue creation"
+ask gh api * -X POST * "[ASK] Review POST request before sending"
+ask gh api * -X PUT * "[ASK] Review PUT request before sending"
+ask gh api * -X DELETE * "[ASK] Review DELETE request before sending"
+ask gh api * -X PATCH * "[ASK] Review PATCH request before sending"
+
+# =============================================================================
+# Custom scripts — allow your own helper scripts by absolute path
+# =============================================================================
+# allow /home/you/scripts/my-helper.sh
+# allow ~/scripts/my-helper.sh
+
+# =============================================================================
+# Network diagnostics — read allowed, write methods prompt.
+# Note the trailing ` *`: it keeps the pattern matching when flags follow the method.
+# =============================================================================
+allow dig
+allow ping
+allow curl
+ask curl * -X POST * "Review POST request before sending"
+ask curl * -X PUT * "Review PUT request before sending"
+ask curl * -X DELETE * "Review DELETE request before sending"
+ask curl * -X PATCH * "Review PATCH request before sending"
+ask curl * --data * "Review request with data before sending"
+ask curl * -d * "Review request with data before sending"
+ask curl * -F * "Review form upload before sending"
+ask curl * -T * "Review file upload before sending"
+
+# =============================================================================
+# Global dangerous asks — placed LAST so they win over the broad allows above
+# =============================================================================
+ask rm -rf "[ASK] WARNING: recursive delete"
+ask rm -r "[ASK] WARNING: recursive delete"
+ask chown "WARNING: will change file ownership"
+ask sudo "[ASK] WARNING: running as root"
+
+# =============================================================================
+# MCP tool rules (requires an `mcp__.*` matcher in your hooks config).
+# Tool names follow mcp__<server>__<action>. Allow a read-only server with a
+# wildcard; gate its write tools with `ask-mcp` placed AFTER (last match wins).
+# =============================================================================
+allow-mcp mcp__context7__*                 # public documentation MCP, read-only
+
+# Example pattern for your own servers — replace <server> / <write-tool>:
+# allow-mcp mcp__<server>__*
+# ask-mcp   mcp__<server>__<write-tool> "[ASK] confirm write op — preview content first"
