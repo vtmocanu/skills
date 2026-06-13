@@ -4,6 +4,13 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - 2026-06-13
+
+### Added
+
+- `agent-team`: the documenter role now self-verifies after a large doc change (a migration or relocation) before reporting done — content fidelity (diff the pre-change source against the new corpus), link integrity, inbound-reference fixes (other docs, CLAUDE.md/CONTRIBUTING.md), and accuracy-vs-source — and points docs at any local-dev setup a reader needs so a relocated instruction never dead-ends.
+- `agent-team`: SKILL.md Step 4 documents a fidelity-first review pass for documentation migrations (five lenses: fidelity, link integrity, accuracy, structure, newcomer-UX), with agent count scaled to the change size.
+
 ## [0.8.0] - 2026-06-13
 
 ### Changed
