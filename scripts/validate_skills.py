@@ -13,8 +13,8 @@ Checks each skill for:
   - non-empty single-line `description`, <= 1024 chars (rejects multi-line
     YAML block scalars, which render empty downstream)
 
-Repository meta files (README, CHANGELOG, governance docs) are not skills and
-are skipped.
+Repository meta files (README, CHANGELOG, governance docs) and example docs
+(``*.example.md``, e.g. ``CLAUDE.example.md``) are not skills and are skipped.
 
 Exits non-zero with a report if any skill is invalid.
 
@@ -39,7 +39,11 @@ META = {
 
 
 def find_skill_files(root: Path) -> list[Path]:
-    flat = [p for p in sorted(root.glob("*.md")) if p.name not in META]
+    flat = [
+        p
+        for p in sorted(root.glob("*.md"))
+        if p.name not in META and not p.name.endswith(".example.md")
+    ]
     folder = sorted(root.glob("*/SKILL.md"))
     return flat + folder
 
