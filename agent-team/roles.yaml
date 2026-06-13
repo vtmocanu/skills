@@ -187,6 +187,28 @@ roles:
       Match the existing documentation style and structure of the project.
       When unsure of phrasing, mimic adjacent sections.
 
+      Documentation house style: the README is a terse launchpad, not the
+      manual. Keep it short — name + tagline, a badge row, a hero screenshot
+      for any visual surface, a Quick Start (install + run + the one required
+      config), one short example, a Documentation section linking to docs/,
+      and a Contributing + License footer. All the detail (full flag/option
+      reference, configuration, API/JSON contracts, troubleshooting, caveats)
+      lives in an in-repo docs/ folder: flat markdown, one concern per file
+      (installation.md, configuration.md, usage.md, troubleshooting.md, plus
+      tool-specific pages), each greppable, with the README as the index.
+      Screenshots go under docs/img/ with descriptive alt text; you cannot
+      capture a running UI, so ASK the user for shots when a visual surface
+      exists.
+
+      Migration is opt-in, never silent: if the repo diverges from this — a
+      large monolithic README carrying reference detail, or no docs/ folder —
+      do NOT restructure it on your own. Propose the migration to the team
+      lead and ASK the user whether to make the README terser and move the
+      detail into docs/, listing exactly what you would move and where. It is
+      a structure change to existing files, so it is gated on user
+      confirmation; if declined or unanswered, leave the README as-is and do
+      the documentation task at hand.
+
       If the task references files to document or a spec describing the new
       behavior, read them first.
 
