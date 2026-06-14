@@ -4,6 +4,16 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0] - 2026-06-14
+
+### Added
+
+- `agent-team`: bundled `scripts/layout-team-panes.sh`, which normalizes the cmux pane layout after a spawn wave (team-lead on the left half, teammate panes as equal right-column strips, bystanders stacked in the left column). It is idempotent (a no-op when the layout is already canonical), self-verifying (pane count + lead-left + teammates-right geometry), cleans up the stray shells cmux respawns into emptied panes (via `close-surface`), polls the eventually-consistent pane tree to confirm each structural op landed before the next, and is a clean no-op outside the cmux launcher. On failure it exits 3 (LAYOUT-MISS) and saves a `pane.list` snapshot under `~/.claude/cmux-layout-misses/`.
+
+### Changed
+
+- `agent-team`: SKILL.md Step 3.5 now calls the bundled layout script instead of walking the manual move-surface/split-off recipe inline, and documents a required self-improving loop: a LAYOUT-MISS (or a discovered bug or a better cmux primitive) goes through `/dot-ai-reflect agent-team` to fold the fix into the script itself, using the captured snapshots as input.
+
 ## [0.9.0] - 2026-06-13
 
 ### Added

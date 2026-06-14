@@ -281,52 +281,30 @@ For `spec-keeper`, do NOT spawn at start; spawn after blocking review/audit find
 
 ### Step 3.5: cmux pane layout (keep the team-lead un-squeezed)
 
-When the session runs inside **cmux** (the `cmux claude-teams` launcher installs a tmux shim that turns each teammate spawn into a `cmux new-split`, so every teammate becomes its own pane), the spawn splits land wherever the shim puts them, not where the user wants them.
+When the session runs inside **cmux** (the `cmux claude-teams` launcher installs a tmux shim that turns each teammate spawn into a `cmux new-split`, so every teammate becomes its own pane), spawn splits land wherever the shim puts them, not where the user wants them.
 
-**Target layout (user-validated 2026-06-12):** the team-lead pane sits on the LEFT half; ALL teammate panes are equal HORIZONTAL strips stacked on the RIGHT half. Non-agent panes (extra shells, old sessions) stacked horizontally above/below the lead in the LEFT column are FINE — leave them alone (user-clarified 2026-06-12; do not consolidate them into lead-pane tabs, that's an unwanted disruption). What's NOT ok: a non-agent pane in the right teammate stack, a teammate pane in the left column, or the lead squeezed into a full-width stack. Teammates stay panes (one each), never tabs, in the END state.
+**Target layout (user-validated):** the team-lead pane on the LEFT half; ALL teammate panes equal HORIZONTAL strips on the RIGHT half. Non-agent bystander panes (extra shells, old sessions) stacked in the LEFT column above/below the lead are FINE — leave them there; do NOT consolidate them into lead-pane tabs (an unwanted disruption). NOT ok: a bystander in the right teammate stack, a teammate in the left column, or the lead squeezed into a full-width stack.
 
-After EVERY spawn wave (the initial Step 3 spawns, the post-coder reviewer/auditor/tester wave, and any respawn in Step 6 or the recycle flow):
-
-1. **Resolve the cmux CLI, then equalize** (cheap first step; clean no-op outside cmux). Do NOT gate on `command -v cmux`: the `claude-teams` launcher puts only shim dirs on PATH (a `tmux`/`claude` shim), so the cmux CLI is usually ABSENT from PATH even though you ARE under cmux — gating on it silently skips the entire layout fix (observed 2026-06-13: lead left squeezed in a full-width stack because the check fell through to "outside cmux"). Detect the launcher by its `$TMUX` socket and resolve the real binary explicitly (app-bundle fallback):
+After EVERY spawn wave (the initial Step 3 spawns, the post-coder reviewer/auditor/tester wave, and any respawn in Step 6 or the recycle flow), run the bundled helper:
 
 ```bash
-CMUX=$(command -v cmux || echo /Applications/cmux.app/Contents/Resources/bin/cmux)
-if [[ "${TMUX:-}" == *cmux-claude-teams* ]] && [[ -x "$CMUX" ]]; then
-  WS=$("$CMUX" identify --json | jq -r '.caller.workspace_ref')
-  "$CMUX" rpc workspace.equalize_splits "$(jq -nc --arg ws "$WS" '{workspace_id: $ws}')"
-fi
+LEAD=$(cmux identify --json | jq -r .caller.surface_ref)
+./scripts/layout-team-panes.sh "$LEAD" surface:NN surface:MM ...   # one arg per teammate
 ```
 
-Use `"$CMUX"` (the resolved path), not bare `cmux`, for every cmux call in steps 2-3.
+- **Lead surface:** `cmux identify --json | jq -r .caller.surface_ref`.
+- **Teammate surfaces:** the surfaces that APPEARED with this wave. Snapshot `cmux rpc pane.list` `selected_surface_ref`s BEFORE spawning, diff after; the new ones are the teammates. Pass them as SEPARATE args — NEVER a single space-joined string (that collapses them into one bogus surface ref and the reshape silently fails).
+- Any surface that is neither the lead nor a listed teammate is treated as a bystander and stacked in the left column.
 
-2. **Verify with pixel frames — `cmux tree` does NOT show split orientation.** A tree that lists [lead, agent, agent, …] can render as one full-width vertical stack (observed: every pane w=container-width, lead = top strip). Check:
+The script is idempotent (a no-op when the layout is already canonical — re-running after a wave that didn't skew costs nothing, and reshaping a good layout is itself what spawns stray shells, so it verifies first), self-verifies the result (exact pane count + lead-left + teammates-right geometry), cleans up the stray shells cmux respawns into emptied panes (via `close-surface`), and is a clean no-op when not under the cmux launcher. It resolves the cmux CLI itself (the claude-teams shim keeps cmux off PATH — it falls back to the app-bundle path, NOT `command -v cmux`).
 
-```bash
-"$CMUX" rpc pane.list "$(jq -nc --arg ws "$WS" '{workspace_id: $ws}')" \
-  | jq -r '.panes[] | "\(.ref) \(.selected_surface_ref) x=\(.pixel_frame.x) w=\(.pixel_frame.width) h=\(.pixel_frame.height)"'
-```
+Exit codes: `0` laid out OK / already canonical / no-op outside cmux; `2` usage; `3` **LAYOUT-MISS** — it could not reach the canonical shape and saved a `pane.list` snapshot under `~/.claude/cmux-layout-misses/`. On a MISS, fall back to inspecting `cmux rpc pane.list` pixel frames by hand (the script source documents the manual recipe), and feed the snapshot into the reflect loop below.
 
-Correct = lead in the left column at w≈half-container (full height OR sharing the left column with non-agent panes — both fine); every agent pane shares the same x (≈ lead-x + lead-w), same w, equal h. Identify agent panes by their surface refs (match against the spawn-created surfaces), not by position — a low-numbered/pre-existing surface in the left column is a bystander, not a layout defect.
-
-3. **Rebuild if wrong** (validated recipe). `workspace.equalize_splits` only evens SIZES at each split level; it cannot fix a wrong tree SHAPE. Rebuild the shape with transient tab-consolidation (the panes-not-tabs rule is about the END state; using tabs as an intermediate step is exactly how you fix the shape):
-
-```bash
-# 1. collapse every agent surface into the lead pane as tabs
-"$CMUX" move-surface --surface <agent-surface> --pane <lead-pane>   # repeat per agent
-# 2. split the FIRST agent off to the RIGHT of the lead -> root becomes [lead | agent]
-"$CMUX" split-off --surface <first-agent-surface> right
-# 3. each remaining agent: move into the LAST agent pane, then split DOWN
-"$CMUX" move-surface --surface <next-agent-surface> --pane <last-agent-pane>
-"$CMUX" split-off --surface <next-agent-surface> down
-# 4. re-run equalize, then re-verify with pane.list (step 2)
-```
-
-Surface identity is stable across move/split-off, so teammate sessions are untouched. Then `"$CMUX" focus-pane <lead-pane>` back to the lead.
+**Self-improving (REQUIRED).** When the script reports LAYOUT-MISS, OR you hit a bug in it, OR you discover a better cmux primitive/approach, run `/dot-ai-reflect agent-team` so the fix is folded into the SCRIPT itself (`scripts/layout-team-panes.sh`), not just into this prose. The captured `~/.claude/cmux-layout-misses/*.json` snapshots are the concrete edge-case input for that pass. This is how the layout helper accretes handled cmux tree shapes over time, instead of the lead re-deriving the reshape by hand each session.
 
 Notes:
-- Naive `split-off down` on a pane that lives inside a column splits WITHIN the column — chains of those build one full-width stack including the lead. Always anchor the right half with a single `split-off right` from the lead first.
-- Re-run equalize after each later spawn wave; every new pane re-skews the splits.
-- `"$CMUX" rpc pane.resize` on the lead pane is a last-resort size pin only; it cannot fix shape either.
+- `cmux rpc workspace.equalize_splits` only evens SIZES at each split level; it canNOT fix a wrong tree SHAPE — that is why the script rebuilds the shape (collapse to tabs → `split-off right` to anchor the right half → stack down) rather than just equalizing. `cmux tree` does NOT show split orientation; verify with `pane.list` pixel frames.
+- The cmux pane tree is eventually-consistent: a structural op is not reflected in the next `pane.list` immediately, so the script polls to confirm each op landed before the next (fire-and-continue races and derails the reshape). This is also why doing it by hand is error-prone — prefer the script.
 
 ### Step 4: drive the flow
 
