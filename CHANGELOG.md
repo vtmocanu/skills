@@ -4,6 +4,12 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.3] - 2026-06-15
+
+### Added
+
+- `agent-team`: SKILL.md Step 3.5 now documents how to re-identify teammate surfaces after a RECYCLE (a teammate shut down + respawned). The before/after `pane.list` diff is unreliable across a recycle because the terminated teammate frees a surface and cmux often respawns a stray shell into the emptied pane, so "new surfaces" no longer equals "the new teammate" (observed 2026-06-15 recycling the coder at a milestone boundary). The reliable disambiguator: correlate tmux pane titles (`tmux list-panes -a -F '#{pane_left},#{pane_top}  #{pane_id}  #{pane_title}'` — live agent panes are titled by teammate name) with the cmux `pane.list` `pixel_frame` (x,y) ordering to map each live agent to its surface, then pass lead + the live-teammate surfaces to the layout script.
+
 ## [0.10.2] - 2026-06-15
 
 ### Fixed
