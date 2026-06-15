@@ -4,6 +4,12 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.1] - 2026-06-15
+
+### Fixed
+
+- `agent-team`: `scripts/layout-team-panes.sh` no longer reports a spurious LAYOUT-MISS when the cmux window has a global chrome/sidebar x-offset. `verify()` now measures pane geometry relative to the layout origin (`ox` = minimum pane x) and span (`cw - ox`) instead of assuming the lead pane starts at absolute x≈0. An offset layout (observed at 216px) was perfectly canonical yet exited 3; the relative check passes it. Backward-compatible (offset 0 reduces to the prior absolute checks) and does not weaken genuine-miss detection (those still fail on pane count / op errors).
+
 ## [0.10.0] - 2026-06-14
 
 ### Added

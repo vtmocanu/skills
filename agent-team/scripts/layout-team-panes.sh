@@ -97,32 +97,41 @@ done
 OPLOG=$(mktemp 2>/dev/null || echo "/tmp/layout-team-panes.$$.log")
 trap 'rm -f "$OPLOG"' EXIT
 
-# Canonical-shape check: exact pane count (no strays), lead on the left (x~0, not
-# full width), every teammate pane in the right column (x ~= lead.x+lead.w).
+# Canonical-shape check: exact pane count (no strays), lead on the left (at the
+# layout's min-x ORIGIN — relative, so a global cmux window-chrome x-offset does not
+# false-fail it — and not full width), every teammate pane in the right column
+# (x ~= lead.x+lead.w).
 verify() {
-  local snap cw lx lw boundary t tx want got
+  local snap cw ox span lx lw boundary t tx want got
   snap=$(plist) || return 1
   want=$((1 + ${#TEAMMATES[@]} + ${#BYSTANDERS[@]}))
   got=$(jq '.panes | length' <<<"$snap")
   [ "$got" = "$want" ] || return 1
   cw=$(jq -r '[.panes[] | (.pixel_frame.x + .pixel_frame.width)] | max' <<<"$snap")
+  ox=$(jq -r '[.panes[] | .pixel_frame.x] | min' <<<"$snap")
   lx=$(jq -r --arg p "$LEAD_PANE" '.panes[]|select(.ref==$p)|.pixel_frame.x' <<<"$snap")
   lw=$(jq -r --arg p "$LEAD_PANE" '.panes[]|select(.ref==$p)|.pixel_frame.width' <<<"$snap")
-  { [ -n "$cw" ] && [ -n "$lx" ] && [ -n "$lw" ]; } || return 1
-  awk -v lx="$lx" -v lw="$lw" -v cw="$cw" 'BEGIN{exit !(lx<20 && lw<cw*0.75)}' || return 1
+  { [ -n "$cw" ] && [ -n "$ox" ] && [ -n "$lx" ] && [ -n "$lw" ]; } || return 1
+  # All geometry is RELATIVE to the layout origin (ox = min pane x) and span (cw-ox):
+  # cmux reports a global x-offset for the window chrome/sidebar, so the lead pane's x
+  # is that offset, NOT ~0. Absolute checks (lx<20, tx>cw*0.4) false-failed a perfectly
+  # canonical layout (observed 2026-06-15, offset=216px → spurious LAYOUT-MISS).
+  span=$(awk -v cw="$cw" -v ox="$ox" 'BEGIN{print cw-ox}')
+  # lead sits at the origin (leftmost) and is not full-width.
+  awk -v lx="$lx" -v ox="$ox" -v lw="$lw" -v span="$span" 'BEGIN{exit !(lx-ox<20 && lw<span*0.75)}' || return 1
   boundary=$(awk -v lx="$lx" -v lw="$lw" 'BEGIN{print lx+lw}')
   for t in "${TEAMMATES[@]}"; do
     [ -z "$t" ] && continue
     tx=$(jq -r --arg s "$t" '.panes[]|select(.selected_surface_ref==$s)|.pixel_frame.x' <<<"$snap")
     [ -z "$tx" ] && return 1
-    awk -v tx="$tx" -v b="$boundary" -v cw="$cw" 'BEGIN{exit !(tx>b-25 && tx<b+25 && tx>cw*0.4)}' || return 1
+    awk -v tx="$tx" -v b="$boundary" -v ox="$ox" -v span="$span" 'BEGIN{exit !(tx>b-25 && tx<b+25 && tx>ox+span*0.4)}' || return 1
   done
-  # Bystanders must sit in the LEFT column (x in the left half), not the right stack.
+  # Bystanders must sit in the LEFT column (left of the right stack), not on the right.
   for t in "${BYSTANDERS[@]}"; do
     [ -z "$t" ] && continue
     tx=$(jq -r --arg s "$t" '.panes[]|select(.selected_surface_ref==$s)|.pixel_frame.x' <<<"$snap")
     [ -z "$tx" ] && return 1
-    awk -v tx="$tx" -v cw="$cw" 'BEGIN{exit !(tx < cw*0.4)}' || return 1
+    awk -v tx="$tx" -v ox="$ox" -v span="$span" 'BEGIN{exit !(tx < ox+span*0.4)}' || return 1
   done
   return 0
 }
