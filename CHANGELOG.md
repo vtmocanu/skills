@@ -4,6 +4,12 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.2] - 2026-06-15
+
+### Fixed
+
+- `agent-team`: SKILL.md Step 3.5 no longer tells the team-lead to run a bare `cmux` to find the lead/teammate surfaces. Under the claude-teams launcher the cmux CLI is off PATH, so `cmux identify` / `cmux rpc pane.list` error out and make the lead wrongly conclude "not under cmux" and skip the layout entirely (observed 2026-06-15). The lead now resolves `$CMUX` via the app-bundle fallback (`/Applications/cmux.app/Contents/Resources/bin/cmux`, the same resolution the bundled `layout-team-panes.sh` already uses) and detects launcher presence from the `$TMUX` socket name (`*cmux-claude-teams*`), never from a `cmux identify` exit code. The script itself was already correct; this aligns the prose the lead executes with it.
+
 ## [0.10.1] - 2026-06-15
 
 ### Fixed

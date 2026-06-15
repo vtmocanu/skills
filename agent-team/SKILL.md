@@ -288,17 +288,23 @@ When the session runs inside **cmux** (the `cmux claude-teams` launcher installs
 After EVERY spawn wave (the initial Step 3 spawns, the post-coder reviewer/auditor/tester wave, and any respawn in Step 6 or the recycle flow), run the bundled helper:
 
 ```bash
-LEAD=$(cmux identify --json | jq -r .caller.surface_ref)
+# Detect cmux by the $TMUX socket name, NOT by running `cmux` — the claude-teams shim keeps the
+# cmux CLI OFF PATH, so a bare `cmux identify` errors and makes you wrongly conclude "not under cmux".
+case "${TMUX:-}" in *cmux-claude-teams*) ;; *) echo "not under cmux claude-teams — skip layout"; esac
+# Resolve the CLI the same way the script does (PATH, else the app-bundle path):
+CMUX=$(command -v cmux || echo /Applications/cmux.app/Contents/Resources/bin/cmux)
+LEAD=$("$CMUX" identify --json | jq -r .caller.surface_ref)
 ./scripts/layout-team-panes.sh "$LEAD" surface:NN surface:MM ...   # one arg per teammate
 ```
 
-- **Lead surface:** `cmux identify --json | jq -r .caller.surface_ref`.
-- **Teammate surfaces:** the surfaces that APPEARED with this wave. Snapshot `cmux rpc pane.list` `selected_surface_ref`s BEFORE spawning, diff after; the new ones are the teammates. Pass them as SEPARATE args — NEVER a single space-joined string (that collapses them into one bogus surface ref and the reshape silently fails).
+- **cmux presence:** decide it from `$TMUX` containing `cmux-claude-teams` (above), never from whether `cmux identify` exits 0 — off PATH it fails even when you ARE under cmux. The correct app-bundle path is `/Applications/cmux.app/Contents/Resources/bin/cmux` (note: `Resources/bin`, NOT `Resources/app/bin`).
+- **Lead surface:** `"$CMUX" identify --json | jq -r .caller.surface_ref` (resolve `$CMUX` first, above).
+- **Teammate surfaces:** the surfaces that APPEARED with this wave. Snapshot `"$CMUX" rpc pane.list` `selected_surface_ref`s BEFORE spawning, diff after; the new ones are the teammates. Pass them as SEPARATE args — NEVER a single space-joined string (that collapses them into one bogus surface ref and the reshape silently fails).
 - Any surface that is neither the lead nor a listed teammate is treated as a bystander and stacked in the left column.
 
 The script is idempotent (a no-op when the layout is already canonical — re-running after a wave that didn't skew costs nothing, and reshaping a good layout is itself what spawns stray shells, so it verifies first), self-verifies the result (exact pane count + lead-left + teammates-right geometry), cleans up the stray shells cmux respawns into emptied panes (via `close-surface`), and is a clean no-op when not under the cmux launcher. It resolves the cmux CLI itself (the claude-teams shim keeps cmux off PATH — it falls back to the app-bundle path, NOT `command -v cmux`).
 
-Exit codes: `0` laid out OK / already canonical / no-op outside cmux; `2` usage; `3` **LAYOUT-MISS** — it could not reach the canonical shape and saved a `pane.list` snapshot under `~/.claude/cmux-layout-misses/`. On a MISS, fall back to inspecting `cmux rpc pane.list` pixel frames by hand (the script source documents the manual recipe), and feed the snapshot into the reflect loop below.
+Exit codes: `0` laid out OK / already canonical / no-op outside cmux; `2` usage; `3` **LAYOUT-MISS** — it could not reach the canonical shape and saved a `pane.list` snapshot under `~/.claude/cmux-layout-misses/`. On a MISS, fall back to inspecting `"$CMUX" rpc pane.list` pixel frames by hand (resolve `$CMUX` as above; the script source documents the manual recipe), and feed the snapshot into the reflect loop below.
 
 **Self-improving (REQUIRED).** When the script reports LAYOUT-MISS, OR you hit a bug in it, OR you discover a better cmux primitive/approach, run `/dot-ai-reflect agent-team` so the fix is folded into the SCRIPT itself (`scripts/layout-team-panes.sh`), not just into this prose. The captured `~/.claude/cmux-layout-misses/*.json` snapshots are the concrete edge-case input for that pass. This is how the layout helper accretes handled cmux tree shapes over time, instead of the lead re-deriving the reshape by hand each session.
 
