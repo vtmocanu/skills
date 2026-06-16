@@ -45,6 +45,25 @@ if [ -z "$LEAD_SURF" ]; then
 fi
 shift
 TEAMMATES=("$@")
+# Defend the documented footgun: a surface ref never contains whitespace, so a
+# teammate arg WITH a space means the caller joined them into one string
+# ("surface:8 surface:9 ...") instead of passing separate args. Observed
+# 2026-06-16: every per-surface cmux op then fails with "Invalid surface handle"
+# and the reshape bails to a confusing LAYOUT-MISS while equalize_splits
+# incidentally evens the geometry — so it LOOKS fine but the script reports a
+# miss. Re-split such args on whitespace to recover the intended surfaces, and
+# warn so the caller fixes the invocation (separate args is still the contract).
+_needs_split=0
+for _a in "${TEAMMATES[@]}"; do
+  case "$_a" in *[[:space:]]*) _needs_split=1;; esac
+done
+if [ "$_needs_split" -eq 1 ]; then
+  echo "layout-team-panes: WARNING — a teammate arg contained whitespace; re-splitting (pass surfaces as SEPARATE args, not one space-joined string)" >&2
+  # Intentional word-split: ${TEAMMATES[*]} re-joins on IFS' first char (space),
+  # the unquoted array assignment then splits it back into the separate refs.
+  # shellcheck disable=SC2206
+  TEAMMATES=(${TEAMMATES[*]})
+fi
 # Nothing to place on the right -> nothing to do (the script's job is teammate panes).
 if [ "${#TEAMMATES[@]}" -eq 0 ]; then
   echo "layout-team-panes: no teammate surfaces given — no-op"

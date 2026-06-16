@@ -4,6 +4,12 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.5] - 2026-06-16
+
+### Fixed
+
+- `agent-team`: `scripts/layout-team-panes.sh` now defends the documented "pass surfaces as separate args" footgun. A teammate arg containing whitespace means the caller joined the surfaces into one string ("surface:8 surface:9 ..."); the script now detects that (a surface ref never contains whitespace), re-splits on whitespace to recover the intended refs, and warns so the caller fixes the invocation. Observed 2026-06-16: a space-joined invocation made every per-surface cmux op fail with "Invalid surface handle" and the reshape bail to a confusing LAYOUT-MISS, while `equalize_splits` incidentally evened the geometry — so the layout looked fine but the script reported a miss. Separate args remains the contract; this is a safety net, not a license to join.
+
 ## [0.10.4] - 2026-06-16
 
 ### Fixed
