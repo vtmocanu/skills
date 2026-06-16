@@ -4,6 +4,13 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.6] - 2026-06-16
+
+### Added
+
+- `agent-team`: SKILL.md "Parallel same-repo waves" now requires verifying a worker branch's ref equals the worker's last reported SHA before merging it (`git rev-parse <branch>`; `git worktree list` must show the branch at that SHA, not `(detached HEAD)`). A follow-up commit made on a detached HEAD leaves the branch ref behind, so `git merge <branch>` silently integrates the stale pre-fix code and drops the follow-up; tests still pass when the dropped delta is additive, so it is invisible without the check. Observed 2026-06-16: a coder's MEDIUM trace-read security fix vanished from a milestone merge because its hardening commit sat on a detached HEAD, caught only later by a docs fact-check against the code. Fix: merge the reported SHA directly, or confirm the ref first, then grep the integration tree for a signature from each follow-up.
+- `agent-team`: Gotchas now note that current Claude Code (observed 2.1.178) exposes a single implicit team rather than the `TeamCreate` API — `team_name` is deprecated/ignored and `TeamCreate`/`TeamDelete` are absent; spawn via `Agent({name, subagent_type})` + coordinate via `SendMessage`/`Task*`. The `TeamCreate`-centric Mode 3 prose predates this; a full rewrite is a separate pending pass.
+
 ## [0.10.5] - 2026-06-16
 
 ### Fixed
