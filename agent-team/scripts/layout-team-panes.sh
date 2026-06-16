@@ -97,12 +97,19 @@ done
 OPLOG=$(mktemp 2>/dev/null || echo "/tmp/layout-team-panes.$$.log")
 trap 'rm -f "$OPLOG"' EXIT
 
-# Canonical-shape check: exact pane count (no strays), lead on the left (at the
-# layout's min-x ORIGIN — relative, so a global cmux window-chrome x-offset does not
-# false-fail it — and not full width), every teammate pane in the right column
-# (x ~= lead.x+lead.w).
+# Canonical-shape AND evenness check: exact pane count (no strays), lead on the
+# left (at the layout's min-x ORIGIN — relative, so a global cmux window-chrome
+# x-offset does not false-fail it), the left/right split roughly EVEN (lead ~half,
+# neither squeezed nor hogging the width), every teammate pane in the right column,
+# and the teammate strips roughly EQUAL height. The evenness gate (vs shape-only)
+# is load-bearing: without it the idempotent early-return would report
+# "LAYOUT-OK (already canonical)" on a shape-correct-but-SKEWED layout and never
+# equalize (observed 2026-06-16: a fresh spawn wave left the lead at ~23% width;
+# the equal-height strips that time were luck, not guaranteed). Tolerances are
+# GENEROUS so a near-even layout is NOT needlessly re-reshaped (a reshape itself
+# spawns strays).
 verify() {
-  local snap cw ox span lx lw boundary t tx want got
+  local snap cw ox span lx lw boundary t tx want got heights hmax hmin
   snap=$(plist) || return 1
   want=$((1 + ${#TEAMMATES[@]} + ${#BYSTANDERS[@]}))
   got=$(jq '.panes | length' <<<"$snap")
@@ -117,8 +124,12 @@ verify() {
   # is that offset, NOT ~0. Absolute checks (lx<20, tx>cw*0.4) false-failed a perfectly
   # canonical layout (observed 2026-06-15, offset=216px → spurious LAYOUT-MISS).
   span=$(awk -v cw="$cw" -v ox="$ox" 'BEGIN{print cw-ox}')
-  # lead sits at the origin (leftmost) and is not full-width.
-  awk -v lx="$lx" -v ox="$ox" -v lw="$lw" -v span="$span" 'BEGIN{exit !(lx-ox<20 && lw<span*0.75)}' || return 1
+  # lead sits at the origin (leftmost) AND the left/right split is roughly even: lead
+  # width in 30-62% of span. The band catches BOTH a squeezed lead (the fresh-spawn
+  # ~23% case) and a lead hogging the width (right column squeezed) — either is "not
+  # equalized" and must trigger a reshape, not a false LAYOUT-OK. (equalize_splits
+  # settles the top-level lead|right split to ~50/50 regardless of teammate count.)
+  awk -v lx="$lx" -v ox="$ox" -v lw="$lw" -v span="$span" 'BEGIN{r=lw/span; exit !(lx-ox<20 && r>0.30 && r<0.62)}' || return 1
   boundary=$(awk -v lx="$lx" -v lw="$lw" 'BEGIN{print lx+lw}')
   for t in "${TEAMMATES[@]}"; do
     [ -z "$t" ] && continue
@@ -126,6 +137,19 @@ verify() {
     [ -z "$tx" ] && return 1
     awk -v tx="$tx" -v b="$boundary" -v ox="$ox" -v span="$span" 'BEGIN{exit !(tx>b-25 && tx<b+25 && tx>ox+span*0.4)}' || return 1
   done
+  # Teammate strips roughly EQUAL height: (maxH-minH)/maxH < 0.35. A shape-correct
+  # right column whose strips drifted (e.g. an 80/20 stack) is "not equalized" and
+  # must reshape. A single teammate => one height => ratio 0 => passes (nothing to
+  # even). An empty/missing height fails closed (triggers a reshape), which is safe.
+  heights=$(for t in "${TEAMMATES[@]}"; do
+    [ -z "$t" ] && continue
+    jq -r --arg s "$t" '.panes[]|select(.selected_surface_ref==$s)|.pixel_frame.height' <<<"$snap"
+  done)
+  if [ -n "$heights" ]; then
+    hmax=$(printf '%s\n' "$heights" | sort -n | tail -1)
+    hmin=$(printf '%s\n' "$heights" | sort -n | head -1)
+    awk -v mx="$hmax" -v mn="$hmin" 'BEGIN{ exit !(mx>0 && (mx-mn)/mx < 0.35) }' || return 1
+  fi
   # Bystanders must sit in the LEFT column (left of the right stack), not on the right.
   for t in "${BYSTANDERS[@]}"; do
     [ -z "$t" ] && continue

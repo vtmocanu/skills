@@ -4,6 +4,12 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.4] - 2026-06-16
+
+### Fixed
+
+- `agent-team`: `scripts/layout-team-panes.sh` `verify()` now gates on layout EVENNESS, not just shape, so the idempotent early-return no longer reports "LAYOUT-OK (already canonical)" on a shape-correct-but-skewed layout and skips equalization. It additionally asserts the left/right split is roughly even (lead width 30-62% of span, catching both a squeezed lead and a width-hogging lead) and the teammate strips are roughly equal height ((maxH-minH)/maxH < 0.35). Tolerances are generous so a near-even layout is not needlessly re-reshaped (a reshape itself spawns strays). Motivated 2026-06-16 by a fresh spawn wave that left the lead at ~23% width; the prior shape-only verify caught that particular case via the lead-width-vs-span boundary check, but a shape-correct right column with unequal strips (e.g. 80/20) would have falsely passed.
+
 ## [0.10.3] - 2026-06-15
 
 ### Added
