@@ -4,6 +4,13 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.7] - 2026-06-16
+
+### Added
+
+- `agent-team`: Gotchas now cover a background teammate's `SendMessage({to: "main"})` report bouncing: the lead receives only the `idle_notification` (a summary preview), not the findings body. Do not act on the summary; SendMessage the (idle, resumable) teammate to re-send its full findings to `main`, and tell teammates in their spawn prompt to fall back to replying directly to the lead if `to: main` bounces. Observed repeatedly 2026-06-16 across multiple background review agents.
+- `agent-team`: the cmux "Re-identifying surfaces" guidance now warns that the lead's OWN pane is titled by its current rendered content (e.g. "Teammate shutdown notifications"), not "Claude Code", and a bystander can itself be titled "Claude Code", so the lead is identified authoritatively by `cmux identify`'s `caller.surface_ref`, never by pane title; only the teammate panes are title-correlated. Observed 2026-06-16.
+
 ## [0.10.6] - 2026-06-16
 
 ### Added
