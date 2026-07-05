@@ -4,6 +4,12 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.2] - 2026-07-05
+
+### Added
+
+- `agent-team`: `web-ux` role gains "agent-browser operational notes" — hard-won CLI gotchas from the role's first production run: absolute paths for screenshots (relative writes land in agent-browser's own cwd), `JSON.stringify` in `eval` (bare objects return `{}`), scoped-snapshot refs over `find role --name` (accessible-name collisions), refs staling on navigation, `drag` with temp `data-*` tagging for selector-less cards, inner-overflow scrolling via `scrollLeft`, IPv6-only dev-server binds (`localhost` vs `127.0.0.1`), and full-page `open` resetting SPA/mock state.
+
 ## [0.11.1] - 2026-07-05
 
 ### Changed
