@@ -4,6 +4,13 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.3] - 2026-07-05
+
+### Changed
+
+- `agent-team`: model guidance rewritten — the role file's `model:` frontmatter DEFINES a role's tier but is not reliably honored at spawn (observed: a `model: sonnet` documenter ran on the parent session's model); the lead must ENFORCE it by passing the Agent tool's `model` parameter on every spawn/respawn. Version-pinned auto-mode model lists (Sonnet 4.6/Opus 4.6/4.7) replaced with durable tier guidance (strong tier for reasoning-heavy roles, mid tier for mechanical, smallest tier banned) plus "verify the current auto-mode list in the Claude Code docs" — the old list predated the Claude 5 family.
+- `agent-team`: new gotcha — `.claude/agents/<role>.md` files added mid-session are spawnable immediately, no session restart needed.
+
 ## [0.11.2] - 2026-07-05
 
 ### Added
