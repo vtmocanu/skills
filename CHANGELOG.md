@@ -4,6 +4,13 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0] - 2026-07-05
+
+### Added
+
+- `agent-team`: new `web-ux` role in the role library — a web UX expert that validates web-interface work by driving it in a real browser via the `agent-browser` CLI (navigate, interact, a11y-tree snapshots, screenshots), reviews five lenses (flow integrity, accessibility, visual/token consistency, responsiveness, copy), and proposes scoped refactor improvements as `Enhancement` findings. Read-only, opus, triggered by web-UI repo signals (`web/`, `frontend/`, vite/next/tailwind configs, `*.tsx`/`*.vue`/`*.svelte`). SKILL.md init/tuning/dispatch sections updated to cover it (dispatch in the reviewer/auditor wave with a reachable URL for the running UI).
+- `agent-team` (from 2026-07-05 session, previously untagged commit): gotchas for false `teammate_terminated` notices (only protocol `shutdown_approved` proves termination; concurrent-writer guard in respawn prompts), crossed nudge/report message protocol, and the single-worktree sequential writer-token pattern.
+
 ## [0.10.7] - 2026-06-16
 
 ### Added
