@@ -4,6 +4,12 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.1] - 2026-07-05
+
+### Changed
+
+- `agent-team`: `web-ux` role gains a MUTATION SAFETY block — a real browser means real side effects, so the role must never perform destructive or state-mutating actions (delete buttons, merges, sends, payments) against a real backend unless the dispatch states the user explicitly permitted that exact action. Target priority: mock/demo build → disposable dummy-data stack → real stack read-only (destructive controls exercised only up to the confirmation step). Mutation-only-provable flows are reported not-validated with a proposal to spin up a mock instance. SKILL.md's dispatch guidance updated to prefer mock/isolated targets and relay the proposal/permission ask to the user.
+
 ## [0.11.0] - 2026-07-05
 
 ### Added
