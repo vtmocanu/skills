@@ -4,6 +4,12 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.0] - 2026-07-09
+
+### Added
+
+- `done`: new flat skill, moved here from a private skills repo. End-of-session wrap-up prompt: checks `git status` (plus unpushed commits via `git log @{u}..`) across every working directory touched in the session, reviews the session for unfinished work, and reports a plain verdict on whether the session can be closed. Read-only by contract; it never commits, pushes, or edits anything to perform the check. Contained no private references beyond its own source-of-truth path, which was rewritten for this repo.
+
 ## [0.11.3] - 2026-07-05
 
 ### Changed

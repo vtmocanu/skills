@@ -32,6 +32,7 @@ dot-ai skills generate --agent claude-code --repo https://github.com/vtmocanu/sk
 | [cmux-markdown](cmux-markdown/SKILL.md) | Open markdown files in a formatted viewer panel with live reload, alongside the terminal. |
 | [cmux-settings](cmux-settings/SKILL.md) | View and edit cmux settings in `~/.config/cmux/cmux.json`: set values by JSON path, validate the file, and look up recognized keys. |
 | [cmux-workspace](cmux-workspace/SKILL.md) | Work inside the current cmux workspace and terminal: caller surface, panes, surfaces, socket targeting, and non-interfering automation. |
+| [done](done.md) | End-of-session wrap-up: check git state across the directories touched this session, review for loose ends, and give a plain verdict on whether the session can be closed. |
 | [reflect](reflect.md) | Analyze the current session and propose improvements to the skill that was used, then edit and commit it. |
 
 ## Other files
