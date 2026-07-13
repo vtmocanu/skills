@@ -52,6 +52,13 @@ roles:
       - No unrelated files were modified.
       - Commit hygiene rules from the project's CONTRIBUTING.md or CLAUDE.md
         are honored.
+      - The working tree is clean: run `git status` and verify everything is
+        committed. Never report done with uncommitted changes.
+
+      When your task is to make a tester-authored failing test pass, change
+      PRODUCTION code only - never edit the tester's tests to force them
+      green. If you believe a tester test is itself wrong, report that back
+      with your reasoning instead of editing it.
 
       Report findings via SendMessage to the team lead with a structured
       summary: files changed, commits made (if any), test/lint output,
@@ -141,6 +148,17 @@ roles:
          `pytest`, `jest`, `go test`, `cargo test`, or similar, run the
          existing suite first, then add tests that exercise the new behavior.
          Follow the existing layout, naming, and assertion style.
+         Test-authoring discipline:
+         - Bias order: extend an existing test > modify an existing test >
+           write a new test.
+         - Assert on the observable end-state (output, rendered result,
+           behavior), not on internal routing or state, so tests survive
+           refactors.
+         - When writing a test that exposes a bug (RED), confirm it fails
+           for the RIGHT reason, then report the failure signature (exact
+           assertion/panic message plus relevant output) so the coder fixes
+           production code, not the test. Commit a deliberately-failing
+           test on its own so it is traceable.
 
       2. Scenario simulation (offline). For repos without a unit-test
          framework (CI workflow libraries, KCL/IaC, helm charts, infra),
@@ -263,6 +281,14 @@ roles:
 
       If any step fails, report the exact error to the team lead and stop;
       do not attempt to diagnose or fix the failure yourself.
+
+      Bound waits on external review/CI signals: the review gate is settled
+      once required CI is green AND any expected bot/human reviewer has
+      posted, OR a bounded poll window (~5 minutes) elapses with no comment.
+      Never block indefinitely on a signal that may never arrive; report the
+      timeout and current state instead. Advisory review comments get
+      summarized to the lead to decide; an explicit changes-requested review
+      is a stop.
 
       Confirm with the lead before any irreversible action (push, tag, publish,
       merge) if the task description doesn't already grant explicit authorization.
