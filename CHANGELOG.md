@@ -4,6 +4,20 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `agent-team`: new `architect` role in the role library, informed by a survey of MetaGPT, Anthropic's planner guidance, and Claude Code subagent collections (wshobson ship-mate, VoltAgent). Three dispatch shapes: pre-implementation design with a named-section output contract (Approach with rejected alternatives, File map, Contracts with mermaid where prose is ambiguous, Risks, Handoff with acceptance criteria, Open questions), post-implementation architectural-fit review, and PRD writing/review (architecture sections plus parallelism-friendly milestone decomposition when writing; feasibility, hidden coupling, independent shippability when reviewing). Halt-and-escalate triggers (external API contracts, data-affecting schema changes, auth-model changes, scope creep, insufficient info); deliverables-not-path principle (no pseudo-code diffs); writes design docs/ADRs only, never source code. SKILL.md wired: include rule (design surface incl. prds/, or multi-component repo), prompt tuning, strong model tier, dispatch guidance (design before coder on non-trivial tasks, fit-pass with the review wave, PRD flows).
+
+### Changed
+
+- `agent-team`: guardrails adopted from vfarcic/dot-agent-deck's applied config. `coder`: clean-tree gate before reporting done (`git status` verified, never done with uncommitted changes) and an anti-test-gaming rule (make tester-authored failing tests pass by changing production code only; a wrong test gets reported, not edited). `tester`: test-authoring discipline (extend > modify > new; assert on observable end-state so tests survive refactors; RED tests must fail for the right reason, commit them on their own, and report the exact failure signature). `release`: bounded review-wait (gate settles on CI green + reviewer posted, or a ~5-minute window elapsing; advisory comments summarized to the lead, changes-requested is a stop).
+
+### Fixed
+
+- `agent-team`: `roles.yaml` was not parseable as strict YAML (tester `description` contained an unquoted `: `); quoted it. Never surfaced because the skill reads the file as text, but the file should be honest YAML.
+
 ## [0.12.0] - 2026-07-09
 
 ### Added
