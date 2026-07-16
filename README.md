@@ -34,6 +34,7 @@ dot-ai skills generate --agent claude-code --repo https://github.com/vtmocanu/sk
 | [cmux-workspace](cmux-workspace/SKILL.md) | Work inside the current cmux workspace and terminal: caller surface, panes, surfaces, socket targeting, and non-interfering automation. |
 | [done](done.md) | End-of-session wrap-up: check git state across the directories touched this session, review for loose ends, and give a plain verdict on whether the session can be closed. |
 | [reflect](reflect.md) | Analyze the current session and propose improvements to the skill that was used, then edit and commit it. |
+| [upgrade-advisor](upgrade-advisor.md) | Evaluate a tool, framework, or dependency upgrade: discover the pinned version, find the latest *installable* one, read the changelog across the whole version delta, and report which breaking changes actually touch this codebase (by grepping usage) plus the features and refactors worth adopting — with a safe / blocked / needs-work verdict and a checklist. |
 
 ## Other files
 
