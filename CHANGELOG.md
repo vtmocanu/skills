@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.13.1] - 2026-07-16
+
+### Changed
+
+- `upgrade-advisor`: review pass (skill-expert agent). Added a `stay put` verdict (not upgrading is a valid outcome — don't manufacture a reason to bump); handle security/CVE-driven upgrades (target = smallest version clearing the advisory, via GHSA/osv.dev/`npm audit`/`govulncheck`/`cargo audit`) and end-of-life/LTS as first-class drivers; step 1 now reports *every* file that pins the dependency and flags drift (Dockerfile + manifest + CI, monorepo per-package pins); classification table gains a **behavioral** row (changed default/semantics that grep can't catch) and the N/A row now caveats that grep-clean is high-confidence, not proof (dynamic/re-export/string-keyed/transitive usages). Replaced the redundant "Hard-won rules" (restated the workflow) with a tighter "Traps" section of non-obvious pitfalls (grep false-negatives, behavioral changes, do-nothing-is-valid, thin-changelog → compare-view/commit-log fallback). Trimmed the description.
+
 ## [0.13.0] - 2026-07-16
 
 ### Added
