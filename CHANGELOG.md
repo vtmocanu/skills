@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-07-16
+
 ### Added
 
 - `upgrade-advisor`: new flat skill. Evaluates whether and how to upgrade a tool, framework, library, or dependency. Discovers the currently pinned version (and the file it comes from), finds both the latest released and the latest *installable* version (a packager can lag upstream — that gap is itself the answer when it blocks the bump), reads the changelog across the whole version delta (not just the newest release), then grep-classifies each breaking change and deprecation against actual codebase usage so the report is filtered to what really applies here. Covers downstream/transitive compatibility (theme min_version, plugin peers, toolchain floor) and matches caution to blast radius (irreversible target → test-first). Output is a safe / blocked / needs-work verdict plus a checklist; investigate-only by default.
