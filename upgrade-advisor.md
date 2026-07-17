@@ -1,6 +1,6 @@
 ---
 name: upgrade-advisor
-description: Evaluates whether and how to upgrade a tool, framework, library, or dependency. Discovers the pinned version(s), finds the latest released and the latest actually-installable version, reads the changelog across the whole version delta, and grep-classifies each breaking change and deprecation against real codebase usage so the report covers only what applies here — plus the features and refactors worth adopting. Handles security/CVE- and end-of-life-driven upgrades; emits a safe / stay-put / blocked / needs-work verdict, investigate-only by default. Use when the user asks to upgrade, bump, or update a tool or dependency, mentions its new release or latest version, or asks whether an upgrade is safe or worth it. Triggers include "upgrade", "bump", "update dependency", "breaking changes", "is it safe to upgrade".
+description: Evaluates whether and how to upgrade a tool, framework, library, or dependency. Discovers the pinned version(s), finds the latest released and the latest actually-installable version, reads the changelog across the whole version delta, and grep-classifies each breaking change and deprecation against real codebase usage so the report covers only what applies here — plus the features and refactors worth adopting. Handles security/CVE- and end-of-life-driven upgrades; emits a safe / stay-put / blocked / needs-work verdict, investigate-only by default. Also runs in verification mode when an upgrade has ALREADY happened, auditing the runtime's own error surface for what broke, including latent breakage from an earlier version that the current changelog delta cannot reveal. Use when the user asks to upgrade, bump, or update a tool or dependency, mentions its new release or latest version, asks whether an upgrade is safe or worth it, or says they have just upgraded something and wants to know what it affected. Triggers include "upgrade", "bump", "update dependency", "breaking changes", "is it safe to upgrade", "I upgraded X", "just upgraded", "what broke after the upgrade".
 ---
 
 # Upgrade Advisor
@@ -13,6 +13,8 @@ This document is located at: `~/stuff/gitrepos/gh/vtmocanu/skills/upgrade-adviso
 
 Evaluate an upgrade before doing it: what changed, what of that actually affects this project, and what is worth adopting. The output is a decision plus a checklist, not a blind version bump. Default to **investigate-only** unless the user asked you to apply the change.
 
+**Two modes — read the request first.** "Should I upgrade X?" is the *evaluation* mode below. But "I've already upgraded X" is a **verification** request: the decision is made, and the question is what it broke. In that mode the deliverable is step 7 (audit the runtime), and steps 3-4 only serve to explain what you find. Do not hand back a purely changelog-derived verdict for an upgrade that already happened — the running system is right there, so use it.
+
 ## Workflow
 
 Run these in order. Steps 1-2 and the changelog fetch in 3 are independent — issue those tool calls in parallel.
@@ -24,6 +26,7 @@ Find where the version is actually pinned. It is rarely in an obvious single pla
 - **Language/tool managers**: `devbox.json`/`devbox.lock`, `.tool-versions` (asdf/mise), `.nvmrc`, `runtime.txt`, `flake.nix`.
 - **Package manifests + lockfiles**: `package.json` + `package-lock.json`/`yarn.lock`/`pnpm-lock.yaml`, `go.mod`/`go.sum`, `pyproject.toml`/`requirements.txt`/`uv.lock`, `Cargo.toml`/`Cargo.lock`, `Gemfile.lock`, `pom.xml`, `build.gradle`.
 - **Containers/CI**: `Dockerfile` `FROM`, `.github`/`.forgejo`/`.gitlab-ci` workflow pins, Helm `Chart.yaml`/`values.yaml`, action `uses:` SHAs/tags.
+- **A running service/appliance pins nothing in the repo** — the version lives in the runtime, so ask it (`ha core info`, `/api/config`, `kubectl version`, `SELECT version()`). Beware reading *during* a restart: it answers with the old version until the new process is up, so confirm from two sources if the number looks stale.
 
 Report the exact current version **and every file that pins it** — the same dependency is often pinned in several places (Dockerfile `FROM` + manifest + CI `uses:`) that can silently disagree; list them all and flag any drift. In a monorepo, note per-package pins that differ, since they may have to move together. If the repo has a remote, confirm the local checkout matches the remote pin (a local branch can be behind). The lockfile is authoritative over the manifest range.
 
@@ -66,11 +69,24 @@ The tool doesn't upgrade in isolation. Verify the target version against everyth
 
 Match caution to reversibility. Hard-to-recover targets (OTA-only firmware, production DB engines, a base image baked into many downstream builds) get **build/compile/test-first, then apply**. Cheap-to-revert targets (a dev CLI, a lockfile bump behind CI) can move directly. State which regime applies.
 
+### 7. Audit the runtime — the changelog cannot tell you what is *already* broken
+
+Steps 3-4 derive the grep list from the **delta**, so the delta is a hard ceiling on what they can find. A symbol removed in a version you upgraded *through* is invisible to them, yet may still be live in your code — because a removed API only fails when its code path actually **runs**, so a rarely-hit path (a dawn-only job, an error branch, a seasonal task) stays broken and silent for months. Grep-clean across the delta therefore does **not** mean working.
+
+So read the system's own error surface, not only its release notes:
+
+- **Structured diagnostics beat log tails**, and are usually one call: Home Assistant `system_log/list`, `django-admin check`, `govulncheck ./...`, `npm ls`, build-time deprecation warnings, a `/health` or diagnostics endpoint. A log tail shows a window; the error surface shows every distinct fault with a count.
+- **Per-unit execution status where it exists** — a component can be failing while the app itself is green and every smoke test passes (HA automation traces expose `script_execution: error`).
+
+**Baseline before you upgrade** whenever you can, and re-read after. Without a baseline you cannot separate *the upgrade broke this* from *this was already broken*, and you will misattribute in both directions. If all you have is logs, timestamps do the same job: compare against the upgrade/restart moment.
+
+Measured example: an HA `2026.6.4 → 2026.7.2` audit came back grep-clean across the whole delta, the Repairs list was empty, and every dashboard rendered — verdict "clean upgrade", which was true and useless. One `system_log/list` then showed `extra keys not allowed @ data['kelvin']`: `light.turn_on`'s `kelvin` parameter had been removed back in **2026.3**, and five call sites had been dead for ~3 months. Nothing in the 2026.7 delta could ever have surfaced it. The same call also exposed two more automations broken on entities that had never existed.
+
 ## Output
 
 Lead with the verdict, then the evidence:
 
-- **Verdict** — one of: `already current` / `safe bump` / `stay put (installable & clean, not worth the churn)` / `blocked (reason)` / `needs work (N items)`.
+- **Verdict** — one of: `already current` / `safe bump` / `stay put (installable & clean, not worth the churn)` / `blocked (reason)` / `needs work (N items)` / `clean, but N pre-existing faults found` (step 7 turned up breakage this upgrade did not cause — say so plainly rather than letting "clean" imply "working").
 - **Versions** — current (+ source file) → latest released → latest installable.
 - **Breaking changes vs. our usage** — the table from step 4; verbatim quotes for anything that affects us, and the N/A list.
 - **Deprecations** — with removal runway.
