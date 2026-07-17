@@ -6,6 +6,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-07-17
+
+### Added
+
+- `upgrade-advisor`: new **step 7 — audit the runtime**, and a matching verification mode. Steps 3-4 derive the grep list from the version *delta*, so the delta is a hard ceiling on what they can find: a symbol removed in a version you upgraded *through* is invisible to them, yet stays live in your code because a removed API only fails when its code path actually **runs** (a rarely-hit path fails silently for months). Real case that prompted this: an HA `2026.6.4 → 2026.7.2` evaluation was grep-clean across the whole delta with an empty Repairs list, so the verdict was "clean upgrade" — true and useless, because `light.turn_on`'s `kelvin` parameter had been removed back in **2026.3** and five call sites had been dead ~3 months. One `system_log/list` surfaced it plus two more broken automations. Step 7 says to read the system's own error surface (structured diagnostics over log tails; per-unit execution status where it exists, since a component can fail while the app stays green and smoke tests pass) and to **baseline before upgrading**, because without a baseline "the upgrade broke this" and "this was already broken" are indistinguishable. Also: new verdict `clean, but N pre-existing faults found` (none of the existing five fit that result, and "clean" wrongly implies "working"); the intro and `description` now name the two modes, so "I've already upgraded X" routes to verification rather than a changelog-only answer; and step 1 notes that a running service pins nothing in the repo (ask the runtime, and beware reading during a restart — it answers with the old version).
+- `agent-team`: **re-derive the claim at the moment you assert it**, written into the workflow-doc template so `init` puts it in every repo. A PRD run lost ~6 correction rounds to one failure repeated 9x across every role including the lead: a claim that was true when checked, asserted later without re-checking. The logic was right nearly every time; the story rotted. Corollaries: a comment is an assertion and deserves a test's mutation; presence is not efficacy (two validators can both be right and appear to conflict because they asked different questions); the experiment that justifies a choice usually also bounds it; it hides in the artifacts with no gate on them. Plus the lead's share (relay findings as claims to check, not facts to apply) and the crossing gotcha's cheap fix: verify the artifact immediately before dispatching, not before composing.
+
 ## [0.13.1] - 2026-07-16
 
 ### Changed
