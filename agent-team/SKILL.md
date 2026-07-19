@@ -1,6 +1,6 @@
 ---
 name: agent-team
-description: Auto-generate and run a per-repo Claude Code agent team. Probes the current repo (build/CI/env manifests, agent launchers, slash commands, spec dirs) and writes `.claude/agents/{role}.md` subagent definitions for the relevant roles from a library (coder, reviewer, auditor, tester, documenter, release, architect, researcher, spec-keeper, fact-checker, web-ux) plus a `.claude/agent-team.md` workflow doc. Use when (1) `/agent-team init` to create the team for the current repo, (2) `/agent-team update` to refresh after project shape changes, (3) `/agent-team {task}` to run a task with the team (TeamCreate plus spawn plus drive orchestrator flow plus stop at user gates). Triggers include "/agent-team", "spin up a team", "auto-create agents", "agent team for this repo", "team-on-task".
+description: Auto-generate and run a per-repo Claude Code agent team. Probes the current repo (build/CI/env manifests, agent launchers, slash commands, spec dirs) and writes `.claude/agents/{role}.md` subagent definitions for the relevant roles from a library (coder, reviewer, auditor, tester, documenter, release, architect, researcher, spec-keeper, fact-checker, web-ux) plus a `.claude/agent-team.md` workflow doc. Use when (1) `/agent-team init` to create the team for the current repo, (2) `/agent-team update` to refresh after project shape changes, (3) `/agent-team {task}` to run a task with the team (TeamCreate plus spawn plus drive orchestrator flow plus stop at user gates), (4) `/agent-team reflect` to review the session's agents and propose refactors plus new roles. Roles carry a frontmatter `version:` for staleness detection. Triggers include "/agent-team", "spin up a team", "auto-create agents", "agent team for this repo", "team-on-task", "reflect on the agents".
 ---
 
 ## Document Location
@@ -13,15 +13,24 @@ This document lives in [github.com/vtmocanu/skills](https://github.com/vtmocanu/
 
 Builds and operates a Claude Code [agent team](https://code.claude.com/docs/en/agent-teams) tailored to the current repo. Inspired by Viktor Farcic's [`dot-agent-deck`](https://github.com/vfarcic/dot-agent-deck) (a TUI that both displays and defines multi-agent teams across Claude Code and OpenCode); this skill is the native-APIs alternative: it probes the current repo for signals, picks roles from a library, and writes Claude Code native `.claude/agents/*.md` subagent definitions plus a `.claude/agent-team.md` workflow doc, so teammates are spawned by name via the Agent tool's `subagent_type` parameter.
 
-The skill has three modes selected by the first argument:
+The skill has four modes selected by the first argument:
 
 | Mode | Trigger | What it does |
 |------|---------|--------------|
 | **init** | `/agent-team init`, or no args + no `.claude/agents/` present | Probe the repo, pick roles, write `.claude/agents/<role>.md` + `.claude/agent-team.md` |
-| **update** | `/agent-team update` | Re-probe, diff against existing `.claude/agents/`, apply targeted changes |
+| **update** | `/agent-team update` | Re-probe, diff against existing `.claude/agents/` (roles + `version:` staleness), apply targeted changes |
 | **run** | `/agent-team <task description>` | Read team manifest, TeamCreate, spawn teammates, drive the workflow, STOP at user gates |
+| **reflect** | `/agent-team reflect` | Spawn a reviewer over this session's agents; propose refactors, new roles, and version bumps |
 
 `.claude/agents/` is a Claude Code project-scoped subagent directory. `.claude/agent-team.md` is a workflow manifest this skill writes for its own use; not loaded automatically by Claude Code but read by the skill on `run`.
+
+## Version staleness check (on load)
+
+Every generated `.claude/agents/<role>.md` carries a frontmatter `version:` copied from that role's `version:` in `./roles.yaml`. Whenever this skill loads in a repo that already has `.claude/agents/`, do a quick staleness pass before other work: for each agent file, read its `version:` and compare to the current role `version:` in `roles.yaml`. Surface the result in one line, e.g.:
+
+> 3 of 6 agents are behind the library — coder (v1→v2), tester (v1→v3), documenter (missing version → treat as v0). Run `/agent-team update` to refresh.
+
+A file with no `version:` field predates versioning; treat it as v0 (stale). This pass only INFORMS — it never auto-edits. The actual merge happens in `update` mode, which preserves each file's `## For this repo` tail. Skip the pass silently when every agent is current.
 
 ## Autonomy: spin up teams as you see fit
 
@@ -90,7 +99,7 @@ If a borderline call needs the user, ask via AskUserQuestion before writing file
 
 ### Step 3: tune prompt bodies
 
-For each picked role, take the `prompt_body` from `roles.yaml` and append project-specific details discovered in step 1:
+For each picked role, the `prompt_body` from `roles.yaml` is the GENERIC body, copied verbatim. Project-specific details discovered in step 1 do NOT get spliced into that body — they go into a separate `## For this repo` tail section appended to the generated file (see Step 5). Draft that tail per role from the discoveries below:
 
 - **coder**: name the actual test/lint command (e.g. `task test`, `cargo test`, `pytest`, `devbox run -- task kcl:test`). Reference CONTRIBUTING.md / CLAUDE.md by path. Reference the spec directory if found.
 - **reviewer**: cite the authoring-rules file (CONTRIBUTING.md / CLAUDE.md) by exact path and quote one or two of its load-bearing rules if obvious.
@@ -104,7 +113,7 @@ For each picked role, take the `prompt_body` from `roles.yaml` and append projec
 - **fact-checker**: name the claim-bearing surfaces in this repo (docs dir, README, CHANGELOG, published specs) and any authoritative sources to check against (the code itself, CI status, official upstream docs).
 - **web-ux**: name how to reach a running instance of the UI (dev-server command, compose service + port, demo/mock build) and the design-token/style-system files if the repo has them; note any repo-specific UX contract (design system, a11y bar, target browsers).
 
-Keep additions tight: 1-3 extra sentences per role. The role library text already covers the generic shape.
+Keep the tail tight: 1-3 sentences per role. The generic body already covers the shape; the `## For this repo` tail only carries what is specific to THIS repo (exact commands, file paths, framework names, how to reach the app). Keeping repo-specifics in the tail — never spliced into the generic body — is what lets `update`/uzi-sync replace the versioned generic body later without clobbering local tuning.
 
 ### Step 4: present a proposal
 
@@ -143,13 +152,24 @@ For each picked role, write `.claude/agents/<name>.md`:
 ```markdown
 ---
 name: <role-name>
+version: <role's version integer from roles.yaml, e.g. 1>
 description: <role's description from roles.yaml, lightly tuned if needed>
 tools: <comma-separated allowlist from roles.yaml, or omit field entirely if empty>
 model: <model from roles.yaml, or omit>
 ---
 
-<tuned prompt_body from step 3>
+<GENERIC prompt_body from roles.yaml, copied verbatim>
+
+## For this repo
+
+<the repo-specific tail drafted in Step 3 — exact commands, paths, framework
+names, how to reach the app. OMIT this whole heading if the role has no
+repo-specifics; the file is then pure generic body at that version.>
 ```
+
+**`version:` frontmatter** stamps which `roles.yaml` version this file was generated from. Claude Code tolerates the custom key (verified on 2.1.215: an agent with `version:` in frontmatter loads and spawns normally) — it is not in the documented key set but is silently ignored by the loader. Copy the integer straight from the role's `version:` in `roles.yaml`. This is the field `update` mode diffs to find stale agents. (Uzi's builtin parser is stricter and rejects unknown keys — versioning uzi builtins needs the separate Go change tracked in the uzi issue; it does not affect these Claude Code files.)
+
+**`## For this repo` tail** holds ALL repo-specific tuning (Step 3), kept out of the generic body so `update`/sync can replace the generic body by version without touching local edits. Everything above the tail must be the verbatim `roles.yaml` body for that version.
 
 **Tool allowlist format**: Claude Code subagent frontmatter accepts `tools:` as a comma-separated list. If `roles.yaml` says `tools: []` (empty array, meaning inherit all), OMIT the `tools` line entirely from the frontmatter. Do not write `tools: []`.
 
@@ -273,11 +293,19 @@ After writing, suggest the user commit `.claude/agents/` and `.claude/agent-team
 
 Use when `/agent-team update` is invoked, or when an existing team feels out of date.
 
-1. Read existing `.claude/agents/*.md` files and `.claude/agent-team.md`.
+1. Read existing `.claude/agents/*.md` files (each file's frontmatter `version:` and its `## For this repo` tail) and `.claude/agent-team.md`.
 2. Re-run discovery (step 1 of init).
-3. Diff: roles in library that match repo signals but missing from `.claude/agents/`, OR roles present but whose `triggers_on` no longer match (project no longer has tests, release flow removed, etc.).
-4. Present the diff to the user as a numbered proposal (additions / removals / prompt-body updates).
-5. On confirmation, apply targeted edits. Preserve any manual customizations the user made (e.g. extra paragraphs in a `prompt_body`) by merging rather than overwriting: read existing content, identify which parts came from the library and which are manual, only touch the library parts.
+3. Diff along three axes:
+   - **Roster**: roles in the library that match repo signals but are missing from `.claude/agents/`, OR roles present whose `triggers_on` no longer match (tests removed, release flow gone, etc.).
+   - **Version staleness**: for each present role, compare its file `version:` to that role's current `version:` in `roles.yaml`. A lower or missing number means the generic body drifted behind the library — read both bodies so you can summarize WHAT changed, not just the number.
+   - **Tuning drift**: repo facts in a `## For this repo` tail that no longer hold (renamed test command, moved spec dir).
+4. Present the diff to the user as a numbered proposal: additions / removals / version bumps (one line of "what changed" each) / tail fixes.
+5. On confirmation, apply targeted edits:
+   - **Version bump**: replace the generic body (everything ABOVE the `## For this repo` heading) with the current `roles.yaml` body, update the frontmatter `version:`, and leave the tail untouched. This is exactly why Step 3 keeps repo-specifics in the tail — the generic part is replaceable wholesale.
+   - **Legacy files with no tail split** (older generated agents, or inline hand-tuning): the boundary is not mechanical, so do NOT blind-overwrite. Read the file, separate library-origin paragraphs from manual ones, replace only the library parts, and migrate the manual repo-specifics into a new `## For this repo` tail so the NEXT update is clean. When unsure which is which, quote the paragraph and ask.
+   - **Roster add/remove**: write or delete the role file as in init Step 5.
+
+**Downstream vendored copies (only when you EDIT `roles.yaml` itself, NOT on a normal repo `update`).** If a downstream app vendors these role bodies as its own built-in templates (shipped-in-binary defaults, seeded into a DB, etc.), a change to a role's generic body/description/tools/model in `roles.yaml` — or a new role — leaves that copy behind. When you make such a `roles.yaml` edit, propose re-syncing the downstream copy: apply the same generic-body change there, preserve each copy's own `## For this repo` tail and any built-ins it owns that have no `roles.yaml` equivalent, and mirror new roles across. Note that a downstream parser may be stricter than Claude Code's loader and reject the `version:` frontmatter key; such a copy carries the new body content but needs its own change before it can store the version stamp. This is a proposal gated like any `roles.yaml` edit; never auto-commit into another repo. (Concrete downstream targets and their tracking issues are kept out of this public file; check the maintainer's notes.)
 
 ## Mode 3: run
 
@@ -435,6 +463,10 @@ TeamDelete does NOT remove the worktrees your spawn prompts told workers to crea
 
 `tmux capture-pane` shows scrollback, NOT only what the teammate is doing *right now*. A recent investigation in the scrollback might have already concluded; the only signal of *current* activity is the running indicator in the statusline. If you see Bash output for an action in the scrollback, assume that action is **already done** unless the statusline shows active processing AND the prompt hasn't returned yet.
 
+#### Offer a reflect pass (end of a substantial run)
+
+After a run that exercised the team substantially — several delegations, a mid-run role-file hotfix, a teammate that struggled, or work the roster handled awkwardly — OFFER (do not auto-run) a reflect pass: "Want me to run `/agent-team reflect` to capture agent improvements from this session?" There is no session-end hook, so this offer is the only trigger. Make it once, at cleanup, and only when the session actually surfaced something worth capturing; skip it for a quick one-delegation run that went cleanly.
+
 ### Step 6: run-mode hotfixes (role-file edits + slot collisions)
 
 Run-mode normally assumes `.claude/agents/*.md` is stable. Two situations break that assumption and require team-lead action mid-run:
@@ -531,6 +563,31 @@ Sequence:
 5. **Run the task** per Mode 3 normal flow.
 
 Exception: if the user explicitly wants the existing team kept alive across the transition (the next task is a tight follow-up on the same diff, primed context is directly reusable, no scope drift), skip the shutdown. But this is the exception; the default is recycle.
+
+## Mode 4: reflect
+
+Use when `/agent-team reflect` is invoked, or when the user accepts the end-of-run offer (Step 5 cleanup). Purpose: turn what THIS session revealed about the team into concrete agent improvements — refactors to existing roles, brand-new roles, version bumps — without silently changing anything.
+
+Run it as a dedicated read-only reviewer subagent so the critique is not colored by the lead's own in-session choices. Spawn via `Agent(subagent_type: "researcher")` if that role exists in the repo, else any read-only reviewer/general agent. Give it in the prompt:
+
+- the repo's current `.claude/agents/*.md` (roster, `version:`s, and each `## For this repo` tail),
+- the library at `./roles.yaml` (source of truth for generic bodies + current versions),
+- a summary of THIS session: what the team did, where a teammate struggled, missing-context surfaces, any mid-run role-file hotfix (Step 6.A), and tasks that had no good owner.
+
+Ask it to return a structured proposal — findings only, no file edits:
+
+1. **Refactors** to existing roles — a concrete body/description/tools change, WHY this session motivated it, and which role `version:` should bump.
+2. **New roles** — name, one-line description, and the roster gap it fills (drawn from work the team handled awkwardly). Propose only roles that would RECUR, not one-offs.
+3. **Stale roster** — agents whose file `version:` trails `roles.yaml` (the on-load staleness pass, restated with specifics).
+4. **Library-worthy vs repo-local** — for each refactor, whether it is repo-specific (belongs in that agent's `## For this repo` tail) or generic (belongs in `roles.yaml`, and should then propagate to every repo + the uzi builtins).
+
+Present the proposal to the user as a numbered list and STOP. Apply nothing without confirmation. On acceptance:
+
+- **Repo-specific change** → edit the agent's `## For this repo` tail only.
+- **Generic change** → edit `roles.yaml` (bump that role's `version:`), then run the `update` merge for THIS repo and raise the uzi-builtin-sync proposal (Mode 2). Editing `roles.yaml` is a library change — gated on the user per the Autonomy section.
+- **New role** → add to `roles.yaml` at `version: 1` (a library change, gated); or, if it is a one-repo experiment, write it only into this repo's `.claude/agents/` and say so explicitly.
+
+Reflect NEVER runs automatically at session end (no hook exists for that) — it is always an explicit command or an accepted offer.
 
 ## Role library reference
 

@@ -6,6 +6,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-07-19
+
+### Added
+
+- `agent-team`: **per-role versioning + staleness detection.** Each role in `roles.yaml` now carries a `version:` integer, and generated `.claude/agents/<role>.md` files stamp it in frontmatter (verified empirically: Claude Code 2.1.215 loads and spawns a subagent whose frontmatter carries the custom `version:` key). On load in a repo that already has a team, the skill reports which agents trail the library; `update` mode diffs versions and replaces only the generic body. Repo-specific tuning now lives in a dedicated `## For this repo` tail that update/sync never overwrites, so the generic body is replaceable wholesale.
+- `agent-team`: new **`reflect` mode** (`/agent-team reflect`). Spawns a read-only reviewer over the session's agents to propose refactors, new roles, and version bumps; findings only, gated on user confirmation. Offered (not auto-run) at the end of a substantial run, since Claude Code exposes no session-end hook.
+- `agent-team`: **downstream builtin sync.** When `roles.yaml` itself changes, `update` mode now proposes propagating the generic-body change to any downstream app that vendors these role bodies as built-in templates, preserving each copy's local `## For this repo` tail and any app-owned roles. A downstream copy whose parser rejects unknown frontmatter keys carries the new body but needs its own change to store the `version:` stamp.
+
+### Changed
+
+- `agent-team`: backported uzi's parallel-mode `coder` contract into the library `coder` body (file-scope hard boundary; no `git commit` in parallel mode; the lead integrates, commits, and runs the repo-wide gate), reconciled with the clean-tree gate. Folded into `coder` `version: 1`.
+
 ## [0.14.0] - 2026-07-17
 
 ### Added

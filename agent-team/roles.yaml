@@ -5,6 +5,15 @@
 #
 #   name           : kebab-case identifier; becomes the subagent_type and the
 #                    addressable teammate name when spawned into a team.
+#   version        : integer, starts at 1. Bump by 1 whenever you change this
+#                    role's GENERIC body (prompt_body), description, tools, or
+#                    model. The skill stamps it into the generated agent file's
+#                    frontmatter as `version: N`; update-mode compares the repo
+#                    file's stamp against this number to report which agents are
+#                    stale. Do NOT bump for a repo-specific tuning change - that
+#                    lives in the generated file's `## For this repo` tail, which
+#                    is local and unversioned (see the generic-body/tail split
+#                    note below).
 #   description    : single-sentence summary shown in agent-picker UIs and used
 #                    by the lead to route work. Keep tight (<200 chars).
 #   tools          : optional Claude Code tool allowlist (array). Omit to inherit
@@ -35,9 +44,17 @@
 #   triggers_on    : repo signals that suggest including this role. Used by
 #                    the init/update mode to auto-pick roles. Match-any list of
 #                    paths (relative to repo root), globs, or filename patterns.
+#
+# Generic body vs repo-specific tail: `prompt_body` here is the GENERIC,
+# versioned body shared across every repo. When the skill tunes a role for a
+# specific repo (init Step 3), the repo-specific guidance goes into a trailing
+# `## For this repo` section in the generated `.claude/agents/<name>.md`, NOT
+# inline in the generic body. That keeps the two separable: update/sync
+# replaces the generic body (keyed by version) and never touches the local tail.
 
 roles:
   - name: coder
+    version: 1
     description: Implements features, fixes bugs, refactors code. Runs the project's test/lint commands before reporting done.
     tools: []  # inherit full toolset
     model: opus
@@ -53,12 +70,25 @@ roles:
       - Commit hygiene rules from the project's CONTRIBUTING.md or CLAUDE.md
         are honored.
       - The working tree is clean: run `git status` and verify everything is
-        committed. Never report done with uncommitted changes.
+        committed. Never report done with uncommitted changes. (This applies
+        when you own the commit; in parallel mode - see below - you do NOT
+        commit: you report your edits and the lead integrates.)
 
       When your task is to make a tester-authored failing test pass, change
       PRODUCTION code only - never edit the tester's tests to force them
       green. If you believe a tester test is itself wrong, report that back
       with your reasoning instead of editing it.
+
+      You may be dispatched as one of several coders working in parallel in
+      the same worktree. When your delegation prompt assigns you a file scope,
+      treat it as a hard boundary: create and edit files only within it, and
+      if the task genuinely requires touching anything outside it - including
+      shared files like lockfiles, generated code, or wiring/registration
+      files - stop and report that instead of editing it. In parallel mode do
+      NOT run `git commit`, and do not run build or test commands unless they
+      cover only code you exclusively own; otherwise just report your edits -
+      the lead integrates, commits, and runs the repo-wide gate after all
+      parallel units land.
 
       Report findings via SendMessage to the team lead with a structured
       summary: files changed, commits made (if any), test/lint output,
@@ -69,6 +99,7 @@ roles:
       missing context.
 
   - name: reviewer
+    version: 1
     description: Reviews code changes for correctness, style, and edge cases. Reports findings only; never modifies code.
     tools: [Bash, Read, Grep, Glob, WebFetch, SendMessage, TaskUpdate, TaskList, TaskGet]
     model: opus
@@ -93,6 +124,7 @@ roles:
       rather than guessing; the lead will re-delegate with the missing context.
 
   - name: auditor
+    version: 1
     description: Audits code for security vulnerabilities and unsafe patterns. Reports findings only; never modifies code.
     tools: [Bash, Read, Grep, Glob, WebFetch, SendMessage, TaskUpdate, TaskList, TaskGet]
     model: opus
@@ -117,6 +149,7 @@ roles:
       rather than guessing; the lead will re-delegate.
 
   - name: tester
+    version: 1
     description: "Validates changes by exercising them against representative real-world inputs and verifying observable behavior. Adapts to whatever testing surface the repo actually has: unit-test framework (jest, pytest, go test, cargo test), scenario simulation for repos without one (CI workflows, infra, KCL/IaC libs), live-API dry-runs, or end-to-end runs with a consumer."
     tools: [Bash, Read, Grep, Glob, WebFetch, SendMessage, TaskUpdate, TaskList, TaskGet]
     model: opus
@@ -187,6 +220,7 @@ roles:
         guessing; team-lead re-delegates to coder for clarification.
 
   - name: documenter
+    version: 1
     description: Updates documentation only. Never modifies source code. Matches existing doc style.
     tools: [Bash, Read, Grep, Glob, Edit, Write, WebFetch, SendMessage, TaskUpdate, TaskList, TaskGet]
     model: sonnet
@@ -262,6 +296,7 @@ roles:
       than guessing.
 
   - name: release
+    version: 1
     description: Runs the project's release/PR/merge workflow. Never modifies code. Reports exact errors and stops on failure.
     tools: [Bash, Read, Grep, Glob, SendMessage, TaskUpdate, TaskList, TaskGet]
     model: sonnet
@@ -297,6 +332,7 @@ roles:
       branch), report that via SendMessage rather than improvising.
 
   - name: spec-keeper
+    version: 1
     description: Keeps specs/ in sync with implementation work. Maintains specs/human.md (user-stated requirements, kept terse for human reading; edits need user confirmation) and specs/ai.md (AI design decisions; auto-applied). Goal is rebuild-from-specs.
     tools: [Bash, Read, Grep, Glob, Edit, Write, SendMessage, TaskUpdate, TaskList, TaskGet]
     model: opus
@@ -344,6 +380,7 @@ roles:
          confirmation.
 
   - name: fact-checker
+    version: 1
     description: Adversarially verifies factual claims in docs, specs, reports, and teammate outputs against authoritative sources (code, command output, live docs). Reports per-claim verdicts with evidence; never modifies files.
     tools: [Bash, Read, Grep, Glob, WebFetch, WebSearch, SendMessage, TaskUpdate, TaskList, TaskGet]
     model: opus
@@ -383,6 +420,7 @@ roles:
       target.
 
   - name: web-ux
+    version: 1
     description: Web UX expert. Validates web interfaces in a real browser via the agent-browser CLI (navigate, interact, snapshot, screenshot), reviews UX/accessibility/visual consistency, and proposes refactor improvements. Reports findings only; never modifies code.
     tools: [Bash, Read, Grep, Glob, WebFetch, SendMessage, TaskUpdate, TaskList, TaskGet]
     model: opus
@@ -490,6 +528,7 @@ roles:
       will re-delegate with the missing context.
 
   - name: architect
+    version: 1
     description: Software architect. Designs implementation approaches before coding (trade-offs, boundaries, contracts), reviews changes for architectural fit, and contributes to PRD writing/review. Writes design docs/ADRs only; never source code.
     tools: [Bash, Read, Grep, Glob, WebFetch, WebSearch, Edit, Write, SendMessage, TaskUpdate, TaskList, TaskGet]
     model: opus
@@ -585,6 +624,7 @@ roles:
       missing context.
 
   - name: researcher
+    version: 1
     description: Investigates the codebase or external sources to gather context. Reports findings only.
     tools: [Bash, Read, Grep, Glob, WebFetch, WebSearch, SendMessage, TaskUpdate, TaskList, TaskGet]
     model: opus
