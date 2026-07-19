@@ -6,6 +6,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-07-19
+
+### Removed
+
+- `agent-team`: retired the entire cmux/tmux pane-layout path: the `scripts/layout-team-panes.sh` helper, the per-spawn-wave layout routine, pane/surface identification and pane-title correlation, the `tmux capture-pane` monitoring, and the cmux presence-detection notes. The skill no longer assumes teammates are visible tmux panes.
+
+### Changed
+
+- `agent-team`: Mode 3 now leads with the **native background model** end to end. Teammates run as background agents (the Agent tool's default) and drive the flow via automatic completion/idle notifications plus `SendMessage`/`Task*`; the lead never polls and never reads a teammate's `.output` transcript. Pre-shutdown "is it mid-work?" checks use `TaskList` plus a status question plus `git status` on the worktree, instead of pane capture. Wedged-teammate recovery is `TaskStop({task_id})` instead of `tmux kill-pane`. Context-budget monitoring drops the pane-statusline `% of 1000k` readout (no native equivalent) for the task-boundary-count heuristic. Net: about 50 lines and one bundled script lighter.
+
 ## [0.15.1] - 2026-07-19
 
 ### Changed
