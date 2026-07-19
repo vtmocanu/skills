@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.15.1] - 2026-07-19
+
+### Changed
+
+- `agent-team`: rewrote Mode 3 (run) for the **implicit-team API**. Claude Code exposes one implicit team per session, so `team_name` is deprecated/ignored and `TeamCreate`/`TeamDelete` are absent (confirmed 2.1.178 through 2.1.215, where the Agent tool documents `team_name` as "Deprecated; ignored. The session has a single implicit team"). Spawns now use `Agent({name, subagent_type, model, prompt})`, coordination is `SendMessage` plus the `Task*` tools, and a teammate is retired with a graceful `shutdown_request`; there is nothing to create or delete. The old `TeamCreate`/`team_name`/`TeamDelete` flow is preserved as a one-paragraph "older build" fallback in Gotchas, instead of being the main prose with a band-aid gotcha telling readers to remap it.
+
 ## [0.15.0] - 2026-07-19
 
 ### Added

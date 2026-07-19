@@ -1,6 +1,6 @@
 ---
 name: agent-team
-description: Auto-generate and run a per-repo Claude Code agent team. Probes the current repo (build/CI/env manifests, agent launchers, slash commands, spec dirs) and writes `.claude/agents/{role}.md` subagent definitions for the relevant roles from a library (coder, reviewer, auditor, tester, documenter, release, architect, researcher, spec-keeper, fact-checker, web-ux) plus a `.claude/agent-team.md` workflow doc. Use when (1) `/agent-team init` to create the team for the current repo, (2) `/agent-team update` to refresh after project shape changes, (3) `/agent-team {task}` to run a task with the team (TeamCreate plus spawn plus drive orchestrator flow plus stop at user gates), (4) `/agent-team reflect` to review the session's agents and propose refactors plus new roles. Roles carry a frontmatter `version:` for staleness detection. Triggers include "/agent-team", "spin up a team", "auto-create agents", "agent team for this repo", "team-on-task", "reflect on the agents".
+description: Auto-generate and run a per-repo Claude Code agent team. Probes the current repo (build/CI/env manifests, agent launchers, slash commands, spec dirs) and writes `.claude/agents/{role}.md` subagent definitions for the relevant roles from a library (coder, reviewer, auditor, tester, documenter, release, architect, researcher, spec-keeper, fact-checker, web-ux) plus a `.claude/agent-team.md` workflow doc. Use when (1) `/agent-team init` to create the team for the current repo, (2) `/agent-team update` to refresh after project shape changes, (3) `/agent-team {task}` to run a task with the team (spawn teammates plus drive orchestrator flow plus stop at user gates), (4) `/agent-team reflect` to review the session's agents and propose refactors plus new roles. Roles carry a frontmatter `version:` for staleness detection. Triggers include "/agent-team", "spin up a team", "auto-create agents", "agent team for this repo", "team-on-task", "reflect on the agents".
 ---
 
 ## Document Location
@@ -19,7 +19,7 @@ The skill has four modes selected by the first argument:
 |------|---------|--------------|
 | **init** | `/agent-team init`, or no args + no `.claude/agents/` present | Probe the repo, pick roles, write `.claude/agents/<role>.md` + `.claude/agent-team.md` |
 | **update** | `/agent-team update` | Re-probe, diff against existing `.claude/agents/` (roles + `version:` staleness), apply targeted changes |
-| **run** | `/agent-team <task description>` | Read team manifest, TeamCreate, spawn teammates, drive the workflow, STOP at user gates |
+| **run** | `/agent-team <task description>` | Read team manifest, spawn teammates, drive the workflow, STOP at user gates |
 | **reflect** | `/agent-team reflect` | Spawn a reviewer over this session's agents; propose refactors, new roles, and version bumps |
 
 `.claude/agents/` is a Claude Code project-scoped subagent directory. `.claude/agent-team.md` is a workflow manifest this skill writes for its own use; not loaded automatically by Claude Code but read by the skill on `run`.
@@ -39,7 +39,7 @@ When this skill is loaded, the team-lead has standing authority to spawn agents 
 Scope of standing authority:
 
 - **Spawning teammates** from the existing `.claude/agents/` roster for the active task.
-- **TeamCreate / TeamDelete** at task boundaries.
+- **Retiring teammates** at task boundaries (graceful shutdown; under the implicit-team API there is no team to create or delete).
 - **Background vs foreground** mode per Agent call.
 - **Recycling** a teammate at a clean task boundary (Mode 3 Step 5 + the "Context recycling" section below).
 - **Dispatching slash commands** the orchestrator may invoke between delegations (per the workflow manifest).
@@ -199,8 +199,9 @@ Generated <date> by the `agent-team` skill.
 ## Orchestrator workflow
 
 You (the team lead) NEVER do implementation, review, or audit work yourself.
-You coordinate the team via TeamCreate + Agent (with team_name + name +
-subagent_type) + SendMessage + TaskUpdate.
+You coordinate the team via Agent (name + subagent_type) to spawn teammates,
+SendMessage to communicate, and the Task* tools to track work. The session
+has ONE implicit team; there is nothing to create or delete.
 
 Default flow for a typical task:
 1. Spawn coder with the full task context. The coder runs `<test-command>`
@@ -322,9 +323,9 @@ Use when `/agent-team <task description>` is invoked with a non-keyword first ar
 
   Always name the exact branch in every spawn prompt, and ensure the lead itself is on/in the work branch before it authors briefs. Stranding these artifacts on the default branch breaks context handoff (the brief is invisible from the work branch/worktree) and pollutes the default branch. Observed 2026-06-13: a session started on `main` while its agents worked on another branch left the `.claude/agent-team-tasks/` ("agents dir") stranded on `main`, invisible from the work branch.
 
-### Step 2: TeamCreate + plan tasks
+### Step 2: plan tasks
 
-Call `TeamCreate({team_name: "<repo-name>-<short-slug>", agent_type: "orchestrator", description: "<task summary>"})`.
+The session already has one implicit team — there is nothing to create. Go straight to planning the task list.
 
 Create team-level tasks via TaskCreate:
 - Task #1: implementation (owner: coder)
@@ -339,9 +340,9 @@ Spawn each teammate in parallel via Agent calls in a single message:
 
 ```
 Agent({
-  team_name: "<team>",
   name: "coder",
   subagent_type: "coder",
+  model: "<tier from the role file>",   // pass explicitly — frontmatter model is not honored at spawn
   prompt: "<task-specific cold-start prompt>"
 })
 ```
@@ -356,7 +357,7 @@ For `spec-keeper`, do NOT spawn at start; spawn after blocking review/audit find
 
 **Parallel same-repo waves (multiple implementers editing one repo at once):**
 
-- Do NOT rely on the Agent tool's `isolation: "worktree"` parameter for teammates: combined with `team_name` it has been observed to silently not isolate (one teammate switched the lead worktree's branch mid-run, 2026-06-10). Instead, put explicit worktree setup in each spawn prompt: `git worktree add <repo-parent>/<branch> <branch>`, then "cd there and do ALL work in that worktree; NEVER touch the lead's worktree or switch its branch".
+- Do NOT rely on the Agent tool's `isolation: "worktree"` parameter for teammates: it has been observed to silently not isolate (one teammate switched the lead worktree's branch mid-run, 2026-06-10). Instead, put explicit worktree setup in each spawn prompt: `git worktree add <repo-parent>/<branch> <branch>`, then "cd there and do ALL work in that worktree; NEVER touch the lead's worktree or switch its branch".
 - When N workers' branches will merge into one integration branch, instruct every worker NOT to bump VERSION/CHANGELOG (or any other shared file all milestones would touch); the lead does one consolidated bump after merging. Otherwise the merge hits N-way conflicts on those files.
 - **Before merging a worker branch, verify its ref == the worker's last reported SHA** (`git rev-parse <branch>`; `git worktree list` must show the branch at that SHA, NOT `(detached HEAD)`). A follow-up commit (a review/hardening fix) made on a detached HEAD leaves the branch ref behind, so `git merge <branch>` silently integrates the STALE pre-fix code and DROPS the follow-up — and tests still pass when the dropped delta was additive, so it is invisible without this check (observed 2026-06-16: a coder's MEDIUM trace-read security fix vanished from the merge because its hardening commit sat on a detached HEAD; `(detached HEAD)` in `git worktree list` was the tell, caught only later by a docs fact-check against the code). Fix: merge the reported SHA directly (`git merge <sha>`), or confirm the ref first; either way, after merging grep the integration tree for a signature line from each follow-up to prove it landed. (This is the merge-time face of "trust but verify against artifacts" in Step 4.) When directing worker A to merge worker B's branch, pin B's last reported tip in the dispatch but add "check the live tip and take whatever it is; if it moved past the pinned SHA, say so instead of guessing" — B may land a final small commit while the dispatch is in flight (observed 2026-07-05: a cosmetic fix landed on the web branch seconds after the merge dispatch; the live-tip instruction absorbed it without a round-trip).
 - If a wave is aborted before commits land, leftover empty branches are fine: tell the respawned worker to reuse the existing branch instead of deleting and recreating it (branch deletion may be denied by the permission classifier as destructive).
@@ -427,7 +428,7 @@ When the task is complete and the user is done, do NOT send `shutdown_request` b
 2. **Pane-activity check**: Capture the teammate's tmux pane and look for the running indicator:
 
 ```bash
-PANE_ID=$(jq -r '.members[] | select(.name=="<teammate>") | .tmuxPaneId' ~/.claude/teams/<team>/config.json)
+PANE_ID=$(jq -r '.members[] | select(.name=="<teammate>") | .tmuxPaneId' ~/.claude/teams/<session>/config.json)
 tmux capture-pane -p -t "$PANE_ID" 2>/dev/null | tail -30
 ```
 
@@ -446,18 +447,18 @@ Do NOT send `shutdown_request` directly. SendMessage a plain question instead: "
 
 #### After verification
 
-Send `{type: "shutdown_request", reason: "<reason>"}` via SendMessage. Wait for `shutdown_response approve: true`. After all teammates confirm, call `TeamDelete`. Do NOT call TeamDelete with active teammates; it will fail.
+Send `{type: "shutdown_request", reason: "<reason>"}` via SendMessage to each teammate and wait for `shutdown_response approve: true`. That is the whole cleanup: under the implicit-team API there is no `TeamDelete` — a shut-down teammate just frees its name slot. (On an older build that still exposes `TeamDelete`, call it only after every member confirms, never with an active member; see the "Old team API" note in Gotchas.)
 
-**Stale `isActive` after a GRACEFUL shutdown** (observed 2026-06-12): even with `shutdown_approved` received and the teammate terminated, its config entry can stay `isActive: true`, making TeamDelete fail with "Cannot cleanup team with N active member(s)". Verify the pane is actually dead (`tmux list-panes -a -F '#{pane_id}' | grep -x '<paneId>'` — paneId from the config), then flip the flag and retry:
+**Stale `isActive` after a GRACEFUL shutdown** (observed 2026-06-12): even with `shutdown_approved` received and the teammate terminated, its config entry can stay `isActive: true`. This keeps the name slot from freeing for a clean respawn (and on older builds makes `TeamDelete` fail with "Cannot cleanup team with N active member(s)"). Verify the pane is actually dead (`tmux list-panes -a -F '#{pane_id}' | grep -x '<paneId>'` — paneId from the config), then flip the flag:
 
 ```bash
 jq '.members |= map(if .name == "<name>" then .isActive = false else . end)' \
-  ~/.claude/teams/<team>/config.json > /tmp/tc.json && mv /tmp/tc.json ~/.claude/teams/<team>/config.json
+  ~/.claude/teams/<session>/config.json > /tmp/tc.json && mv /tmp/tc.json ~/.claude/teams/<session>/config.json
 ```
 
-#### Worktree cleanup after TeamDelete
+#### Worktree cleanup after shutdown
 
-TeamDelete does NOT remove the worktrees your spawn prompts told workers to create (the explicit `git worktree add` pattern from Step 3) — only worktrees the Agent tool itself created via `isolation`. After the wave's branches are merged, the lead must `git worktree remove <path>` each milestone worktree and delete the merged branches. Two follow-on gotchas: (1) removing a worktree can poison the shared golangci-lint cache — later `task lint` runs in surviving worktrees fail on phantom issues whose paths point into the removed worktree; fix with `golangci-lint cache clean`. (2) A single follow-up role task after TeamDelete (e.g. release) does not need a new team — spawn it standalone via `Agent(subagent_type: <role>)`.
+Shutting a teammate down does NOT remove the worktrees your spawn prompts told workers to create (the explicit `git worktree add` pattern from Step 3) — only worktrees the Agent tool itself created via `isolation`. After the wave's branches are merged, the lead must `git worktree remove <path>` each milestone worktree and delete the merged branches. Two follow-on gotchas: (1) removing a worktree can poison the shared golangci-lint cache — later `task lint` runs in surviving worktrees fail on phantom issues whose paths point into the removed worktree; fix with `golangci-lint cache clean`. (2) A single follow-up role task after the run (e.g. release) needs nothing special — the implicit team persists for the session, so spawn it standalone via `Agent(subagent_type: <role>)`.
 
 #### Pane-capture caveat
 
@@ -485,10 +486,10 @@ Out of scope for hotfixes: adding new roles, removing roles, changing a role's r
 
 **B. Slot-collision handling when respawning a teammate.**
 
-Whether a respawn collides depends on how the previous holder ended. A graceful shutdown (shutdown_request, then `shutdown_response approve: true`, then termination) FREES the name slot: respawning with the same `name:` and `team_name:` reuses it with no suffix (verified 2026-06-10). Killing a teammate's pane without the protocol (`tmux kill-pane`, crash) leaves a stale entry in the team config (`~/.claude/teams/<team>/config.json`) with `isActive: false` that does NOT free the slot; a subsequent `Agent` spawn with the same name produces a `-N` suffix (e.g., `reviewer` becomes `reviewer-2` on first respawn, `reviewer-3` on the next). Two implications when the suffix happens:
+Whether a respawn collides depends on how the previous holder ended. A graceful shutdown (shutdown_request, then `shutdown_response approve: true`, then termination) FREES the name slot: respawning with the same `name:` reuses it with no suffix (verified 2026-06-10). Killing a teammate's pane without the protocol (`tmux kill-pane`, crash) leaves a stale entry in the team config (`~/.claude/teams/<session>/config.json`) with `isActive: false` that does NOT free the slot; a subsequent `Agent` spawn with the same name produces a `-N` suffix (e.g., `reviewer` becomes `reviewer-2` on first respawn, `reviewer-3` on the next). Two implications when the suffix happens:
 
 - The live agent's NAME (for `SendMessage` targeting and `TaskUpdate` ownership) is the suffixed form. Address them as `reviewer-2`, not `reviewer`. The skill text + brief prompts must use the live name.
-- The stale `reviewer` entry with `isActive: false` is harmless but clutters the roster. Optional cleanup: edit the config to remove the stale members before respawning, OR accept the suffix and move on. Do NOT call `TeamDelete` to "reset" the team mid-run; that nukes the task list and any other live members.
+- The stale `reviewer` entry with `isActive: false` is harmless but clutters the roster. Optional cleanup: edit the config to remove the stale members before respawning, OR accept the suffix and move on. Do NOT wipe the team config (or call `TeamDelete` on an older build) to "reset" the team mid-run; that nukes the task list and any other live members.
 
 If the pane is alive but the agent is wedged (responded to `shutdown_request` with plain text instead of the protocol response, often because the tool allowlist excludes `SendMessage`), kill the pane directly with `tmux kill-pane -t <pane-id>`. Then respawn (accepting the `-N` suffix) with the patched role file.
 
@@ -498,10 +499,10 @@ Each teammate is a full Claude Code session with its own context window (1M for 
 
 ### Monitoring teammate context
 
-Each teammate runs in a tmux pane recorded at `~/.claude/teams/<team>/config.json#members[].tmuxPaneId`. Capture the live statusline:
+Each teammate runs in a tmux pane recorded at `~/.claude/teams/<session>/config.json#members[].tmuxPaneId`. Capture the live statusline:
 
 ```bash
-PANE_ID=$(jq -r '.members[] | select(.name=="coder") | .tmuxPaneId' ~/.claude/teams/<team>/config.json)
+PANE_ID=$(jq -r '.members[] | select(.name=="coder") | .tmuxPaneId' ~/.claude/teams/<session>/config.json)
 tmux capture-pane -p -t "$PANE_ID" 2>/dev/null | grep -E '% of [0-9]+k'
 ```
 
@@ -526,13 +527,13 @@ Output: `▰▰▰▱▱▱▱ 51% of 1000k`: the live context budget. Run this 
 
 2. **Shutdown**. Send `SendMessage({to: "<teammate>", message: {type: "shutdown_request", reason: "Recycle for context budget"}})`. Wait for `shutdown_response` with `approve: true`.
 
-3. **Respawn**. Call Agent with the same `team_name`, `name`, `subagent_type`, and a cold-start prompt that references the checkpoint:
+3. **Respawn**. Call Agent with the same `name` and `subagent_type` (plus the explicit `model`), and a cold-start prompt that references the checkpoint:
 
    ```
    Agent({
-     team_name: "<team>",
      name: "<role>",
      subagent_type: "<role>",
+     model: "<tier from the role file>",
      prompt: "Cold-start. Read .claude/agent-team-tasks/<slug>-checkpoint.md for prior context. Then: <new task>."
    })
    ```
@@ -558,8 +559,8 @@ Sequence:
 
 1. **Analyze without dispatching.** Read the PRD, identify the next task, present the recommendation. The team stays dormant: no spawns, no SendMessage, no role-file edits.
 2. **Wait for user acceptance.** Do NOT spawn anything until the user confirms the chosen task. Skipping this step risks priming teammates on a scope the user will redirect.
-3. **On acceptance, gracefully shutdown the existing team.** Follow the Mode 3 Step 5 cleanup procedure: pre-shutdown checks (task ownership + pane activity), `SendMessage shutdown_request` + wait for `shutdown_response approve:true`, `TeamDelete`. Wedged teammates (no `SendMessage` in their allowlist) get `tmux kill-pane`. Mid-work teammates mean the prior task wasn't actually done; resolve before transitioning.
-4. **TeamCreate + spawn fresh.** A new `team_name` (or reusing the same one if no stale member slots remain) avoids the `-N` suffix collision documented in Step 6 above.
+3. **On acceptance, gracefully shutdown the existing team.** Follow the Mode 3 Step 5 cleanup procedure: pre-shutdown checks (task ownership + pane activity), `SendMessage shutdown_request` + wait for `shutdown_response approve:true` from each teammate. Wedged teammates (no `SendMessage` in their allowlist) get `tmux kill-pane`. Mid-work teammates mean the prior task wasn't actually done; resolve before transitioning.
+4. **Spawn fresh.** With every prior teammate gracefully shut down, their name slots are freed, so respawning by the same names avoids the `-N` suffix collision documented in Step 6 above. There is no team to re-create.
 5. **Run the task** per Mode 3 normal flow.
 
 Exception: if the user explicitly wants the existing team kept alive across the transition (the next task is a tight follow-up on the same diff, primed context is directly reusable, no scope drift), skip the shutdown. But this is the exception; the default is recycle.
@@ -597,7 +598,7 @@ The full role library is in `./roles.yaml`. Read it during init/update to see th
 
 - **Permission-classifier outage blocks mutating Bash temporarily** (observed 2026-07-15): the auto-mode safety classifier can go briefly unavailable, failing every state-changing Bash call ("temporarily unavailable, so auto mode cannot determine the safety") while read-only ops keep working. Don't spin on retries: interleave the non-Bash steps of your plan meanwhile (protocol shutdown_requests, file edits via Edit/Write, SendMessage coordination), wait ~1 min, then retry the blocked command — it recovered on the second window.
 
-- **Current Claude Code may expose a single implicit team, not the `TeamCreate` API** (observed 2026-06-16 on Claude Code 2.1.178): the Agent tool's `team_name` is deprecated/ignored and `TeamCreate`/`TeamDelete` are absent — the session has ONE implicit team. Spawn teammates with `Agent({name, subagent_type, prompt})` (optionally `run_in_background: true`) and coordinate via `SendMessage` (target by teammate name) + the `Task*` tools; there is nothing to create or delete. Graceful shutdown still works (`SendMessage` a `shutdown_request`, await `shutdown_response approve:true`). The `TeamCreate`/`team_name`-centric prose in Mode 3 below predates this — map it onto the implicit-team primitives. (A full Mode-3 rewrite for the implicit-team API is a separate pending pass.)
+- **Old team API (`TeamCreate` / `team_name` / `TeamDelete`) — superseded by the implicit team.** Mode 3 above is written for the implicit-team API: the session has ONE implicit team, so you spawn with `Agent({name, subagent_type, model, prompt})` (optionally `run_in_background: true`), coordinate via `SendMessage` (target by teammate name) + the `Task*` tools, and retire a teammate with a graceful `shutdown_request` → `shutdown_response approve:true`. There is nothing to create or delete. Confirmed on Claude Code 2.1.178 (2026-06-16) through 2.1.215, where the Agent tool documents `team_name` as "Deprecated; ignored. The session has a single implicit team" and exposes no `TeamCreate`/`TeamDelete`. If you are on an OLDER build that still has them: call `TeamCreate({team_name, agent_type, description})` once before the first spawn, pass that `team_name` on every `Agent` spawn/respawn, and `TeamDelete` at the very end (only after all members confirm shutdown, never with an active member). Everything else in Mode 3 is identical.
 - **`/clear` does not clear the team registry.** After a `/clear`, the session's `~/.claude/teams/<session>/config.json` still lists every pre-clear member, and those agents can be alive, idle, and WAKEABLE. Two observed effects (2026-07-03): (a) spawning a teammate with a role name a stale slot holds silently suffixes the new agent (`coder` → `coder-2`); (b) `TaskUpdate({owner: "coder"})` intended for the fresh spawn woke the STALE pre-clear `coder`, which read the on-disk brief and started implementing in the same worktree as the fresh `coder-2` — two writers in one worktree, caught only because both self-reported foreign uncommitted files. Rules: before run-mode spawns, list the session's team members and treat any entry you did not spawn in THIS conversation as a stale-slot hazard; always address teammates AND set task `owner` using the exact live name returned by the spawn result, never the bare role name; if a stale agent wakes, stop its writes first, then graceful-shutdown it.
 - **A `teammate_terminated` notice can be FALSE — treat any termination you did not protocol-confirm as unconfirmed** (observed 2026-07-05): the system announced "coder has shut down", the lead verified the worktree clean and respawned the role (suffixed `coder-2`), and the "terminated" coder then kept working and committed a full milestone ~25 min later — two writers in one worktree. Rules: only your own `shutdown_request` answered by `shutdown_approved` proves termination; a worktree-clean check at respawn time is NOT proof (the zombie can commit later); when respawning a role into the same worktree, put a concurrent-writer guard in the spawn prompt ("if foreign uncommitted changes or unexplained commits appear, STOP writing and report") — that guard is what caught it; if the zombie surfaces, protocol-shutdown it and freeze the legitimate writer until `shutdown_approved` arrives; the zombie's COMMITTED work is salvage, not waste — verify it adversarially and adopt it rather than reimplementing. Name-reuse corollary: a fresh spawn that reuses the dead-looking holder's name can receive that name's PENDING stale `shutdown_request` and get killed mid-task — after any same-name respawn, verify the new agent's task actually completed (check the artifact, not the report) before relying on it.
 - **Two writers in one worktree — containment and recovery** (observed 2026-07-03, same incident as the `/clear` gotcha; both writers were individually careful and it still took three rounds to contain):
@@ -648,7 +649,7 @@ Claude: [writes 6 files, confirms]
 
 ```
 User: /agent-team implement the new --json output flag
-Claude: [reads .claude/agent-team.md, TeamCreate, spawns coder with the task,
+Claude: [reads .claude/agent-team.md, spawns coder with the task,
         spawns reviewer + auditor in standby mode, waits]
         Team spawned. Coder is working on the --json flag. Reviewer + auditor
         primed and standing by.
