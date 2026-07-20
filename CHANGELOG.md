@@ -6,6 +6,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-07-20
+
+### Changed
+
+- `agent-team`: **tester role gains `Edit, Write`** (version 1 to 2). The tester body already prescribes test-authoring ("add tests that exercise the new behavior", "write a new test", "Commit a deliberately-failing test on its own"), and its "read-only by default" clause forbids only *external* mutations (push, merge, PR comments, workflow_dispatch), not local file writes; but the tool allowlist omitted `Edit, Write`, so the tester could only author via Bash heredocs, against the allowlist's intent. Added the tools so the tester authors RED tests as the body already describes. Surfaced on a PRD run where authoring an e2e test leg had to be routed to a coder because the read-only tester could not write files.
+- `agent-team`: **architect gains a seam-completeness review lens** (version 1 to 2). Section C (PRD writing/review) now requires: when a milestone is a SEAM that later milestones consume (for example "this pre-lands the interface that makes M2 and M3 file-disjoint"), specify EVERY field, prop, and interface member each downstream milestone will read from it; an incomplete seam is not "done", it leaks work back as authorized edits into a supposedly-frozen file. Motivated by a run where a seam milestone was declared done while under-provisioning props the next milestone needed.
+
+### Added
+
+- `agent-team`: new run-mode gotcha on process ownership. Do NOT tell a teammate to kill a process you have not confirmed is theirs (match the shell-snapshot path, redirected log path, and cwd against the worker's own); a teammate refusing to touch an unowned process is correct behavior, not obstruction. A stray run in a separate compose project that self-tears-down is harmless.
+
 ## [0.16.0] - 2026-07-19
 
 ### Removed
