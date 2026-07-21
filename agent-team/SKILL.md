@@ -402,6 +402,7 @@ Use when `/agent-team update` is invoked, or when an existing team feels out of 
 3. Diff along three axes:
    - **Roster**: roles in the library that match repo signals but are missing from `.claude/agents/`, OR roles present whose `triggers_on` no longer match (tests removed, release flow gone, etc.).
    - **Version staleness**: for each present role, compare its file `version:` to that role's current `version:` in `roles.yaml`. A lower or missing number means the generic body drifted behind the library — read both bodies so you can summarize WHAT changed, not just the number.
+   - **Local modification at EQUAL version** — a distinct category from staleness, and invisible to a version comparison. Compare the file's generic body, `description`, `tools` and `model` against `roles.yaml` even when the numbers match, and report any difference as **MODIFIED LOCALLY** rather than folding it into "stale". Two real cases motivate this: a repo whose local `description` is BETTER than the library's (an improvement that nothing propagates back, and that the next sync silently reverts), and a body that is a hand-reflowed copy rather than a synced one. Local modification is not always wrong — but it must be visible, or the next version bump destroys it without anyone deciding to. Also report roles present in `.claude/agents/` that have **no `roles.yaml` entry at all** as **CUSTOM, NOT IN LIBRARY** — those are the repo's own and an update must never touch them.
    - **Tuning drift**: repo facts in a `## For this repo` tail that no longer hold (renamed test command, moved spec dir). Gate slots drift the same way and are worth re-deriving: a repo can gain a linter, a dead-code check, or a task runner after the team was generated, and a tail still naming the old raw recipe sends the tester at a command that no longer matches CI.
 4. Present the diff to the user as a numbered proposal: additions / removals / version bumps (one line of "what changed" each) / tail fixes.
 5. On confirmation, apply targeted edits:
@@ -436,6 +437,12 @@ Create team-level tasks via TaskCreate:
 - Task #3: audit (owner: auditor, blockedBy: #1)
 - Task: spec sync (owner: spec-keeper, blockedBy: #2 + #3) - only if spec-keeper role exists
 - Task #4: release (owner: release, blockedBy: #2 + #3, user-gated) - only if release role exists
+
+**Then create a task for EVERY OTHER ROLE IN THE ROSTER WHOSE TRIGGERS FIRE ON THIS CHANGE, and close the ones you are not dispatching WITH A WRITTEN REASON.** Not a dispatch — a task. Tester when the change alters behavior; web-ux when it touches a web interface; architect on a new or changed contract; documenter when docs change; fact-checker when the change carries claims; spec-keeper when `specs/` exists. Closing one takes a sentence: `web-ux: skipped — no reachable instance` is a legitimate close. Leaving it uncreated is not.
+
+**Why this is a task and not another instruction to remember.** The dispatch rules further down (Step 4) are conditional and fire mid-flow, each requiring you to notice a condition while doing something else. This fires ONCE, unconditionally, at the moment you are already enumerating roles. And it changes what a skip LEAVES BEHIND: today a role that is never spawned produces no artifact at all, so nobody — not the user, not a teammate, not a later reflect pass — can see that a decision was made, or contradict the reason. A closed task with a stated reason is visible and falsifiable. `web-ux: skipped — needs a running instance` sitting next to a role file that names a mock build is a sentence somebody catches in seconds.
+
+This does NOT force a dispatch. Skipping a role is often right. What it forbids is skipping one silently.
 
 ### Step 3: spawn teammates
 
