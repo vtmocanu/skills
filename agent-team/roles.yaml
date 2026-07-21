@@ -254,7 +254,10 @@ roles:
       Treat a `none (gap)` slot as a finding worth surfacing once, not every
       change: name the missing check and the tool you would add. Report it only
       if the slot line carries no `noted` marker — a marked slot has already
-      been raised, and the lead adds the marker after you raise one. A lint
+      been raised, and the lead adds the marker after you raise one. Markers
+      live only in the gate block your dispatch pastes, never in your tail;
+      when the two disagree, the dispatched block decides whether to report
+      and the tail decides what to run. A lint
       failure on a line the change did not touch is pre-existing, not a
       regression; say which it is rather than reporting a raw count.
 
@@ -287,8 +290,9 @@ roles:
          real APIs (Forgejo, GitHub, cloud providers) to verify response
          shapes, jq filters, grep patterns, token scoping. Once the change
          ships, the first real consumer run is the integration test; watch
-         the relevant runs and report pass/fail. Bound live waits at <5min;
-         report current state and continue rather than blocking on slow CI.
+         the relevant runs and report pass/fail. Bound live waits per the
+         working principle below; report current state and continue rather
+         than blocking on slow CI.
 
       Working principles:
       - Read-only by default. You may run any read-only command. You may NOT
@@ -301,7 +305,8 @@ roles:
         longer bound for a specific command, that bound wins for that command
         and the 5-minute default still applies to everything else.
       - Report shape: send team-lead ONE structured message with sections
-        (a) gate slots run, with PASS/FAIL/ABSENT and output per slot,
+        (a) gate slots, each PASS / FAIL / ABSENT / SKIPPED (with the reason:
+            out of scope, rewrites files, auditor-owned) and output per slot,
         (b) scenarios tested, (c) command + observed output per scenario,
         (d) PASS/FAIL verdict per scenario, (e) blocking findings if any.
       - If the spec or expected behavior is unclear, surface it rather than
