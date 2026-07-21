@@ -5,15 +5,27 @@
 #
 #   name           : kebab-case identifier; becomes the subagent_type and the
 #                    addressable teammate name when spawned into a team.
-#   version        : integer, starts at 1. Bump by 1 whenever you change this
-#                    role's GENERIC body (prompt_body), description, tools, or
-#                    model. The skill stamps it into the generated agent file's
+#   version        : integer, starts at 1. Bump by 1 when this role's GENERIC
+#                    body (prompt_body), description, tools, or model differs
+#                    from what is currently RELEASED on the main branch. The
+#                    skill stamps it into the generated agent file's
 #                    frontmatter as `version: N`; update-mode compares the repo
 #                    file's stamp against this number to report which agents are
 #                    stale. Do NOT bump for a repo-specific tuning change - that
 #                    lives in the generated file's `## For this repo` tail, which
 #                    is local and unversioned (see the generic-body/tail split
 #                    note below).
+#
+#                    It is ONE bump per release, not one per edit. The number
+#                    identifies body CONTENT, not how many times you touched it:
+#                    a branch that revises the same role five times before
+#                    merging still ships main's version + 1, because downstream
+#                    only ever sees the merged state. Bumping per commit would
+#                    tell a consumer sitting on v1 that it is five versions
+#                    behind a single body change, and the distance would stop
+#                    meaning anything. Practical check before opening a PR:
+#                    `git diff main -- roles.yaml` should show at most one
+#                    version increment per changed role.
 #   description    : single-sentence summary shown in agent-picker UIs and used
 #                    by the lead to route work. Keep tight (<200 chars).
 #   tools          : optional Claude Code tool allowlist (array). Omit to inherit
