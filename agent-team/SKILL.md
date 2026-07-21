@@ -71,6 +71,22 @@ Probe for these signals. Use the Glob and Read tools; do NOT run `find /`. All p
 
 - **Build/package manifests**: `package.json`, `go.mod`, `pyproject.toml`, `Cargo.toml`, `pom.xml`, `Gemfile`, `build.gradle`, `Makefile`, `kcl.mod`, `Chart.yaml`.
 - **Task runners**: `Taskfile.yml`, `justfile`, `Makefile`, `package.json#scripts`.
+- **Quality-gate configs**: the checks the repo can run beyond its tests. Probe for each config file, then resolve it to the command that actually runs it — prefer a task-runner target or CI job over the raw binary, since that is what contributors and CI use.
+
+  | Slot | Config signals | Typical command |
+  |---|---|---|
+  | format | `.editorconfig`, `.prettierrc*`, `rustfmt.toml`, `.clang-format`, gofmt (implicit for Go) | `task fmt-check`, `prettier --check .`, `gofmt -l .`, `cargo fmt --check` |
+  | lint | `.golangci.y*ml`, `eslint.config.*`, `.eslintrc*`, `biome.json`, `.oxlintrc*`, `ruff.toml`, `.flake8`, `.rubocop.yml`, `clippy.toml` | `task lint`, `golangci-lint run`, `npm run lint`, `ruff check`, `cargo clippy` |
+  | typecheck | `tsconfig.json`, `mypy.ini`, `pyrightconfig.json` | `tsc --noEmit`, `mypy .` |
+  | test | test dirs/manifests from the rows above | `task test`, `go test ./...`, `pytest`, `npm test` |
+  | dead code | `knip.json`, `.ts-prunerc`, `deadcode`/`unused`/`unparam` in a golangci config, `vulture` config | `knip`, `deadcode -test ./...`, `vulture .` |
+  | coverage | `codecov.yml`, `.coveragerc`, a `-coverprofile`/`--coverage` flag anywhere in CI or task targets | `task test-coverage`, `go test -coverprofile=…`, `vitest --coverage` |
+  | security scan | `.gitleaks.toml`, `.semgrep.yml`, `.trivyignore`, gosec/bandit/govulncheck/`npm audit`/`cargo audit` invocations in CI | `gitleaks detect`, `govulncheck ./...`, `npm audit` |
+  | pre-commit | `.pre-commit-config.yaml`, `lefthook.y*ml`, `.husky/` | `pre-commit run -a`, `lefthook run pre-commit` |
+
+  **Mine the CI config for these, not just the repo root.** A repo can lint in CI with no config file at the root, and a repo can carry a `.golangci.yml` that nothing ever invokes. The CI job definitions are the evidence of what actually runs.
+
+  **Record a slot with no check as the literal `none (gap)`, never omit the line.** An omitted slot reads as "not investigated"; `none (gap)` is what lets the tester and auditor say "this repo has no linter" instead of silently skipping it. In a monorepo, record slots per component (`lint (api)`, `lint (web)`) — one flat gate that forces a four-toolchain run for a one-line change is a gate that stops being run.
 - **Reproducible-env manifests**: `devbox.json`, `flake.nix`, `shell.nix`, `.nvmrc`, `pyproject.toml` (poetry), `environment.yml`, `.tool-versions`, `.envrc`. The first hit drives `init_command` references in the team workflow doc.
 - **Agent launchers**: scripts/aliases that launch a Claude/opencode/etc. session. Look in `scripts/`, `Taskfile.yml`, `Makefile`, `package.json#scripts`, devbox script blocks. Record the FULL invocation form (`devbox run agent-big`, `task agent`, `make agent`), not the bare script name.
 - **Project slash commands** the orchestrator can invoke between delegations: `.claude/commands/`, `.claude/skills/`. List them; the lead will reference them in the workflow doc.
@@ -102,9 +118,9 @@ If a borderline call needs the user, ask via AskUserQuestion before writing file
 For each picked role, the `prompt_body` from `roles.yaml` is the GENERIC body, copied verbatim. Project-specific details discovered in step 1 do NOT get spliced into that body — they go into a separate `## For this repo` tail section appended to the generated file (see Step 5). Draft that tail per role from the discoveries below:
 
 - **coder**: name the actual test/lint command (e.g. `task test`, `cargo test`, `pytest`, `devbox run -- task kcl:test`). Reference CONTRIBUTING.md / CLAUDE.md by path. Reference the spec directory if found.
-- **reviewer**: cite the authoring-rules file (CONTRIBUTING.md / CLAUDE.md) by exact path and quote one or two of its load-bearing rules if obvious.
-- **auditor**: note if the repo is public (security implications differ); name the secret scanner if found in CI (`gitleaks`, `trufflehog`).
-- **tester**: name the test framework discovered (jest, pytest, go test, cargo test).
+- **reviewer**: cite the authoring-rules file (CONTRIBUTING.md / CLAUDE.md) by exact path and quote one or two of its load-bearing rules if obvious. Name the dead-code command from the gate slots if the repo has one, so the deletion lens in the generic body has something to run.
+- **auditor**: note if the repo is public (security implications differ); give the security-scan slot verbatim — the command if one exists, or `none (gap)` — since the generic body now tells the auditor to run it rather than merely name it.
+- **tester**: **paste the gate-slot table for this repo**, one line per slot, each with the exact command including its working directory (`cd api && go test ./...`) or the literal `none (gap)`. A framework name alone is not enough: the generic body tells the tester to run every populated slot, so a tail that says "vitest" gives it nothing to invoke. This is the one role whose tail may exceed the 1-3 sentence cap below — a monorepo with four toolchains needs four sets of slots, and truncating them is what leaves checks unrun. Also record here any command whose runtime exceeds the generic 5-minute live-wait bound, with its real bound (e.g. "`./e2e/run-e2e.sh` takes ~30min; let it finish").
 - **documenter**: name the doc site generator (mkdocs, hugo, docusaurus) or "plain markdown" if none. The documenter also owns the repo's `CHANGELOG.md` and keeps it TERSE: one concise line per change under an `[Unreleased]` section (Keep a Changelog style), not paragraphs. Every feature/fix/behaviour change the team ships gets a one-line entry there; the releaser later folds `[Unreleased]` into the cut version (see Mode 3 Step 3). If the repo has no CHANGELOG yet, the documenter creates one. The documenter also carries the README/docs house style (terse README as a launchpad, reference detail in a `docs/` folder); when the repo's README diverges (a large monolithic README, or no `docs/` — the same signal as the >500-line-README include trigger in Step 2), it PROPOSES a migration and asks the user before restructuring, never doing it silently. For repos with non-trivial architecture (multiple components/services, cross-cutting data flows, trust boundaries) it also keeps an `ARCHITECTURE.md` at the root, creating one when it helps a new reader and skipping it for small/simple repos where the README conveys the shape.
 - **release**: name the release flow doc by path (`docs/releasing.md`, etc.) and the release command (`semantic-release`, `goreleaser`, manual tag-push).
 - **architect**: name the design-doc/ADR directory and its numbering/format convention if one exists (or note there is none, so the role proposes before creating one); list the repo's major components so designs map onto them.
@@ -113,7 +129,7 @@ For each picked role, the `prompt_body` from `roles.yaml` is the GENERIC body, c
 - **fact-checker**: name the claim-bearing surfaces in this repo (docs dir, README, CHANGELOG, published specs) and any authoritative sources to check against (the code itself, CI status, official upstream docs).
 - **web-ux**: name how to reach a running instance of the UI (dev-server command, compose service + port, demo/mock build) and the design-token/style-system files if the repo has them; note any repo-specific UX contract (design system, a11y bar, target browsers).
 
-Keep the tail tight: 1-3 sentences per role. The generic body already covers the shape; the `## For this repo` tail only carries what is specific to THIS repo (exact commands, file paths, framework names, how to reach the app). Keeping repo-specifics in the tail — never spliced into the generic body — is what lets `update`/uzi-sync replace the versioned generic body later without clobbering local tuning.
+Keep the tail tight: 1-3 sentences per role, the tester's gate-slot table excepted. The generic body already covers the shape; the `## For this repo` tail only carries what is specific to THIS repo (exact commands, file paths, framework names, how to reach the app). Keeping repo-specifics in the tail — never spliced into the generic body — is what lets `update`/uzi-sync replace the versioned generic body later without clobbering local tuning.
 
 ### Step 4: present a proposal
 
@@ -274,10 +290,24 @@ identity, never text") that was half right: identity fails too, when the selecto
 drifts. Verify a load-bearing claim yourself before acting on it, and say plainly
 when you did not.
 
+## Quality gates
+
+One line per slot, in this order, each with the exact command or the literal
+`none (gap)`. Per component in a monorepo. This block is the tester's and the
+reviewer's source of truth; a slot omitted here is a slot nobody runs.
+
+- format: <command | none (gap)>
+- lint: <command | none (gap)>
+- typecheck: <command | none (gap)>
+- test: <command | none (gap)>
+- dead code: <command | none (gap)>
+- coverage: <command | none (gap)>
+- security scan: <command | none (gap)>
+- pre-commit: <command | none (gap)>
+- long-running: <any gate command exceeding the tester's 5-minute default wait, with its real bound>
+
 ## Project signals
 
-- Test command: <discovered>
-- Lint command: <discovered>
 - Release flow: <discovered path>
 - Spec dir: <discovered path>
 - Authoring rules: <CLAUDE.md / CONTRIBUTING.md paths>
