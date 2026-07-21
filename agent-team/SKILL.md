@@ -276,6 +276,47 @@ Corollaries, each earned:
   get run, commit messages get diffed. A "still open" list, a checkpoint, a
   handoff note is prose nobody executes, and it decides where the next person
   spends their time. Re-derive those too.
+- **The check can be as blind as the claim: a verification that cannot fail is not
+  evidence.** A distinct failure from a wrong measurement, and worse, because
+  re-running a blind instrument re-runs the blindness — "just double-check it" is
+  the instinct this class defeats. `grep … | head -N` cannot show a summary line
+  past N (→ a fabricated count); a page-width probe cannot show a truncated label
+  (→ a "no regression" that regressed); `pgrep -f <name>` matches its own command
+  line (→ a phantom process, or a deadlock); a stale git ref cannot show remote
+  drift; a green CI *summary* cannot show that the phase you needed never ran.
+  Defense: ask *what result could this instrument not produce?* — if the answer is
+  "the one that would prove me wrong," it is not evidence. Prefer an instrument
+  that holds an **identity** over one that holds a **pattern**: `kill -0 <pid>`
+  over `pgrep -f`, `getElementById` over `querySelector`, `toBe(el)` over
+  `textContent.toMatch`, `git grep <sha>` over a working-tree grep, a
+  named-assertion count over an exit code. Naming the class buys no immunity — on
+  the PRD that surfaced it the author hit it five times, once *during the shutdown
+  check seconds after committing the note that says the author isn't immune*, each
+  caught only because an identity-based check dissented from the blind one.
+- **A constraint stated in a form cheaper to satisfy than to mean is an invitation
+  to satisfy it.** "No horizontal scroll" was met while the lane label rendered
+  zero characters; the intent was "the layout is not worse." A correct constraint
+  measured with a blind instrument and a blind constraint measured well fail
+  identically silently — they are two different questions. The writer of a
+  dispatch owes the *intent* alongside the measurable proxy, and the receiver owes
+  one question asked **before** the work, of the instruction itself: *what would
+  make this true but still bad?* It is the only check in this section that
+  prevents the work rather than catching it after.
+- **A hostile fixture that cannot reach the sink it targets passes vacuously.** A
+  payload clamped, trimmed, or flattened before it reaches the code under test
+  proves nothing: a 63-rune XSS string cut at a 48-rune clamp, leading tabs eaten
+  by `TrimSpace` before the column they were meant to break, a benign label making
+  a sanitize-mutation a no-op. Caught only when the test fails for the *wrong*
+  reason and someone asks why. Run a **positive control** — confirm the un-fixed
+  code actually fails your check first — or "0 failures" is the blind-instrument
+  result above wearing a green hat.
+- **A number you did not see is a claim, not a measurement.** A figure read off a
+  truncated window (`| head`), or a tally inherited across a handoff and
+  incremented but never re-derived, is not evidence even when every digit in it is
+  real — build the list first and let the count fall out of it, never the reverse.
+  On one run both a coder's mutation count and the lead's running "claims caught"
+  tally failed this way; the honest report is the corrections themselves, each
+  recorded where it does work, not a total.
 
 Validated 2026-07-16 on a PRD where **nine claims fell over**, each believed by
 someone competent and each disproved in seconds once someone ran it: a PRD
