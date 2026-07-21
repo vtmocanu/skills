@@ -71,6 +71,30 @@ Probe for these signals. Use the Glob and Read tools; do NOT run `find /`. All p
 
 - **Build/package manifests**: `package.json`, `go.mod`, `pyproject.toml`, `Cargo.toml`, `pom.xml`, `Gemfile`, `build.gradle`, `Makefile`, `kcl.mod`, `Chart.yaml`.
 - **Task runners**: `Taskfile.yml`, `justfile`, `Makefile`, `package.json#scripts`.
+- **Quality-gate configs**: the checks the repo can run beyond its tests. Probe for each config file, then resolve it to the command that actually runs it — prefer a task-runner target or CI job over the raw binary, since that is what contributors and CI use.
+
+  **Record the CHECK-mode variant, never the fixing one.** Many of these tools have both: `prettier --check` vs `prettier --write`, `gofmt -l` vs `gofmt -w`, `task fmt-check` vs `task fmt`, `eslint` vs `eslint --fix`. The tester runs these commands against a worktree the coder is still working in, so a fixing variant silently rewrites someone else's files mid-run. Where only a fixing variant exists — `pre-commit run -a` rewrites by design, since its hooks include formatters — record it with an explicit `(rewrites files)` suffix so the tester knows not to run it. **When the slot resolves to a task-runner target or an npm script, open its definition and read what it actually runs** — the preference for named targets over raw binaries is what hides the fixing flag, so a `lint` target wrapping `golangci-lint run --fix` looks safe from the outside.
+
+  | Slot | Config signals | Typical command |
+  |---|---|---|
+  | format | `.editorconfig`, `.prettierrc*`, `rustfmt.toml`, `.clang-format`, gofmt (implicit for Go) | `task fmt-check`, `prettier --check .`, `gofmt -l .`, `cargo fmt --check` (check-mode only — never `--write`/`-w`) |
+  | lint | `.golangci.y*ml`, `eslint.config.*`, `.eslintrc*`, `biome.json`, `.oxlintrc*`, `ruff.toml`, `.flake8`, `.rubocop.yml`, `clippy.toml` | `task lint`, `golangci-lint run`, `npm run lint`, `ruff check`, `cargo clippy` |
+  | typecheck | `tsconfig.json`, `mypy.ini`, `pyrightconfig.json` | `tsc --noEmit`, `mypy .` |
+  | test | test dirs/manifests from the rows above | `task test`, `go test ./...`, `pytest`, `npm test` |
+  | dead code | `knip.json`, `.ts-prunerc`, `deadcode`/`unused`/`unparam` in a golangci config, `vulture` config | `knip`, `deadcode -test ./...`, `vulture .` |
+  | coverage | `codecov.yml`, `.coveragerc`, a `-coverprofile`/`--coverage` flag anywhere in CI or task targets | `task test-coverage`, `go test -coverprofile=…`, `vitest --coverage` |
+  | security scan | `.gitleaks.toml`, `.semgrep.yml`, `.trivyignore`, gosec/bandit/govulncheck/`npm audit`/`cargo audit` invocations in CI | `gitleaks detect`, `govulncheck ./...`, `npm audit` |
+  | pre-commit | `.pre-commit-config.yaml`, `lefthook.y*ml`, `.husky/` | `pre-commit run -a (rewrites files)`, `lefthook run pre-commit (rewrites files)` |
+
+  **Mine the CI config for these, not just the repo root.** A repo can lint in CI with no config file at the root, and a repo can carry a `.golangci.yml` that nothing ever invokes. The CI job definitions are the evidence of what actually runs.
+
+  **Record a slot with no check as the literal `none (gap)`, never omit the line.** An omitted slot reads as "not investigated"; `none (gap)` is what lets the tester and auditor say "this repo has no linter" instead of silently skipping it. In a monorepo, record slots per component (`lint (api)`, `lint (web)`) — one flat gate that forces a four-toolchain run for a one-line change is a gate that stops being run.
+
+  **If the repo has no task runner and two or more slots need more than a single bare command, PROPOSE writing one — and ask before creating it.** "More than a single bare command" means anything a person cannot paste as-is from the slot line: a `cd` into a subdirectory first, two commands chained, an env var prefix, a flag set nobody remembers. `pytest` is one bare command; `cd api && go test ./... && go vet ./...` is not. Without a runner, each slot's raw recipe gets copied into every role tail, the workflow doc, and CLAUDE.md, and then drifts independently in each. A task runner collapses that to one name per slot. Same proposal when a runner exists but does not cover every populated slot (a repo with `npm test` whose lint lives only in a CI job): offer to add the missing targets. Never create or restructure a build file silently — this is the same consent gate the documenter uses before restructuring a README.
+
+  Raise it as part of the Step 4 proposal, not as a separate mid-probe interruption — it is one more numbered item the user accepts or declines alongside the roster. **If they decline, record the raw recipes in the slots as normal, add a `task runner: declined <date>` line to the Quality gates block, and do not raise it again** while that line stands; the team still works, the commands are just longer and duplicated. Without the recorded line every future `update` re-runs discovery and re-proposes the same runner. Match the ecosystem's convention when picking the runner (`Taskfile.yml` where the org already uses Task, `justfile`, `Makefile`, or `package.json#scripts` in a Node-only repo) rather than importing a preference.
+
+  When you do write one, write it **repo-local and self-contained**: every target defined inline in the repo's own file, no imports of shared or remote task libraries. Some projects do use shared libraries; do not introduce one unless the user asks. Targets invoke the tools directly (`golangci-lint run`, `shellcheck …`) and stay indifferent to what puts them on `PATH`, so the same target works in a local dev shell and in CI. Where the repo's CI already runs those commands, note that it can call the same targets — one definition, two callers.
 - **Reproducible-env manifests**: `devbox.json`, `flake.nix`, `shell.nix`, `.nvmrc`, `pyproject.toml` (poetry), `environment.yml`, `.tool-versions`, `.envrc`. The first hit drives `init_command` references in the team workflow doc.
 - **Agent launchers**: scripts/aliases that launch a Claude/opencode/etc. session. Look in `scripts/`, `Taskfile.yml`, `Makefile`, `package.json#scripts`, devbox script blocks. Record the FULL invocation form (`devbox run agent-big`, `task agent`, `make agent`), not the bare script name.
 - **Project slash commands** the orchestrator can invoke between delegations: `.claude/commands/`, `.claude/skills/`. List them; the lead will reference them in the workflow doc.
@@ -86,7 +110,7 @@ Cite the actual files/directories you found in the proposal you present to the u
 Load the role library at `./roles.yaml` (relative to this SKILL.md). For each role:
 
 - **coder, reviewer, auditor**: always include. These are the default trio.
-- **tester**: include if any of the role's `triggers_on` patterns match a path in the repo (`tests/`, `test/`, `*_test.go`, `pytest.ini`, etc.).
+- **tester**: include if any of the role's `triggers_on` patterns match a path in the repo (`tests/`, `test/`, `*_test.go`, `pytest.ini`, etc.), OR if any gate slot other than `test` is populated. A repo with a linter and no test suite still needs someone other than the coder to run that linter — otherwise the gate is back to one self-reporting owner and no verifier, which is the case this whole mechanism exists to fix.
 - **documenter**: include if a non-trivial `docs/` dir exists OR README is large (>500 lines) OR a docs site config is present (`mkdocs.yml`, `book.toml`, `docusaurus.config.*`).
 - **release**: include if any release signal from §discover step matches.
 - **architect**: include if the repo has a design surface (`docs/adr/`, `docs/design/`, `rfcs/`, `proposals/`, `prds/`, `ARCHITECTURE.md`) OR the user requests it OR the repo is multi-component enough that up-front design pays (several services/packages, cross-cutting data flows). Designs implementation approaches before coding, reviews changes for architectural fit, and contributes to PRD writing/review; writes design docs/ADRs only, never source.
@@ -101,10 +125,10 @@ If a borderline call needs the user, ask via AskUserQuestion before writing file
 
 For each picked role, the `prompt_body` from `roles.yaml` is the GENERIC body, copied verbatim. Project-specific details discovered in step 1 do NOT get spliced into that body — they go into a separate `## For this repo` tail section appended to the generated file (see Step 5). Draft that tail per role from the discoveries below:
 
-- **coder**: name the actual test/lint command (e.g. `task test`, `cargo test`, `pytest`, `devbox run -- task kcl:test`). Reference CONTRIBUTING.md / CLAUDE.md by path. Reference the spec directory if found.
-- **reviewer**: cite the authoring-rules file (CONTRIBUTING.md / CLAUDE.md) by exact path and quote one or two of its load-bearing rules if obvious.
-- **auditor**: note if the repo is public (security implications differ); name the secret scanner if found in CI (`gitleaks`, `trufflehog`).
-- **tester**: name the test framework discovered (jest, pytest, go test, cargo test).
+- **coder**: give the gate slots it must run before reporting done — the same check-mode commands recorded for the tester (format, lint, typecheck, test at minimum; leave the security-scan slot to the auditor), not just the test command. The v2 coder body says "every slot named in your tail", so a tail naming only `pytest` silently drops format and lint back to having no owner. Reference CONTRIBUTING.md / CLAUDE.md by path, and the spec directory if found.
+- **reviewer**: cite the authoring-rules file (CONTRIBUTING.md / CLAUDE.md) by exact path and quote one or two of its load-bearing rules if obvious. Name the dead-code command from the gate slots if the repo has one, so the deletion lens in the generic body has something to run.
+- **auditor**: note if the repo is public (security implications differ); give the security-scan slot verbatim — the command if one exists, or `none (gap)` — since the generic body now tells the auditor to run it rather than merely name it.
+- **tester**: **paste the gate-slot table for this repo**, one line per slot, each with the exact command including its working directory (`cd api && go test ./...`) or the literal `none (gap)`. Preserve each command's check-mode form and any `(rewrites files)` suffix verbatim — the tester decides what is safe to run from these strings. A framework name alone is not enough: the generic body tells the tester to run the populated slots scoped to what the change touched, so a tail that says "vitest" gives it nothing to invoke. This is the one role whose tail may exceed the 1-3 sentence cap below — a monorepo with four toolchains needs four sets of slots, and truncating them is what leaves checks unrun. Also record here any command whose runtime exceeds the generic 5-minute live-wait bound, with its real bound (e.g. "`./e2e/run-e2e.sh` takes ~30min; when a change warrants it, let it finish"). The tail is authoritative for COMMANDS; `noted` markers live only in the workflow doc's Quality gates block, so do not copy them here.
 - **documenter**: name the doc site generator (mkdocs, hugo, docusaurus) or "plain markdown" if none. The documenter also owns the repo's `CHANGELOG.md` and keeps it TERSE: one concise line per change under an `[Unreleased]` section (Keep a Changelog style), not paragraphs. Every feature/fix/behaviour change the team ships gets a one-line entry there; the releaser later folds `[Unreleased]` into the cut version (see Mode 3 Step 3). If the repo has no CHANGELOG yet, the documenter creates one. The documenter also carries the README/docs house style (terse README as a launchpad, reference detail in a `docs/` folder); when the repo's README diverges (a large monolithic README, or no `docs/` — the same signal as the >500-line-README include trigger in Step 2), it PROPOSES a migration and asks the user before restructuring, never doing it silently. For repos with non-trivial architecture (multiple components/services, cross-cutting data flows, trust boundaries) it also keeps an `ARCHITECTURE.md` at the root, creating one when it helps a new reader and skipping it for small/simple repos where the README conveys the shape.
 - **release**: name the release flow doc by path (`docs/releasing.md`, etc.) and the release command (`semantic-release`, `goreleaser`, manual tag-push).
 - **architect**: name the design-doc/ADR directory and its numbering/format convention if one exists (or note there is none, so the role proposes before creating one); list the repo's major components so designs map onto them.
@@ -113,7 +137,7 @@ For each picked role, the `prompt_body` from `roles.yaml` is the GENERIC body, c
 - **fact-checker**: name the claim-bearing surfaces in this repo (docs dir, README, CHANGELOG, published specs) and any authoritative sources to check against (the code itself, CI status, official upstream docs).
 - **web-ux**: name how to reach a running instance of the UI (dev-server command, compose service + port, demo/mock build) and the design-token/style-system files if the repo has them; note any repo-specific UX contract (design system, a11y bar, target browsers).
 
-Keep the tail tight: 1-3 sentences per role. The generic body already covers the shape; the `## For this repo` tail only carries what is specific to THIS repo (exact commands, file paths, framework names, how to reach the app). Keeping repo-specifics in the tail — never spliced into the generic body — is what lets `update`/uzi-sync replace the versioned generic body later without clobbering local tuning.
+Keep the tail tight: 1-3 sentences per role, the tester's gate-slot table excepted. The generic body already covers the shape; the `## For this repo` tail only carries what is specific to THIS repo (exact commands, file paths, framework names, how to reach the app). Keeping repo-specifics in the tail — never spliced into the generic body — is what lets `update`/uzi-sync replace the versioned generic body later without clobbering local tuning.
 
 ### Step 4: present a proposal
 
@@ -127,7 +151,7 @@ Proposed team for <repo-name>:
 2. reviewer (sonnet) - reviews against <CONTRIBUTING.md rules>. Read-only.
 3. auditor (sonnet) - security audit. Notes: <public/private repo>, secret
    scanner: <name>. Read-only.
-4. tester (sonnet) - <test framework discovered>. (included because <reason>)
+4. tester (sonnet) - runs the gate slots (<slots>) + <test framework>. (included because <reason>)
    [omit if not picked]
 5. release (sonnet) - runs <release-doc path>. (included because <release signal>)
    [omit if not picked]
@@ -274,10 +298,34 @@ identity, never text") that was half right: identity fails too, when the selecto
 drifts. Verify a load-bearing claim yourself before acting on it, and say plainly
 when you did not.
 
+## Quality gates
+
+One line per slot, in this order, each with the exact command (check-mode, and
+suffixed `(rewrites files)` if only a fixing variant exists) or the literal
+`none (gap)`. Per component in a monorepo. This block is the team's source of
+truth for the gate; a slot omitted here is a slot nobody runs, and the lead
+pastes it into every tester/reviewer/auditor dispatch since teammates
+cold-start and never read this file themselves.
+
+Once a teammate has surfaced a `none (gap)` slot, the lead appends a `noted`
+marker — `dead code: none (gap, noted 2026-07-21)`. Roles are told to report a
+gap only when its line carries no marker. Without this the instruction "report
+it once per repo, not per change" is unfollowable: a fresh teammate has no
+memory of prior sessions, so it either re-reports every wave or suppresses
+forever.
+
+- format: <command | none (gap)>
+- lint: <command | none (gap)>
+- typecheck: <command | none (gap)>
+- test: <command | none (gap)>
+- dead code: <command | none (gap)>
+- coverage: <command | none (gap)>
+- security scan: <command | none (gap)>
+- pre-commit: <command | none (gap)>
+- long-running: <any gate command exceeding the tester's 5-minute default wait, with its real bound>
+
 ## Project signals
 
-- Test command: <discovered>
-- Lint command: <discovered>
 - Release flow: <discovered path>
 - Spec dir: <discovered path>
 - Authoring rules: <CLAUDE.md / CONTRIBUTING.md paths>
@@ -299,7 +347,7 @@ Use when `/agent-team update` is invoked, or when an existing team feels out of 
 3. Diff along three axes:
    - **Roster**: roles in the library that match repo signals but are missing from `.claude/agents/`, OR roles present whose `triggers_on` no longer match (tests removed, release flow gone, etc.).
    - **Version staleness**: for each present role, compare its file `version:` to that role's current `version:` in `roles.yaml`. A lower or missing number means the generic body drifted behind the library — read both bodies so you can summarize WHAT changed, not just the number.
-   - **Tuning drift**: repo facts in a `## For this repo` tail that no longer hold (renamed test command, moved spec dir).
+   - **Tuning drift**: repo facts in a `## For this repo` tail that no longer hold (renamed test command, moved spec dir). Gate slots drift the same way and are worth re-deriving: a repo can gain a linter, a dead-code check, or a task runner after the team was generated, and a tail still naming the old raw recipe sends the tester at a command that no longer matches CI.
 4. Present the diff to the user as a numbered proposal: additions / removals / version bumps (one line of "what changed" each) / tail fixes.
 5. On confirmation, apply targeted edits:
    - **Version bump**: replace the generic body (everything ABOVE the `## For this repo` heading) with the current `roles.yaml` body, update the frontmatter `version:`, and leave the tail untouched. This is exactly why Step 3 keeps repo-specifics in the tail — the generic part is replaceable wholesale.
@@ -369,7 +417,7 @@ Teammates run as **background agents**: an `Agent(...)` spawn returns immediatel
 ### Step 4: drive the flow
 
 - Wait for coder's completion message via the automatic mailbox notifications (do NOT poll).
-- On coder done: SendMessage to reviewer and auditor with the diff summary, file paths changed, and the coder's report. They claim their tasks and report findings.
+- On coder done: SendMessage to reviewer and auditor with the diff summary, file paths changed, the coder's report, **and the `## Quality gates` block from `.claude/agent-team.md`**. Their bodies tell them to run the dead-code and security-scan slots, and teammates cold-start — only you have read the workflow doc, so a slot you do not paste is a slot they cannot run. Same when dispatching the tester.
 - **Pin review scope to explicit commit SHAs** in the review dispatch, and if the worker adds commits after the review was dispatched (a follow-up fix, a crossed-in-flight reconciliation), immediately SendMessage the reviewer the new tip and require explicit confirmation that ALL commits were covered. Observed failure mode: a reviewer's report cited only the first of two commits on the branch; the second commit was verified only after a direct "did you cover SHA X?" follow-up. A second tell (observed 2026-07-05): a validator's report describing behavior that CONTRADICTS the worker's description of a later commit (e.g. praising semantics the follow-up reversed) means the validator reviewed a stale tip — require a re-read at the live tip and an explicit ruling before accepting either claim.
 - **No amends after review dispatch — put this rule in the coder's INITIAL spawn prompt.** Workers may amend freely BEFORE a SHA is dispatched for review; once dispatched, fixes must land as follow-up commits, never amends. An amend orphans the pinned SHA (it stops being an ancestor of HEAD), invalidates in-flight review scope, and forces a re-confirmation round-trip with every validator. Observed twice in one run (2026-06-12): both amends crossed the reviewer's/auditor's reports in flight, and each validator had to re-diff and re-confirm coverage of the new tip; after the rule was sent mid-run, all later fixes stacked cleanly. Stating it at spawn time costs one sentence; correcting it mid-run costs a round per validator per amend.
 - **Pipeline milestones across review waves**: once a milestone's SHAs are frozen and dispatched to the read-only validators, dispatch the coder's NEXT milestone immediately — do not idle the coder waiting for the wave. The no-amends rule makes this safe: any findings come back as labeled follow-up commits on top of whatever the coder has built since, and validators needing to build a pinned SHA use a detached worktree. Validated 2026-07-13: a 6-milestone PRD ran coder-implementation and review waves fully overlapped, zero rework, zero blocking findings, no idle coder time. Two docker-stack agents in one worktree (a validator's kept e2e stack + the coder's e2e gate) may NOT collide — check how the harness derives its compose project name (a PID-derived unique project = safe to overlap) before serializing them.
@@ -583,7 +631,8 @@ Claude: [probes repo, finds Cargo.toml + tests/ + docs/ + .github/workflows/rele
        1. coder (sonnet) - will run `cargo test` before reporting done.
        2. reviewer (sonnet) - read-only.
        3. auditor (sonnet) - public repo on github; no secret scanner in CI (consider gitleaks).
-       4. tester (sonnet) - cargo test framework discovered in tests/.
+       4. tester (sonnet) - runs the gate slots (fmt-check, clippy, cargo test)
+          independently of the coder; cargo test framework in tests/.
        5. release (sonnet) - .github/workflows/release.yml present; uses cargo-release.
 
        Files I would write: .claude/agents/{coder,reviewer,auditor,tester,release}.md + .claude/agent-team.md.
