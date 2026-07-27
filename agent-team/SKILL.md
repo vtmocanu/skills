@@ -353,6 +353,167 @@ identity, never text") that was half right: identity fails too, when the selecto
 drifts. Verify a load-bearing claim yourself before acting on it, and say plainly
 when you did not.
 
+## Sweep per FACT after the last behavioural commit
+
+**A batch's own findings falsify claims in code it never touched, and nothing
+per-commit or per-file catches that, because the stale claim is not in the diff.**
+After the last behavioural commit — before the final review wave, not after it —
+grep for every *fact* the batch established and find every place that asserts
+otherwise.
+
+Validated 2026-07-27 on a batch that shipped **six code defects and ten prose
+ones**. Every prose defect was a true statement a neighbouring commit falsified,
+and none had an executable control: four sibling comments left asserting a
+mechanism the fix had disproved (one directly contradicting another comment three
+files away), an assertion that could not fail, a doc headline falsified by the
+function one line beneath it, and a freshness claim true of only three rungs of a
+six-rung fallback chain. The code was right every time. They cost four review
+rounds and were found by four different agents.
+
+Three things make the sweep work, each learned by its absence:
+
+- **Sweep for the CLAIM, not the wording.** A grep for the phrase misses a
+  sentence asserting the same thing in different words — one file carried the
+  superseded measurement table without ever using the phrase being searched for.
+- **The correction must state the mechanism, not just delete the false clause.**
+  "Dropped the wrong claim" and "states the right one" are different edits, and
+  only the second prevents the next round: a comment that is no longer false but
+  no longer explains anything leaves the next reader to re-derive it and get it
+  wrong. That happened three times to one paragraph in a single batch.
+- **A CITATION is an assertion too, and `git log -S` is its control.** "Commit X
+  fixed this" is checkable and almost never checked. The same two commits were
+  transposed **twice** — one apart, touching the same field, differing only in
+  *channel*, which was the very distinction the sentence existed to teach. A
+  reader following it landed on a commit whose subject line contradicted the claim
+  in its first six words, which discredits the true half along with the false one.
+
+**Corollary for the lead:** when you dispatch a fix that names N sites, verify all
+N landed. The one that got missed was missed because the lead checked the site it
+had argued about and not the four it had listed in the same message.
+
+## Two negative results from instruments that share an assumption are ONE negative result
+
+**A search that comes back empty is evidence only if it could have come back
+full.** Running a second search and getting empty again feels like corroboration
+and usually is not: if both are shaped by the same guess about naming, they fail
+together, and their agreement measures the guess rather than the code.
+
+Measured 2026-07-27, and it nearly shipped a false security invariant. A field was
+ruled safe on the premise that one query was the only one listing a table:
+
+- the first grep searched for a substring the counterexample's name **does not
+  contain** (the two names share no common substring, though they name the same
+  concept), so it was structurally incapable of returning it — and its short
+  output was read as an enumeration;
+- the second searched a directory the relevant page does not live in, for a type
+  name that differs from the one actually imported.
+
+Two empty results, each shaped by a different naming guess, treated as agreement.
+The premise was false: an admin route rendered every user's row, so the "safe"
+field was the only cross-principal sink in the batch. It was caught because the
+agent asked to *write the claim into a comment* checked it first — the last cheap
+moment before a false invariant becomes code carrying two names.
+
+**Enumerate from the schema object, not from a name you already know**: every
+query touching the table, not every query whose name matches a string you have
+already seen. The same reduction covers the sibling failures — a grep over
+already-inventoried field names, a fixture built to demonstrate one state and read
+as a search for its opposite, an assertion over one channel read as whole-component
+coverage. **All four search a space defined by what you already found.**
+
+**Corollary for the lead:** relaying a teammate's verified-sounding premise is not
+verification. When a claim is about to be *written down* as an invariant — in a
+comment, a spec, a doc — re-derive it yourself, however well-sourced. That is the
+moment it stops being a finding and starts being something the next reader trusts
+without checking.
+
+## An assertion defines its CHANNEL
+
+**"Nothing in this component carries X" and "nothing in this component's TEXT
+carries X" are different claims, and the test that means the second reads like the
+first.** A whole-subtree text assertion cannot see attribute values, a form
+control's `value`, or the document title. The component is in scope; the channel is
+not, and the assertion's own wording papers over the gap.
+
+Measured 2026-07-27: nine tests asserting over rendered text all passed while
+**four** untrusted values reached tooltip and accessible-name attributes
+unstripped, across three rounds of review. Every one was found by a sweep or a
+mutation control; **none by a test.** The demonstration is one line — revert the
+attribute fix and only the new case reds, while the existing text-channel case for
+the *same field* stays green.
+
+Three habits follow:
+
+- **Fix at the composition point, not the render sites.** One descriptor feeding
+  five renderers gets one fix where it is composed. But state the coverage
+  honestly: in that batch the comment claimed all five were covered when only two
+  consumed that descriptor, and the "one place cannot drift out of step with four
+  others" argument ran backwards — four constructors of the same shape already
+  existed and the fix touched one.
+- **A test that renders the wrong component passes forever.** One test rendered a
+  component that does not render the field under test. It was green and worthless,
+  and only its own control caught it. **Five files in that batch needed a
+  component extracted to make the claim assertable at all** — if the value is not
+  reachable by a test, that is a finding about the code's shape, not a licence to
+  assert something adjacent.
+- **A guarded render can make an assertion VACUOUS rather than weak.** Where the
+  markup renders behind a truthiness guard and the fixture leaves the field empty,
+  the subtree never mounts and a "no bad characters present" assertion passes over
+  nothing. Require a **positive** assertion that the value is on screen. Note the
+  two mechanisms differ: one branch did not mount at all, while a sibling mounted
+  with a partial string, so only the positive assertion caught the second.
+
+## Mutate at the CALL SITE, not in the shared helper
+
+**Folding a mutation into a shared function proves the function is live. It does
+not prove every caller routes through it** — and those are the two different
+claims a control is usually asked to settle.
+
+Measured 2026-07-27. A helper had two call sites; the control replaced its body
+with the identity and two cases reddened, which read as proof the behaviour was
+load-bearing. Both reddened cases exercised **the same call site**. The other arm
+had no assertion at all, so a fix applied to only one of the two would have passed
+that control unchanged — which is what happened, and it was caught by an audit
+reading a comment rather than by any test.
+
+**The discriminating instrument is per-call-site:** fold each site separately and
+require **each** to red on its own, on disjoint sets. The tester who found this had
+*already* used that instrument on eight render sites in the same batch; the shared
+function simply made one fold look sufficient. As they put it: *"mutating the
+shared helper is the composition-point mistake one level down — the same shape as
+the finding itself, which is presumably why neither of us saw it from inside."* A
+control written from inside an abstraction inherits that abstraction's blind spot.
+
+## TYPECHECK the mutated tree before reading the test result
+
+**A mutation that does not compile produces a run that says nothing, and "nothing"
+is one glance from the finding you were hoping for.** Measured 2026-07-27, on the
+last round of a long batch: a replacement string carried literal backslashes into
+the mutation script, the mutant was a syntax error, the runner failed to *collect*
+the file, and the run printed `Tests  no tests`.
+
+The dangerous reading was right there — *"the mutation applied and no test went
+red"* reads as *"this site is unguarded"*, which would have been a false
+**Blocking** finding against a correct fix.
+
+**It is the inverse of the silent no-op mutation** (a fold that matches nothing,
+runs green, and understates). Both look like "the tests did not say what I
+expected", and only the compiler separates them:
+
+- run the typechecker **between mutate and run**;
+- keep the pre-assert that the pattern was present and the post-assert that it is
+  gone;
+- add a post-assert that no stray escape reached the source, since the escaping bug
+  is what produced the syntax error in the first place;
+- **read the collection line, not just the tally** — "no tests" and "1 failed" are
+  both "not the green I expected", and only one of them is a result.
+
+**Read every red's arrival time and line number, not just the count.** A red at the
+runner's timeout is a lookup failing, not an assertion firing: in that batch two
+render tests reddened at a 5-second `findByText` timeout, so their real assertions
+had never executed. After anchoring the awaits on something the mutation cannot
+move, the same reds arrived at named lines in 2-4ms.
+
 ## Quality gates
 
 One line per slot, in this order, each with the exact command (check-mode, and
