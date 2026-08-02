@@ -60,6 +60,46 @@ The wrapper reads `permission_mode` from the hook payload and branches:
 
 Worked example from the current config: `ask git push "[ASK] Confirm push target"` (has `[ASK]`) prompts the human even in auto mode, but `ask git commit "Confirm commit"` and `ask git add "Confirm staging"` (no `[ASK]`) are silently handled by the auto-classifier in auto mode, no prompt. When authoring a new `ask` rule, decide deliberately whether it needs `[ASK]`: write/destructive operations that must always reach a human should carry it.
 
+### Kill-switch: temporarily disabling Dippy
+
+The wrapper checks for a sentinel file **before** reading the payload:
+
+```bash
+[ -f "${HOME}/.dippy/OFF" ] && exit 0
+```
+
+```bash
+touch ~/.dippy/OFF   # bypass Dippy
+rm ~/.dippy/OFF      # re-enable
+```
+
+No restart is needed in either direction: Claude Code caches the hook *command* from settings.json at startup, but the *script* is re-read on every invocation, so the toggle applies to the running session immediately. (Editing the hook entries in settings.json, by contrast, does require a restart.)
+
+While `~/.dippy/OFF` exists the wrapper emits nothing and `exit 0`s for every event, so:
+
+- **The `deny` blocklist is not enforced** — `rm -rf`, `git push --force`, `deny-redirect` secret-path guards, `deny-mcp` rules all stop firing.
+- `allow` rules stop firing too, so in **non-auto** modes routine commands start prompting (more prompts, not fewer). In **auto** mode everything falls to auto-mode's own classifier, which usually runs commands without prompting.
+- Afterthoughts go silent too, since the kill-switch fires before the event check.
+
+So it is a genuine safety-off switch, not a noise filter. Prefer narrower alternatives when they fit:
+
+| Goal | Better tool than the kill-switch |
+|---|---|
+| Stop prompts in one repo | `set default allow` in that repo's `.dippy` (global `deny` rules still fire) |
+| Stop prompts for one command | `allow <cmd>` rule in the project `.dippy` |
+| Swap the whole ruleset for a run | `DIPPY_CONFIG=/path/to/other-config claude` |
+
+Verify the current state:
+
+```bash
+# is the kill-switch on?
+ls -la ~/.dippy/OFF 2>/dev/null && echo "DIPPY BYPASSED" || echo "dippy active"
+
+# end-to-end check (empty output = bypassed; JSON decision = active)
+printf '%s' '{"permission_mode":"default","tool_name":"Bash","tool_input":{"command":"rm -rf /tmp/x"}}' \
+  | ~/stuff/gitrepos/gh/vtmocanu/skills/agent-permissions/dippy-with-auto-fallback.sh
+```
+
 > **Note: Native settings.json capabilities** (for context, not to use): settings.json supports wildcards at any position since v2.1.0 (Jan 2026), has allow/ask/deny directives, per-project overrides via `settings.local.json`, and MCP tool permissions. **Dippy's unique advantages**: guidance messages on ask/deny rules, last-match-wins ordering (vs deny>ask>allow fixed priority), plain text config with comments, and file redirect controls (`deny-redirect`).
 
 ## Key Locations
@@ -115,6 +155,29 @@ A ready-to-adapt starter config ships with this skill as [`config.example`](conf
 > **v0.2.7 fix**: Trailing `*` now matches empty strings (bare commands). So `ask tea issue* close *` matches both `tea issues close` and `tea issues close 42`. Always add trailing ` *` to glob patterns that should match with or without extra args.
 >
 > **Corollary for `curl` patterns:** Always use trailing `*` after the flag you're matching: `ask curl * -X POST *` catches both `curl url -X POST` and `curl url -X POST -d '{}'`. Without trailing `*`, the pattern only matches when POST is the last token.
+>
+> **GOTCHA: pattern tokens align with command tokens, so a path rule needs a `-*` slot for the flags.** This is the single biggest source of rules that look right and never fire. `ask rm /*.git/*` matches `rm /repo/.git/config` but **NOT** `rm -rf /repo/.git/config` — the `-rf` occupies a token the pattern has no slot for. Write both forms, or lead with `-*`:
+>
+> ```
+> ask rm /*.git/*     "deletes git internals"   # rm <path>
+> ask rm -* /*.git/*  "deletes git internals"   # rm -rf <path>
+> ```
+>
+> **Corollary — a path pattern token must be absolute.** A token *without* a `/` (`*.git`, `*objects`) is a plain glob that spans the rest of the command. A token *with* a `/` is matched against one argument, and a relative one can never match an absolute argument. Inside such a token `*` does cross slashes, so it matches at any depth. Verified against v0.2.7 on 2026-08-02 via an isolated `DIPPY_CONFIG`, target `rm -rf /Users/me/repo/.git/objects`:
+>
+> | Pattern | Matches? | Why |
+> |---|---|---|
+> | `ask rm -* /*.git/*` | yes | absolute path token, `*` crosses `/` |
+> | `ask rm -* /*/.git/*` | yes | same |
+> | `ask rm *.git` | yes | no slash → plain glob, spans the command; only when `.git` ends it |
+> | `ask rm *.git/*` | **no** | has a slash → path token, but relative |
+> | `ask rm */.git/*` | **no** | same |
+> | `ask rm /*.git/*` | **no** | absolute, but no `-*` slot for `-rf` |
+> | `ask rm **/.git/*` | **no** | `**` is redirect-pattern syntax only |
+>
+> Redirects are a different matcher and unaffected: `deny-redirect **/.env*` works as documented.
+>
+> **Test every rule you write, in isolation:** `printf 'set default allow\nask rm <pattern> "HIT"\n' > /tmp/p.dippy` then pipe a hook payload through `DIPPY_CONFIG=/tmp/p.dippy dippy --claude`. `set default deny` is **not** valid syntax (only `allow`/`ask`) and silently yields an empty ruleset, which looks exactly like "`DIPPY_CONFIG` is ignored"; a nonexistent config path also falls back to the global file without warning.
 >
 > **SECURITY: Never `allow` interpreter commands.** Rules like `allow bash`, `allow python3`, `allow node` are prefix matches that auto-approve `bash -c '...'`, `python3 -c '...'`, `node -e '...'`, bypassing ALL inner command rules. Dippy does not trace into `-c`/`-e` arguments (single-layer execution). Remove these and let them fall through to `set default ask`.
 
@@ -280,6 +343,8 @@ fd -H -t f '^\\.dippy$' ~/stuff/gitrepos/wxs/
 | Read/WebFetch denied | Missing entry in settings.json (not Dippy) | Add to `permissions.allow` in settings.json |
 | JSON parse error after settings edit | Malformed JSON | Run `jq .` to find syntax errors |
 | Afterthought not firing | Missing PostToolUse hook | Add PostToolUse Bash matcher in settings.json |
+| No rules fire at all: `deny` ignored, guidance messages gone | Kill-switch left on — `~/.dippy/OFF` exists, wrapper exits before running dippy | `rm ~/.dippy/OFF` (see [Kill-switch](#kill-switch-temporarily-disabling-dippy)); takes effect immediately, no restart |
+| Afterthought not firing **in auto mode only** | Wrapper predating the `hook_event_name` check: its auto-mode filter forwards only `allow`/`deny`/`[ASK]`-tagged `ask`, and dippy emits afterthoughts as **plain text** with no `permissionDecision`, so they were dropped. Fixed 2026-07-26 — the wrapper now pipes any non-`PreToolUse` event straight to `dippy`, so pointing PostToolUse at either the wrapper or bare `dippy` works | Update your clone of `dippy-with-auto-fallback.sh` |
 | Rule with glob chars doesn't match commands with extra args | Patterns with `*`/`?`/`[` lose implicit trailing ` *` prefix matching; must match entire command | Add explicit trailing ` *` to your glob pattern (v0.2.7+ matches bare commands too) |
 | `bash -c` / `python3 -c` bypasses rules | `allow bash` prefix-matches all `bash -c '...'` commands; Dippy doesn't trace into `-c` args | Remove `allow bash`/`allow python3`/`allow node`; let them fall to `set default ask` |
 
