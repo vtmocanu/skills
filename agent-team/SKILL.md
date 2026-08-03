@@ -305,6 +305,10 @@ Observed 2026-08-02, on the first run after this task was added (a downstream pr
 
 If neither describes what you actually set up, the split is not settled yet; settle it before creating the tasks, because the graph you are about to build encodes the answer either way.
 
+**What may overlap your integration gate is the READ-ONLY wave, never another implementation unit.** Reviewer, auditor, fact-checker and web-ux read; a second unit writes. In the shared-worktree mode every teammate is in one tree, so gating while a unit is still writing gates a tree that is moving underneath you, and the verdict is about nothing. Per-worker worktrees make the overlap safe because the writing happens somewhere else.
+
+And **count the contention against the gate, not just against the clock.** Measured on a sibling project running this same fan-out shape: one suite ran 36.1s to 79.8s at a constant test tally, and 33.8s to 89.6s at another — 2.2x and 2.65x spreads driven purely by concurrent load, pushing into timeouts that had already been raised because of contention. A gate that reddens intermittently is WEAKER verification than a slow one, because the documented human response is to re-run, and the retry destroys the evidence. If fanning out buys wall clock with a flakier gate, it has not paid; report red-then-green-on-retry alongside the timing.
+
 **Where the split rules live, and why they are not restated here.** The test for whether units are genuinely disjoint, the file-scope boundary each coder honours, and the no-commit / no-repo-wide-gate contract in parallel mode are all already written, in places the lead and the coder each read:
 
 - `roles.yaml`, the `coder` body: the hard file-scope boundary, and the rule that in parallel mode a coder does not `git commit` and does not run gate/build/test commands beyond code it exclusively owns — *"the lead integrates, commits, and runs the repo-wide gate after all parallel units land."*
@@ -647,6 +651,7 @@ Ask it to return a structured proposal — findings only, no file edits:
    - **Peak concurrency**: the largest number of teammates simultaneously dispatched-and-not-yet-reported, per the `## Roster` lines and the dispatch record.
    - **Wall clock**: first dispatch to the last gate on the integrated tree, from `git log --format='%h %aI %s' <base>..<work-branch>`, plus the span of each implementation lane.
    - **Idle implementer time**: spans where the coder held no dispatched work while a validator wave ran. This is what Step 4's pipelining rule targets, so it is the number that says whether the rule fired.
+   - **Gate flakiness**: how many gate runs went red then green on retry with no change in between. Concurrency buys wall clock and spends it on contention, and a gate that reddens intermittently is weaker verification than a slow one. A run that got faster while acquiring a flaky gate did not improve; without this figure the report cannot tell the two apart.
 
    **Label every figure `measured` or `recalled`, and never blend them into one range.** Commit timestamps are measured; dispatch and completion times are the lead's recollection unless they were written down, and the task list is documented-volatile — this file records a session where `TaskList` returned "No tasks found" at cleanup. A recalled figure is still worth reporting; a recalled figure presented as measured is exactly the defect the rest of this file exists to prevent, and it would be self-inflicted here.
 

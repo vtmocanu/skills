@@ -270,6 +270,43 @@ documented consequence rather than a surprise.
 - **R3: More concurrent teammates means more contention** on the machine and on
   the test suite. Step 4's existing rule that the lead gates once over the
   integrated tree is the main lever, and it is unchanged.
+
+  **R3 is no longer an assertion. It has been measured, elsewhere, and it is
+  larger than this document assumed.** The sibling change in the `uzi` repo
+  (PRD #215, "Pipeline the lead's review lane and overlap its integration
+  gate", which cites this PRD in its own D1) measured the same suite under
+  contention at a **constant test tally**, which is the comparison that is not
+  confounded by a moving tree: `npm test` ran **36.1 / 43.7 / 43.9 / 52.6 /
+  73.3 / 79.8 s** at 1474 tests (2.2x spread) and **33.8 through 89.6 s** at
+  1541 tests (2.65x). Its D2 records why that matters beyond latency: those
+  runs push into timeouts that had *already* been raised because of contention,
+  and a gate that reddens intermittently is **weaker verification**, because
+  the documented human response is to re-run and the retry destroys the
+  evidence. Its source repo states the principle directly: *"The gate's job is
+  a trustworthy verdict, not a fast one."*
+
+  Two consequences for this PRD, neither of which the original R3 supports:
+
+  - **Criterion 4's "wall clock does not regress" is necessary but not
+    sufficient.** A run can hold wall clock and still buy it with a flakier
+    gate. M4 should report gate red-then-green-on-retry counts, which is
+    PRD #215's criterion 7 and is the half this document has no instrument for.
+  - **What may overlap the integration gate is the READ-ONLY wave only**
+    (PRD #215's D3). Reviewer, auditor, fact-checker and tester read; a second
+    implementation unit writes. Every teammate in the shared-worktree mode
+    shares one tree, so overlapping the gate with a *writing* unit gates a tree
+    that is moving underneath it. Step 2's two-modes paragraph makes the SHA
+    question explicit but does not say this, and it should.
+
+- **R5: This PRD's M0 is the weaker of the two instruments now in existence.**
+  Reflect item 7 reads artifacts after the fact and labels half its figures
+  `recalled`. PRD #215's M0 is a script over `uzi run logs --json` producing a
+  concurrency profile with per-wave timings, and it recommends a **paired**
+  comparison (the same issue before and after) because wall clock is dominated
+  by issue shape rather than by the prompt. That is a better design and this
+  PRD should not pretend otherwise. It is also the concrete unblock path for
+  M4: an agent-team session run inside a repo that factory measures would get a
+  real baseline rather than a recalled one.
 - **R4: The graph gets harder to read.** A conditional task graph is more
   complex than a fixed one, and every reader pays that including on one-file
   changes. D1 and criterion 1 are the mitigation.
