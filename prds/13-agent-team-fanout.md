@@ -2,7 +2,13 @@
 
 **Issue**: [#13](https://github.com/vtmocanu/skills/issues/13) | **Label**: PRD | **Priority**: Medium
 **Area**: `agent-team/SKILL.md`, Mode 3 Step 2 (the whole feature). `agent-team/manifest-template.md` is alignment only (M3).
-**Status**: M0, M1, M2, M3, M5 landed. **M4 is not done and is not doable in this change** — it requires running a genuinely multi-unit agent-team session and comparing against an M0 baseline that does not exist yet, since M0 delivers the instrument and the baseline needs a session run through it. Success criteria 4 and 5 depend on M4 and are therefore unclaimed.
+**Status**: **CLOSED 2026-08-03.** M0, M1, M2, M3 and M5 landed (PR #14, `06dfd06`;
+follow-up PR #15, `6d0e333`). **M4 was SKIPPED by decision, not completed** — it is
+validation only, nothing shipped depends on it, and it needed a live multi-agent
+session against a baseline that did not exist. Its box stays unchecked and carries
+the reason. Success criteria 1, 2, 3 and 6 are met; **4 and 5 are unproven by
+decision** rather than by oversight, which means this change ships as reasoning
+rather than as measurement. See M4 and R1.
 
 **Evidence basis**: this PRD is derived from reading the three files that make up
 the `agent-team` skill. No timing data for agent-team sessions exists, which is
@@ -207,14 +213,26 @@ documented consequence rather than a surprise.
 - [ ] **M4: Validation.** Run a genuinely multi-unit task and report against
       M0's baseline: concurrency, wall clock, and the classes of finding the
       review lane produced.
-      **NOT DONE, and deliberately left unchecked.** This is a live multi-agent
-      session plus a measurement, not a documentation change, and it is blocked
-      twice over: M0 ships the instrument but no session has yet been measured
-      through it, so there is no baseline to compare against. Checking this box
-      from a doc-only change would assert a measurement nobody took, in a PRD
-      whose own thesis is that measured beats asserted. Needs: one ordinary
-      single-unit run reported under item 7 to establish the baseline, then one
-      genuinely multi-unit run reported the same way.
+      **SKIPPED 2026-08-03, by decision, and the box stays unchecked.** M4 is
+      validation only: nothing in the shipped behaviour depends on it, and
+      M0-M3 and M5 are the change itself. It needs a live multi-agent session
+      plus a measurement, and it was blocked twice over — M0 ships the
+      instrument, but no session had been measured through it, so there was no
+      baseline to compare against.
+      **What the skip costs, stated rather than buried.** Criteria 4 and 5 are
+      the two that would have shown the fan-out actually helps, so this change
+      ships as reasoning rather than as measurement. R1 already names that
+      exposure: *"M4 measures rather than asserts."* The trade is defensible
+      for a workflow document whose cost of being wrong is a slower run, not a
+      broken one, and it is recorded here so a later reader can disagree with
+      it on the evidence rather than discover it by absence.
+      **How it becomes doable, if anyone wants it later.** R5's path is
+      unchanged: run an agent-team session inside a repo whose factory already
+      emits run-log concurrency profiles, and take the paired comparison there
+      instead of from reflect item 7's partly-recalled figures. That does not
+      require reopening this PRD.
+      The box is not checked, per this repo's own convention: a milestone the
+      work did not complete keeps its empty box and carries the reason.
 - [x] **M5: Conventions.** Add a line to `.github/CONTRIBUTING.md` describing
       this repo's own `prds/` convention, which no document currently describes.
       (`prds/` is *mentioned* in four places - `SKILL.md:101`, `:116`, `:271`,
@@ -233,6 +251,10 @@ documented consequence rather than a surprise.
       `CHANGELOG.md` under `## [Unreleased]`.
 
 ## Success criteria
+
+**Met: 1, 2, 3, 6. Unproven by decision: 4 and 5** — both depend on M4, which was
+skipped (see M4). They are not "probably fine"; they were never measured, and the
+distinction is the whole point of stating them separately.
 
 1. A single-unit task produces today's task graph, unchanged, with no extra
    decision required of the lead.
