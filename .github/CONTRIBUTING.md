@@ -7,6 +7,7 @@ Thanks for your interest in contributing! Issues and pull requests are welcome.
 - [Code of Conduct](#code-of-conduct)
 - [Ways to Contribute](#ways-to-contribute)
 - [Adding or Editing a Skill](#adding-or-editing-a-skill)
+- [Product Requirements Documents](#product-requirements-documents)
 - [Validating](#validating)
 - [Pull Request Process](#pull-request-process)
 - [Skill Authoring Standards](#skill-authoring-standards)
@@ -42,6 +43,17 @@ description: <one line: what it does and when to use it>
 2. Add or edit the skill file at the repository root.
 3. Run the validator (below).
 4. Open a pull request.
+
+## Product Requirements Documents
+
+Changes large enough to need planning are written up first as a PRD. PRDs live in `prds/` at the repository root, one Markdown file per document, named `<issue-number>-<slug>.md` (for example `prds/13-agent-team-fanout.md`).
+
+- The issue number matches an open GitHub issue labelled `PRD`, and the document links back to that issue on its first line.
+- A PRD carries: the problem stated with evidence (cite files and line numbers, quote the text you are calling wrong), the solution, a decision log, milestones as a checklist, measurable success criteria, and risks.
+- Milestones are checked off as they land. A milestone the pull request cannot complete stays unchecked, with the reason written next to it. Do not check a box to tidy the list.
+- PRDs are working documents. When review disproves something the draft claimed, correct it in place and record the correction rather than deleting the claim; the wrong turn is often the most useful part for the next reader.
+
+`prds/` is also a spec directory in the `agent-team` sense: it matches the `architect` role's `triggers_on` patterns, so a team generated for this repository includes an architect that would not have been selected before.
 
 ## Validating
 

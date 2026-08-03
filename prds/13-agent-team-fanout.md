@@ -2,7 +2,7 @@
 
 **Issue**: [#13](https://github.com/vtmocanu/skills/issues/13) | **Label**: PRD | **Priority**: Medium
 **Area**: `agent-team/SKILL.md`, Mode 3 Step 2 (the whole feature). `agent-team/manifest-template.md` is alignment only (M3).
-**Status**: not started.
+**Status**: M0, M1, M2, M3, M5 landed. **M4 is not done and is not doable in this change** — it requires running a genuinely multi-unit agent-team session and comparing against an M0 baseline that does not exist yet, since M0 delivers the instrument and the baseline needs a session run through it. Success criteria 4 and 5 depend on M4 and are therefore unclaimed.
 
 **Evidence basis**: this PRD is derived from reading the three files that make up
 the `agent-team` skill. No timing data for agent-team sessions exists, which is
@@ -150,27 +150,72 @@ below state each half separately so neither can pass by pointing at the other.
 
 **D5: Scope.** Mode 3 Step 2, plus the manifest's flow paragraph for
 consistency. Not `roles.yaml`, not the role bodies, not the generated
-`.claude/agents/*.md`.
+`.claude/agents/*.md`. Mode 4 is also touched, for M0's instrument only.
+M2's contradiction was fixed inside Step 2 rather than in Step 3 to hold this
+line: the singular "the implementer" in Step 3's frozen-spec rule is now
+qualified where the N-unit graph is built, not where the rule is stated.
+
+**D6: Creating `prds/` in this repo changes this repo's own role roster, and
+that is accepted rather than worked around.** `roles.yaml`'s architect lists
+`"prds/**"` in `triggers_on` and `SKILL.md`'s Step 2 includes architect when the
+repo has a design surface, so the next `init`/`update` here selects an architect
+it would not have selected before. This is the one behavioural change to a live
+system that landed before any milestone was implemented (the directory arrived
+with the PRD itself, in commit 8156f01). Desirable: a repo whose main artifact
+is agent-workflow design is exactly a repo an architect should be on. Recorded
+rather than silently absorbed because it is a roster change nobody asked for,
+and `.github/CONTRIBUTING.md` now states it so the next reader meets it as a
+documented consequence rather than a surprise.
 
 ## Milestones
 
-- [ ] **M0: Baseline.** Mode 4 (reflect) already produces dated session
+- [x] **M0: Baseline.** Mode 4 (reflect) already produces dated session
       observations and is the starting point, not a blank sheet. What it does
       not produce is timing or concurrency data. Add that: for a completed
       session, how many teammates were active concurrently, and where the wall
       clock went. Without it, M4 cannot compare anything.
-- [ ] **M1: Task graph follows the decomposition.** Rewrite Step 2 so the
+      **Landed** as reflect return item 7 (`SKILL.md` Mode 4), with the brief
+      path and work-branch name added to the pass's inputs so the item has
+      something to read. Measures unit split, peak concurrency, wall clock, and
+      idle-implementer time; requires every figure labelled `measured` or
+      `recalled`, and requires reporting on single-unit runs too, since those
+      are the baseline.
+- [x] **M1: Task graph follows the decomposition.** Rewrite Step 2 so the
       implementation task count comes from the unit split and each validator
       task blocks on its own unit, with the integrated pass retained (D1, D2).
-- [ ] **M2: Step 2 and Step 4 agree.** Verify by reading that the graph Step 2
+      **Landed.** The integrated pass is created only when N>1: with one unit
+      the per-unit review already is the pass over the whole diff, and adding a
+      fourth task would have broken success criterion 1.
+- [x] **M2: Step 2 and Step 4 agree.** Verify by reading that the graph Step 2
       builds is one the Step 4 pipelining rule can actually operate on, and that
       neither section contradicts `roles.yaml`'s coder contract.
-- [ ] **M3: Manifest alignment.** Update `manifest-template.md`'s flow paragraph
+      **Done, and it found one.** Step 4 requires review scope pinned to explicit
+      commit SHAs; `roles.yaml`'s coder body says a coder in parallel mode does
+      not `git commit`. A per-unit validator task therefore has no SHA to pin in
+      the shared-worktree mode, which would have made the new graph
+      un-executable exactly where it matters. Resolved inside Step 2 (D5 scope)
+      by naming the two modes: per-worker branches supply a coder SHA; a shared
+      worktree means one LEAD commit per unit, which is the integrate step the
+      coder body already assigns the lead. Also fixed there: with N units the
+      design freezes when the FIRST coder spawns, which Step 3's frozen-spec
+      rule states in the singular.
+- [x] **M3: Manifest alignment.** Update `manifest-template.md`'s flow paragraph
       to match, carrying the release steps through unchanged (D3).
+      **Landed.** Steps 4 and 5 (the release summary and its user-confirmation
+      gate) are byte-identical to before; the flow now names `SKILL.md` Mode 3
+      Step 2 as authoritative so the summary cannot drift into a second spec.
 - [ ] **M4: Validation.** Run a genuinely multi-unit task and report against
       M0's baseline: concurrency, wall clock, and the classes of finding the
       review lane produced.
-- [ ] **M5: Conventions.** Add a line to `.github/CONTRIBUTING.md` describing
+      **NOT DONE, and deliberately left unchecked.** This is a live multi-agent
+      session plus a measurement, not a documentation change, and it is blocked
+      twice over: M0 ships the instrument but no session has yet been measured
+      through it, so there is no baseline to compare against. Checking this box
+      from a doc-only change would assert a measurement nobody took, in a PRD
+      whose own thesis is that measured beats asserted. Needs: one ordinary
+      single-unit run reported under item 7 to establish the baseline, then one
+      genuinely multi-unit run reported the same way.
+- [x] **M5: Conventions.** Add a line to `.github/CONTRIBUTING.md` describing
       this repo's own `prds/` convention, which no document currently describes.
       (`prds/` is *mentioned* in four places - `SKILL.md:101`, `:116`, `:271`,
       `roles.yaml:994` - but only as a directory to look for in OTHER repos.)
@@ -182,6 +227,10 @@ consistency. Not `roles.yaml`, not the role bodies, not the generated
       change this PRD makes to a live system before any milestone is
       implemented. Also record the change in `CHANGELOG.md` under
       `## [Unreleased]`.
+      **Landed** as a `## Product Requirements Documents` section in
+      `.github/CONTRIBUTING.md` (with a TOC entry), which also states the
+      architect side effect for the next reader. Recorded as D6 below and in
+      `CHANGELOG.md` under `## [Unreleased]`.
 
 ## Success criteria
 
@@ -225,10 +274,27 @@ consistency. Not `roles.yaml`, not the role bodies, not the generated
   complex than a fixed one, and every reader pays that including on one-file
   changes. D1 and criterion 1 are the mitigation.
 
-## Open questions
+## Open questions (resolved during implementation)
 
-- What does M0 actually measure, and from what surface? This determines whether
-  M4 is a real comparison or a qualitative one.
-- Should Step 2 require the lead to state the unit split explicitly (an
-  artifact a later reader can contradict, matching how Task #0 is justified), or
-  leave it implicit?
+- ~~What does M0 actually measure, and from what surface?~~ **Four figures, all
+  from artifacts that outlive the run**: the `units:` line in the brief's
+  `## Roster` section against the number of implementation tasks actually
+  created; peak simultaneous dispatched-and-unreported teammates; wall clock
+  from `git log --format='%h %aI %s' <base>..<work-branch>`; and idle-implementer
+  time, which is the figure that says whether Step 4's pipelining rule fired.
+  The surface choice is doing real work: commit timestamps are measured, while
+  dispatch and completion times are the lead's recollection unless written down,
+  and the task list is documented-volatile in this same file. So item 7 requires
+  each figure labelled `measured` or `recalled` and forbids blending them.
+  M4 is therefore a real comparison on wall clock and a partly recalled one on
+  concurrency, which is worth stating up front rather than discovering later.
+
+- ~~Should Step 2 require the lead to state the unit split explicitly?~~ **Yes,
+  as one line in the `## Roster` section Step 2 already mandates writing.** Not
+  a new artifact and not a new decision: `units: 1 — one file, no split` records
+  that no decision was needed, so D1's zero-effort path costs one sentence in a
+  section already being written and criterion 1 still holds. The reason to
+  require it is the reason Task #0 is a task: a split that lives only in the
+  lead's head leaves nothing for a later reader to contradict, and it is
+  invisible to the reflect pass, which is the only thing that measures whether
+  any of this helped.
