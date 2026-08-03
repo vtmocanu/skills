@@ -199,358 +199,25 @@ repo-specifics; the file is then pure generic body at that version.>
 
 **Team-coordination tools (REQUIRED on any non-empty allowlist)**: every role with a `tools:` line MUST include `SendMessage, TaskUpdate, TaskList, TaskGet`. Without these, the spawned agent produces its report but cannot transmit it to team-lead, claim/complete tasks, or respond to `shutdown_request`. The role library at `roles.yaml` already includes them on every non-empty allowlist; verify they survived any prompt-body or schema-tuning edits you make in Step 3.
 
-**Frontmatter MUST be single-line for `description`** (multi-line YAML block scalars break Claude Code's parser).
+**Frontmatter MUST be single-line for `description`** (multi-line YAML block scalars break Claude Code's parser), **and QUOTE it when the value contains `: `**. A bare colon-space inside an unquoted scalar is illegal YAML — PyYAML answers `mapping values are not allowed here` and refuses the whole frontmatter. `roles.yaml` quotes the `tester` description for exactly this reason (its text reads *"…the repo actually has: unit-test framework…"*), and the quoting has been lost at generation at least once: the shipped `tester.md` in a real repo carried an unquoted description that no YAML parser accepts. Claude Code's loader tolerates it, which is why it survives unnoticed — but a stricter downstream parser does not, so the copy that looks fine is the one that hides the defect.
 
 **Model tiers (define in frontmatter, ENFORCE via the Agent `model` param)**: the role file's `model:` is where the roster DEFINES each role's tier, but it is NOT reliably honored at spawn — observed 2026-07-05: a `model: sonnet` documenter spawned without an explicit override ran on the parent session's model instead. So the lead MUST read the role file's `model:` and pass it explicitly via the Agent tool's `model` parameter on EVERY teammate spawn and respawn; treat frontmatter-only as declared intent, never as enforcement.
 
 Tier guidance (alias names, deliberately not version-pinned — model families rotate; the Claude 5 family shipped after this guidance was first written): reasoning-heavy roles (coder, reviewer, auditor, tester, architect, researcher, spec-keeper, fact-checker, web-ux) get the strong tier (`opus`); mechanical roles (documenter, release) get the mid tier (`sonnet`); never pin the smallest tier (`haiku`) for any role. Rationale for the haiku ban: auto-mode (the bias-to-act permission mode that lets teammates complete shared-system writes like a release push without a manual confirmation round-trip) is gated to specific models — the smallest tier has been excluded; **verify the current auto-mode-capable list in the Claude Code docs** rather than trusting a version list here. The tester is strong-tier because testing in most repos here is adversarial/scenario validation (crafting fixtures to break a guard, reasoning about evasion vectors, probing runtime contracts); keep tester on `sonnet` only when the repo's testing is a purely mechanical unit-test-suite run. Note (per the docs): a subagent's frontmatter `permissionMode` is ignored; its actions are classified under the parent session's rules, but only if the subagent's model is itself auto-mode-capable, which is why the model choice (not a mode flag) is the lever here.
 
-Write `.claude/agent-team.md` as the workflow manifest:
+Write `.claude/agent-team.md` as the workflow manifest. **The full template is the sibling file [`manifest-template.md`](./manifest-template.md) — copy it verbatim and fill in the values discovered in Step 1.** It ships in the generated skill directory alongside `roles.yaml`.
 
-```markdown
-# Agent team workflow for <repo-name>
+Its sections, so you know what you are filling in without opening it:
 
-Generated <date> by the `agent-team` skill.
+- **Team roster** — one row per picked role: role, subagent type, model, tools.
+- **Orchestrator workflow** — the default flow for a typical task in this repo.
+- **Context handoff** — why a spawn prompt is the teammate's entire world.
+- **Re-derive the claim at the moment you assert it** — the evidence discipline, with its worked failures.
+- **Sweep per FACT after the last behavioural commit**, **two negative results from instruments that share an assumption**, **an assertion defines its CHANNEL**, **mutate at the CALL SITE**, **TYPECHECK the mutated tree** — the mutation-testing and claim-checking sections.
+- **Quality gates** — one line per slot, the block the lead pastes into every validator dispatch.
+- **Project signals** — release flow, spec dir, authoring rules, CI, slash commands.
 
-## Team roster
-
-| Role | Subagent type | Model | Tools |
-|------|---------------|-------|-------|
-| coder | coder | sonnet | (inherit) |
-| reviewer | reviewer | sonnet | Bash, Read, Grep, Glob, WebFetch |
-| ... | | | |
-
-## Orchestrator workflow
-
-You (the team lead) NEVER do implementation, review, or audit work yourself.
-You coordinate the team via Agent (name + subagent_type) to spawn teammates,
-SendMessage to communicate, and the Task* tools to track work. The session
-has ONE implicit team; there is nothing to create or delete.
-
-Default flow for a typical task:
-1. Spawn coder with the full task context. The coder runs `<test-command>`
-   before reporting done.
-2. After coder reports done, spawn reviewer + auditor IN PARALLEL with
-   coder's diff + report.
-3. Resolve any blocking findings (route them back to coder via SendMessage).
-4. <if release role exists> Before delegating to release, summarize what to
-   verify end-to-end and STOP for user confirmation.
-5. <if release role exists> On user OK, spawn release.
-
-## Context handoff (CRITICAL)
-
-Every teammate cold-starts with no memory of prior conversation or other
-teammates' outputs. Whatever you write in the spawn `prompt:` is the entire
-context they have, plus the body of `.claude/agents/<role>.md`.
-
-Therefore every spawn prompt MUST include:
-- File paths the teammate should read (the spec, the files being modified,
-  CLAUDE.md/CONTRIBUTING.md when authoring rules matter)
-- A summary of any prior teammate's findings when chaining workers
-- The exact error message when retrying after a failure
-- If context is long, write it to `.claude/agent-team-tasks/<slug>.md` and
-  reference that path in the prompt instead of pasting inline
-
-## Re-derive the claim at the moment you assert it (CRITICAL)
-
-**Re-derive a claim from the code at the moment you assert it, however sure you
-are.** Having verified something once is not knowing it: you verified a *past*
-state and you assert in the present. This applies to every role, including the
-lead.
-
-**A comment is an assertion, so it deserves the same mutation as a test.**
-Freeze the field, drop the line, move the path, and watch the assertion fail.
-If nothing fails, the comment describes a mechanism that is not there.
-
-**A test's FAILURE MESSAGE is an assertion too, and it is the one nobody
-mutates.** A message that names a cause the check never measured is worse than a
-vacuous test: a vacuous test merely fails to help, while a lying message actively
-routes the next reader into the wrong subsystem. Ask of every diagnostic: could
-this string be printed by a condition other than the one it names? (2026-07-21: an
-e2e guard failed with "the worker claimed nothing (204)" when the actual cause was
-a wrong jq path into a 200 response — `[ -n "$x" ]` cannot tell "no response" from
-"wrong path", both give the empty string. It cost the lead an hour aimed at queue
-contention. Fix: split the status check from the extraction so the two modes
-produce two different messages.) Corollary for shell harnesses: `fail` called
-inside `$( )` exits only the subshell and writes to stdout, which the substitution
-*captures* — the run aborts under `set -e` with the diagnosis swallowed and nothing
-printed at all. Set a global and return instead of printing.
-
-Corollaries, each earned:
-- **The code is usually right; the story is what rots.** Every instance below had
-  correct logic and a wrong description. Nobody was careless: each claim was true
-  when written and stopped being true, or was never re-derived from the code.
-- **Presence is not efficacy.** "The attribute is there" and "it reaches anyone"
-  are different claims. Two validators can both be right and appear to conflict
-  because they asked different questions: find the two questions before picking a
-  winner.
-- **The experiment that justifies a choice usually also bounds it.** Record both
-  halves, not the flattering one.
-- **It hides in the artifacts with no gate.** Comments get read in review, tests
-  get run, commit messages get diffed. A "still open" list, a checkpoint, a
-  handoff note is prose nobody executes, and it decides where the next person
-  spends their time. Re-derive those too.
-- **The check can be as blind as the claim: a verification that cannot fail is not
-  evidence.** A distinct failure from a wrong measurement, and worse, because
-  re-running a blind instrument re-runs the blindness — "just double-check it" is
-  the instinct this class defeats. `grep … | head -N` cannot show a summary line
-  past N (→ a fabricated count); a page-width probe cannot show a truncated label
-  (→ a "no regression" that regressed); `pgrep -f <name>` matches its own command
-  line (→ a phantom process, or a deadlock); a stale git ref cannot show remote
-  drift; a green CI *summary* cannot show that the phase you needed never ran.
-  Defense: ask *what result could this instrument not produce?* — if the answer is
-  "the one that would prove me wrong," it is not evidence. Prefer an instrument
-  that holds an **identity** over one that holds a **pattern**: `kill -0 <pid>`
-  over `pgrep -f`, `getElementById` over `querySelector`, `toBe(el)` over
-  `textContent.toMatch`, `git grep <sha>` over a working-tree grep, a
-  named-assertion count over an exit code. Naming the class buys no immunity — on
-  the PRD that surfaced it the author hit it five times, once *during the shutdown
-  check seconds after committing the note that says the author isn't immune*, each
-  caught only because an identity-based check dissented from the blind one.
-- **A constraint stated in a form cheaper to satisfy than to mean is an invitation
-  to satisfy it.** "No horizontal scroll" was met while the lane label rendered
-  zero characters; the intent was "the layout is not worse." A correct constraint
-  measured with a blind instrument and a blind constraint measured well fail
-  identically silently — they are two different questions. The writer of a
-  dispatch owes the *intent* alongside the measurable proxy, and the receiver owes
-  one question asked **before** the work, of the instruction itself: *what would
-  make this true but still bad?* It is the only check in this section that
-  prevents the work rather than catching it after.
-- **A hostile fixture that cannot reach the sink it targets passes vacuously.** A
-  payload clamped, trimmed, or flattened before it reaches the code under test
-  proves nothing: a 63-rune XSS string cut at a 48-rune clamp, leading tabs eaten
-  by `TrimSpace` before the column they were meant to break, a benign label making
-  a sanitize-mutation a no-op. Caught only when the test fails for the *wrong*
-  reason and someone asks why. Run a **positive control** — confirm the un-fixed
-  code actually fails your check first — or "0 failures" is the blind-instrument
-  result above wearing a green hat.
-- **A number you did not see is a claim, not a measurement.** A figure read off a
-  truncated window (`| head`), or a tally inherited across a handoff and
-  incremented but never re-derived, is not evidence even when every digit in it is
-  real — build the list first and let the count fall out of it, never the reverse.
-  On one run both a coder's mutation count and the lead's running "claims caught"
-  tally failed this way; the honest report is the corrections themselves, each
-  recorded where it does work, not a total.
-
-Validated 2026-07-16 on a PRD where **nine claims fell over**, each believed by
-someone competent and each disproved in seconds once someone ran it: a PRD
-decision asserting a quota was atomic (measured: 8 of 8 concurrent provisions
-passed a quota of 2); a design claiming one test caught a misplaced lock (it
-stays green, because a misplaced lock still blocks); a design claiming only a
-browser could prove a UI gate escapable (a page-level test does it); three code
-comments naming mechanisms the code did not have; a test-count baseline carried
-from memory; a handoff note that outlived the fix that killed it and was
-reported open twice; and a browser pass that "verified" a `title` reaching no
-screen-reader user. The coder that made four of them diagnosed the root: *"I
-trusted any claim I had personally verified once, and stopped re-checking it,
-because having checked it felt like knowing it."*
-
-**Lead's share of this:** relay findings as claims to check, not facts to apply.
-When you forward a teammate's finding, say what was measured and what was
-inferred. Twice in that run the lead propagated a validator's inherited
-attribution as verified, and once told a reviewer a rule ("focus is proven by
-identity, never text") that was half right: identity fails too, when the selector
-drifts. Verify a load-bearing claim yourself before acting on it, and say plainly
-when you did not.
-
-## Sweep per FACT after the last behavioural commit
-
-**A batch's own findings falsify claims in code it never touched, and nothing
-per-commit or per-file catches that, because the stale claim is not in the diff.**
-After the last behavioural commit — before the final review wave, not after it —
-grep for every *fact* the batch established and find every place that asserts
-otherwise.
-
-Validated 2026-07-27 on a batch that shipped **six code defects and ten prose
-ones**. Every prose defect was a true statement a neighbouring commit falsified,
-and none had an executable control: four sibling comments left asserting a
-mechanism the fix had disproved (one directly contradicting another comment three
-files away), an assertion that could not fail, a doc headline falsified by the
-function one line beneath it, and a freshness claim true of only three rungs of a
-six-rung fallback chain. The code was right every time. They cost four review
-rounds and were found by four different agents.
-
-Three things make the sweep work, each learned by its absence:
-
-- **Sweep for the CLAIM, not the wording.** A grep for the phrase misses a
-  sentence asserting the same thing in different words — one file carried the
-  superseded measurement table without ever using the phrase being searched for.
-- **The correction must state the mechanism, not just delete the false clause.**
-  "Dropped the wrong claim" and "states the right one" are different edits, and
-  only the second prevents the next round: a comment that is no longer false but
-  no longer explains anything leaves the next reader to re-derive it and get it
-  wrong. That happened three times to one paragraph in a single batch.
-- **A CITATION is an assertion too, and `git log -S` is its control.** "Commit X
-  fixed this" is checkable and almost never checked. The same two commits were
-  transposed **twice** — one apart, touching the same field, differing only in
-  *channel*, which was the very distinction the sentence existed to teach. A
-  reader following it landed on a commit whose subject line contradicted the claim
-  in its first six words, which discredits the true half along with the false one.
-
-**Corollary for the lead:** when you dispatch a fix that names N sites, verify all
-N landed. The one that got missed was missed because the lead checked the site it
-had argued about and not the four it had listed in the same message.
-
-## Two negative results from instruments that share an assumption are ONE negative result
-
-**A search that comes back empty is evidence only if it could have come back
-full.** Running a second search and getting empty again feels like corroboration
-and usually is not: if both are shaped by the same guess about naming, they fail
-together, and their agreement measures the guess rather than the code.
-
-Measured 2026-07-27, and it nearly shipped a false security invariant. A field was
-ruled safe on the premise that one query was the only one listing a table:
-
-- the first grep searched for a substring the counterexample's name **does not
-  contain** (the two names share no common substring, though they name the same
-  concept), so it was structurally incapable of returning it — and its short
-  output was read as an enumeration;
-- the second searched a directory the relevant page does not live in, for a type
-  name that differs from the one actually imported.
-
-Two empty results, each shaped by a different naming guess, treated as agreement.
-The premise was false: an admin route rendered every user's row, so the "safe"
-field was the only cross-principal sink in the batch. It was caught because the
-agent asked to *write the claim into a comment* checked it first — the last cheap
-moment before a false invariant becomes code carrying two names.
-
-**Enumerate from the schema object, not from a name you already know**: every
-query touching the table, not every query whose name matches a string you have
-already seen. The same reduction covers the sibling failures — a grep over
-already-inventoried field names, a fixture built to demonstrate one state and read
-as a search for its opposite, an assertion over one channel read as whole-component
-coverage. **All four search a space defined by what you already found.**
-
-**Corollary for the lead:** relaying a teammate's verified-sounding premise is not
-verification. When a claim is about to be *written down* as an invariant — in a
-comment, a spec, a doc — re-derive it yourself, however well-sourced. That is the
-moment it stops being a finding and starts being something the next reader trusts
-without checking.
-
-## An assertion defines its CHANNEL
-
-**"Nothing in this component carries X" and "nothing in this component's TEXT
-carries X" are different claims, and the test that means the second reads like the
-first.** A whole-subtree text assertion cannot see attribute values, a form
-control's `value`, or the document title. The component is in scope; the channel is
-not, and the assertion's own wording papers over the gap.
-
-Measured 2026-07-27: nine tests asserting over rendered text all passed while
-**four** untrusted values reached tooltip and accessible-name attributes
-unstripped, across three rounds of review. Every one was found by a sweep or a
-mutation control; **none by a test.** The demonstration is one line — revert the
-attribute fix and only the new case reds, while the existing text-channel case for
-the *same field* stays green.
-
-Three habits follow:
-
-- **Fix at the composition point, not the render sites.** One descriptor feeding
-  five renderers gets one fix where it is composed. But state the coverage
-  honestly: in that batch the comment claimed all five were covered when only two
-  consumed that descriptor, and the "one place cannot drift out of step with four
-  others" argument ran backwards — four constructors of the same shape already
-  existed and the fix touched one.
-- **A test that renders the wrong component passes forever.** One test rendered a
-  component that does not render the field under test. It was green and worthless,
-  and only its own control caught it. **Five files in that batch needed a
-  component extracted to make the claim assertable at all** — if the value is not
-  reachable by a test, that is a finding about the code's shape, not a licence to
-  assert something adjacent.
-- **A guarded render can make an assertion VACUOUS rather than weak.** Where the
-  markup renders behind a truthiness guard and the fixture leaves the field empty,
-  the subtree never mounts and a "no bad characters present" assertion passes over
-  nothing. Require a **positive** assertion that the value is on screen. Note the
-  two mechanisms differ: one branch did not mount at all, while a sibling mounted
-  with a partial string, so only the positive assertion caught the second.
-
-## Mutate at the CALL SITE, not in the shared helper
-
-**Folding a mutation into a shared function proves the function is live. It does
-not prove every caller routes through it** — and those are the two different
-claims a control is usually asked to settle.
-
-Measured 2026-07-27. A helper had two call sites; the control replaced its body
-with the identity and two cases reddened, which read as proof the behaviour was
-load-bearing. Both reddened cases exercised **the same call site**. The other arm
-had no assertion at all, so a fix applied to only one of the two would have passed
-that control unchanged — which is what happened, and it was caught by an audit
-reading a comment rather than by any test.
-
-**The discriminating instrument is per-call-site:** fold each site separately and
-require **each** to red on its own, on disjoint sets. The tester who found this had
-*already* used that instrument on eight render sites in the same batch; the shared
-function simply made one fold look sufficient. As they put it: *"mutating the
-shared helper is the composition-point mistake one level down — the same shape as
-the finding itself, which is presumably why neither of us saw it from inside."* A
-control written from inside an abstraction inherits that abstraction's blind spot.
-
-## TYPECHECK the mutated tree before reading the test result
-
-**A mutation that does not compile produces a run that says nothing, and "nothing"
-is one glance from the finding you were hoping for.** Measured 2026-07-27, on the
-last round of a long batch: a replacement string carried literal backslashes into
-the mutation script, the mutant was a syntax error, the runner failed to *collect*
-the file, and the run printed `Tests  no tests`.
-
-The dangerous reading was right there — *"the mutation applied and no test went
-red"* reads as *"this site is unguarded"*, which would have been a false
-**Blocking** finding against a correct fix.
-
-**It is the inverse of the silent no-op mutation** (a fold that matches nothing,
-runs green, and understates). Both look like "the tests did not say what I
-expected", and only the compiler separates them:
-
-- run the typechecker **between mutate and run**;
-- keep the pre-assert that the pattern was present and the post-assert that it is
-  gone;
-- add a post-assert that no stray escape reached the source, since the escaping bug
-  is what produced the syntax error in the first place;
-- **read the collection line, not just the tally** — "no tests" and "1 failed" are
-  both "not the green I expected", and only one of them is a result.
-
-**Read every red's arrival time and line number, not just the count.** A red at the
-runner's timeout is a lookup failing, not an assertion firing: in that batch two
-render tests reddened at a 5-second `findByText` timeout, so their real assertions
-had never executed. After anchoring the awaits on something the mutation cannot
-move, the same reds arrived at named lines in 2-4ms.
-
-## Quality gates
-
-One line per slot, in this order, each with the exact command (check-mode, and
-suffixed `(rewrites files)` if only a fixing variant exists) or the literal
-`none (gap)`. Per component in a monorepo. This block is the team's source of
-truth for the gate; a slot omitted here is a slot nobody runs, and the lead
-pastes it into every tester/reviewer/auditor dispatch since teammates
-cold-start and never read this file themselves.
-
-Once a teammate has surfaced a `none (gap)` slot, the lead appends a `noted`
-marker — `dead code: none (gap, noted 2026-07-21)`. Roles are told to report a
-gap only when its line carries no marker. Without this the instruction "report
-it once per repo, not per change" is unfollowable: a fresh teammate has no
-memory of prior sessions, so it either re-reports every wave or suppresses
-forever.
-
-- format: <command | none (gap)>
-- lint: <command | none (gap)>
-- typecheck: <command | none (gap)>
-- test: <command | none (gap)>
-- dead code: <command | none (gap)>
-- coverage: <command | none (gap)>
-- security scan: <command | none (gap)>
-- pre-commit: <command | none (gap)>
-- long-running: <any gate command exceeding the tester's 5-minute default wait, with its real bound>
-
-## Project signals
-
-- Release flow: <discovered path>
-- Spec dir: <discovered path>
-- Authoring rules: <CLAUDE.md / CONTRIBUTING.md paths>
-- CI: <forgejo / github / gitlab / etc.>
-- Slash commands the orchestrator may invoke between delegations:
-  <list of /commands the lead can run itself>
-```
-
-Cite specific values, not "discovered".
+**Fill Quality gates and Project signals with cited values, never the word "discovered".** Those two blocks are the only ones whose content is repo-specific; everything else is copied as-is.
 
 After writing, suggest the user commit `.claude/agents/` and `.claude/agent-team.md` to the repo so the team definition is reproducible.
 
@@ -619,6 +286,8 @@ Observed 2026-08-02, on the first run after this task was added (uzi #195): the 
 
 **Then create a task for EVERY OTHER ROLE IN THE ROSTER WHOSE TRIGGERS FIRE ON THIS CHANGE, and close the ones you are not dispatching WITH A WRITTEN REASON.** Not a dispatch — a task. Tester when the change alters behavior; web-ux when it touches a web interface; architect on a new or changed contract; documenter when docs change; fact-checker when the change carries claims; spec-keeper when `specs/` exists. Closing one takes a sentence: `web-ux: skipped — no reachable instance` is a legitimate close. Leaving it uncreated is not.
 
+**Write that sweep into the brief under a `## Roster` heading, one line per role, and keep it current as you dispatch** — `reviewer: dispatched at <sha>` / `web-ux: closed — no reachable instance`. The task list gets the same content, but the brief is the half that survives: Step 5's first cleanup check reads this section, and it can only do that if the heading exists. Without it the closure reasons live only in a store this file elsewhere calls a coordination convenience, and a session is on record where that store returned "No tasks found" at cleanup and took four written reasons with it.
+
 **Why this is a task and not another instruction to remember.** The dispatch rules further down (Step 4) are conditional and fire mid-flow, each requiring you to notice a condition while doing something else. This fires ONCE, unconditionally, at the moment you are already enumerating roles. And it changes what a skip LEAVES BEHIND: today a role that is never spawned produces no artifact at all, so nobody — not the user, not a teammate, not a later reflect pass — can see that a decision was made, or contradict the reason. A closed task with a stated reason is visible and falsifiable. `web-ux: skipped — needs a running instance` sitting next to a role file that names a mock build is a sentence somebody catches in seconds.
 
 This does NOT force a dispatch. Skipping a role is often right. What it forbids is skipping one silently.
@@ -677,9 +346,25 @@ For `spec-keeper`, do NOT spawn at start; spawn after blocking review/audit find
 - **Shared utility needed by two parallel branches (e.g. two PRD teams both needing one new package): cherry-pick the exact commit that introduces it, never reimplement.** Byte-identical content on both branches merges trivially; a functionally-identical reimplementation guarantees add/add conflicts on the package plus divergent edits to shared wiring files (config, compose, .env.example). If a worker already committed its own version before the coordination signal arrived and that SHA has NOT been dispatched for review, replace it (`git stash -u` any adopted working-tree files → `git reset --hard HEAD~1` → `git cherry-pick <shared-sha>` → `git stash pop`) rather than living with the fork (observed 2026-07-03: two AES secretbox implementations, same public API, different comments and config wiring, on sibling PRD branches).
 - **SEQUENTIAL pipelines can share ONE worktree with a lead-enforced writer token** (validated 2026-07-05: coder → documenter → spec-keeper → coder handoffs on one branch, 8 writer transitions, zero collisions). Rules: exactly one teammate unfrozen for writes at a time; every dispatch to a new writer names the verified tip SHA; the outgoing writer explicitly confirms FREEZE (and the lead verifies the tree is clean at the expected tip) before the next GO; read-only agents (reviewer/auditor/tester/fact-checker) run in parallel freely. Use per-worker worktrees only when writers must genuinely work CONCURRENTLY. When a validator must BUILD/TEST a pinned SHA while the shared tree carries the current writer's uncommitted WIP, it should verify in a throwaway detached worktree (`git worktree add --detach <tmp> <sha>`, removed after) — validated 2026-07-10: a reviewer's `go build` failed on the live tree purely from the coder's in-progress M3 edits, and the detached-worktree run cleanly verified the committed SHA. **Lead edits to a shared file in the active writer's worktree** (PRD checkbox bookkeeping, brief updates) are fine WITHOUT taking the token if you pre-warn the writer in the same breath: "the uncommitted change in <file> is MINE (team lead), expected — do not stop; fold it into your next commit." The pre-warning defuses the concurrent-writer guard the spawn prompt installed; without it the guard correctly reads the edit as a foreign writer and freezes the worker (validated 2026-07-13: a mid-milestone PRD progress edit landed cleanly inside the coder's next commit, zero disruption).
 
+  **That carve-out covers FILE EDITS and nothing else. REF-MOVING commands — `merge`, `rebase`, `reset`, `checkout`, `stash`, `push` — are never the lead's to run in ANY worktree holding a live writer.** Either the single writer runs them, or you take the token first. The predicate is *a live writer*, not *a contested tree*: "contested" is the wrong test precisely when the lead is the one making it contested, and a single-writer worktree is exactly where the lead feels entitled to reach in. Observed 2026-08-03: a lead ran `git merge origin/main` into an agent's active worktree twice in one session, safe both times only because the tree happened to be clean at that instant. A `reset` or `checkout` there takes uncommitted work, and the agent cannot detect it happening — the Bash tool resets cwd between calls and nobody re-reads HEAD before each edit.
+
+  **And publish the SHA you gated, not the branch that points at it:**
+
+  ```sh
+  git push origin <sha>:refs/heads/<branch>
+  ```
+
+  A branch name resolves at push time; a gate result is bound to a SHA. Same session: the lead gated a merge commit, an agent committed twice into the same worktree in the intervening minutes, and the lead's `git push -u origin <branch>` published the agent's tip — a commit the lead had never gated — after which it opened an MR whose description claimed verification of a different SHA. Nothing had to go wrong for that: no stray push, no hook, no misconfiguration. **The refspec form makes it impossible; "re-verify before pushing" only makes it less likely.**
+
 Teammates run as **background agents**: an `Agent(...)` spawn returns immediately (background is the Agent tool's default), and each teammate's completion or idle state arrives as an automatic notification, so you do NOT poll and there are no panes to lay out or watch. Drive the flow off those notifications (Step 4), and check status with `TaskList` / `TaskGet` when you need it. Never `Read` a teammate's `.output` file: for an agent it is the full conversation transcript and will overflow your context.
 
 ### Step 4: drive the flow
+
+- **A MESSAGE CARRIES AT MOST ONE ACTIONABLE ITEM.** Two or more go in the brief; the message names the section and nothing else. This is the protocol, not a style preference — count the asks before you send, which is checkable while composing in a way that "be careful about crossing" never is.
+
+  **Why one and not two.** Mailboxes are read between turns (see Gotchas), so delivery races a turn boundary and the loss is **per item** — and a partially-absorbed multi-item message is indistinguishable from a fully-absorbed one to both parties. One item either landed or visibly did not. N items are N independent chances with no observable difference, which is why the failure presents as "the worker ignored point 3" rather than as a delivery error.
+
+  Measured across **six** sessions now (2026-06-12, 07-05 twice, 07-13, 07-16, 08-03), always with the same recovery: a standalone single-item re-send to an *idle* worker lands first try. In the most recent, one finding crossed **three times** inside multi-item messages and landed immediately once sent alone. Six sessions of better prose about crossing has not moved that number; the item count is the only lever that has.
 
 - **THE BRIEF IS THE SPEC. Corrections AMEND THE BRIEF; messages only point at it.** When a requirement changes, edit `.claude/agent-team-tasks/<slug>.md` and send a short message naming the section that moved — never a long message carrying the requirement itself. Date each amendment inside the brief so a worker can tell what it has already seen.
 
@@ -692,6 +377,14 @@ Teammates run as **background agents**: an `Agent(...)` spawn returns immediatel
   **The brief must be at the durable path you chose in Step 1's precheck.** If you skipped that decision, make it now before relying on this rule: a gitignored brief is not a spec, it is a scratch file that dies with the worktree.
 
   Keep messages for what they are good at: a pointer ("brief §3 changed, re-read before your next commit"), a question, an ack, a verified-evidence nudge.
+
+- **THE LEAD DOES NOT AUTHOR THE CONTROL FOR ITS OWN CLAIM.** When you dispatch a validation, name the **behaviour** that must be pinned. Do NOT name the fold class, and do NOT state the expected result. Require the validator to choose its own instrument and to say why that instrument *could* produce the disconfirming answer. If you have already formed an expectation, label it as your prediction — never as the acceptance criterion.
+
+  **A control written from inside the change inherits the change's blind spots.** That sentence is usually applied to a coder folding its own code; it applies to the lead at least as hard, because a lead's expectation reaches every validator at once.
+
+  Two shapes, both measured in one session. **A criterion that contradicts its own fix:** the lead demanded a red from a *positional* fold on a fix whose entire purpose was removing the positional dependency — if the fix worked, that red could not exist, and a round was spent proving it. **A fold class named in the brief:** the lead wrote the class into the brief, three agents used it in three different wordings, and the agreement was read as confirmation. All three were *presence* mutations, so they were one instrument, and the class they could not see turned out to be **five pins wide** and took three further rounds to close. The record's own summary: *"Three separate controls agreeing was three readings of one instrument."*
+
+  Note this asks you to write **less** in a dispatch, not more.
 
 - **THE MECHANISM NARRATIVE IS WRITTEN ONCE, BY ONE OWNER, AFTER THE LAST BEHAVIOURAL COMMIT.** While findings are still in motion, a mechanism belongs in reports and in the brief — **not** in code comments, docstrings or an ADR. A claim written into three artifacts must be corrected in three artifacts, by whoever holds each file, and every corrector re-derives it from scratch. Wait for the facts to stop moving, then dispatch the documenter (or take it yourself and *say* you did) to write it in ONE place, with the other artifacts pointing at that place rather than restating it.
 
@@ -712,7 +405,17 @@ Teammates run as **background agents**: an `Agent(...)` spawn returns immediatel
 
   **(b) Apply the severity bar, and RAISE it when the round has turned inward.** A findings round's bar is a property of the ARTIFACT, never of the reader's standard. When a wave's findings are dominated by the PREVIOUS wave's output rather than by the deliverable, announce to every validator in one message: **Blocking now requires a demonstration** — an execution that fails, or a re-derivation showing a sentence is FALSE. "Could be sharper", "imprecise", "unsupported but probably true" become Non-blocking, reported in a separate list and never suppressed. Read that list yourself; an item naming a MECHANISM rather than a preference gets promoted.
 
-  **The trigger, because "notice a regress" is exactly the noticing-not-mechanism failure this step exists to remove.** Fire the bar when **round N's findings cite artifacts introduced in round N-1** rather than in the deliverable — checkable from the SHAs the findings already cite, which is the same check you do for review scope. And one leading indicator available BEFORE any wave: **when the change's prose exceeds its executable content by roughly an order of magnitude, arm the bar at the FIRST round rather than the fifth.**
+  **The trigger is a COMMAND, not a judgement — run it as the last act of (a) Synthesize, before you write anything.**
+
+  ```sh
+  git diff --numstat <round N-1 tip> <round N tip> -- <deliverable paths>
+  ```
+
+  **If the executable content did not move, round N produced no behavioural change.** Arm the bar by default and say so in the message that opens round N+1. The older trigger — *round N's findings cite artifacts introduced in round N-1* — is still true and still worth knowing, but it is a judgement about provenance made while you are synthesizing the findings, which is the noticing-not-mechanism failure this step exists to remove.
+
+  **The exception, or this over-fires and gets waved through:** a round whose deliverable is legitimately prose — a docs migration, a spec sync, a comment that IS the product — will trip this every time. When that is the case, say which artifact is the deliverable and move on. The bar is for rounds that *intended* behavioural change and produced none.
+
+  Measured on two branches in one session: one change's deliverable took **148 added lines after its implementation commit, every one a comment or blank**, across nine follow-up rounds. The other's product template went **19 → 8 → 6 → 4** added lines across four rounds while the findings prose stayed above 100 each time — 37 lines of deliverable against ~540 of record. Neither fired the old trigger, and the lead had read it.
 
   Why it is on the artifact: *imprecise* and *could be sharper* are properties of the reader, and a reader's standard rises as the artifact improves, so a loop gated on them has no exit condition. *States something false* is a property of the artifact — decidable and finite. Measured 2026-08-02 (uzi PRD #103 M2): 19 commits of which four touched executable content, seven findings rounds, **zero behavioural defects**; rounds 5-7 were finding defects in the corrections, and each correction could acquire its own unchecked support. The user imposed this bar ad hoc and it terminated the loop in one round. The code-heavy predicate is the same rule with a different demonstration — for code this file already names it (*a control that produces no output is not a control*); prose is the case where nobody noticed the demonstration was missing, because a sentence about a sentence reads like analysis.
 
@@ -724,7 +427,14 @@ Teammates run as **background agents**: an `Agent(...)` spawn returns immediatel
 
   Steps (c) and (d) sit between two things you already do, so skipping (c) leaves a visible hole in a sequence you are mid-way through. The previous form asked you to notice, while composing a message, that the message had become a spec. Measured 2026-08-02: a lead that had amended the brief correctly twice then sent every findings-round correction as a long message instead, and **four dispatches crossed the coder mid-turn**. It also removes the stale-SHA failure for free — two of that lead's "outstanding items" lists were built by reading the tree at a SHA the coder had already moved past, and **an amendment cannot go stale the way a message does**, because the worker re-reads the file at its own pace at whatever SHA it is on.
 - **Trust but verify teammate-reported gate results against artifacts** when the result matters beyond the report: a teammate's "task build green" can be stale-cache luck or a partial run. Cheap checks: binary timestamp/version after a build claim, `git log` tip after a commit claim. (Observed: a release agent reported the build gate green while the installed binary was left months stale.) The same applies to **time-sensitive repo-state claims** ("branch X has/lacks file Y"): re-run the check yourself before making a coordination decision on it, especially when two teammates' claims conflict — a standby agent's primed check goes stale within minutes while parallel branches advance (observed 2026-07-03: an auditor's "secretbox absent on the sibling PRD branch" was contradicted by the reviewer; the lead's own `git ls-tree` settled it and reversed the build-vs-cherry-pick decision). **This generalises past gate results to every claim the team asserts, including its own comments and your relays** — see the "Re-derive the claim at the moment you assert it" section in the workflow-doc template above, which is the compact form to write into `.claude/agent-team.md` at init. The lead's specific share: **relay findings as claims to check, not facts to apply**, and say what was measured vs inferred. Validated 2026-07-16, where the lead twice propagated a validator's *inherited* attribution as verified — one of them a mechanism a comment had asserted and nobody had re-derived, which then collected a second reviewer's certification before a third agent froze the field and found nothing read it.
-- A teammate going idle WITHOUT reporting, right after being asked for a small fix, may be stalled mid-fix rather than working: check `git -C <their-worktree> status` — idle + uncommitted edits = stalled; send a targeted "finish the loop: run the gate, commit, report the SHA" nudge. Prevent it at dispatch time too: any message that sends NEW requirements to a worker that already reported done MUST explicitly end with "run the gate, commit, and report the new tip SHA" (observed 2026-06-10: a coder applied forwarded security hardening but went idle with it uncommitted — the "release-ready" branch tip lacked the fix, and only the auditor's `git status` check caught it). **False-stall caveat**: when the role's gate is a long multi-phase job (an e2e stack that cycles services down/up, a long build), point-in-time evidence lies — "no container/process running" can be an inter-phase gap and stale source-file mtimes just mean the agent is waiting on the gate, not wedged. Before escalating, send ONE status question with forced options ("(a) working + where, (b) blocked on X + error, (c) done, committing") and wait a full known-gate-duration for the reply; escalate to checkpoint/respawn only after that window passes silent (observed 2026-07-05: a coder mid-e2e was nudged twice as "stalled" on no-stack-running + 28-min-old mtimes; the e2e legitimately cycles the stack and it was running the whole time). A worker legitimately waiting on a long gate may answer "(a) working — a background wait-loop will notify me on exit"; accept that, but do NOT trust the wake to happen: a background wait-loop does not reliably re-invoke the agent when the watched job exits (observed 2026-07-13: the e2e finished overnight — its exit trap even tore the stack down — but the coder never woke to report, leaving green-tested WIP uncommitted for hours). If the gate's known duration passes with no report, verify the artifacts yourself (stack gone? tree state?) and send a finish-the-loop nudge that STATES the verified evidence ("your stack is gone so the run exited; check your log, commit, report the tip"). When the LEAD arms its own watcher on the worker's background gate log, first verify the completion marker actually reaches the watched file (observed 2026-07-15: the worker ran `cmd > log 2>&1; echo EXIT=$?` — the marker goes to the shell's stdout, NOT the redirected log, so a grep-for-marker watcher would never fire); watch for the harness's own final log lines (its "all passed"/summary output) or process-disappearance instead. The validated watcher shape (2026-07-15, corrected 2026-07-22): capture the long-runner's PID at spawn and watch it by IDENTITY — `kill -0 <pid>` until it exits — then fire; do NOT `pgrep -f <script-name>`, which is the pattern-over-identity trap this file warns about above (prefer an instrument that holds an identity over one that holds a pattern). A process can re-exec and rewrite its own argv — a harness that re-execs itself (here via `env -i`) reconstructs argv so its `dir/` path prefix disappears — and a path-pattern watcher then matches nothing and fires a phantom "finished" while the run is still going (observed 2026-07-22: a lead's `pgrep -f 'e2e/run-e2e.sh'` fired early because the re-exec'd process no longer carried the `e2e/` prefix; only a looser second check that caught the live PID dissented). `kill -0` fails safe here — on the rare PID reuse over a very long wait it just never fires, never false-fires. When you genuinely cannot capture the PID (the watcher is not the process's parent, so `wait` is out), match on an invariant the re-exec cannot change — a side-effect the run OWNS: its growing log file, its compose project, a lockfile — never a path a re-exec can rewrite nor an env var `env -i` wipes. Follow it with a nudge that states the verified evidence, and the worker reconciles immediately. **NEVER instruct a worker to edit a script while that script is executing, and treat a worker that REFUSES such an instruction as correct.** `bash` reads a script incrementally rather than into memory, so editing it mid-run can make the interpreter resume at a byte offset that now lands mid-token — silent corruption that surfaces as a bizarre new gate failure rather than as an edit, sending everyone to debug the wrong thing (2026-07-21: a lead's "the fix is not applied, apply it" crossed a run already in flight with the fix applied-but-uncommitted; the coder declined, cited the incremental-read mechanism, and that explanation is what let the lead verify instead of overrule). Committing during a run is safe — git does not rewrite the working file — but hold the commit anyway if you want the SHA and the result to land as one report.
+#### Waiting on a long-running worker
+
+- **Idle + uncommitted edits = stalled mid-fix, not done.** Check `git -C <their-worktree> status`; send a "finish the loop: run the gate, commit, report the SHA" nudge. Prevent it at dispatch time: any message sending NEW requirements to a worker that already reported done MUST end with that same instruction (2026-06-10: a coder applied forwarded hardening but went idle with it uncommitted, so the "release-ready" tip lacked the fix).
+- **Point-in-time evidence lies when the gate is a long multi-phase job.** "No container running" can be an inter-phase gap; stale mtimes mean waiting, not wedged. Send ONE status question with forced options — "(a) working + where, (b) blocked on X + error, (c) done, committing" — and wait a full known-gate-duration before escalating (2026-07-05: a coder mid-e2e was nudged twice as stalled and was running the whole time).
+- **Do NOT trust a background wait-loop to wake the worker.** It does not reliably re-invoke on exit (2026-07-13: an overnight e2e finished, its trap tore the stack down, and the coder never woke — green-tested WIP sat uncommitted for hours). If the known duration passes silent, verify the artifacts yourself and nudge with the evidence stated: "your stack is gone so the run exited; check your log, commit, report the tip."
+- **A lead's own watcher must watch an IDENTITY, not a pattern.** Capture the PID at spawn and `kill -0 <pid>` until it exits. Never `pgrep -f <script-name>`: a harness that re-execs itself (via `env -i`) reconstructs argv, the path prefix disappears, and the watcher fires a phantom "finished" mid-run (2026-07-22). `kill -0` fails safe — on PID reuse it never fires rather than false-firing. If you genuinely cannot capture the PID, match an invariant the re-exec cannot change: its growing log file, its compose project, a lockfile.
+- **Verify the completion marker actually reaches the file you are watching.** `cmd > log 2>&1; echo EXIT=$?` sends the marker to the shell's stdout, NOT the redirected log, so a grep-for-marker watcher never fires (2026-07-15). Watch for the harness's own final summary lines, or for the process disappearing.
+- **NEVER instruct a worker to edit a script while that script is executing, and treat a refusal as CORRECT.** `bash` reads a script incrementally, so a mid-run edit can resume the interpreter at a byte offset landing mid-token — silent corruption presenting as a bizarre new gate failure (2026-07-21: the coder declined, cited the mechanism, and that is what let the lead verify instead of overrule). Committing during a run is safe; git does not rewrite the working file.
 - **Standby reviewers/auditors often surface baseline pre-flags while priming** (they read the target code before the coder finishes). Forward actionable pre-flags to the coder MID-implementation instead of holding them for the review round — requirements are cheaper upstream than as blocking findings (observed: an auditor's pre-flags became the spec for a hardening commit, avoiding a full fix-and-re-review cycle). CROSSING HAZARD (observed 2026-07-15): a pre-flag forwarded while the coder is mid-milestone can be acted on AFTER the milestone's review wave already ran — the coder lands a follow-up commit implementing a pre-flag suggestion whose OPPOSITE the wave just praised, leaving two contradictory validator positions on file. Don't let both reports stand: dispatch a scoped delta review of the follow-up commit that names the contradiction and demands an explicit keep/revert ruling (that run: both validators ruled KEEP and one retracted its earlier framing — one cheap delta round, clean record).
 - **If the tester role exists and the change alters behavior, dispatch it by default** — after the coder's first commit, not at kickoff (Step 3) — on the scenario surface (the real runtime path: live conversation, real container/deploy entrypoint, the spec's stated success criteria). Coder-authored unit/security suites are NOT a substitute for end-to-end scenario proof — they test components, not the user-visible criterion. Observed (2026-06-12): a PRD's headline success criterion ("answers question X end-to-end via the real docker path") sat unproven through four reviewed milestones because the test matrix looked comprehensive; the user caught the missing tester, whose E2E run then produced the only direct evidence of the criterion (plus an adversarial injection probe and live doc-example verification the suites couldn't provide). **Kept-stack validation wave** (validated 2026-07-15): when the coder's final long gate supports a keep-stack/keep-instance flag, have it run the gate WITH that flag so tester + web-ux validate against the SAME live instance in parallel right after — one gate run serves three validators. Hostile/mutating probes go to a PHANTOM second identity (e.g. a worker row minted from a fresh join token that no real process drives) instead of racing the real component's own update cadence — deterministic assertions, no flapping. The lead coordinates teardown only after the whole wave reports. SHARED-STACK VALIDATOR RACE (observed 2026-07-15): a MUTATING tester and a read-only browser validator on the same stack collide two ways — the tester's authorized mutations flip the persona states the other validator was briefed to expect (a token delete/save changes no_token/unavailable rows mid-pass), and an app with single-active-session-per-user revokes each other's logins mid-journey. Mitigations: partition personas per validator (tester mutates only personas the browser pass doesn't rely on), brief the read-only validator that states are a moving target and to verify each rendering against the authoritative API at read time (that's what saved the run — the SPA always matched its API, so both passed), and the moment the tester reports, relay its residual-state list to any validator still driving the stack.
 - If the architect role exists: for a non-trivial task (new component, cross-cutting change, new or changed contract/interface), dispatch it BEFORE the coder and fold its design summary (or the ADR path it wrote) into the coder's spawn prompt; skip it for small fixes. Post-implementation, it can join the reviewer/auditor wave for an architectural-fit pass when the change moved boundaries. Also dispatch it whenever a PRD is being written or reviewed (including `/prd-create`-style flows): it contributes the architecture sections and the milestone decomposition/dependency graph when writing, and judges feasibility, hidden milestone coupling, and independent shippability when reviewing. Open design questions it flags go to the user, not to the coder as guesses.
@@ -746,7 +456,9 @@ When the task is complete and the user is done, do NOT send `shutdown_request` b
 
 #### Pre-shutdown checks (mandatory before SendMessage shutdown_request)
 
-1. **Task-ownership check**: Run TaskList. If the teammate owns any task in `in_progress` status, they may be mid-work. Investigate before shutting down.
+1. **Roster read-back, from the BRIEF first.** Read the brief's `## Roster` section: every line must read *dispatched, with a SHA* or *closed, with a reason*. A line that is neither is an undispatched step, not a skip — surface it. **Then** run `TaskList` as a cross-check only.
+
+   The brief is the durable half and the task list is not: this file records a session where `TaskList` returned "No tasks found" at cleanup, making a mandated check unperformable and losing four written closure reasons. And observed 2026-08-03, the failure this ordering removes: a review task was created in Step 2, never dispatched, and caught at the very end only by a glance at the task list — the one store the file itself calls a coordination convenience.
 
 2. **Idle vs mid-work**: a background teammate is at a clean stop when its most recent notification was completion/idle AND it owns no `in_progress` task. You cannot watch it work in real time, so when unsure do NOT assume: `SendMessage` a status question with forced options ("(a) working + where, (b) blocked on X, (c) done + clean") and wait for the reply.
 
@@ -922,7 +634,7 @@ The full role library is in `./roles.yaml`. Read it during init/update to see th
 - **A `teammate_terminated` notice can be FALSE — treat any termination you did not protocol-confirm as unconfirmed** (observed 2026-07-05): the system announced "coder has shut down", the lead verified the worktree clean and respawned the role (suffixed `coder-2`), and the "terminated" coder then kept working and committed a full milestone ~25 min later — two writers in one worktree. Rules: only your own `shutdown_request` answered by `shutdown_approved` proves termination; a worktree-clean check at respawn time is NOT proof (the zombie can commit later); when respawning a role into the same worktree, put a concurrent-writer guard in the spawn prompt ("if foreign uncommitted changes or unexplained commits appear, STOP writing and report") — that guard is what caught it; if the zombie surfaces, protocol-shutdown it and freeze the legitimate writer until `shutdown_approved` arrives; the zombie's COMMITTED work is salvage, not waste — verify it adversarially and adopt it rather than reimplementing. Name-reuse corollary: a fresh spawn that reuses the dead-looking holder's name can receive that name's PENDING stale `shutdown_request` and get killed mid-task — after any same-name respawn, verify the new agent's task actually completed (check the artifact, not the report) before relying on it.
 - **Two writers in one worktree — containment and recovery** (observed 2026-07-03, same incident as the `/clear` gotcha; both writers were individually careful and it still took three rounds to contain):
   - A STOP/HOLD message can cross an agent's in-flight turn (mailboxes are read between turns): the woken agent acknowledged a HOLD, then resumed and committed anyway. Treat any stop as UNCONFIRMED until the protocol `shutdown_approved` arrives — and until it does, freeze the LEGITIMATE writer too. One live + one "stopped" writer still interleaved a sanctioned reset+cherry-pick with a fresh commit, leaving the branch mid-conflict.
-  - The lead inspects (`git log`/`status`/`reflog`) but NEVER runs state-changing git in the contested worktree — a "helpful" abort makes a third writer. The reflog is the ground truth for reconstructing who did what, and commits reset off the branch remain recoverable by SHA.
+  - The lead inspects (`git log`/`status`/`reflog`) but NEVER runs state-changing git in a worktree with a **live writer** — contested or not; see Step 3's ref-moving rule, and note "contested" was the original wording and is the wrong predicate, since a single-writer tree is exactly where a lead feels entitled to reach in. A "helpful" abort makes a third writer. The reflog is the ground truth for reconstructing who did what, and commits reset off the branch remain recoverable by SHA.
   - Before sanctioning any history rewrite in a worktree with two-writer risk, require the worker to back up uncommitted/adopted files OUTSIDE the worktree (scratchpad). That backup is what makes every subsequent surprise recoverable.
   - A stale agent that ignores bare shutdown_requests may comply when you quote the pending `request_id` and the exact protocol JSON to reply with in a plain message; that worked where two bare requests did not.
   - Once termination is protocol-confirmed, hand the surviving writer ONE explicit recovery sequence: the lead-verified current state (HEAD, tree cleanliness, which commits are off-branch but alive), numbered steps, and "report final SHAs to freeze them (no amends after)".
@@ -938,7 +650,7 @@ The full role library is in `./roles.yaml`. Read it during init/update to see th
 - **Idle is normal**: teammates go idle after every turn. Do not interpret idle as "done" or "stuck". Only act when a teammate sends a message or completes a task.
 - **Tasks vs SendMessage**: use TaskUpdate to mark progress (shared task list); use SendMessage for human-readable communication. Do not send structured JSON status payloads via SendMessage.
 - **The shared task list can vanish mid-run** (observed: lead's `TaskUpdate` returned "Task not found" and a teammate saw its task entry disappear, mid-session, with the team still healthy). Treat git state + SendMessage reports as the source of truth; the task list is a coordination convenience. Teammates should report findings via SendMessage directly when their task entry is missing instead of stalling, and the lead should not block any flow step on task-list bookkeeping succeeding.
-- **Stale duplicate message re-deliveries** (observed ~5x in one session, 2026-06-12): teammates can receive a re-delivered copy of an earlier dispatch AFTER completing it — sometimes minutes later, sometimes after the task entry has vanished from the store. Correct teammate behavior: recognize it (HEAD unchanged, work already reported), take NO action, and reply that the prior verdict stands. Correct lead behavior: confirm "stale duplicate, no re-dispatch — your verdict stands" and never treat the re-delivery as new scope or respawn-worthy. A side effect to watch: a re-delivered pre-flag list can wake the coder into an UNREQUESTED extra work round — if uncommitted WIP appears with no dispatch behind it, check its worktree/task state, then require the standard finish-the-loop (gate, commit, report tip SHA) rather than aborting it. The INVERSE crossing is equally routine (observed ~4x in one session, 2026-07-05): a lead's "you still owe X" nudge crosses the worker's completion report in flight. Correct worker behavior: re-verify the LIVE state (`git rev-parse HEAD`, `git log`, the artifact itself) and reply with that evidence — never redo or re-commit already-landed work. Correct lead behavior: check the worktree/artifact immediately before nudging, and on discovering the crossing, ack "in sync, nothing owed" so the worker doesn't reconcile further. Prevention (observed 3x in one run, 2026-07-05): new requirements dispatched while a worker is MID-TURN frequently cross and go unactioned — prefer queueing new items until the worker's next report, and after any mid-turn dispatch verify the item actually appears in that report (or on disk) before proceeding; if it crossed twice, re-send it as a standalone single-item task while the worker has nothing else in flight. Expect this at EVERY milestone handoff, not occasionally: the next-task dispatch sent right after receiving a completion report crossed the worker's post-report idle transition on all four handoffs in one run (2026-07-13) — the standalone re-send while the worker sat idle recovered each one first try, so treat crossing+re-send as the normal handoff cost, not an anomaly to diagnose. A specific, avoidable re-delivery trigger (observed 3x in one run, 2026-07-10): the lead's own `TaskUpdate` bookkeeping (setting owner/status on a task) WAKES the named idle agent, which reads the assignment as new scope and re-reports already-completed work — do task-list bookkeeping BEFORE the SendMessage dispatch (or accept skipping it), and answer the resulting "already done" reply with the standard "in sync, nothing owed" ack. **Confirmed again 2026-07-16 (5x in ONE milestone), and the recovery held every time**: the standalone re-send to an idle worker recovered each one first try, and in all five the worker correctly checked live state and reported "already done" rather than redoing the work. Treat it as the normal cost of a fast review loop, not a defect to chase. The lead-side cheap fix is the one already stated — **verify the artifact immediately before dispatching, not before composing**: three of the five were the lead verifying at SHA `N`, writing a long dispatch, and sending it after the worker had reached `N+1`. Re-check the tip as the last act before send.
+- **Stale duplicate message re-deliveries and mid-turn crossing.** Mechanism: mailboxes are read BETWEEN turns, so a dispatch races a turn boundary and a re-delivered copy can arrive after the work is done. Symptom: an item in a multi-item message goes unactioned, or a worker is woken to re-report finished work — including by the lead's own `TaskUpdate` bookkeeping, so do that BEFORE the dispatch or skip it. Recovery: a standalone SINGLE-ITEM re-send to an idle worker, which has landed first try in every recorded instance (2026-06-12, 07-05 x2, 07-13, 07-16, 08-03). Correct worker behaviour on a stale duplicate is to re-verify live state (`git rev-parse HEAD`, the artifact) and reply with that evidence — never redo landed work; correct lead behaviour is to ack "in sync, nothing owed". **The removal, not the coping strategy, is Step 4's one-actionable-item-per-message rule — read that instead of managing this.**
 - **A teammate's `SendMessage({to: "main"})` report can bounce — you get only its idle notification, not the body.** Observed repeatedly (2026-06-16, across multiple background review agents): a background teammate's report addressed to `main` is silently dropped/rejected, so the lead receives only the `idle_notification` (which carries a short summary preview), NOT the findings body. Do NOT act on the summary preview as if it were the report. SendMessage the teammate (it is idle and resumable by name) asking it to RE-SEND its full findings to `main`; the resend usually arrives. In the spawn prompt, tell teammates to fall back to replying directly to the team-lead if `to: main` bounces (they often self-diagnose it: "the `to: main` route is rejected for me, routing through you").
 - **Message timestamps are UTC; teammate-quoted wall-clock times are LOCAL.** Teammate/system JSON messages carry UTC timestamps, while human-facing times a teammate relays (e.g. a rate-limit notice "resets 4:10pm (Europe/Bucharest)") are in the user's local timezone. Never derive "time until X" by comparing a quoted local time against message timestamps — run `date` for the actual local clock before scheduling any wait (observed 2026-07-05: a 2.5h wait timer was set for a reset that had already passed).
 - **Session-limit teammate failure is recoverable — do not respawn.** A teammate dying with idleReason `failed` + "You've hit your session limit" is the account-wide usage cap, not a crash. The same agent resumes by name via a plain SendMessage once the limit lifts (respawning costs the `-N` suffix and the accumulated context). Meanwhile other agents and fresh spawns may still work — keep read-only validation and other pipeline stages moving instead of blocking the whole run. The failure message names the reset time — note it. If the dead worker sat on the critical path, the lead may take over MECHANICAL steps only (a plain merge, a file rename, running gates, a push) to keep landing on schedule; anything semantic (conflict resolutions with judgment, test-fixture reconciliation, code fixes) waits for the reset and goes back to the worker — and whatever the lead DID resolve by hand gets a sanity review from the resumed worker before the next gate (observed 2026-07-05: coder died mid-landing; lead merged main + renumbered a migration, then handed the two semantic test breaks back to the reset coder with "review my three conflict resolutions" — clean). The 401 variant behaves the same: idleReason `failed` + "401 Invalid authentication credentials" (expired/limited OAuth token) is an auth outage, not a crash — before assuming lost work, check the worktree: the final dispatch may be fully committed (observed 2026-07-15: coder completed its renumber + stack teardown, committed, THEN died on 401; the lead only had to do the mechanical push + MR).
