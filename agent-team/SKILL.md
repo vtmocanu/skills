@@ -277,7 +277,7 @@ Use when `/agent-team <task description>` is invoked with a non-keyword first ar
 The session already has one implicit team — there is nothing to create. Go straight to planning the task list.
 
 Create team-level tasks via TaskCreate:
-- Task #0: **design critique** (owners: reviewer + auditor, and architect if the roster has one) — blocks #1. Close it with a written reason when the change is small enough not to need one. This is a task for the same reason the roster sweep below is: it fires ONCE, at the moment you are already enumerating work, and a skip then LEAVES AN ARTIFACT somebody can contradict. Step 3 explains what the wave is for; this line is what makes it binding.
+- Task #0: **design critique** (owners: reviewer + auditor, and architect if the roster has one) — blocks every implementation task. Close it with a written reason when the change is small enough not to need one. This is a task for the same reason the roster sweep below is: it fires ONCE, at the moment you are already enumerating work, and a skip then LEAVES AN ARTIFACT somebody can contradict. Step 3 explains what the wave is for; this line is what makes it binding.
 
 **HOW to close a skipped task, because the tool has no state for it and this rule failed on its own first run.** `TaskUpdate`'s statuses are `pending | in_progress | completed | deleted` — there is **no "closed with a reason"**. So write the reason into the record:
 
@@ -289,11 +289,29 @@ TaskUpdate({taskId, status: "completed",
 A reason stated only in conversation is **not an artifact** and does not satisfy this rule: the whole point of the paragraph below is that a later reader can see the decision and contradict it, and a chat message is invisible to every teammate and to the reflect pass. Setting `completed` on work that was genuinely *not done* is equally wrong — that is a false record, not a skip. If the step should have run and did not, leave it `pending`, say so, and surface it.
 
 Observed 2026-08-02, on the first run after this task was added (a downstream project): the lead told the user it had "closed #6 and #9 with written reasons", never called `TaskUpdate`, and **three of nine tasks ended `pending` with no reason anywhere**. One of them was `specs/` sync, which Step 4 declares mandatory — so a prescribed step silently did not run and nothing recorded it. The reflect pass found it by reading `TaskList`; nobody else could have. **Add the check to Step 5 cleanup**, which already calls `TaskList` for `in_progress`: a task left `pending` at the end of a run is an unmade decision, not a skip.
-- Task #1: implementation (owner: coder)
-- Task #2: review (owner: reviewer, blockedBy: #1)
-- Task #3: audit (owner: auditor, blockedBy: #1)
-- Task: spec sync (owner: spec-keeper, blockedBy: #2 + #3) - only if spec-keeper role exists
-- Task #4: release (owner: release, blockedBy: #2 + #3, user-gated) - only if release role exists
+- Task #1: implementation (owner: coder) — **ONE TASK PER UNIT. The count comes from the decomposition, not from this list.** Most work is one unit and stops here, producing exactly the graph these five bullets describe. Where the work splits into file-disjoint units, create one implementation task per unit and name that unit's file scope in the task description — that scope is the boundary the coder's own body already enforces.
+- Task #2: review (owner: reviewer, blockedBy: #1) — **one per implementation task, each blocked on ITS OWN unit.** A single review task blocked on all of them cannot start while any other unit is still building, and that wait is the entire cost this shape exists to remove.
+- Task #3: audit (owner: auditor, blockedBy: #1) — same: one per implementation task, blocked on its own unit.
+- Task: **integrated pass** (owners: reviewer + auditor, blockedBy: every implementation task) — **create this ONLY when there is more than one unit.** With one unit the per-unit review IS the pass over the whole diff, and a second task is noise on the common path. With N units it is not optional: every per-unit validator was scoped to a diff that is not the diff being shipped, so cross-unit interaction is exactly what none of them could see.
+- Task: spec sync (owner: spec-keeper, blockedBy: every #2 + #3, and the integrated pass where one exists) - only if spec-keeper role exists
+- Task #4: release (owner: release, blockedBy: every #2 + #3, and the integrated pass where one exists, user-gated) - only if release role exists
+
+**One unit is the default and costs nothing.** N=1 yields Task #0-#4 as listed, no integrated pass, no extra decision. The branch is available, not required. Note also that with N>1 the design freezes when the FIRST coder spawns, not the last: Step 3's frozen-spec rule is about a spec somebody has started building against, and after that a design change is a new wave for every unit, not a message to the one that has not started yet.
+
+**A per-unit validator task needs a per-unit SHA, and only one of the two parallel modes hands you one.** Step 4 requires review scope pinned to explicit commit SHAs; `roles.yaml`'s coder body says a coder in parallel mode does not `git commit`. Both are right, and they only compose once you have said which mode you are running:
+
+- **Per-worker worktrees and branches** (Step 3's *Parallel same-repo waves*): the worker commits on its own branch, so its unit already has a SHA. Dispatch that unit's validators against it, and before merging verify the branch ref equals the worker's last reported SHA — the same section's `(detached HEAD)` check, which exists because a follow-up commit on a detached HEAD merges as the stale pre-fix code.
+- **Several coders in ONE shared worktree**: nobody commits, so there is no SHA to pin and that unit's validator task cannot start on its own. The lead commits the unit's reported edits by explicit path — the integrate step the coder body already assigns it — and dispatches the validators against THAT commit. Per-unit review here means one LEAD commit per unit, not one coder commit per unit.
+
+If neither describes what you actually set up, the split is not settled yet; settle it before creating the tasks, because the graph you are about to build encodes the answer either way.
+
+**Where the split rules live, and why they are not restated here.** The test for whether units are genuinely disjoint, the file-scope boundary each coder honours, and the no-commit / no-repo-wide-gate contract in parallel mode are all already written, in places the lead and the coder each read:
+
+- `roles.yaml`, the `coder` body: the hard file-scope boundary, and the rule that in parallel mode a coder does not `git commit` and does not run gate/build/test commands beyond code it exclusively owns — *"the lead integrates, commits, and runs the repo-wide gate after all parallel units land."*
+- `roles.yaml`, the `architect` body (section C): the decomposition contract — a dependency graph that maximises safe parallelism, and what a SEAM milestone owes every downstream milestone that consumes it.
+- Step 3's **Parallel same-repo waves** (explicit worktree setup, merge-time SHA verification, cherry-pick over reimplement) and Step 4's **Pipeline milestones across review waves** (do not idle the coder while a wave runs).
+
+A copy of any of them here would drift from the original, and nothing in this repo can detect that: `scripts/validate_skills.py` checks frontmatter only. Point at them; do not paste them.
 
 **Then create a task for EVERY OTHER ROLE IN THE ROSTER WHOSE TRIGGERS FIRE ON THIS CHANGE, and close the ones you are not dispatching WITH A WRITTEN REASON.** Not a dispatch — a task. Tester when the change alters behavior; web-ux when it touches a web interface; architect on a new or changed contract; documenter when docs change; fact-checker when the change carries claims; spec-keeper when `specs/` exists. Closing one takes a sentence: `web-ux: skipped — no reachable instance` is a legitimate close. Leaving it uncreated is not.
 
@@ -304,6 +322,8 @@ Observed 2026-08-02, on the first run after this task was added (a downstream pr
 This does NOT force a dispatch. Skipping a role is often right. What it forbids is skipping one silently.
 
 **WRITE THE ROSTER SWEEP INTO THE DURABLE BRIEF AT THE SAME MOMENT, as a `## Roster` section — one line per role, dispatched or closed-with-reason.** Two writes, one of which survives.
+
+**That section carries ONE MORE LINE: the unit split from the top of this step** — `units: 1 — one file, no split`, or `units: 3 — api/, web/, docs/`. Writing "1" is not a decision, it is the record that no decision was needed, so the single-unit path costs one sentence in a section you are already writing. What it buys is what Task #0 and the sweep buy: a lead that fanned out where the units were not disjoint, or serialised where they were, has left a line somebody can contradict. A split that exists only in the lead's head is invisible to the reflect pass by construction, and that pass (Mode 4 item 7) is the only thing that measures whether any of this worked — it reads this line first.
 
 **The task list is documented-volatile and this rule depends on it entirely.** Gotchas already records that the shared task list can vanish mid-run; measured 2026-08-02, it did — `TaskList` returned "No tasks found" at cleanup, so Step 5's mandated check for tasks left `pending` was **unperformable**, and four written closure reasons were unrecoverable. Every justification for this rule ("a later reader can see the decision and contradict it"; "the reflect pass found it by reading `TaskList`") rests on a store this same file calls a coordination convenience. The brief is durable by the Step 1 precheck; write it there too and the rule stops depending on the store.
 
@@ -604,6 +624,7 @@ Run it as a dedicated read-only reviewer subagent so the critique is not colored
 - the repo's current `.claude/agents/*.md` (roster, `version:`s, and each `## For this repo` tail),
 - the library at `./roles.yaml` (source of truth for generic bodies + current versions),
 - a summary of THIS session: what the team did, where a teammate struggled, missing-context surfaces, any mid-run role-file hotfix (Step 6.A), and tasks that had no good owner.
+- **the durable brief's path and the work branch name**, so item 7 below has something to read. Without these the pass can describe the session but cannot measure it.
 
 Ask it to return a structured proposal — findings only, no file edits:
 
@@ -619,6 +640,17 @@ Ask it to return a structured proposal — findings only, no file edits:
    The mechanism is structural, not a matter of diligence: **teammates cold-start and read their role file; nobody reads the manifest.** This file says so itself in Step 4 ("teammates cold-start and never read this file themselves"), and it is measurable — `grep -rn 'agent-team.md' .claude/agents/*.md` in one mature repo returned **one** hit, a passing citation. So a rule living only in the manifest is unenforced on teammates **by construction**, however well written.
 
    Measured 2026-08-02 (a downstream project), twice in one session and independently: the manifest already carried *"STAGE BY PATH. Never `git add -A`…"* (added a week earlier) and *"Apply the screen PER CLAIM… the credibility is borrowed from the neighbour"* (added twelve days earlier). The coder then did `git add -A` and swept another agent's file; the reviewer independently re-derived the credibility rule from its own two misses and reported it as a new finding. Both rules were right, both were present, neither bound. In the same window that manifest had grown from 163 to 1948 lines. **More prose in a file nobody is required to read cannot fix a rule that is already in it.**
+
+7. **Concurrency and wall clock — the numbers, from the artifacts that survived the run.** Every other item on this list is a judgement; this one is arithmetic, and it is the only item that can tell a later reader whether a workflow change helped or merely felt better. Report:
+
+   - **Unit split**: the `units:` line from the brief's `## Roster` section, and the number of implementation tasks the run actually created. A `units: 3` next to one implementation task is a finding in itself.
+   - **Peak concurrency**: the largest number of teammates simultaneously dispatched-and-not-yet-reported, per the `## Roster` lines and the dispatch record.
+   - **Wall clock**: first dispatch to the last gate on the integrated tree, from `git log --format='%h %aI %s' <base>..<work-branch>`, plus the span of each implementation lane.
+   - **Idle implementer time**: spans where the coder held no dispatched work while a validator wave ran. This is what Step 4's pipelining rule targets, so it is the number that says whether the rule fired.
+
+   **Label every figure `measured` or `recalled`, and never blend them into one range.** Commit timestamps are measured; dispatch and completion times are the lead's recollection unless they were written down, and the task list is documented-volatile — this file records a session where `TaskList` returned "No tasks found" at cleanup. A recalled figure is still worth reporting; a recalled figure presented as measured is exactly the defect the rest of this file exists to prevent, and it would be self-inflicted here.
+
+   **Report the numbers even when nothing changed, and especially then.** A run with peak concurrency 1 on a single-unit task is the correct outcome, not a null result, and it is the baseline every multi-unit run gets compared against. Skipping the item because the session was ordinary is how the comparison never becomes possible.
 
 Present the proposal to the user as a numbered list and STOP. Apply nothing without confirmation. On acceptance:
 

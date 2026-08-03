@@ -31,11 +31,17 @@ You coordinate the team via Agent (name + subagent_type) to spawn teammates,
 SendMessage to communicate, and the Task* tools to track work. The session
 has ONE implicit team; there is nothing to create or delete.
 
-Default flow for a typical task:
+Default flow for a typical task. The authoritative task graph is `SKILL.md`
+Mode 3 Step 2; this is a summary of it, never a second copy to maintain.
 1. Spawn coder with the full task context. The coder runs `<test-command>`
-   before reporting done.
-2. After coder reports done, spawn reviewer + auditor IN PARALLEL with
-   coder's diff + report.
+   before reporting done. ONE coder per file-disjoint unit. Most tasks are
+   one unit; the count comes from the split, not from this list.
+2. As each unit reports done, spawn reviewer + auditor IN PARALLEL on THAT
+   unit's diff + report. Do not hold them for the other units: a validator
+   blocked on all of them waits on work it will never look at. Where there
+   is more than one unit, add an integrated pass over the combined diff
+   after the last unit lands, because cross-unit interaction is precisely
+   what a per-unit review was not scoped to see.
 3. Resolve any blocking findings (route them back to coder via SendMessage).
 4. <if release role exists> Before delegating to release, summarize what to
    verify end-to-end and STOP for user confirmation.

@@ -6,6 +6,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- `agent-team`: **Mode 3 Step 2's task graph now follows the decomposition instead of hardcoding one implementation task.** The graph the lead builds was serial, and it disagreed with `roles.yaml`'s parallel coder contract, with Step 3's "Parallel same-repo waves" section, and with Step 4's pipelining rule 116 lines further down. A task graph is executed rather than read, so the serial one won. Implementation is now one task per file-disjoint unit, each validator task blocks on its own unit rather than on all implementation, and a multi-unit run adds an integrated pass over the combined diff. A single-unit task produces exactly the previous graph with no extra decision, and the split rules are referenced in `roles.yaml` and Steps 3 and 4 rather than copied into Step 2. The lead states the unit split as one line in the brief's `## Roster` section.
+- `agent-team`: **Mode 4 reflect now returns concurrency and wall-clock numbers** (item 7), read from the brief's roster lines and `git log` on the work branch, with every figure labelled measured or recalled. Reflect already produced dated session observations; it produced no timing data at all, so no workflow change to the team's parallelism could be compared against anything.
+- `agent-team`: `manifest-template.md`'s default flow matches the new graph and points at Mode 3 Step 2 as authoritative rather than restating it. The release steps and their user-confirmation gate are unchanged.
+
+### Added
+
+- Repository: `.github/CONTRIBUTING.md` documents this repo's own `prds/` convention (naming, required sections, milestone-checkbox discipline), which no document described. Note that adding `prds/` matches the `agent-team` `architect` role's `triggers_on`, so a team generated for this repository now selects an architect.
+
 ## [0.18.0] - 2026-08-03
 
 Seventeen commits had accumulated on `main` since 0.17.0 without a release, so this entry covers the whole backlog. Every role body moved; a consumer regenerating from this release should expect an `/agent-team update` to report most of its roster stale.
