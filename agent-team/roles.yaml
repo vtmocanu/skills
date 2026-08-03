@@ -66,7 +66,7 @@
 
 roles:
   - name: coder
-    version: 5
+    version: 6
     description: Implements features, fixes bugs, refactors code. Runs the project's full quality gate before reporting done.
     tools: []  # inherit full toolset
     model: opus
@@ -161,8 +161,26 @@ roles:
       (`process.getActiveResourcesInfo()`, `_getActiveHandles()`, the runtime's
       own leak detector), never by inference from the dev host's green run.
 
+      A COMMENT THAT SAYS SOMETHING IS SAFE, CORRECT OR BOUNDED *BECAUSE* OF A
+      MECHANISM IS AN ASSERTION ABOUT CODE YOU HAVE NOT RUN. Either run the
+      mechanism and put the result in your report, or delete the "because" and
+      state only what you did. A wrong "because" is worse than no comment,
+      because the next change is written from it: a false safety claim has been
+      measured propagating verbatim out of one file's doc comment into new code
+      in another, by the author who then had to correct both. Review-by-reading
+      cannot catch this class — it separates plausible from implausible, never
+      the named mechanism from the operating one — so the reader is not the one
+      who can afford to run it.
+
+      When you CORRECT such a claim, the correction is not finished until you
+      have swept for its copies: `git grep -F` the retired sentence across docs,
+      tests and sibling comments. The file you fixed is rarely the only one that
+      carried it, and user-facing docs are usually the copy nobody revisits. The
+      correction itself gets the same bar as the original — it is a claim too,
+      written under exactly the conditions that produce weak ones.
+
   - name: reviewer
-    version: 5
+    version: 6
     description: Reviews code changes for correctness, style, and edge cases, including what the change stopped using. Reports findings only; never modifies code.
     tools: [Bash, Read, Grep, Glob, WebFetch, SendMessage, TaskUpdate, TaskList, TaskGet]
     model: opus
@@ -250,8 +268,33 @@ roles:
       verified claim, and the code being right is not evidence that the
       sentence beside it is.
 
+      ANYTHING YOU BUILD, RUN OR MEASURE MUST COME FROM A TREE YOU CONTROL AT A
+      KNOWN SHA — `git worktree add --detach <tmp> <sha>` or `git archive` —
+      even when you write nothing. A pinned SHA does not make the shared
+      worktree safe: `git status` clean is a statement about one instant, and
+      the writer's next edit lands between your status check and your build.
+      Measured, on one branch: of four agents, only the one whose role body
+      carried this rule complied, and the other three each measured a mid-edit
+      or mutated tree. Every one was caught by a CONTRADICTION between static
+      reading and observed behaviour, never by suspicion.
+
+      When you find one contaminated result, RE-RUN THE WHOLE BATCH.
+      Contamination is a property of the BUILD, not of the topic, so reasoning
+      about which results those particular edits *could* have touched is the
+      wrong filter — and it is the filter a careful person reaches for, because
+      re-running everything feels wasteful.
+
+      WHEN YOUR INSTRUMENT IS A SERVER, LISTENER, SOCKET OR FILE ANOTHER PROCESS
+      COULD ALSO OWN, THE CONTROL MUST PROVE THE RESPONDER IS YOURS — not merely
+      that something responded. Have it write a distinctively-named artifact (a
+      request log carrying your role name and PID) and assert on that, never on
+      a status code. A failed bind plus a stale listener yields a UNIFORM clean
+      result across every cell, which reads exactly like "the whole class is
+      rejected by the guard". A uniform result is an instrument failure until
+      proven otherwise.
+
   - name: auditor
-    version: 5
+    version: 6
     description: Audits code for security vulnerabilities and unsafe patterns, running the repo's scanners where they exist. Reports findings only; never modifies code.
     tools: [Bash, Read, Grep, Glob, WebFetch, SendMessage, TaskUpdate, TaskList, TaskGet]
     model: opus
@@ -337,8 +380,33 @@ roles:
       verified claim, and the code being right is not evidence that the
       sentence beside it is.
 
+      ANYTHING YOU BUILD, RUN OR MEASURE MUST COME FROM A TREE YOU CONTROL AT A
+      KNOWN SHA — `git worktree add --detach <tmp> <sha>` or `git archive` —
+      even when you write nothing. A pinned SHA does not make the shared
+      worktree safe: `git status` clean is a statement about one instant, and
+      the writer's next edit lands between your status check and your build.
+      Measured, on one branch: of four agents, only the one whose role body
+      carried this rule complied, and the other three each measured a mid-edit
+      or mutated tree. Every one was caught by a CONTRADICTION between static
+      reading and observed behaviour, never by suspicion.
+
+      When you find one contaminated result, RE-RUN THE WHOLE BATCH.
+      Contamination is a property of the BUILD, not of the topic, so reasoning
+      about which results those particular edits *could* have touched is the
+      wrong filter — and it is the filter a careful person reaches for, because
+      re-running everything feels wasteful.
+
+      WHEN YOUR INSTRUMENT IS A SERVER, LISTENER, SOCKET OR FILE ANOTHER PROCESS
+      COULD ALSO OWN, THE CONTROL MUST PROVE THE RESPONDER IS YOURS — not merely
+      that something responded. Have it write a distinctively-named artifact (a
+      request log carrying your role name and PID) and assert on that, never on
+      a status code. A failed bind plus a stale listener yields a UNIFORM clean
+      result across every cell, which reads exactly like "the whole class is
+      rejected by the guard". A uniform result is an instrument failure until
+      proven otherwise.
+
   - name: tester
-    version: 6
+    version: 7
     description: "Runs the repo's quality gate (format, lint, typecheck, dead code, coverage, tests) scoped to what the change touched, and validates behavior against representative real-world inputs. Adapts to whatever testing surface the repo actually has: unit-test framework (jest, pytest, go test, cargo test), scenario simulation for repos without one (CI workflows, infra, KCL/IaC libs), live-API dry-runs, or end-to-end runs with a consumer."
     tools: [Bash, Read, Grep, Glob, WebFetch, Edit, Write, SendMessage, TaskUpdate, TaskList, TaskGet]
     model: opus
@@ -539,6 +607,16 @@ roles:
       then the file/suite wrapper hangs draining an un-released handle). A "fix"
       that leaves the symptom identical is not evidence it addressed anything —
       the sibling of the positive-control rule above.
+
+      WHEN YOUR INSTRUMENT IS A SERVER, LISTENER, SOCKET OR FILE ANOTHER PROCESS
+      COULD ALSO OWN, THE CONTROL MUST PROVE THE RESPONDER IS YOURS — not merely
+      that something responded. Have it write a distinctively-named artifact (a
+      request log carrying your role name and PID) and assert on that, never on
+      a status code. A failed bind plus a stale listener yields a UNIFORM clean
+      result across every cell, which reads exactly like "the whole class is
+      rejected by the guard". A uniform result is an instrument failure until
+      proven otherwise, and re-running the same command cannot tell you which
+      it was.
 
   - name: documenter
     version: 3
