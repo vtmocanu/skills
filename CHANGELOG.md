@@ -6,9 +6,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-08-03
+
+Workflow-only. **No role body changed and no role `version:` moved**, so a consumer regenerating from this release will NOT see its roster reported stale: `/agent-team update` stays quiet and the change is in how the lead drives the team, not in what the teammates are told.
+
 ### Added
 
 - `agent-team`: Mode 3 Step 4 now covers dispatching a validator at an **uncommitted working tree**, which the neighbouring "pin review scope to explicit commit SHAs" rule silently did not. There is no SHA to pin, so the validator checks a tree the author is still editing and its findings land against a state that no longer exists. Snapshot first (`git stash create` yields a throwaway commit object without touching the tree), dispatch at the snapshot, and name it in the prompt. The cost is paid twice: findings cannot be sorted into live-versus-already-fixed, and the validator loses the ability to claim independence, since a fact-checker that re-derives a mechanism before reading your assertion has corroborated you while one that reads it first can only agree. Which of those you get becomes an accident of timing rather than a property of the check. Validated 2026-08-03 on a PRD edit rewritten twice under two running validators: the fact-checker had to segregate its verdicts into EARLY (correct at the state it read, target since deleted) versus current, and observed that its strongest finding "only counts as corroboration because I happened to reach it before the file changed under me".
+- Repository: `.github/CONTRIBUTING.md` documents this repo's own `prds/` convention (naming, required sections, milestone-checkbox discipline), which no document described. Note that adding `prds/` matches the `agent-team` `architect` role's `triggers_on`, so a team generated for this repository now selects an architect.
 
 ### Changed
 
@@ -16,10 +21,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `agent-team`: **Mode 4 reflect now returns concurrency and wall-clock numbers** (item 7), read from the brief's roster lines and `git log` on the work branch, with every figure labelled measured or recalled. Reflect already produced dated session observations; it produced no timing data at all, so no workflow change to the team's parallelism could be compared against anything.
 - `agent-team`: `manifest-template.md`'s default flow matches the new graph and points at Mode 3 Step 2 as authoritative rather than restating it. The release steps and their user-confirmation gate are unchanged.
 - `agent-team`: **only the read-only wave may overlap the lead's integration gate**, never a second implementation unit, and the contention cost is now counted against the gate rather than only against the clock. A sibling project running this same fan-out shape measured one suite at 36.1s to 79.8s on a constant test tally, and 33.8s to 89.6s on another, pushing into timeouts that had already been raised because of contention. A gate that reddens intermittently is weaker verification than a slow one, because the documented human response is to re-run and the retry destroys the evidence. Mode 4 reflect item 7 gains a gate-flakiness figure so a run that got faster while acquiring a flaky gate cannot read as an improvement.
-
-### Added
-
-- Repository: `.github/CONTRIBUTING.md` documents this repo's own `prds/` convention (naming, required sections, milestone-checkbox discipline), which no document described. Note that adding `prds/` matches the `agent-team` `architect` role's `triggers_on`, so a team generated for this repository now selects an architect.
 
 ## [0.18.0] - 2026-08-03
 
