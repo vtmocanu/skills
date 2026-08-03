@@ -79,7 +79,7 @@ Note on version numbers: `roles.yaml` states one bump per release, not one per e
 
 ### Changed
 
-- `agent-team`: backported uzi's parallel-mode `coder` contract into the library `coder` body (file-scope hard boundary; no `git commit` in parallel mode; the lead integrates, commits, and runs the repo-wide gate), reconciled with the clean-tree gate. Folded into `coder` `version: 1`.
+- `agent-team`: backported a downstream project's parallel-mode `coder` contract into the library `coder` body (file-scope hard boundary; no `git commit` in parallel mode; the lead integrates, commits, and runs the repo-wide gate), reconciled with the clean-tree gate. Folded into `coder` `version: 1`.
 
 ## [0.14.0] - 2026-07-17
 
