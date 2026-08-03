@@ -73,6 +73,17 @@ touch ~/.dippy/OFF   # bypass Dippy
 rm ~/.dippy/OFF      # re-enable
 ```
 
+On this Mac, prefer the wrapper script (`mackup/scripts/dippy-toggle.sh`, on `PATH` via `~/scripts`), which does the same thing plus reports state and warns if `settings.json` has stopped routing hooks through `dippy-with-auto-fallback.sh` (in which case the marker file is a no-op):
+
+```bash
+dippy-toggle.sh          # status (default)
+dippy-toggle.sh off      # bypass Dippy
+dippy-toggle.sh on       # re-enable
+dippy-toggle.sh toggle   # flip
+```
+
+`~/.dippy` is a symlink into the mackup repo, so the marker lands at `confs/.dippy/OFF`; it is gitignored on purpose (machine-local state, not synced config).
+
 No restart is needed in either direction: Claude Code caches the hook *command* from settings.json at startup, but the *script* is re-read on every invocation, so the toggle applies to the running session immediately. (Editing the hook entries in settings.json, by contrast, does require a restart.)
 
 While `~/.dippy/OFF` exists the wrapper emits nothing and `exit 0`s for every event, so:
@@ -92,7 +103,7 @@ So it is a genuine safety-off switch, not a noise filter. Prefer narrower altern
 Verify the current state:
 
 ```bash
-# is the kill-switch on?
+# is the kill-switch on?  (or just: dippy-toggle.sh status)
 ls -la ~/.dippy/OFF 2>/dev/null && echo "DIPPY BYPASSED" || echo "dippy active"
 
 # end-to-end check (empty output = bypassed; JSON decision = active)
@@ -343,7 +354,7 @@ fd -H -t f '^\\.dippy$' ~/stuff/gitrepos/wxs/
 | Read/WebFetch denied | Missing entry in settings.json (not Dippy) | Add to `permissions.allow` in settings.json |
 | JSON parse error after settings edit | Malformed JSON | Run `jq .` to find syntax errors |
 | Afterthought not firing | Missing PostToolUse hook | Add PostToolUse Bash matcher in settings.json |
-| No rules fire at all: `deny` ignored, guidance messages gone | Kill-switch left on — `~/.dippy/OFF` exists, wrapper exits before running dippy | `rm ~/.dippy/OFF` (see [Kill-switch](#kill-switch-temporarily-disabling-dippy)); takes effect immediately, no restart |
+| No rules fire at all: `deny` ignored, guidance messages gone | Kill-switch left on — `~/.dippy/OFF` exists, wrapper exits before running dippy | `dippy-toggle.sh on` (or `rm ~/.dippy/OFF`; see [Kill-switch](#kill-switch-temporarily-disabling-dippy)); takes effect immediately, no restart |
 | Afterthought not firing **in auto mode only** | Wrapper predating the `hook_event_name` check: its auto-mode filter forwards only `allow`/`deny`/`[ASK]`-tagged `ask`, and dippy emits afterthoughts as **plain text** with no `permissionDecision`, so they were dropped. Fixed 2026-07-26 — the wrapper now pipes any non-`PreToolUse` event straight to `dippy`, so pointing PostToolUse at either the wrapper or bare `dippy` works | Update your clone of `dippy-with-auto-fallback.sh` |
 | Rule with glob chars doesn't match commands with extra args | Patterns with `*`/`?`/`[` lose implicit trailing ` *` prefix matching; must match entire command | Add explicit trailing ` *` to your glob pattern (v0.2.7+ matches bare commands too) |
 | `bash -c` / `python3 -c` bypasses rules | `allow bash` prefix-matches all `bash -c '...'` commands; Dippy doesn't trace into `-c` args | Remove `allow bash`/`allow python3`/`allow node`; let them fall to `set default ask` |
