@@ -642,6 +642,13 @@ roles:
     triggers_on:
       - ".forgejo/workflows/**"
       - ".github/workflows/**"
+      # GitLab is a first-class forge and was missing here entirely, so a repo
+      # whose only release signal is a tag-gated `.gitlab-ci.yml` never matched.
+      # Same false-positive profile as `.github/workflows/**` above (a CI config
+      # exists in most repos, release flow or not) — the lead confirms at the
+      # Step 4 proposal either way.
+      - ".gitlab-ci.yml"
+      - ".gitlab/**"
       - "docs/releasing.md"
       - "docs/RELEASE.md"
       - "RELEASING.md"

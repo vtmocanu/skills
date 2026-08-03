@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- `agent-team`: the `release` role's `triggers_on` had no GitLab pattern, so a repo whose only release signal is a tag-gated `.gitlab-ci.yml` never matched and the role was silently left out of the roster at init. Added `.gitlab-ci.yml` and `.gitlab/**` alongside the existing Forgejo and GitHub workflow globs. Found on a repo that publishes images, a Helm chart and a CLI on `$CI_COMMIT_TAG`, documents the full tag-then-bump-`targetRevision` GitOps procedure, and still had no releaser: exactly the two-step flow the role's body was written for. No `version:` bump, because `triggers_on` is read fresh from the library at init/update and is never stamped into a generated `.claude/agents/<role>.md`; bumping would flag every existing `release.md` as stale for a no-op body replacement.
+
 ## [0.17.0] - 2026-07-20
 
 ### Changed
