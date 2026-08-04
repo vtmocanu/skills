@@ -40,7 +40,7 @@ Dippy runs as a PreToolUse hook (configured in settings.json) for both `Bash` an
 
 ### Auto-mode fallback wrapper
 
-The wrapper reads `permission_mode` from the hook payload and branches:
+The wrapper reads `permission_mode` from the hook payload and branches (this is the behavior in the default **ACTIVE** state; see [Three states](#three-states-active--allow-only--disabled) for the two marker-file states that pre-empt it):
 
 - **Non-auto modes** (`default`, `acceptEdits`, `plan`, etc.): the payload is handed straight to `dippy`. Normal behavior, `ask` rules surface an interactive prompt to the user.
 - **`auto` mode**: the wrapper runs `dippy`, inspects the decision, and forwards **only**:
@@ -60,31 +60,54 @@ The wrapper reads `permission_mode` from the hook payload and branches:
 
 Worked example from the current config: `ask git push "[ASK] Confirm push target"` (has `[ASK]`) prompts the human even in auto mode, but `ask git commit "Confirm commit"` and `ask git add "Confirm staging"` (no `[ASK]`) are silently handled by the auto-classifier in auto mode, no prompt. When authoring a new `ask` rule, decide deliberately whether it needs `[ASK]`: write/destructive operations that must always reach a human should carry it.
 
-### Kill-switch: temporarily disabling Dippy
+### Three states: ACTIVE / ALLOW-ONLY / DISABLED
 
-The wrapper checks for a sentinel file **before** reading the payload:
+Dippy has no enable/disable flag of its own (`dippy --help`, v0.2.7). The state lives in two marker files that the wrapper checks per invocation:
+
+| State | Marker | What the wrapper forwards | Net effect |
+|---|---|---|---|
+| **ACTIVE** (default) | none | `allow`, `deny`, and `ask` (plain `ask` filtered in auto mode, per the table above) | Full ruleset, full guardrails |
+| **ALLOW-ONLY** | `~/.dippy/ALLOW_ONLY` | `allow` only | Whitelist skips the host's auto classifier; **everything else** is decided by it |
+| **DISABLED** | `~/.dippy/OFF` | nothing, for every event | Dippy bypassed end to end |
+
+`OFF` wins if both markers exist. `~/.dippy` is a symlink into the mackup repo, so the markers land at `confs/.dippy/`; both are gitignored on purpose (machine-local state, not synced config).
+
+No restart is needed for any transition: Claude Code caches the hook *command* from settings.json at startup, but the *script* is re-read on every invocation, so a switch applies to the running session immediately. (Editing the hook entries in settings.json, by contrast, does require a restart.)
+
+On this Mac, prefer `mackup/scripts/dippy-toggle.sh` (on `PATH` via `~/scripts`) over touching the markers by hand. It reports state, keeps the two markers mutually exclusive, and warns if `settings.json` has stopped routing hooks through `dippy-with-auto-fallback.sh` or if the wrapper it points at is a stale clone with no `ALLOW_ONLY` branch (in either case the marker is a no-op):
 
 ```bash
-[ -f "${HOME}/.dippy/OFF" ] && exit 0
+dippy-toggle.sh              # status (default)
+dippy-toggle.sh on           # ACTIVE      - full dippy (clears both markers)
+dippy-toggle.sh allow-only   # ALLOW-ONLY  - whitelist only
+dippy-toggle.sh off          # DISABLED    - bypass dippy
+dippy-toggle.sh toggle       # flip on <-> off
+dippy-toggle.sh cycle        # rotate active -> allow-only -> off -> active
 ```
+
+#### ALLOW-ONLY: whitelist-only, a noise filter
+
+The wrapper runs dippy, forwards the verdict only when it is `allow`, and emits nothing otherwise:
 
 ```bash
-touch ~/.dippy/OFF   # bypass Dippy
-rm ~/.dippy/OFF      # re-enable
+[ -f "${HOME}/.dippy/ALLOW_ONLY" ] && forward only `allow`
 ```
 
-On this Mac, prefer the wrapper script (`mackup/scripts/dippy-toggle.sh`, on `PATH` via `~/scripts`), which does the same thing plus reports state and warns if `settings.json` has stopped routing hooks through `dippy-with-auto-fallback.sh` (in which case the marker file is a no-op):
+A hook `allow` short-circuits the host's permission flow, so whitelisted commands never reach the auto classifier — that is the point of the state. Everything not on the whitelist falls through to whatever the host would have done: the classifier in `auto` mode, an ordinary prompt in the other modes.
 
-```bash
-dippy-toggle.sh          # status (default)
-dippy-toggle.sh off      # bypass Dippy
-dippy-toggle.sh on       # re-enable
-dippy-toggle.sh toggle   # flip
-```
+**`deny` rules and `[ASK]` escalations do NOT fire in this state.** Verified against dippy 0.2.7 on 2026-08-04:
 
-`~/.dippy` is a symlink into the mackup repo, so the marker lands at `confs/.dippy/OFF`; it is gitignored on purpose (machine-local state, not synced config).
+| Command | ACTIVE verdict | ALLOW-ONLY: what Claude sees |
+|---|---|---|
+| `cat /etc/hosts` | `allow` | `allow` — classifier skipped |
+| `kubectl get pods` | `allow` | `allow` — classifier skipped |
+| `helm install foo bar` | `deny` ("Use GitOps…") | nothing — classifier decides |
+| `brew install foo` | `ask` `[ASK]` | nothing — classifier decides |
+| `some-unknown-tool --wat` | `ask` | nothing — classifier decides |
 
-No restart is needed in either direction: Claude Code caches the hook *command* from settings.json at startup, but the *script* is re-read on every invocation, so the toggle applies to the running session immediately. (Editing the hook entries in settings.json, by contrast, does require a restart.)
+PostToolUse afterthoughts still fire in ALLOW-ONLY (they are guidance text, not a permission decision, and the event check runs before the filter).
+
+#### DISABLED: a safety-off switch, not a noise filter
 
 While `~/.dippy/OFF` exists the wrapper emits nothing and `exit 0`s for every event, so:
 
@@ -92,10 +115,11 @@ While `~/.dippy/OFF` exists the wrapper emits nothing and `exit 0`s for every ev
 - `allow` rules stop firing too, so in **non-auto** modes routine commands start prompting (more prompts, not fewer). In **auto** mode everything falls to auto-mode's own classifier, which usually runs commands without prompting.
 - Afterthoughts go silent too, since the kill-switch fires before the event check.
 
-So it is a genuine safety-off switch, not a noise filter. Prefer narrower alternatives when they fit:
+Prefer narrower alternatives when they fit:
 
 | Goal | Better tool than the kill-switch |
 |---|---|
+| Keep the fast-path allows but stop all dippy prompts | `dippy-toggle.sh allow-only` (note: drops `deny` too) |
 | Stop prompts in one repo | `set default allow` in that repo's `.dippy` (global `deny` rules still fire) |
 | Stop prompts for one command | `allow <cmd>` rule in the project `.dippy` |
 | Swap the whole ruleset for a run | `DIPPY_CONFIG=/path/to/other-config claude` |
@@ -103,11 +127,15 @@ So it is a genuine safety-off switch, not a noise filter. Prefer narrower altern
 Verify the current state:
 
 ```bash
-# is the kill-switch on?  (or just: dippy-toggle.sh status)
-ls -la ~/.dippy/OFF 2>/dev/null && echo "DIPPY BYPASSED" || echo "dippy active"
+# which state?  (or just: dippy-toggle.sh status)
+ls -la ~/.dippy/OFF ~/.dippy/ALLOW_ONLY 2>/dev/null
 
-# end-to-end check (empty output = bypassed; JSON decision = active)
-printf '%s' '{"permission_mode":"default","tool_name":"Bash","tool_input":{"command":"rm -rf /tmp/x"}}' \
+# end-to-end check — a denied command (empty = bypassed or allow-only; JSON deny = active)
+printf '%s' '{"permission_mode":"default","tool_name":"Bash","tool_input":{"command":"helm install foo bar"}}' \
+  | ~/stuff/gitrepos/gh/vtmocanu/skills/agent-permissions/dippy-with-auto-fallback.sh
+
+# end-to-end check — a whitelisted command (JSON allow = active or allow-only; empty = bypassed)
+printf '%s' '{"permission_mode":"default","tool_name":"Bash","tool_input":{"command":"cat /etc/hosts"}}' \
   | ~/stuff/gitrepos/gh/vtmocanu/skills/agent-permissions/dippy-with-auto-fallback.sh
 ```
 
@@ -354,7 +382,9 @@ fd -H -t f '^\\.dippy$' ~/stuff/gitrepos/wxs/
 | Read/WebFetch denied | Missing entry in settings.json (not Dippy) | Add to `permissions.allow` in settings.json |
 | JSON parse error after settings edit | Malformed JSON | Run `jq .` to find syntax errors |
 | Afterthought not firing | Missing PostToolUse hook | Add PostToolUse Bash matcher in settings.json |
-| No rules fire at all: `deny` ignored, guidance messages gone | Kill-switch left on — `~/.dippy/OFF` exists, wrapper exits before running dippy | `dippy-toggle.sh on` (or `rm ~/.dippy/OFF`; see [Kill-switch](#kill-switch-temporarily-disabling-dippy)); takes effect immediately, no restart |
+| No rules fire at all: `deny` ignored, guidance messages gone | Kill-switch left on — `~/.dippy/OFF` exists, wrapper exits before running dippy | `dippy-toggle.sh on` (or `rm ~/.dippy/OFF`; see [Three states](#three-states-active--allow-only--disabled)); takes effect immediately, no restart |
+| `allow` rules fire but `deny` and `[ASK]` do not, and afterthoughts still work | ALLOW-ONLY state left on — `~/.dippy/ALLOW_ONLY` exists, wrapper forwards only `allow` | `dippy-toggle.sh on` restores full guardrails; `dippy-toggle.sh status` reports the state |
+| `dippy-toggle.sh allow-only` reports ALLOW-ONLY but `deny` rules still block | `settings.json` points at a wrapper clone predating the `ALLOW_ONLY` branch (added 2026-08-04) | Update your clone of `dippy-with-auto-fallback.sh`; `dippy-toggle.sh status` warns about this automatically |
 | Afterthought not firing **in auto mode only** | Wrapper predating the `hook_event_name` check: its auto-mode filter forwards only `allow`/`deny`/`[ASK]`-tagged `ask`, and dippy emits afterthoughts as **plain text** with no `permissionDecision`, so they were dropped. Fixed 2026-07-26 — the wrapper now pipes any non-`PreToolUse` event straight to `dippy`, so pointing PostToolUse at either the wrapper or bare `dippy` works | Update your clone of `dippy-with-auto-fallback.sh` |
 | Rule with glob chars doesn't match commands with extra args | Patterns with `*`/`?`/`[` lose implicit trailing ` *` prefix matching; must match entire command | Add explicit trailing ` *` to your glob pattern (v0.2.7+ matches bare commands too) |
 | `bash -c` / `python3 -c` bypasses rules | `allow bash` prefix-matches all `bash -c '...'` commands; Dippy doesn't trace into `-c` args | Remove `allow bash`/`allow python3`/`allow node`; let them fall to `set default ask` |
