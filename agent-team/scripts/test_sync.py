@@ -27,6 +27,8 @@ import tempfile
 import textwrap
 import unittest
 
+import yaml
+
 HERE = pathlib.Path(__file__).resolve().parent
 SYNC = HERE / "sync.py"
 
@@ -666,6 +668,183 @@ class TestReplaceShapedHandEdit(SyncTestCase):
         self.run_sync("apply", "alpha")
         backup = self.agents / "alpha.md.pre-sync"
         self.assertEqual(stat.S_IMODE(os.stat(backup).st_mode), 0o600)
+
+
+# ---------------------------------------------------------------------------
+# Invariants and real-data corpus.
+#
+# Everything above pins a specific defect, which means every fixture above was
+# authored by someone who already knew what they were looking for. That is the
+# failure mode this whole file exists because of: a fixture drawn from the same
+# mental model as the code inherits its blind spots, and two independent
+# reviewers plus the author all built append-shaped fixtures for a defect that
+# only appears in replace-shaped input.
+#
+# The two classes below are the antidote, and each attacks a different half:
+#   - INVARIANTS come from the contract, not from anyone's idea of the input,
+#     so they hold for inputs nobody thought of.
+#   - The CORPUS is real historical data, so it contains shapes nobody would
+#     have invented. Every finding in this project's review that no authored
+#     fixture reached came from a corpus.
+# ---------------------------------------------------------------------------
+
+
+class TestInvariants(SyncTestCase):
+    """Properties that must hold for EVERY input, not for a chosen one."""
+
+    CASES = {
+        "stale, clean body": dict(version="1", tail="Repo rule."),
+        "stale, no tail": dict(version="1"),
+        "stale, reworded line": dict(
+            version="1",
+            body="Alpha generic body line one.\nAlpha generic body line two, older.",
+            tail="Repo rule.",
+        ),
+        "stale, extra line": dict(
+            version="1", body=ALPHA_BODY + "\nEXTRA", tail="Repo rule."
+        ),
+        "stale, empty body": dict(version="1", body="", tail="Repo rule."),
+        "no version key": dict(version=None, tail="Repo rule."),
+        "crlf file": dict(version="1", tail="Repo rule."),
+    }
+
+    def _write(self, label):
+        kwargs = dict(self.CASES[label])
+        newline = "\r\n" if label == "crlf file" else "\n"
+        return self.write("alpha", agent_file(**kwargs), newline=newline)
+
+    def test_apply_is_idempotent(self):
+        for label in self.CASES:
+            with self.subTest(case=label):
+                path = self._write(label)
+                self.assertIn(self.run_sync("apply", "alpha").returncode, (0, 1))
+                once = path.read_bytes()
+                self.run_sync("apply", "alpha")
+                self.assertEqual(path.read_bytes(), once, "apply is not idempotent")
+
+    def test_check_is_clean_after_apply(self):
+        for label in self.CASES:
+            with self.subTest(case=label):
+                self._write(label)
+                if self.run_sync("apply", "alpha").returncode != 0:
+                    continue  # a refusal is a valid outcome; it leaves drift
+                self.assertEqual(
+                    self.run_sync("check").returncode, 0,
+                    "apply succeeded and check still reports drift",
+                )
+
+    def test_the_tail_is_byte_identical_across_apply(self):
+        for label in self.CASES:
+            with self.subTest(case=label):
+                path = self._write(label)
+                before = AgentFileTail(path)
+                if self.run_sync("apply", "alpha").returncode != 0:
+                    continue
+                self.assertEqual(AgentFileTail(path), before, "the tail moved")
+
+    def test_apply_on_an_already_current_file_is_a_byte_no_op(self):
+        self.write("alpha", agent_file(version="2", tail="Repo rule."))
+        path = self.agents / "alpha.md"
+        before = path.read_bytes()
+        self.assertEqual(self.run_sync("apply", "alpha").returncode, 0)
+        self.assertEqual(path.read_bytes(), before)
+
+
+def AgentFileTail(path):
+    """The tail as BYTES. Not via AgentFile.tail, which is decoded text — the
+    point of the invariant is that the bytes on disk did not move."""
+    raw = path.read_bytes()
+    marker = b"\n## For this repo"
+    return raw[raw.index(marker):] if marker in raw else None
+
+
+class TestHistoricalCorpus(unittest.TestCase):
+    """Every past revision of the real library, synced to the current one.
+
+    This is the instrument that caught what no authored fixture did: that the
+    round-2 predicate refused 11 of 11 roles on a real bump, and that the
+    round-3 predicate fired on 0 of 119 real (role, release) pairs. It needs no
+    imagination — the inputs are in git.
+
+    Skips (rather than fails) outside a git checkout of this repo, so the file
+    stays runnable from a tarball.
+    """
+
+    MAX_REVISIONS = 8  # newest first; the whole history is ~23 and slow
+
+    @classmethod
+    def setUpClass(cls):
+        cls.repo = pathlib.Path(__file__).resolve().parents[2]
+        cls.library = cls.repo / "agent-team" / "roles.yaml"
+        if not (cls.repo / ".git").exists() or not cls.library.exists():
+            raise unittest.SkipTest("not a git checkout of the skills repo")
+        out = subprocess.run(
+            ["git", "-C", str(cls.repo), "log", "--format=%H", "--",
+             "agent-team/roles.yaml"],
+            capture_output=True, text=True,
+        )
+        cls.revisions = out.stdout.split()[: cls.MAX_REVISIONS]
+        if not cls.revisions:
+            raise unittest.SkipTest("no history for roles.yaml")
+
+    def _roster_from(self, rev, dest):
+        blob = subprocess.run(
+            ["git", "-C", str(self.repo), "show", f"{rev}:agent-team/roles.yaml"],
+            capture_output=True, text=True,
+        ).stdout
+        roles = yaml.safe_load(blob)["roles"]
+        for role in roles:
+            tools = f"tools: {', '.join(role['tools'])}\n" if role.get("tools") else ""
+            model = f"model: {role['model']}\n" if role.get("model") else ""
+            # QUOTED via yaml.dump. Writing `description: {value}` bare is a
+            # fixture defect that produced a BAD-FM refusal, which was then
+            # published as a real measurement.
+            desc = yaml.dump({"description": role["description"]},
+                             default_flow_style=False).strip()
+            (dest / f"{role['name']}.md").write_text(
+                f"---\nname: {role['name']}\nversion: {role['version']}\n"
+                f"{desc}\n{tools}{model}---\n\n"
+                + role["prompt_body"].rstrip("\n")
+                + "\n\n## For this repo\n\nSENTINEL: repo-owned tail.\n"
+            )
+        return [r["name"] for r in roles]
+
+    def test_every_past_revision_syncs_with_the_tail_intact(self):
+        for rev in self.revisions:
+            with self.subTest(revision=rev[:9]):
+                tmp = pathlib.Path(tempfile.mkdtemp(prefix="corpus-"))
+                self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+                agents = tmp / ".claude" / "agents"
+                agents.mkdir(parents=True)
+                names = self._roster_from(rev, agents)
+
+                for name in names:
+                    proc = subprocess.run(
+                        [sys.executable, str(SYNC), "apply", name,
+                         "--library", str(self.library), "--force"],
+                        capture_output=True, text=True, cwd=str(tmp),
+                    )
+                    # --force covers the equal-version case, which is a
+                    # legitimate refusal and not what this test is about.
+                    self.assertEqual(
+                        proc.returncode, 0,
+                        f"{rev[:9]}/{name} would not sync:\n{proc.stderr}",
+                    )
+                    text = (agents / f"{name}.md").read_text()
+                    self.assertIn(
+                        "SENTINEL: repo-owned tail.", text,
+                        f"{rev[:9]}/{name} lost its tail",
+                    )
+
+                after = subprocess.run(
+                    [sys.executable, str(SYNC), "check",
+                     "--library", str(self.library)],
+                    capture_output=True, text=True, cwd=str(tmp),
+                )
+                self.assertEqual(
+                    after.returncode, 0,
+                    f"{rev[:9]} still reports drift after syncing:\n{after.stdout}",
+                )
 
 
 if __name__ == "__main__":
