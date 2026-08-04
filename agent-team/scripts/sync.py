@@ -21,17 +21,17 @@ because a comparison that shares the reader's newline normalization cannot
 observe the one corruption this step is most likely to introduce.
 
 Exit codes:
-    0  no drift (check), or applied cleanly with nothing dropped (apply)
+    0  no drift (check), or applied (apply). NOTE that a successful apply
+       REPLACES the generic body, so anything a human edited into the
+       library-owned half is gone; every replaced file gets a `.pre-sync`
+       backup named on stdout. There is deliberately no separate status
+       for that — it is the normal outcome, not an exceptional one.
     1  drift found (check), or nothing applied because a guard fired (apply).
        Every guard, including the version stamp, runs over every named role
        before the first byte is written, so a GUARD refusal never leaves a
        partial batch. It is not a promise about every path that can return 1:
        an uncaught exception is 1 too, because that is Python's exit code for a
        traceback.
-    3  applied, but body lines the library lacked were DROPPED (apply). Each
-       affected file is named on stdout with a `.pre-sync` backup beside it.
-       Not an error — but it is not "clean" either, and a caller that only
-       tests for 0 must not read it as such.
     2  the instrument itself failed — unreadable library, unreadable file,
        malformed library entry, bad arguments. From `apply` it also covers a
        write error or a failed post-write verification, where earlier roles in
@@ -398,33 +398,34 @@ def compare(agent: AgentFile, role: dict | None) -> tuple[str, list[str]]:
         # repo-specifics.
         notes.append("no tail (nothing repo-specific to preserve)")
 
+    # ORDER IS THE CONTRACT: each status must predict what `apply` does to
+    # THIS file. BAD-FM and an equal-version difference are both REFUSALS, so
+    # they have to be decided before LEGACY, which promises the opposite ("the
+    # body is replaced and these lines go"). Ranking LEGACY first made the row
+    # a false statement about the two files it refuses — the same defect that
+    # ranking BAD-FM below STALE produced two rounds ago, re-entered through
+    # statement order rather than through a gate.
+    if agent.error:
+        return "BAD-FM", notes
+
+    if not stale:
+        if body_differs or metadata_differs or tools_incomplete:
+            # Equal version, content differs: `apply` refuses without --force.
+            # A distinct category from staleness and invisible to a version
+            # comparison. It may be an improvement worth sending back to the
+            # library — the next sync destroys it either way, so it has to be
+            # visible before anyone decides.
+            return "MODIFIED", notes
+        return "ok", notes
+
     if adds:
-        # Reported for every file, tail or no tail. The status must predict what
-        # `apply` DOES — it drops these lines and says so — rather than being
-        # gated on a property (having a tail) that the write path does not
-        # consult.
         notes.append(
-            f"{adds} line(s) the library lacks — apply DROPS them; check "
-            f"whether any is repo-specific"
+            f"{adds} line(s) the library lacks — apply replaces the body, so "
+            f"they go; a backup is written"
         )
         return "LEGACY", notes
 
-    if agent.error:
-        # Not "ok". Claude Code's loader tolerates this file, so it works in use
-        # and looks fine; a stricter downstream parser rejects it outright, and
-        # the copy that works is exactly the one that hides the defect.
-        # Outranks STALE deliberately: `apply` refuses this file, so a row
-        # reading STALE would send the reader to a command that will not run.
-        return "BAD-FM", notes
-    if stale:
-        return "STALE", notes
-    if body_differs or metadata_differs or tools_incomplete:
-        # Equal version, content differs: a distinct category from staleness and
-        # invisible to a version comparison. It may be an improvement worth
-        # sending back to the library — the next sync destroys it either way, so
-        # it has to be visible before anyone decides.
-        return "MODIFIED", notes
-    return "ok", notes
+    return "STALE", notes
 
 
 def cmd_check(agents_dir: pathlib.Path, roles: dict) -> int:
@@ -645,22 +646,43 @@ def cmd_apply(
         # What still refuses: a body differing at EQUAL version, immediately
         # below. There the difference is UNEXPLAINED, which is the actual
         # signal that someone edited the file by hand.
-        adds, _ = body_delta(agent, role)
+        adds, dels = body_delta(agent, role)
+        body_differs = normalized(agent.generic).strip() != normalized(role["prompt_body"]).strip()
+
+        # The backup is keyed on the body being REPLACED AT ALL, not on any
+        # measure of how it differs. Three rounds moved that threshold and each
+        # time the untested side of it was the one that broke: gated on having
+        # no tail (too narrow), then on `adds` counting `replace` (so broad it
+        # refused 11 of 11 roles on a real bump), then on `adds` counting
+        # `insert` only — which is blind to a human EDITING a library line in
+        # place, because that produces the same `replace` opcode as the library
+        # rewording it.
+        #
+        # Measured over every historical roles.yaml revision in this repo: of
+        # 119 (role, release) pairs whose body differs, the insert-only warning
+        # fired on ZERO, and 99 carried a `replace` that would have been dropped
+        # silently. A compensating control with a measured firing rate of zero
+        # on real data is not a control.
+        #
+        # No predicate can separate "the library reworded this" from "a human
+        # edited this" — the opcodes are identical. So stop trying to, and make
+        # the UNDO unconditional instead. A backup costs one file and asks the
+        # operator for no decision, which is the property that makes it immune
+        # to the reflex that defeats guards.
         backup = None
         warnings = []
-        if adds:
+        if body_differs:
             backup = path.with_name(path.name + ".pre-sync")
             warnings.append(
-                f"{name}: {adds} line(s) in the generic body are not in the "
-                f"library and WILL BE DROPPED. Most often they are just the "
-                f"previous release's wording, which is what a sync is for — but "
-                f"if any is repo-specific it belongs in the `## For this repo` "
-                f"tail. `sync.py diff {name}` lists them, and the file as it was "
-                f"is kept at {backup.name}. Do NOT rely on `git diff` here: if "
-                f"the line was not committed, it is in no git object at all."
+                f"{name}: the generic body is being REPLACED (+{adds}/-{dels} "
+                f"lines). Most of that is the previous release's wording, which "
+                f"is what a sync is for — but anything a human edited into the "
+                f"library-owned body goes with it, and nothing can tell the two "
+                f"apart. The file as it was is kept at {backup.name}; diff "
+                f"against that. Do NOT rely on `git diff`: if the change was "
+                f"not committed, it is in no git object at all."
             )
 
-        body_differs = normalized(agent.generic).strip() != normalized(role["prompt_body"]).strip()
         if body_differs and agent.version == role["version"] and not force:
             print(
                 f"{name}: body differs at EQUAL version {agent.version} — this is a "
@@ -761,20 +783,19 @@ def cmd_apply(
         )
 
     if dropped_lines:
+        # No exit code here, and that is a reversal of the previous round.
+        # A distinct status was right while "content was dropped" was a rare,
+        # detectable event. Once the predicate was corrected it fires on every
+        # ordinary sync — apply's whole job is replacing bodies — so a nonzero
+        # status would mean "it worked", which is worse than no signal. The
+        # backup and the per-file line carry it instead.
         print(
-            "\nBODY LINES WERE DROPPED. Each affected file is named above with "
-            "its `.pre-sync` backup; diff against that, not against git, and "
-            "delete the backups once you have checked them."
+            "\nBodies were replaced. Each file above names its `.pre-sync` "
+            "backup — diff against that, not against git, and delete the "
+            "backups once you have checked them."
         )
-        # A distinct code, because exit 0 is documented as "applied cleanly" and
-        # an agent branching on the status is the reason the contract exists.
-        # Measured: eleven files could lose a repo-specific line each while
-        # every stdout line said "preserved" and the status said 0.
-        return 3
-    print(
-        "\nverify with `git diff` — the only deletions should be the old "
-        "version lines"
-    )
+    else:
+        print("\nno body changed; only the version stamp moved")
     return 0
 
 
