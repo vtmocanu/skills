@@ -20,6 +20,19 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
+          # The historical-corpus test walks past revisions of roles.yaml. With
+          # the default shallow checkout it still passes — over however few
+          # revisions the clone happens to contain — so it would report the same
+          # test name as the local run while covering less.
+          fetch-depth: 0
 
       - name: Validate skill frontmatter
         run: python3 scripts/validate_skills.py .
+
+      # validate_skills.py reads frontmatter and never opens a .py file, so it
+      # was green on a tree containing every defect this suite now covers.
+      - name: Install sync.py's only dependency
+        run: python3 -m pip install --disable-pip-version-check pyyaml
+
+      - name: Test agent-team/scripts/sync.py
+        run: python3 agent-team/scripts/test_sync.py
