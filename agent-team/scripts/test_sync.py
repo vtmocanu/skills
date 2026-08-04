@@ -771,6 +771,7 @@ class TestHistoricalCorpus(unittest.TestCase):
     """
 
     MAX_REVISIONS = 8  # newest first; the whole history is ~23 and slow
+    MIN_REVISIONS = 5  # below this the test is covering ~nothing
 
     @classmethod
     def setUpClass(cls):
@@ -786,6 +787,18 @@ class TestHistoricalCorpus(unittest.TestCase):
         cls.revisions = out.stdout.split()[: cls.MAX_REVISIONS]
         if not cls.revisions:
             raise unittest.SkipTest("no history for roles.yaml")
+        # The coverage of this test must be a property of the TEST, not of the
+        # checkout that happens to run it. Under a shallow clone the list is
+        # non-empty but tiny: it would run over one revision, pass, and print
+        # the same test name as a full run — the "same name, different
+        # coverage" trap this suite exists to catch, arriving through CI config
+        # rather than through code. `fetch-depth: 0` in the workflow is the
+        # mitigation; this assertion is what notices when that decision is
+        # changed somewhere else.
+        assert len(cls.revisions) >= cls.MIN_REVISIONS, (
+            f"only {len(cls.revisions)} revision(s) of roles.yaml are reachable "
+            f"— a shallow clone? This test needs history to cover anything."
+        )
 
     def _roster_from(self, rev, dest):
         blob = subprocess.run(
