@@ -255,16 +255,51 @@ class TestInlineTuningWarning(SyncTestCase):
     def test_the_line_is_dropped_with_a_warning_naming_the_count(self):
         self.write("alpha", agent_file(body=self.HAND, tail="Repo rule."))
         proc = self.run_sync("apply", "alpha")
-        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.returncode, 3, proc.stderr)
         self.assertIn("WILL BE DROPPED", proc.stderr)
         self.assertIn("1 line(s)", proc.stderr)
         self.assertNotIn("HAND WRITTEN", self.body_of("alpha"))
         self.assertIn("Repo rule.", self.body_of("alpha"), "the tail must survive")
 
+    def test_a_drop_is_visible_on_stdout_and_in_the_exit_code(self):
+        """Eleven files could lose a line each while every stdout line said
+        `preserved` and the status said 0 — the two channels a caller reads."""
+        self.write("alpha", agent_file(body=self.HAND, tail="Repo rule."))
+        proc = self.run_sync("apply", "alpha")
+        self.assertEqual(proc.returncode, 3)
+        self.assertIn("1 body line(s) DROPPED", proc.stdout)
+        self.assertIn("alpha.md.pre-sync", proc.stdout)
+
+    def test_the_dropped_content_is_recoverable_from_the_backup(self):
+        """`git diff` is not a recovery path here: with the roster committed and
+        the tuning added since, it shows one deletion — the version line — which
+        is the drop-free all-clear signature."""
+        self.write("alpha", agent_file(body=self.HAND, tail="Repo rule."))
+        self.assertEqual(self.run_sync("apply", "alpha").returncode, 3)
+        backup = self.agents / "alpha.md.pre-sync"
+        self.assertTrue(backup.exists(), "no backup written")
+        self.assertIn("HAND WRITTEN", backup.read_text())
+
+    def test_a_backup_is_not_picked_up_as_an_agent_file(self):
+        """`.pre-sync` files sit in the agents directory; if check globbed them
+        they would show as CUSTOM and hold the mandatory load-time pass red."""
+        self.write("alpha", agent_file(body=self.HAND, tail="Repo rule."))
+        self.assertEqual(self.run_sync("apply", "alpha").returncode, 3)
+        self.assertTrue((self.agents / "alpha.md.pre-sync").exists())
+        proc = self.run_sync("check")
+        self.assertNotIn("pre-sync", proc.stdout)
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+
+    def test_a_clean_sync_writes_no_backup(self):
+        self.write("alpha", agent_file(tail="Repo rule."))
+        self.assertEqual(self.run_sync("apply", "alpha").returncode, 0)
+        self.assertFalse((self.agents / "alpha.md.pre-sync").exists())
+
     def test_the_closing_message_does_not_claim_only_version_lines_went(self):
         self.write("alpha", agent_file(body=self.HAND, tail="Repo rule."))
         proc = self.run_sync("apply", "alpha")
-        self.assertIn("deletions include body lines", proc.stdout)
+        self.assertIn("BODY LINES WERE DROPPED", proc.stdout)
+        self.assertNotIn("only deletions should be", proc.stdout)
 
     def test_a_clean_sync_still_claims_only_version_lines_went(self):
         self.write("alpha", agent_file(tail="Repo rule."))
@@ -276,7 +311,7 @@ class TestInlineTuningWarning(SyncTestCase):
         opposite treatment — that inconsistency was the original finding."""
         self.write("alpha", agent_file(body=self.HAND))
         proc = self.run_sync("apply", "alpha")
-        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.returncode, 3, proc.stderr)
         self.assertIn("WILL BE DROPPED", proc.stderr)
 
     def test_a_line_starting_with_plus_plus_is_counted(self):
@@ -295,7 +330,7 @@ class TestInlineTuningWarning(SyncTestCase):
     def test_force_lifts_the_equal_version_refusal(self):
         self.write("alpha", agent_file(version="2", body=self.HAND, tail="Repo rule."))
         proc = self.run_sync("apply", "alpha", "--force")
-        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.returncode, 3, proc.stderr)
         self.assertIn("Repo rule.", self.body_of("alpha"))
 
     def test_delta_counts_lines_starting_with_dashes(self):
