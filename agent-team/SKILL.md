@@ -34,12 +34,18 @@ A file with no `version:` field predates versioning; treat it as v0 (stale). Thi
 
 **Run it, do not re-derive it by hand: [`./scripts/sync.py`](scripts/sync.py) ships with this skill.**
 
+**The two paths are anchored differently, so spell the script one out.** `./scripts/sync.py` is relative to THIS FILE's directory; `--agents` defaults to `.claude/agents` relative to your CWD, which is the consumer repo. So run it from the repo being checked, giving the script's own absolute path — the directory this SKILL.md was loaded from:
+
 ```sh
-python3 ./scripts/sync.py check          # from the repo root; --agents to point elsewhere
-python3 ./scripts/sync.py diff <role>    # read one drift before deciding anything
+python3 "<this skill's directory>/scripts/sync.py" check
+python3 "<this skill's directory>/scripts/sync.py" diff <role>
 ```
 
-`check` compares version, generic body, `description`, `tools` and `model` for every file, and classifies each as `ok` / `STALE` / `MODIFIED` (equal version, content differs — see axis 3 in Mode 2) / `CUSTOM` (no library entry) / `LEGACY` (no tail AND body lines the library lacks — inline tuning) / `BAD-FM` (frontmatter that Claude Code's loader tolerates and a stricter parser rejects). It exits **0** when clean, **1** when anything drifted, **2** when the instrument itself failed — an unreadable library is not a finding about the repo, and a caller that reads it as one goes hunting for drift that was never measured. `check` and `diff` write nothing.
+A bare `python3 ./scripts/sync.py check` cannot work from either location: from the consumer repo there is no `scripts/` there, and from the skill directory `--agents` then resolves against the skill directory too.
+
+`check` classifies each file as `ok` / `STALE` / `MODIFIED` (equal version, content differs — see axis 3 in Mode 2) / `CUSTOM` (no library entry) / `LEGACY` (body lines the library lacks — inline tuning) / `BAD-FM` (frontmatter that Claude Code's loader tolerates and a stricter parser rejects) / `ERROR` (unreadable). It compares version, generic body, `description`, `tools` and `model` — with two exemptions worth knowing, because both are cases where a green covers less than it looks: a `CUSTOM` file is not compared at all, and a `BAD-FM` file has its `description`/`tools`/`model` skipped, since those values could not be read. The script says so in the row rather than leaving you to infer it.
+
+It exits **0** when clean, **1** when anything drifted, **2** when the instrument itself failed — an unreadable library is not a finding about the repo, and a caller that reads it as one goes hunting for drift that was never measured. `check` and `diff` write nothing.
 
 The script exists because this pass is prescribed as mandatory and had no tooling, so every session either re-derived an 11-file body comparison by hand or wrote a throwaway to do it — which is the shape Mode 4 calls a workflow defect: a rule that binds only when someone remembers to do it manually.
 
@@ -274,10 +280,12 @@ Use when `/agent-team update` is invoked, or when an existing team feels out of 
    Measured 2026-08-03 (a downstream project): the repo's vendored copy of these role bodies had been fixed for a defect the library still carries — subagent bodies naming an unreachable recipient, measured at 8 of 26 messages failing in real runs. The fix existed downstream for hours while `roles.yaml` shipped the defect to every other repo, because nothing in this mode asks "should this go back?".
 
 5. On confirmation, apply targeted edits:
-   - **Version bump**: `python3 ./scripts/sync.py apply <role> [<role> ...]` — replaces the generic body (everything ABOVE the `## For this repo` heading) with the current `roles.yaml` body, rewrites the frontmatter `version:`, and leaves the tail untouched. This is exactly why Step 3 keeps repo-specifics in the tail — the generic part is replaceable wholesale. The script re-reads each file after writing and aborts if the tail moved by a byte, because "the tail was preserved" is the one claim worth checking against the file rather than against the string it just built.
-   - **Legacy files with no tail split** (older generated agents, or inline hand-tuning): the boundary is not mechanical, so do NOT blind-overwrite. Read the file, separate library-origin paragraphs from manual ones, replace only the library parts, and migrate the manual repo-specifics into a new `## For this repo` tail so the NEXT update is clean. When unsure which is which, quote the paragraph and ask. `apply` refuses these on its own — but only where the body carries lines the library lacks, which is what inline tuning looks like; a tail-less file whose body is purely a stale copy of the library has nothing to preserve and syncs normally.
+   - **Version bump**: `apply <role> [<role> ...]` replaces the generic body (everything ABOVE the `## For this repo` heading) with the current `roles.yaml` body, rewrites the frontmatter `version:`, and leaves the tail untouched. This is exactly why Step 3 keeps repo-specifics in the tail — the generic part is replaceable wholesale. The script re-reads each file after writing and aborts if the tail moved, comparing BYTES: "the tail was preserved" is the one claim worth checking against the file rather than against the string it just built, and a check that compares two newline-normalized strings cannot see a CRLF file being silently rewritten.
+   - **Inline hand-tuning in the generic body** — lines the library does not have, wherever the file keeps them: `apply` refuses, because replacing the body destroys content the library cannot restore. Move them into the `## For this repo` tail and re-run. This has nothing to do with whether the file HAS a tail: two files identical but for a tail must not get opposite treatment, and a tail-less file whose body is purely a stale copy has nothing to preserve and syncs normally.
+   - **Legacy files with no tail split** (older generated agents): where the boundary is not mechanical, do NOT blind-overwrite. Read the file, separate library-origin paragraphs from manual ones, replace only the library parts, and migrate the manual repo-specifics into a new `## For this repo` tail so the NEXT update is clean. When unsure which is which, quote the paragraph and ask.
    - **A body that differs at EQUAL version** is the axis-3 case, not staleness, and `apply` refuses it too: overwriting it destroys a local change nobody decided to discard. Read it, give it the backport verdict this step already requires, then re-run with `--force` if the verdict is `keep library`.
-   - **Roster add/remove**: write or delete the role file as in init Step 5. Neither `check` nor `apply` does this — whether a role belongs is a roster decision, and the script only ever reports which library roles have no file here.
+   - **The two `--force` flags are separate on purpose.** `--force` lifts the equal-version guard only; `--force-inline` lifts the inline-tuning one and destroys those lines. One flag for both would mean an operator who decided the equal-version question for role A silently disarms the content-destroying guard for roles B and C in the same invocation.
+   - **Roster add/remove**: write or delete the role file as in init Step 5. Neither `check` nor `apply` does this — whether a role belongs is a roster decision. The script reports the gap in both directions: library roles with no file here, and files here with no library entry (`CUSTOM`, which it never touches).
 
 **Downstream vendored copies (only when you EDIT `roles.yaml` itself, NOT on a normal repo `update`).** If a downstream app vendors these role bodies as its own built-in templates (shipped-in-binary defaults, seeded into a DB, etc.), a change to a role's generic body/description/tools/model in `roles.yaml` — or a new role — leaves that copy behind. When you make such a `roles.yaml` edit, propose re-syncing the downstream copy: apply the same generic-body change there, preserve each copy's own `## For this repo` tail and any built-ins it owns that have no `roles.yaml` equivalent, and mirror new roles across. Note that a downstream parser may be stricter than Claude Code's loader and reject the `version:` frontmatter key; such a copy carries the new body content but needs its own change before it can store the version stamp. This is a proposal gated like any `roles.yaml` edit; never auto-commit into another repo. (Concrete downstream targets and their tracking issues are kept out of this public file; check the maintainer's notes.)
 
@@ -782,15 +790,18 @@ Reflect NEVER runs automatically at session end (no hook exists for that) — it
 
 The full role library is in `./roles.yaml`. Read it during init/update to see the canonical role descriptions, default tool allowlists, and `triggers_on` patterns. The library may evolve over time; the skill always reads it fresh.
 
-Three files ship with this skill, and only one of them is a document you read end to end:
+Besides this file, three others ship with the skill:
 
 | file | what it is |
 |---|---|
 | `./roles.yaml` | the role library — versioned generic bodies, descriptions, tool allowlists, `triggers_on` |
 | [`./manifest-template.md`](manifest-template.md) | the template copied into a repo as `.claude/agent-team.md` at init |
 | [`./scripts/sync.py`](scripts/sync.py) | the check/diff/apply tool for the staleness pass and the Mode 2 merge |
+| [`./scripts/test_sync.py`](scripts/test_sync.py) | its regression suite — `python3 agent-team/scripts/test_sync.py`, stdlib `unittest`, no pytest |
 
 `sync.py` needs PyYAML and nothing else; it refuses to run without it rather than hand-parsing `roles.yaml`, whose block scalars a partial parse would silently read as clean bodies it never saw.
+
+Every test in `test_sync.py` is a defect review found in the first draft of `sync.py`, written as a fixture because that is the form that would have caught it. Add one there before fixing anything in `sync.py`.
 
 ## Gotchas
 
