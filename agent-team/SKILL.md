@@ -598,15 +598,28 @@ Each teammate is a full Claude Code session with its own context window (1M for 
 
 ### Monitoring teammate context
 
-There is no native readout of a background teammate's context budget: the old pane-statusline `% of 1000k` reading needed a visible pane, which the background model does not provide. Estimate instead by **counting task boundaries since the teammate spawned**: the heavy worker (usually `coder`) typically crosses ~30% within a milestone or two. Keep spawn prompts self-contained so a recycle costs little, and gate the >30% recycle heuristic below on this count rather than a precise number.
+**You cannot read a teammate's context budget, and no workaround recovers it.** Checked against the docs 2026-08-04, because the rules below used to prescribe a percentage:
+
+- **No live readout exists.** The monitoring docs: telemetry is *"suitable for retrospective analysis and dashboarding, but not for live monitoring of an active subagent's current context state."*
+- **`TaskGet` and `TaskList` expose no token fields**, and `TaskOutput` is deprecated and warns that a local agent's `.output` is a symlink to the full transcript, which will overflow whoever reads it.
+- **OpenTelemetry cannot distinguish your teammates from each other.** `claude_code.token.usage` carries `query_source: "subagent"` and an `agent.name`, but *"user-defined agent names are replaced with `custom`"*, and every agent-team role is user-defined. All N teammates land in one bucket.
+- **A percentage is model-relative anyway**: *"a subagent's context window is sized by its own model, not the parent's."* So one number does not denote one amount across a mixed-tier roster.
+
+The old pane-statusline `% of 1000k` reading needed a visible pane, which the background model does not provide. It is not coming back: do not write a rule that depends on it.
+
+**What IS observable, and it is enough.** Primary instrument: **count the tasks you have dispatched to a teammate since it spawned.** It comes from your own record, needs no tooling, and cannot go stale. Secondary, where the harness hands you the teammate's output path at spawn: **grep that transcript for `compact_boundary`** (never `Read` it, per the overflow hazard above). Each event carries `compactMetadata.preTokens`, so a teammate that has compacted is one the harness says outgrew its window, rather than one you estimated. Treat the grep as a bonus signal; the count is what the rules below actually run on.
+
+**And note what auto-compaction implies.** Subagents compact automatically on the same logic as the main conversation, so a teammate does not fall off a cliff at some threshold, it compacts and continues. Recycling is therefore about the RELEVANCE of carried context, not about rescuing a session from overflow.
 
 ### When to recycle (heuristic)
 
-**Mandatory pre-dispatch check.** Before handing a teammate a NEW task (a fresh scope, not a fix or iteration on the task it just did), check its context budget (see Monitoring above). If it is **>30%**, recycle before dispatching: have it write a checkpoint, then either clear its context or shut it down and respawn a fresh one. Both reduce to the Recycle procedure below; a teammate has no in-place `/clear` the lead can trigger remotely, so checkpoint + shutdown + respawn-fresh IS the clear. A new task rarely needs the prior task's working memory; carrying 30%+ of now-irrelevant context degrades output quality and compounds prompt-cache cost. The heaviest worker (usually `coder`) crosses 30% within a milestone or two, so expect to recycle it at most new-task boundaries.
+**Mandatory pre-dispatch check.** Before handing a teammate a NEW task (a fresh scope, not a fix or iteration on the task it just did), **count the tasks you have dispatched to it since it spawned**. Recycle before dispatching once that count reaches **two**, i.e. before handing it a third: have it write a checkpoint, then shut it down and respawn fresh. A teammate has no in-place `/clear` the lead can trigger remotely, so checkpoint + shutdown + respawn-fresh IS the clear. The reason is relevance, not size: a new task rarely needs the prior task's working memory, and carrying two tasks' worth of now-irrelevant context degrades output. The heaviest worker (usually `coder`) reaches this within a milestone or two, so expect to recycle it at most new-task boundaries.
 
-**Force-recycle regardless of coupling** when context >85%: even on a same-track continuation, externalize via checkpoint and respawn. Cache pressure and quality drop too far past this floor to keep the session alive.
+The count is a proxy and will be wrong for a teammate whose single task was enormous. That is the cost of using an instrument that exists; the percentage it replaced could not be read at all, so it was a check nobody could perform. If you have the teammate's transcript path, a `compact_boundary` hit is stronger evidence than the count and overrides it.
 
-**Do NOT recycle (keep the teammate, ignore the 30% line) when:**
+**Force-recycle regardless of coupling** when a teammate has **compacted at least once** (grep its transcript for `compact_boundary`), or when it reports its own degradation, or when you can no longer reconstruct what it is carrying. Even on a same-track continuation, externalize via checkpoint and respawn. Note this is a weaker claim than the `>85%` figure it replaces: auto-compaction means the session is not at risk of dying, so what you are protecting is the quality of a teammate now reasoning over a summarised history rather than the record itself.
+
+**Do NOT recycle (keep the teammate, ignore the task count) when:**
 - **Mid-task**: never recycle while a task is `in_progress`.
 - **Fixes / iterations on the SAME task** the teammate just finished: routing reviewer or auditor findings back to the coder for the same diff, debugging the same code, iterating the same change. Here the carried context IS the point; recycling would force costly re-discovery. (This is the "not fixes for an old one" carve-out.)
 - **Last task before shutdown**: no payback for the recycle cost.
@@ -632,7 +645,7 @@ The respawned teammate starts fresh; the checkpoint is the bridge.
 
 ### Anti-patterns
 
-- **Recycle at NEW-task boundaries, not within a task or for same-task fixes.** Each recycle costs a cold-start prompt + checkpoint-write effort + risk of losing context that wasn't externalized. The >30% threshold gates *new-task* dispatch; it does not license recycling mid-task or per-fix.
+- **Recycle at NEW-task boundaries, not within a task or for same-task fixes.** Each recycle costs a cold-start prompt + checkpoint-write effort + risk of losing context that wasn't externalized. The task count gates *new-task* dispatch; it does not license recycling mid-task or per-fix.
 - **Recycling without a checkpoint** orphans whatever the teammate knew that wasn't in the file system.
 - **Recycling mid-task** loses working state and forces re-discovery.
 - **Recycling reviewer/auditor between dispatches** is usually wasteful: they're typically dispatched once per task they're reviewing, finish their report, and idle. Their context stays low. Coder is the one to watch.
