@@ -3,10 +3,11 @@
 
 Run: python3 agent-team/scripts/test_sync.py    (stdlib unittest; no pytest)
 
-Every test here is a defect that shipped in the first draft of sync.py and was
-found by review, not by the author. They are written as fixtures because that is
-the form that would have caught them: each one is three lines of setup, and the
-review round that found them cost considerably more.
+Most tests here pin a defect review found in a draft of sync.py; a few pin a
+property no version ever broke, and a few pin defects the suite itself caught
+after a fix over-corrected. They are written as fixtures because that is the
+form that would have caught them: each is a few lines of setup, and the review
+rounds that found them cost considerably more.
 
 The naming convention is deliberate — `test_<finding>_<what it must do now>` —
 so a failure names the defect that came back rather than the assertion that
@@ -19,6 +20,7 @@ import importlib.util
 import os
 import pathlib
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -59,6 +61,11 @@ LIBRARY = textwrap.dedent(
 
 ALPHA_TOOLS = "Bash, Read, SendMessage, TaskUpdate, TaskList, TaskGet"
 ALPHA_BODY = "Alpha generic body line one.\nAlpha generic body line two."
+BETA_BODY = (
+    "Beta generic body.\n"
+    "--oneline -3 is a line starting with two dashes.\n"
+    "++ and this one starts with two pluses."
+)
 
 
 def agent_file(version="1", body=ALPHA_BODY, tail=None, **fm):
@@ -230,43 +237,66 @@ class TestTailPreservation(SyncTestCase):
         self.assertIsNone(sync.AgentFile(self.agents / "alpha.md").tail)
 
 
-class TestInlineTuningGuard(SyncTestCase):
-    """The guard was gated on the file having no tail, so two byte-identical
-    files carrying the same hand-written paragraph got opposite treatment."""
+class TestInlineTuningWarning(SyncTestCase):
+    """Lines in the repo body that the library lacks are DROPPED with a warning,
+    not refused.
 
-    HAND = "Alpha generic body line one.\nHAND WRITTEN, MUST NOT BE LOST"
+    Refusing was measured at 17 of 51 real library edits, 11 of 11 roles on one
+    real bump, and 5 of 11 on a roster generated from an older library — the
+    tool's primary use case. `adds` cannot tell hand-written content from
+    previous-release library text: a line the library DELETED is present in the
+    consumer's older copy and looks identical to one a human added. The
+    unexplained case — a body differing at EQUAL version — is what still
+    refuses.
+    """
 
-    def test_refused_when_the_file_has_a_tail(self):
+    HAND = ALPHA_BODY + "\nHAND WRITTEN"
+
+    def test_the_line_is_dropped_with_a_warning_naming_the_count(self):
         self.write("alpha", agent_file(body=self.HAND, tail="Repo rule."))
         proc = self.run_sync("apply", "alpha")
-        self.assertEqual(proc.returncode, 1, proc.stdout)
-        self.assertIn("HAND WRITTEN", self.body_of("alpha"))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("WILL BE DROPPED", proc.stderr)
+        self.assertIn("1 line(s)", proc.stderr)
+        self.assertNotIn("HAND WRITTEN", self.body_of("alpha"))
+        self.assertIn("Repo rule.", self.body_of("alpha"), "the tail must survive")
 
-    def test_refused_when_the_file_has_no_tail(self):
+    def test_the_closing_message_does_not_claim_only_version_lines_went(self):
+        self.write("alpha", agent_file(body=self.HAND, tail="Repo rule."))
+        proc = self.run_sync("apply", "alpha")
+        self.assertIn("deletions include body lines", proc.stdout)
+
+    def test_a_clean_sync_still_claims_only_version_lines_went(self):
+        self.write("alpha", agent_file(tail="Repo rule."))
+        proc = self.run_sync("apply", "alpha")
+        self.assertIn("only deletions should be the old", proc.stdout)
+
+    def test_a_tail_less_file_is_treated_identically(self):
+        """Two files differing only in whether a tail exists must not get
+        opposite treatment — that inconsistency was the original finding."""
         self.write("alpha", agent_file(body=self.HAND))
         proc = self.run_sync("apply", "alpha")
-        self.assertEqual(proc.returncode, 1, proc.stdout)
-        self.assertIn("HAND WRITTEN", self.body_of("alpha"))
-
-    def test_plain_force_does_not_lift_it(self):
-        self.write("alpha", agent_file(body=self.HAND, tail="Repo rule."))
-        proc = self.run_sync("apply", "alpha", "--force")
-        self.assertEqual(proc.returncode, 1, proc.stdout)
-        self.assertIn("HAND WRITTEN", self.body_of("alpha"))
-
-    def test_force_inline_lifts_it(self):
-        self.write("alpha", agent_file(body=self.HAND, tail="Repo rule."))
-        proc = self.run_sync("apply", "alpha", "--force-inline")
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertNotIn("HAND WRITTEN", self.body_of("alpha"))
+        self.assertIn("WILL BE DROPPED", proc.stderr)
 
-    def test_a_line_starting_with_plus_plus_still_arms_it(self):
+    def test_a_line_starting_with_plus_plus_is_counted(self):
         """body_delta filtered unified-diff headers by prefix, which also ate
         content lines beginning ++ or --."""
-        self.write("alpha", agent_file(body="Alpha generic body line one.\n++ HAND WRITTEN"))
+        self.write("alpha", agent_file(body=ALPHA_BODY + "\n++ HAND WRITTEN"))
+        proc = self.run_sync("apply", "alpha")
+        self.assertIn("1 line(s)", proc.stderr)
+
+    def test_an_equal_version_body_difference_still_refuses(self):
+        self.write("alpha", agent_file(version="2", body=self.HAND, tail="Repo rule."))
         proc = self.run_sync("apply", "alpha")
         self.assertEqual(proc.returncode, 1, proc.stdout)
-        self.assertIn("++ HAND WRITTEN", self.body_of("alpha"))
+        self.assertIn("HAND WRITTEN", self.body_of("alpha"))
+
+    def test_force_lifts_the_equal_version_refusal(self):
+        self.write("alpha", agent_file(version="2", body=self.HAND, tail="Repo rule."))
+        proc = self.run_sync("apply", "alpha", "--force")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("Repo rule.", self.body_of("alpha"))
 
     def test_delta_counts_lines_starting_with_dashes(self):
         role = {"prompt_body": "a\n--oneline -3\nb\n"}
@@ -327,9 +357,12 @@ class TestExitCodes(SyncTestCase):
     def test_apply_returning_1_leaves_the_tree_untouched(self):
         """Guards, including the version stamp, all run before the first write."""
         self.write("alpha", agent_file(tail="Repo rule."))
-        self.write("beta", agent_file(name="beta", body="Beta generic body.\nHAND WRITTEN"))
+        self.write(
+            "beta",
+            agent_file(name="beta", version="3", body=BETA_BODY + "\nHAND WRITTEN"),
+        )
         before = self.body_of("alpha")
-        # beta's body carries library-absent lines, so the batch must refuse.
+        # beta's body differs at its EQUAL version, so the batch must refuse.
         proc = self.run_sync("apply", "alpha", "beta")
         self.assertEqual(proc.returncode, 1, proc.stdout)
         self.assertEqual(self.body_of("alpha"), before)
@@ -388,6 +421,119 @@ class TestReadOnlySubcommands(SyncTestCase):
         self.write("alpha", agent_file(tail="INTERNAL hostname db-eu-1.corp"))
         proc = self.run_sync("diff", "alpha")
         self.assertNotIn("db-eu-1.corp", proc.stdout)
+
+
+class TestStaleBodySyncs(SyncTestCase):
+    """The tool's primary use case: a consumer some releases behind, whose file
+    is a pristine copy of an OLDER library body. Every line the library has
+    since reworded is present in that file with the old wording, and an `adds`
+    predicate counting `replace` opcodes read all of them as hand-tuning —
+    refusing 11 of 11 roles on one real library bump."""
+
+    OLD_BODY = "Alpha generic body line one.\nAlpha generic body line two, older wording."
+
+    def test_a_stale_body_from_an_older_release_applies(self):
+        self.write("alpha", agent_file(version="1", body=self.OLD_BODY, tail="Repo rule."))
+        proc = self.run_sync("apply", "alpha")
+        self.assertEqual(proc.returncode, 0, "a plain stale sync was refused:\n" + proc.stderr)
+        self.assertIn("Repo rule.", self.body_of("alpha"))
+        self.assertEqual(self.run_sync("check").returncode, 0)
+
+    def test_a_reworded_library_line_is_not_treated_as_hand_tuning(self):
+        role = {"prompt_body": "a\nreworded line\nc\n"}
+        agent = type("A", (), {"generic": "a\nold wording\nc\n"})()
+        adds, dels = sync.body_delta(agent, role)
+        self.assertEqual(adds, 0, "a replaced line must not count as an addition")
+        self.assertEqual(dels, 1)
+
+    def test_check_marks_an_inline_tuned_file_LEGACY_even_with_a_tail(self):
+        """`check` must predict what `apply` DOES. The status used to be gated
+        on the file having no tail while the write path never consulted it."""
+        self.write("alpha", agent_file(body=ALPHA_BODY + "\nHAND WRITTEN", tail="Repo rule."))
+        proc = self.run_sync("check")
+        self.assertIn("LEGACY", proc.stdout)
+
+
+class TestWriteSafety(SyncTestCase):
+    def test_a_read_only_file_is_refused(self):
+        """open(..., "w") needed write permission on the FILE; os.replace only
+        needs it on the DIRECTORY, so making the write atomic silently removed
+        this protection."""
+        path = self.write("alpha", agent_file(tail="Repo rule."))
+        before = path.read_bytes()
+        os.chmod(path, 0o444)
+        self.addCleanup(os.chmod, path, 0o644)
+        proc = self.run_sync("apply", "alpha")
+        self.assertEqual(proc.returncode, 1, proc.stdout)
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_mode_survives_the_atomic_replace(self):
+        path = self.write("alpha", agent_file(tail="Repo rule."))
+        os.chmod(path, 0o600)
+        self.assertEqual(self.run_sync("apply", "alpha").returncode, 0)
+        self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
+
+    def test_a_symlink_inside_the_agents_dir_is_refused(self):
+        """Path.resolve() follows symlinks, so a check on the resolved path is
+        unreachable; the case it missed rewrites another role's file."""
+        victim = self.write("beta", agent_file(name="beta", tail="Beta rule."))
+        before = victim.read_bytes()
+        os.symlink(victim, self.agents / "alpha.md")
+        proc = self.run_sync("apply", "alpha")
+        self.assertEqual(proc.returncode, 1, proc.stdout)
+        self.assertEqual(victim.read_bytes(), before)
+
+    def test_the_crlf_version_line_keeps_its_carriage_return(self):
+        self.write("alpha", agent_file(tail="Repo rule."), newline="\r\n")
+        self.assertEqual(self.run_sync("apply", "alpha").returncode, 0)
+        raw = (self.agents / "alpha.md").read_bytes()
+        self.assertIn(b"version: 2\r\n", raw)
+        self.assertNotIn(b"version: 2\n", raw.replace(b"version: 2\r\n", b""))
+
+
+class TestLibraryValidation(SyncTestCase):
+    def test_a_null_value_is_an_instrument_failure_not_drift(self):
+        """Emptying a block scalar while editing roles.yaml is an ordinary slip.
+        It used to land as a traceback with exit 1, i.e. "drift found"."""
+        for key in ("description", "prompt_body"):
+            with self.subTest(key=key):
+                # Written out rather than patched into LIBRARY: commenting the
+                # `|` off a block scalar leaves the indented lines behind as a
+                # folded plain scalar, which is a perfectly good string and
+                # tests nothing.
+                self.library.write_text(
+                    "roles:\n"
+                    "  - name: alpha\n"
+                    "    version: 2\n"
+                    + (f"    {key}:\n" if key == "description" else "    description: d\n")
+                    + (f"    {key}:\n" if key == "prompt_body" else "    prompt_body: b\n")
+                )
+                self.write("alpha", agent_file())
+                proc = self.run_sync("check")
+                self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
+                self.assertNotIn("Traceback", proc.stderr)
+
+    def test_a_wrong_typed_value_is_an_instrument_failure(self):
+        self.library.write_text(
+            "roles:\n  - name: alpha\n    version: two\n"
+            "    description: d\n    prompt_body: b\n"
+        )
+        self.write("alpha", agent_file())
+        proc = self.run_sync("check")
+        self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
+        self.assertNotIn("Traceback", proc.stderr)
+
+
+class TestDiffContainment(SyncTestCase):
+    def test_diff_refuses_a_path_outside_the_agents_dir(self):
+        """diff does not write, but it PRINTS the file — for an agent that is a
+        disclosure into its context and possibly its report."""
+        secret = self.agents.parent / "PRIVATE.md"
+        secret.write_text("CONFIDENTIAL prod db db-eu-1.corp\n")
+        self.library.write_text(LIBRARY.replace("- name: alpha", "- name: ../PRIVATE", 1))
+        proc = self.run_sync("diff", "../PRIVATE")
+        self.assertNotIn("db-eu-1.corp", proc.stdout)
+        self.assertEqual(proc.returncode, 1)
 
 
 if __name__ == "__main__":

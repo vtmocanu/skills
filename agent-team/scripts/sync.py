@@ -22,13 +22,16 @@ observe the one corruption this step is most likely to introduce.
 
 Exit codes:
     0  no drift (check), or applied cleanly (apply)
-    1  drift found (check), or NOTHING applied because a guard fired (apply);
-       every guard, including the version stamp, runs over every named role
-       before the first byte is written, so 1 always means the tree is untouched
+    1  drift found (check), or nothing applied because a guard fired (apply).
+       Every guard, including the version stamp, runs over every named role
+       before the first byte is written, so a GUARD refusal never leaves a
+       partial batch. It is not a promise about every path that can return 1:
+       an uncaught exception is 1 too, because that is Python's exit code for a
+       traceback.
     2  the instrument itself failed — unreadable library, unreadable file,
-       malformed library entry, bad arguments. From `apply` it can also mean a
-       post-write verification failed, in which case earlier roles in the batch
-       ARE on disk; the message names the file to restore.
+       malformed library entry, bad arguments. From `apply` it also covers a
+       write error or a failed post-write verification, where earlier roles in
+       the batch ARE on disk; the message says so and names the file.
 
 Read the output, not just the status: `check` exits 1 for anything from a
 single stale role to a whole unsynced roster.
@@ -41,7 +44,9 @@ import difflib
 import os
 import pathlib
 import re
+import stat
 import sys
+import tempfile
 
 try:
     import yaml
@@ -54,9 +59,6 @@ except ImportError:  # pragma: no cover - environment problem, not a finding
     )
     sys.exit(2)  # instrument failure, not a finding — see the exit-code contract
 
-# Anchored to a whole line. A substring test would take `## For this repository`
-# for the marker, and four library bodies already contain the literal
-# `## For this repo` in prose.
 # A whole HEADING LINE beginning `## For this repo`, with an optional suffix:
 # real rosters write `## For this repo (uzi)`, and requiring an exact match
 # reported 10 of 11 files as tail-less — which routes every one of them to the
@@ -111,10 +113,18 @@ def write_source(path: pathlib.Path, text: str) -> None:
     and the only output was a traceback. Writing a sibling temp file and
     `os.replace`-ing it means the file is either the old one or the new one.
     """
-    tmp = path.with_name(path.name + ".sync-tmp")
+    original_mode = stat.S_IMODE(os.stat(path).st_mode)
+    # mkstemp rather than a name derived from the target: the derived name is
+    # predictable and SHARED, so two agents applying the same role in one repo
+    # would write the same temp file and one would truncate the other's.
+    handle_fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=".sync-")
+    tmp = pathlib.Path(tmp_name)
     try:
-        with tmp.open("w", encoding="utf-8", newline="") as handle:
+        with os.fdopen(handle_fd, "w", encoding="utf-8", newline="") as handle:
             handle.write(text)
+        # os.replace does not carry the target's mode across, so without this a
+        # deliberately-restricted file comes back 0644 on an ordinary sync.
+        os.chmod(tmp, original_mode)
         os.replace(tmp, path)
     finally:
         tmp.unlink(missing_ok=True)
@@ -197,7 +207,10 @@ class AgentFile:
     def newline(self) -> str:
         """The file's own convention, so a synced body does not arrive as an
         LF island inside a CRLF file."""
-        return "\r\n" if "\r\n" in self.text else "\n"
+        first = self.text.find("\n")
+        if first > 0 and self.text[first - 1] == "\r":
+            return "\r\n"
+        return "\n"
 
     @property
     def version(self):
@@ -238,6 +251,22 @@ def load_library(path: pathlib.Path) -> dict:
         if missing:
             label = role.get("name", f"roles[{index}]")
             die(f"{path}: role {label} is missing {', '.join(missing)}")
+        # Presence is not enough: emptying a block scalar while editing
+        # roles.yaml is an ordinary slip and lands the value as None, which
+        # used to surface as a traceback with exit 1 — the "unreadable library
+        # read as drift" case the exit-code split exists to prevent.
+        label = role["name"]
+        for key in ("name", "description", "prompt_body"):
+            if not isinstance(role[key], str):
+                die(
+                    f"{path}: role {label} has {key} of type "
+                    f"{type(role[key]).__name__}, expected a string"
+                )
+        if not isinstance(role["version"], int):
+            die(
+                f"{path}: role {label} has version of type "
+                f"{type(role['version']).__name__}, expected an integer"
+            )
         roles[role["name"]] = role
     return roles
 
@@ -267,7 +296,15 @@ def body_delta(agent: AgentFile, role: dict) -> tuple[int, int]:
     )
     adds = dels = 0
     for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-        if tag in ("insert", "replace"):
+        # ADDS counts `insert` ONLY. A `replace` is the signature of the LIBRARY
+        # rewording a line: the consumer's file still holds the previous
+        # release's wording, which is old library text, not repo-owned content.
+        # Counting replace toward adds made the inline-tuning guard refuse
+        # ordinary stale syncs — 17 of 51 real library edits in this repo's own
+        # history, and 11 of 11 roles on the bump that fixed an unreachable
+        # report recipient, which is the exact drift this skill documents as
+        # motivating the body diff.
+        if tag == "insert":
             adds += j2 - j1
         if tag in ("delete", "replace"):
             dels += i2 - i1
@@ -342,17 +379,19 @@ def compare(agent: AgentFile, role: dict | None) -> tuple[str, list[str]]:
 
     if agent.tail is None:
         # No tail is legitimate: the skill omits the heading when a role has no
-        # repo-specifics. It is only a hazard when the body ALSO carries lines
-        # the library does not have, which is inline hand-tuning that an
-        # overwrite would eat. That distinction is mechanical, so make it rather
-        # than refusing every tail-less file.
-        if adds:
-            notes.append(
-                f"NO TAIL and {adds} line(s) the library lacks — inline tuning, "
-                f"apply refuses this file"
-            )
-            return "LEGACY", notes
+        # repo-specifics.
         notes.append("no tail (nothing repo-specific to preserve)")
+
+    if adds:
+        # Reported for every file, tail or no tail. The status must predict what
+        # `apply` DOES — it drops these lines and says so — rather than being
+        # gated on a property (having a tail) that the write path does not
+        # consult.
+        notes.append(
+            f"{adds} line(s) the library lacks — apply DROPS them; check "
+            f"whether any is repo-specific"
+        )
+        return "LEGACY", notes
 
     if agent.error:
         # Not "ok". Claude Code's loader tolerates this file, so it works in use
@@ -428,7 +467,17 @@ def cmd_check(agents_dir: pathlib.Path, roles: dict) -> int:
 def cmd_diff(agents_dir: pathlib.Path, roles: dict, names: list[str]) -> int:
     status = 0
     for name in names:
-        path = agents_dir / f"{name}.md"
+        # Same containment as `apply`. `diff` does not write, but it PRINTS the
+        # file, and for an agent that means straight into its context and
+        # possibly its report — so an uncontained path here is a disclosure
+        # rather than a corruption.
+        path = resolve_target(agents_dir, name)
+        if path is None:
+            print(
+                f"{name}: resolves outside {agents_dir} — refusing.",
+                file=sys.stderr,
+            )
+            return 1
         if not path.exists():
             print(f"{name}: no such file at {path}", file=sys.stderr)
             return 2
@@ -454,7 +503,7 @@ def cmd_diff(agents_dir: pathlib.Path, roles: dict, names: list[str]) -> int:
     return status
 
 
-def stamp_version(raw_frontmatter: str, version: int) -> str | None:
+def stamp_version(raw_frontmatter: str, version: int, newline: str = "\n") -> str | None:
     """Rewrite the `version:` line, or insert one if the file predates it.
 
     Matches ANY `version:` line, not just `version: <digits>`. A hand-edited
@@ -464,12 +513,15 @@ def stamp_version(raw_frontmatter: str, version: int) -> str | None:
     reported writing was not the value any reader saw. It never converged.
     """
     new, count = re.subn(
-        r"(?m)^version:.*$", f"version: {version}", raw_frontmatter, count=1
+        r"(?m)^version:[^\r\n]*", f"version: {version}", raw_frontmatter, count=1
     )
     if count == 1:
         return new
     new, count = re.subn(
-        r"(?m)^(name: .+)$", rf"\1\nversion: {version}", raw_frontmatter, count=1
+        r"(?m)^(name:[^\r\n]*)",
+        lambda m: f"{m.group(1)}{newline}version: {version}",
+        raw_frontmatter,
+        count=1,
     )
     return new if count == 1 else None
 
@@ -494,7 +546,6 @@ def cmd_apply(
     roles: dict,
     names: list[str],
     force: bool,
-    force_inline: bool,
 ) -> int:
     if not names:
         print("apply needs at least one role name", file=sys.stderr)
@@ -510,6 +561,21 @@ def cmd_apply(
             print(f"{name}: not in the library — refusing to touch it", file=sys.stderr)
             return 1
 
+        raw_path = agents_dir / f"{name}.md"
+        if raw_path.is_symlink():
+            # Tested BEFORE resolving: Path.resolve() follows symlinks, so a
+            # check on the resolved path is unreachable. The case that check
+            # missed is a symlink pointing INSIDE the agents dir, which passes
+            # containment and rewrites a different role's file under this
+            # role's name.
+            print(
+                f"{name}: {raw_path} is a symlink to {os.readlink(raw_path)} — "
+                f"refusing. Writing through it edits a file the caller did not "
+                f"name.",
+                file=sys.stderr,
+            )
+            return 1
+
         path = resolve_target(agents_dir, name)
         if path is None:
             print(
@@ -521,10 +587,14 @@ def cmd_apply(
         if not path.exists():
             print(f"{name}: no such file at {path}", file=sys.stderr)
             return 2
-        if path.is_symlink():
+        if not os.access(path, os.W_OK):
+            # `chmod -w` is how a user says "do not touch this file". The
+            # non-atomic write refused it for free, because open(..., "w") needs
+            # write permission on the FILE; os.replace only needs it on the
+            # DIRECTORY, so the atomic-write fix silently removed a protection.
             print(
-                f"{name}: {path} is a symlink to {os.readlink(path)} — refusing. "
-                f"Writing through it edits a file outside the agents directory.",
+                f"{name}: {path} is not writable — refusing rather than "
+                f"replacing it.",
                 file=sys.stderr,
             )
             return 1
@@ -541,24 +611,35 @@ def cmd_apply(
             )
             return 1
 
-        # This guard is about the BODY and has nothing to do with the tail. It
-        # used to be gated on `agent.tail is None`, so two byte-identical files
-        # carrying the same hand-written paragraph got opposite treatment: the
-        # tail-less one was refused and the one WITH a tail was silently eaten.
-        # body_delta's own docstring stated the principle unconditionally; only
-        # the code was conditional.
+        # Lines in the repo body that the library does not have. This CANNOT
+        # distinguish hand-written content from previous-release library text,
+        # and both of the obvious sources look identical to it: a line the
+        # library REWORDED (handled — `replace` no longer counts toward adds)
+        # and a line the library DELETED (not handled, and unhandleable —
+        # the consumer's older copy legitimately still has it).
+        #
+        # So this is a WARNING, not a refusal. Refusing measured at 17 of 51
+        # real library edits in this repo's history, 11 of 11 roles on one real
+        # bump, and 5 of 11 on a roster generated from an older library
+        # revision — i.e. it refuses the tool's primary use case, and the
+        # documented escape was a flag whose help says it destroys content. A
+        # guard the operator learns to force past by reflex is worse than no
+        # guard, because the reflex survives into the case that mattered.
+        #
+        # What still refuses: a body differing at EQUAL version, immediately
+        # below. There the difference is UNEXPLAINED, which is the actual
+        # signal that someone edited the file by hand.
         adds, _ = body_delta(agent, role)
-        if adds and not force_inline:
-            where = "no `## For this repo` tail, and the" if agent.tail is None else "the generic"
-            print(
-                f"{name}: {where} body carries {adds} line(s) the library does "
-                f"not have — that is inline hand-tuning, and replacing the body "
-                f"would eat it. Move them into the `## For this repo` tail, then "
-                f"re-run (`sync.py diff {name}` shows them). --force does NOT "
-                f"lift this guard; --force-inline does, and destroys those lines.",
-                file=sys.stderr,
+        warnings = []
+        if adds:
+            warnings.append(
+                f"{name}: {adds} line(s) in the generic body are not in the "
+                f"library and WILL BE DROPPED. If any is repo-specific, stop "
+                f"and move it into the `## For this repo` tail first — "
+                f"`sync.py diff {name}` lists them, and `git diff` shows what "
+                f"went. Most often they are just the previous release's "
+                f"wording, which is what a sync is for."
             )
-            return 1
 
         body_differs = normalized(agent.generic).strip() != normalized(role["prompt_body"]).strip()
         if body_differs and agent.version == role["version"] and not force:
@@ -571,7 +652,9 @@ def cmd_apply(
             )
             return 1
 
-        new_frontmatter = stamp_version(agent.raw_frontmatter, role["version"])
+        new_frontmatter = stamp_version(
+            agent.raw_frontmatter, role["version"], agent.newline
+        )
         if new_frontmatter is None:
             print(
                 f"{name}: cannot place a `version:` line in the frontmatter — "
@@ -580,9 +663,14 @@ def cmd_apply(
             )
             return 1
 
-        planned.append((agent, role, new_frontmatter))
+        planned.append((agent, role, new_frontmatter, warnings))
 
-    for agent, role, new_frontmatter in planned:
+    for warning in [w for _, _, _, ws in planned for w in ws]:
+        print(f"warning: {warning}", file=sys.stderr)
+
+    dropped_lines = False
+    for agent, role, new_frontmatter, warnings in planned:
+        dropped_lines = dropped_lines or bool(warnings)
         body = role["prompt_body"].rstrip("\n")
         if agent.newline != "\n":
             body = body.replace("\n", agent.newline)
@@ -593,7 +681,17 @@ def cmd_apply(
             + agent.newline
             + (agent.tail or "")
         )
-        write_source(agent.path, out)
+        try:
+            write_source(agent.path, out)
+        except OSError as exc:
+            # Not 1. Exit 1 is documented as "the tree is untouched", and by
+            # this point earlier roles in the batch are already written.
+            print(
+                f"{agent.name}: write failed ({exc}). Earlier roles in this "
+                f"batch are already on disk; check `git status`.",
+                file=sys.stderr,
+            )
+            return 2
 
         # Verify against the file on disk, not against the string we just built.
         # The tail comparison is on BYTES: an earlier version compared two
@@ -630,7 +728,16 @@ def cmd_apply(
             f"body {len(role['prompt_body'])}B replaced, {tail_note}"
         )
 
-    print("\nverify with `git diff` — the only deletions should be the old version lines")
+    if dropped_lines:
+        print(
+            "\nverify with `git diff` — deletions include body lines that were "
+            "not in the library, listed in the warnings above"
+        )
+    else:
+        print(
+            "\nverify with `git diff` — the only deletions should be the old "
+            "version lines"
+        )
     return 0
 
 
@@ -664,6 +771,13 @@ def add_common(parser, default_library: pathlib.Path, *, suppress: bool) -> None
 
 
 def main() -> int:
+    # Output carries em dashes and role prose. Under a C/POSIX locale the
+    # default stdout encoding is ascii and printing a row raises, which exits 1
+    # — an instrument failure wearing "drift found" again.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
     default_library = pathlib.Path(__file__).resolve().parent.parent / "roles.yaml"
 
     parser = argparse.ArgumentParser(
@@ -681,14 +795,7 @@ def main() -> int:
         "--force",
         action="store_true",
         help="overwrite a body that differs at equal version (a local "
-        "modification). Does NOT lift the tail-less guard.",
-    )
-    p_apply.add_argument(
-        "--force-inline",
-        action="store_true",
-        help="overwrite a body carrying lines the library lacks, destroying "
-        "that inline tuning. Separate from --force on purpose: the two "
-        "hazards are not one decision.",
+        "modification). Does NOT lift the inline-tuning guard.",
     )
     for subparser in (p_check, p_diff, p_apply):
         add_common(subparser, default_library, suppress=True)
@@ -706,9 +813,7 @@ def main() -> int:
     if args.command == "diff":
         return cmd_diff(args.agents, roles, args.roles)
     if args.command == "apply":
-        return cmd_apply(
-            args.agents, roles, args.roles, args.force, args.force_inline
-        )
+        return cmd_apply(args.agents, roles, args.roles, args.force)
     return cmd_check(args.agents, roles)
 
 
