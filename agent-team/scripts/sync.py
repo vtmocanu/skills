@@ -288,21 +288,22 @@ def load_library(path: pathlib.Path) -> dict:
 
 
 def body_delta(agent: AgentFile, role: dict) -> tuple[int, int]:
-    """(added, deleted) lines of the repo's generic body against the library's.
+    """(lost, gained) lines if the repo's generic body is replaced by the library's.
 
-    ADDED is the load-bearing half: a line present in the repo body and absent
-    from the library's is content the library cannot restore, so replacing the
-    body destroys it. DELETED lines are just the library additions this file has
-    not received yet, which is what a sync is for.
+    LOST = lines in the repo body that are absent from the library body, so
+    replacing the body removes them. GAINED = the reverse.
 
-    Counted from SequenceMatcher opcodes rather than by filtering a unified
-    diff's `+++`/`---` header lines. That filter cannot tell a header from a
-    CONTENT line beginning `++` or `--`, and these bodies quote CLI flags at
-    line start routinely: the library's own auditor and reviewer bodies each
-    carry a line starting `--oneline -3`, which made the old counter report 28
-    deletions where there were 29. The same undercount could drive `adds` to
-    zero and disarm the inline-tuning guard on a file whose only repo-owned
-    line began with `++`, which is how it destroyed one.
+    LOST counts `insert` AND the repo side of `replace`, and that is the whole
+    correction: a reworded line is one the repo has and the library does not, so
+    it IS lost. An earlier version counted `insert` only — correct as a GUARD,
+    since a `replace` cannot be told from a library rewording and gating on it
+    refused 11 of 11 roles on a real bump — and then that guard-shaped number
+    was left driving the user-facing count, which reported "0 body line(s)
+    DROPPED" on a run that dropped a line.
+
+    The distinction to hold: this metric was never wrong as a DESCRIPTION of
+    what is lost, only as a PREDICATE for whether to act. Retiring it from the
+    predicate had to mean finding every consumer, not deleting the number.
     """
     matcher = difflib.SequenceMatcher(
         None,
@@ -310,21 +311,13 @@ def body_delta(agent: AgentFile, role: dict) -> tuple[int, int]:
         normalized(agent.generic).strip().splitlines(),
         autojunk=False,
     )
-    adds = dels = 0
+    lost = gained = 0
     for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-        # ADDS counts `insert` ONLY. A `replace` is the signature of the LIBRARY
-        # rewording a line: the consumer's file still holds the previous
-        # release's wording, which is old library text, not repo-owned content.
-        # Counting replace toward adds made the inline-tuning guard refuse
-        # ordinary stale syncs — 17 of 51 real library edits in this repo's own
-        # history, and 11 of 11 roles on the bump that fixed an unreachable
-        # report recipient, which is the exact drift this skill documents as
-        # motivating the body diff.
-        if tag == "insert":
-            adds += j2 - j1
+        if tag in ("insert", "replace"):
+            lost += j2 - j1
         if tag in ("delete", "replace"):
-            dels += i2 - i1
-    return adds, dels
+            gained += i2 - i1
+    return lost, gained
 
 
 def compare(agent: AgentFile, role: dict | None) -> tuple[str, list[str]]:
@@ -345,13 +338,13 @@ def compare(agent: AgentFile, role: dict | None) -> tuple[str, list[str]]:
 
     stale = agent.version != role["version"]
     body_differs = normalized(agent.generic).strip() != normalized(role["prompt_body"]).strip()
-    adds = 0
+    lost = 0
     metadata_differs = False
     tools_incomplete = False
 
     if body_differs:
-        adds, dels = body_delta(agent, role)
-        notes.append(f"body +{adds}/-{dels} vs library")
+        lost, gained = body_delta(agent, role)
+        notes.append(f"body -{lost}/+{gained} vs library")
 
     # A frontmatter that did not parse gives us no values to compare, so any
     # description/tools verdict here would be a statement about our own failed
@@ -418,10 +411,10 @@ def compare(agent: AgentFile, role: dict | None) -> tuple[str, list[str]]:
             return "MODIFIED", notes
         return "ok", notes
 
-    if adds:
+    if lost:
         notes.append(
-            f"{adds} line(s) the library lacks — apply replaces the body, so "
-            f"they go; a backup is written"
+            f"{lost} line(s) of this body are not in the library — apply "
+            f"replaces the body, so they go; a backup is written"
         )
         return "LEGACY", notes
 
@@ -646,7 +639,7 @@ def cmd_apply(
         # What still refuses: a body differing at EQUAL version, immediately
         # below. There the difference is UNEXPLAINED, which is the actual
         # signal that someone edited the file by hand.
-        adds, dels = body_delta(agent, role)
+        lost, gained = body_delta(agent, role)
         body_differs = normalized(agent.generic).strip() != normalized(role["prompt_body"]).strip()
 
         # The backup is keyed on the body being REPLACED AT ALL, not on any
@@ -673,14 +666,20 @@ def cmd_apply(
         warnings = []
         if body_differs:
             backup = path.with_name(path.name + ".pre-sync")
+            suffix = 2
+            while backup.exists():
+                # Never overwrite: the existing one may hold the only copy of
+                # content dropped by an earlier sync the operator has not read.
+                backup = path.with_name(f"{path.name}.pre-sync.{suffix}")
+                suffix += 1
             warnings.append(
-                f"{name}: the generic body is being REPLACED (+{adds}/-{dels} "
-                f"lines). Most of that is the previous release's wording, which "
-                f"is what a sync is for — but anything a human edited into the "
-                f"library-owned body goes with it, and nothing can tell the two "
-                f"apart. The file as it was is kept at {backup.name}; diff "
-                f"against that. Do NOT rely on `git diff`: if the change was "
-                f"not committed, it is in no git object at all."
+                f"{name}: the generic body is being REPLACED — {lost} line(s) of it are "
+                f"not in the library and will NOT survive ({gained} arriving). Most of "
+                f"that is the previous release's wording, which is what a sync is for "
+                f"— but anything a human edited into the library-owned body goes with "
+                f"it, and nothing can tell the two apart. The file as it was is kept "
+                f"at {backup.name}; diff against that. Do NOT rely on `git diff`: if "
+                f"the change was not committed, it is in no git object at all."
             )
 
         if body_differs and agent.version == role["version"] and not force:
@@ -704,13 +703,13 @@ def cmd_apply(
             )
             return 1
 
-        planned.append((agent, role, new_frontmatter, warnings, backup, adds))
+        planned.append((agent, role, new_frontmatter, warnings, backup, lost))
 
     for warning in [w for _, _, _, ws, _, _ in planned for w in ws]:
         print(f"warning: {warning}", file=sys.stderr)
 
     dropped_lines = False
-    for agent, role, new_frontmatter, warnings, backup, adds in planned:
+    for agent, role, new_frontmatter, warnings, backup, lost in planned:
         dropped_lines = dropped_lines or bool(warnings)
         body = role["prompt_body"].rstrip("\n")
         if agent.newline != "\n":
@@ -769,14 +768,18 @@ def cmd_apply(
         # scale eleven warnings preceded eleven success lines saying "preserved"
         # and nothing correlated them; and the closing line pointed at
         # "the warnings above", which a caller reading only stdout does not have.
-        # `adds` is the PRE-write count, carried from the guard phase.
+        # `lost` is the PRE-write count, carried from the guard phase.
         # Recomputing it here would measure the body we just wrote.
         drop_note = ""
         if backup is not None:
+            # The count is suppressed at zero rather than the BACKUP being
+            # suppressed. `lost == 0` provably means every repo body line
+            # survives, so a backup is unnecessary — but "provably" is what the
+            # last three rounds each believed about a predicate, and a spare
+            # file costs nothing next to being wrong about that.
             drop_note = (
-                f", {adds} body line(s) DROPPED — previous content kept at "
-                f"{backup.name}"
-            )
+                f", {lost} body line(s) NOT CARRIED OVER" if lost else ""
+            ) + f" — previous body kept at {backup.name}"
         print(
             f"{agent.name}: version -> {role['version']}, "
             f"body {len(role['prompt_body'])}B replaced, {tail_note}{drop_note}"

@@ -257,7 +257,7 @@ class TestInlineTuningWarning(SyncTestCase):
         proc = self.run_sync("apply", "alpha")
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("REPLACED", proc.stderr)
-        self.assertIn("+1/-0 lines", proc.stderr)
+        self.assertIn("1 line(s) of it are", proc.stderr)
         self.assertNotIn("HAND WRITTEN", self.body_of("alpha"))
         self.assertIn("Repo rule.", self.body_of("alpha"), "the tail must survive")
 
@@ -320,7 +320,7 @@ class TestInlineTuningWarning(SyncTestCase):
         content lines beginning ++ or --."""
         self.write("alpha", agent_file(body=ALPHA_BODY + "\n++ HAND WRITTEN"))
         proc = self.run_sync("apply", "alpha")
-        self.assertIn("+1/-0 lines", proc.stderr)
+        self.assertIn("1 line(s) of it are", proc.stderr)
 
     def test_an_equal_version_body_difference_still_refuses(self):
         self.write("alpha", agent_file(version="2", body=self.HAND, tail="Repo rule."))
@@ -475,12 +475,28 @@ class TestStaleBodySyncs(SyncTestCase):
         self.assertIn("Repo rule.", self.body_of("alpha"))
         self.assertEqual(self.run_sync("check").returncode, 0)
 
-    def test_a_reworded_library_line_is_not_treated_as_hand_tuning(self):
+    def test_a_reworded_line_counts_as_LOST_but_gates_nothing(self):
+        """The metric was never wrong as a DESCRIPTION of what goes — a reworded
+        line IS lost. It was wrong as a PREDICATE, because a rewording cannot be
+        told from a human edit. Retiring it from the gate had to mean fixing
+        every consumer, not deleting the number: one consumer was left driving
+        the stdout count, which read `0 body line(s) DROPPED` on a run that
+        dropped a line."""
         role = {"prompt_body": "a\nreworded line\nc\n"}
         agent = type("A", (), {"generic": "a\nold wording\nc\n"})()
-        adds, dels = sync.body_delta(agent, role)
-        self.assertEqual(adds, 0, "a replaced line must not count as an addition")
-        self.assertEqual(dels, 1)
+        lost, gained = sync.body_delta(agent, role)
+        self.assertEqual(lost, 1, "the repo's version of that line does not survive")
+        self.assertEqual(gained, 1)
+
+    def test_the_stdout_count_matches_what_actually_went(self):
+        """The in-place edit that reported `0 body line(s) DROPPED`."""
+        self.write("alpha", agent_file(
+            version="1",
+            body="Alpha generic body line one.\nAlpha generic body line two, EDITED HERE.",
+            tail="Repo rule."))
+        proc = self.run_sync("apply", "alpha")
+        self.assertIn("1 body line(s) NOT CARRIED OVER", proc.stdout)
+        self.assertNotIn("0 body line(s)", proc.stdout)
 
     def test_check_marks_an_inline_tuned_file_LEGACY_even_with_a_tail(self):
         """`check` must predict what `apply` DOES. The status used to be gated
