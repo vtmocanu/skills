@@ -105,6 +105,16 @@ Probe for these signals. Use the Glob and Read tools; do NOT run `find /`. All p
 - **Release signals**: `docs/releasing.md`, `RELEASING.md`, `.goreleaser.*`, `CHANGELOG.md`, `semantic-release.json`, `.releaserc*`, a release workflow in CI.
 - **CLAUDE.md and CONTRIBUTING.md**: read both (top-level and any nested). They contain authoring rules workers must follow.
 
+  **MEASURE the root `CLAUDE.md` and report the number, because every agent pays it.** A project `CLAUDE.md` is loaded in full at the start of every session, and a subagent is its own session, so an N-token file costs N tokens *per teammate spawned*, not N per task. Nothing amortises it: each subagent is a separate conversation, so there is no cross-agent prompt-cache hit. Claude Code's own guidance is **under 200 lines**, and past roughly 30KB the file is a standing tax on a team that fans out eight agents in a wave.
+
+  When it exceeds that, **propose a split as part of the Step 4 proposal**, one more numbered item the user accepts or declines exactly like the task-runner proposal above. The root file keeps what is genuinely repo-wide (identity, gate names, architecture, conventions, cross-cutting traps); per-component detail moves into `.claude/rules/*.md` carrying `paths:` frontmatter, which Claude Code includes only when it reads a file matching those globs. A nested `<subdir>/CLAUDE.md` does the same job at directory granularity; prefer rules when the natural scope is not one directory (a migrations dir, a file type, a config file).
+
+  Measured 2026-08-04 on a four-toolchain repo: a 578-line / 124,514-byte root file (about 31k tokens) became 188 lines / 40,507 bytes, so an eight-agent wave stopped paying roughly 170k tokens of preamble it could not use. **Move the content byte-exact and PROVE it** with a reassembly diff against the original, not by reading the result. A split is a fidelity problem before it is a formatting one, and the proof is cheap: extract by line range, concatenate in original order, diff.
+
+  Two properties belong in the root file itself, because both fail silently. A path-scoped rule fires on a file **read**, so running a gate without opening a file in that component does not pull its rule in. And nested rules are **not** re-injected after `/compact`, while the root file is.
+
+- **Dead weight, and files too large to read**: directories imported by nothing (archived evidence, vendored corpora, completed-work archives) and single files big enough to end an agent. Record both in the workflow doc, so sweeps can skip the first and nobody opens the second. A 1.3MB spec file is roughly 337k tokens, so one `Read` of it costs a teammate; the natural instinct, reading the spec before starting, is precisely what triggers that. Note the size beside the path and name the scoped alternative (`git grep -n`, an explicit line range).
+
 Cite the actual files/directories you found in the proposal you present to the user. Do not pad with generic boilerplate.
 
 ### Step 2: pick roles
@@ -427,6 +437,14 @@ Teammates run as **background agents**: an `Agent(...)` spawn returns immediatel
 
   Keep messages for what they are good at: a pointer ("brief §3 changed, re-read before your next commit"), a question, an ack, a verified-evidence nudge.
 
+- **PASTE THE POINTERS YOU ALREADY FOUND. A dispatch that says "go find X" buys N re-derivations of a search you have already run.** By the time you dispatch you have usually located the code. Name the files and line numbers in the prompt. Validators cold-start with no memory of your investigation, so a reviewer, an auditor, a fact-checker and a tester sent at one diff will each independently grep for the same symbols, and on a large repo that sweep is the largest slice of a teammate's context before it does any work at all.
+
+  This is not *Context handoff* restated. That rule says the spawn prompt must be self-contained, which is about completeness. This one is about DUPLICATION: the lead already holds the expensive half, and handing it over is strictly cheaper than having it rediscovered once per validator.
+
+  **Two things it does not license.** Paste the LOCATION, never your conclusion about what is there: naming a file is context, while telling a validator what it will find is authoring the control for your own claim (see the bullet below). And a pointer is a citation, so it carries a citation's obligation, pinned to the SHA you are dispatching, because a bare line number goes stale the moment the tree moves.
+
+  Where a sweep genuinely is needed and its product is a conclusion rather than a corpus, delegate it to a read-only search subagent: that agent's context is discarded and only its answer returns, so the caller pays a paragraph instead of the whole sweep.
+
 - **THE LEAD DOES NOT AUTHOR THE CONTROL FOR ITS OWN CLAIM.** When you dispatch a validation, name the **behaviour** that must be pinned. Do NOT name the fold class, and do NOT state the expected result. Require the validator to choose its own instrument and to say why that instrument *could* produce the disconfirming answer. If you have already formed an expectation, label it as your prediction — never as the acceptance criterion.
 
   **A control written from inside the change inherits the change's blind spots.** That sentence is usually applied to a coder folding its own code; it applies to the lead at least as hard, because a lead's expectation reaches every validator at once.
@@ -581,6 +599,10 @@ There is no native readout of a background teammate's context budget: the old pa
 ### When to recycle (heuristic)
 
 **Mandatory pre-dispatch check.** Before handing a teammate a NEW task (a fresh scope, not a fix or iteration on the task it just did), check its context budget (see Monitoring above). If it is **>30%**, recycle before dispatching: have it write a checkpoint, then either clear its context or shut it down and respawn a fresh one. Both reduce to the Recycle procedure below; a teammate has no in-place `/clear` the lead can trigger remotely, so checkpoint + shutdown + respawn-fresh IS the clear. A new task rarely needs the prior task's working memory; carrying 30%+ of now-irrelevant context degrades output quality and compounds prompt-cache cost. The heaviest worker (usually `coder`) crosses 30% within a milestone or two, so expect to recycle it at most new-task boundaries.
+
+**Weigh the >30% line against the prompt cache before applying it mechanically.** A recycle discards a warm cache: the respawned teammate re-reads its role file, the project `CLAUDE.md` and its checkpoint at full price, then re-derives whatever the checkpoint failed to capture. Where the session's cache TTL is long (an hour rather than the five-minute default), a coder continuing down the SAME lane across several milestones can be both cheaper and faster kept resident than checkpointed and respawned, even above 30%.
+
+The threshold is a heuristic about RELEVANCE, not about size. It exists because a new task rarely needs the prior task's working memory, so apply it when the scope genuinely changes, which is what "NEW task" already says, and do not read it as a budget to enforce against a teammate whose carried context is still the context it needs. The >85% force-recycle below is a different rule and is not subject to this caveat: past that floor the quality drop outweighs any cache saving.
 
 **Force-recycle regardless of coupling** when context >85%: even on a same-track continuation, externalize via checkpoint and respawn. Cache pressure and quality drop too far past this floor to keep the session alive.
 
