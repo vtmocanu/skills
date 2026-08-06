@@ -57,6 +57,7 @@ A breaking change you don't use is N/A. For each breaking change and deprecation
 | Breaking — **N/A** | Not present anywhere (grep clean) | Note it as checked-and-clear — but grep-clean is high-confidence, not proof; flag anything referenced dynamically / via re-export / string-keyed config / a transitive dep as "likely N/A, verify" |
 | Deprecation | Still works, warns; has a removal runway | Migrate opportunistically; record the removal version |
 | Feature / improvement | New capability or perf/security fix | Flag if it lets us delete workarounds or gain for free |
+| Bundled alerting rule / health check — **new or newly-fixed** | Upgrade ships default-on PrometheusRules / `/health` checks / synthetic monitors, or repairs a rule that was dead (renamed metric, wrong selector) | **Dry-run each against live signal before shipping** — a rule that was absent or dead fires the moment it activates on any pre-existing latent condition; don't wave it through as "net-positive monitoring" |
 | Refactor opportunity | Our code can simplify given the new version | Propose it, don't auto-apply |
 
 Listing the N/A items explicitly matters: it's the difference between "I checked, nothing hits us" and "I skimmed the headlines."
@@ -86,6 +87,8 @@ Measured example: a cert-manager `1.20.3 → 1.21.0` audit reported "~5 lines/se
 
 Measured example: an HA `2026.6.4 → 2026.7.2` audit came back grep-clean across the whole delta, the Repairs list was empty, and every dashboard rendered — verdict "clean upgrade", which was true and useless. One `system_log/list` then showed `extra keys not allowed @ data['kelvin']`: `light.turn_on`'s `kelvin` parameter had been removed back in **2026.3**, and five call sites had been dead for ~3 months. Nothing in the 2026.7 delta could ever have surfaced it. The same call also exposed two more automations broken on entities that had never existed.
 
+Measured example — **the monitoring layer is itself an upgrade payload.** A certmon (x509-certificate-exporter) `4.1.0 → 4.2.0` bump shipped new default-on PrometheusRules and *repaired* a long-dead alert (`X509ExporterReadErrors` had pointed at a metric renamed away in 4.0.0). The eval saw the new alerts, called them "net positive, minimal fatigue", and shipped. Within minutes **18 fired** (`SourceDown`/`SourceErrors`/`SourceErrorsSustained` × 6 pods) — not on a new fault, but on `broken_symlink`/`out_of_scope_symlink` errors the hostPath exporters had emitted continuously on 4.1.0 too; the old rule was simply dead, so nothing had ever paged. The certs were fine (`x509_cert_not_after` still populated) — every one a false critical. When the delta ships or repairs alert rules, run each rule's PromQL against *current* metrics as part of the eval (the raw expression before, `count(ALERTS{...})` after): "we gained a working alert" and "we just paged ourselves on a benign condition that was always there" are the same event, and only a live check tells them apart.
+
 ## Output
 
 Lead with the verdict, then the evidence:
@@ -105,3 +108,4 @@ Lead with the verdict, then the evidence:
 - **Not upgrading is a valid outcome.** Installable + grep-clean but no fix you need, no feature you'd use, and non-trivial blast radius → recommend `stay put` and say why. Don't manufacture a reason to bump.
 - **A thin changelog isn't a clean one.** If release notes are sparse or the project tagged without them, fall back to the compare view (`github.com/OWNER/REPO/compare/vA...vB`) or the commit log — breaking changes sometimes live only in commits.
 - **Deprecation ≠ removal.** It's a warning with a runway — record the version it's removed in, migrate on your schedule, don't panic-fix.
+- **A new or fixed alert fires on old news.** An upgrade that ships default-on alert rules — or repairs a dead one — pages you on any latent condition that was always present but unwatched. Evaluate bundled rules against live signal *during* the eval; a "safe bump" that adds monitoring is not automatically a quiet one.
