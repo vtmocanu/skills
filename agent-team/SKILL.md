@@ -325,6 +325,8 @@ Use when `/agent-team <task description>` is invoked with a non-keyword first ar
 
 The session already has one implicit team — there is nothing to create. Go straight to planning the task list.
 
+**Before you build the plan, gate on any acceptance criterion you cannot meet.** If investigation shows a stated AC is unsatisfiable as written — the only viable approach violates it — escalate a crisp go/no-go to the user *before* authoring a full multi-milestone plan, rather than burying the deviation inside a large plan and submitting it. An AC conflict is the likeliest reason a finished plan is rejected, and a one-line clarification is far cheaper than a discarded plan (measured 2026-07-20: a well-researched multi-milestone plan was hard-rejected with no recoverable reason because it knowingly contradicted a "one path, no second download" AC instead of surfacing the conflict first).
+
 Create team-level tasks via TaskCreate:
 - Task #0: **design critique** (owners: reviewer + auditor, and architect if the roster has one) — blocks every implementation task. Close it with a written reason when the change is small enough not to need one. This is a task for the same reason the roster sweep below is: it fires ONCE, at the moment you are already enumerating work, and a skip then LEAVES AN ARTIFACT somebody can contradict. Step 3 explains what the wave is for; this line is what makes it binding.
 
