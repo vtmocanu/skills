@@ -6,6 +6,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-08-07
+
+### Added
+
+- `agent-team`: **architect (v4)** gains a re-checkable-PRD-claims block (cite files by path plus a searchable symbol rather than a line number alone, mark "file X already exists" as verified at authoring time, and show the exhaustive search behind any "field read nowhere else" claim), a milestone-gating self-check (a milestone that "lands this run" must not depend on a gate that is itself deferred), and a capability probe before writing gated-contingency prose. It also absorbs the **pre-approval discipline** promoted up from the uzi product builtins: write the durable ADR or design doc only once the decision is taken, never before the plan is approved.
+- `agent-team`: **fact-checker (v7)** gains two verification techniques. Mutation-test a regression test at the call site (reintroduce the defect, confirm the new test reddens for the stated reason, then restore the tree and show it clean), and verify an external standard, spec, or normative citation against its **source text** rather than the document that cites it (recomputing any claimed number from raw inputs). Plus a note to delete scratch artifacts fetched outside the worktree.
+- `agent-team`: the lead now escalates an **unsatisfiable acceptance criterion** to the user before authoring a full multi-milestone plan, rather than burying the deviation inside the plan and submitting it (SKILL.md, Step 2).
+
 ## [0.21.0] - 2026-08-06
 
 ### Added
