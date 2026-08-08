@@ -9,7 +9,7 @@ description: Evaluates whether and how to upgrade a tool, framework, library, or
 
 This document is located at: `~/stuff/gitrepos/gh/vtmocanu/skills/upgrade-advisor/SKILL.md` (public repo: github.com/vtmocanu/skills)
 
-> **Note**: This is the source of truth. The skill copy at `~/.claude/commands/dot-ai-upgrade-advisor/SKILL.md` is derived from this file. All edits should be made here. After editing, use `/dot-ai-skills` to regenerate; never copy files directly to `~/.claude/commands/`.
+> **Note**: This is the source of truth. The installed copy at `~/.claude/skills/upgrade-advisor/SKILL.md` is derived from this file by the `npx skills` package manager; edit here, then run `npx skills update` to re-pull it. Never edit the installed copy.
 
 Evaluate an upgrade before doing it: what changed, what of that actually affects this project, and what is worth adopting. The output is a decision plus a checklist, not a blind version bump. Default to **investigate-only** unless the user asked you to apply the change.
 

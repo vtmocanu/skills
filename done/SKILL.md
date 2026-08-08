@@ -1,6 +1,6 @@
 ---
 name: done
-description: End-of-session wrap-up prompt. When invoked, asks Claude to determine whether the session is finished and safe to close: check git status for uncommitted, unstaged, untracked, and unpushed changes across the working directories touched this session, review the session for unfinished tasks or loose ends, then report a plain verdict on whether the session can be closed or something is still outstanding. Invoke explicitly with /dot-ai-done when wrapping up a working session.
+description: End-of-session wrap-up prompt. When invoked, asks Claude to determine whether the session is finished and safe to close by checking git status for uncommitted, unstaged, untracked, and unpushed changes across the working directories touched this session, reviewing the session for unfinished tasks or loose ends, then reporting a plain verdict on whether the session can be closed or something is still outstanding. Invoke explicitly with /done when wrapping up a working session.
 ---
 
 # Done
@@ -9,7 +9,7 @@ description: End-of-session wrap-up prompt. When invoked, asks Claude to determi
 
 This document is located at: `~/stuff/gitrepos/gh/vtmocanu/skills/done/SKILL.md` (public repo: github.com/vtmocanu/skills)
 
-> **Note**: This is the source of truth. The skill copy at `~/.claude/commands/dot-ai-done/SKILL.md` is derived from this file. All edits should be made here. After editing, use `/dot-ai-skills` to regenerate; never copy files directly to `~/.claude/commands/`.
+> **Note**: This is the source of truth. The installed copy at `~/.claude/skills/done/SKILL.md` is derived from this file by the `npx skills` package manager; edit here, then run `npx skills update` to re-pull it. Never edit the installed copy.
 
 Are we done here? Can we close this session? Decide and tell me, after checking:
 

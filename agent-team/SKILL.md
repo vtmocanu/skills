@@ -7,7 +7,7 @@ description: Auto-generate and run a per-repo Claude Code agent team. Probes the
 
 This document lives in [github.com/vtmocanu/skills](https://github.com/vtmocanu/skills) at `agent-team/SKILL.md`.
 
-> **Note**: This is the source of truth. Generated copies in your agent's skills directory (e.g. Claude Code's `~/.claude/commands/`) are derived from this file via `dot-ai skills generate --repo https://github.com/vtmocanu/skills`. Edit here and regenerate; never edit generated copies.
+> **Note**: This is the source of truth. The installed copy in your agent's skills directory (e.g. Claude Code's `~/.claude/skills/agent-team/`) is derived from this file by the `npx skills` package manager (`npx skills add https://github.com/vtmocanu/skills`); edit here, then `npx skills update` to re-pull. Never edit the installed copy.
 
 ## What this skill does
 
@@ -785,9 +785,9 @@ Ask it to return a structured proposal — findings only, no file edits:
 Present the proposal to the user as a numbered list and STOP. Apply nothing without confirmation. On acceptance:
 
 - **Repo-specific change** → edit the agent's `## For this repo` tail only.
-- **Workflow change** → edit `agent-team/SKILL.md` in the skills repo (a library change, gated on the user exactly like `roles.yaml`), then regenerate. Never edit the generated copy under `~/.claude/commands/`; it is overwritten.
+- **Workflow change** → edit `agent-team/SKILL.md` in the skills repo (a library change, gated on the user exactly like `roles.yaml`), then push and `npx skills update`. Never edit the installed copy under `~/.claude/skills/`; it is overwritten.
 
-  **REGENERATING FROM A `--repo` SOURCE NEEDS `dot-ai prompts refresh` FIRST, OR IT SILENTLY SHIPS STALE CONTENT.** The server caches the source repo, so `dot-ai skills generate … --repo <url>` will **rewrite every generated file** (fresh mtimes, `Skills generated successfully`, exit 0) from the cached copy — a success report over a no-op. Measured 2026-08-02: a push landed on `origin/main` with four role `version:` bumps, `git show origin/main:agent-team/roles.yaml` confirmed them on the remote, and the regenerate still produced the OLD versions; `dot-ai prompts refresh` then made the same command correct. **Verify by content, not by the success line** — read a `version:` you just bumped, or grep a string you just added, out of the generated copy.
+  **`npx skills update` RE-CLONES THE REMOTE, SO PUSH FIRST OR IT SILENTLY SHIPS STALE CONTENT.** `npx skills` pulls each source from its git remote, not your local checkout — an unpushed local edit is invisible to it, and a `local` lockfile source (one installed from a folder path rather than the git URL) only ever re-copies your working tree. Push to `origin/main`, run `npx skills update`, then **verify by content, not by the success line**: grep a string you just added out of the installed copy at `~/.claude/skills/agent-team/SKILL.md`.
 - **Elsewhere-knowledge** → propose the edit to the owning file (the project's `CLAUDE.md`, `.claude/agent-team.md`, an ADR) and say plainly which file, so the user approves a specific change rather than a category.
 - **Generic change** → edit `roles.yaml` (bump that role's `version:`), then run the `update` merge for THIS repo and raise the builtin-sync proposal (Mode 2). Editing `roles.yaml` is a library change — gated on the user per the Autonomy section.
 - **New role** → add to `roles.yaml` at `version: 1` (a library change, gated); or, if it is a one-repo experiment, write it only into this repo's `.claude/agents/` and say so explicitly.

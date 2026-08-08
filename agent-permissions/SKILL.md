@@ -9,7 +9,7 @@ description: Manage Claude Code permissions via Dippy config files (global and p
 
 This document is located at: `~/stuff/gitrepos/gh/vtmocanu/skills/agent-permissions/SKILL.md` (public repo: github.com/vtmocanu/skills)
 
-> **Note**: This is the source of truth. The skill copy at `~/.claude/commands/dot-ai-agent-permissions/SKILL.md` is derived from this file. All edits should be made here. After editing, use `/dot-ai-skills` to regenerate; never copy files directly to `~/.claude/commands/`.
+> **Note**: This is the source of truth. The installed copy at `~/.claude/skills/agent-permissions/SKILL.md` is derived from this file by the `npx skills` package manager; edit here, then run `npx skills update` to re-pull it. Never edit the installed copy.
 
 > **Dippy docs**: Configuration syntax and behavior are documented at <https://github.com/ldayton/Dippy/wiki>. If you encounter syntax you're unsure about, fetch the relevant wiki page to verify before making changes. Key pages: [Configuration](https://github.com/ldayton/Dippy/wiki/Configuration), [MCP Tools](https://github.com/ldayton/Dippy/wiki/MCP-Tools), [File Editing](https://github.com/ldayton/Dippy/wiki/File-Editing), [Afterthoughts](https://github.com/ldayton/Dippy/wiki/Afterthoughts), [Handler Model](https://github.com/ldayton/Dippy/wiki/Handler-Model), [Security Model](https://github.com/ldayton/Dippy/wiki/Security-Model).
 
@@ -393,7 +393,7 @@ fd -H -t f '^\\.dippy$' ~/stuff/gitrepos/wxs/
 
 The following hooks must exist in `~/mackup/confs/claude/settings.json` for Dippy to function. The PreToolUse `Bash` + `mcp__.*` matchers invoke the **auto-fallback wrapper** (`dippy-with-auto-fallback.sh`, bundled with this skill), not bare `dippy`, so that auto-mode `ask` handling works as described in [Auto-mode fallback wrapper](#auto-mode-fallback-wrapper). The PostToolUse hook (afterthoughts) calls `dippy` directly.
 
-> **Hook command paths must be absolute.** Claude Code does NOT expand `~` in hook `command` strings — the `~/...` paths shown below are for readability; in your actual `settings.json` use the fully expanded path (e.g. `/home/you/stuff/gitrepos/gh/vtmocanu/skills/agent-permissions/dippy-with-auto-fallback.sh`). Point the hook at your local clone of this repo, not at the generated `~/.claude/commands/dot-ai-agent-permissions/` copy (that directory is wiped and recreated on every `dot-ai skills generate`).
+> **Hook command paths must be absolute.** Claude Code does NOT expand `~` in hook `command` strings — the `~/...` paths shown below are for readability; in your actual `settings.json` use the fully expanded path (e.g. `/home/you/stuff/gitrepos/gh/vtmocanu/skills/agent-permissions/dippy-with-auto-fallback.sh`). Point the hook at your local clone of this repo, not at the installed `~/.claude/skills/agent-permissions/` copy (that directory is overwritten on every `npx skills update`).
 
 ```json
 {

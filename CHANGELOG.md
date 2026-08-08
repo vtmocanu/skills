@@ -10,10 +10,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - `reflect`, `done`, `upgrade-advisor`: converted from flat `<name>.md` files to `<name>/SKILL.md` folders so the `npx skills` package manager discovers them (npx reads only folder skills; dot-ai continues to accept both forms).
 - `agent-team`: normalized bundled-file references (`roles.yaml`, `manifest-template.md`, `scripts/sync.py`, `scripts/test_sync.py`) from bare-relative paths to the `<this skill's directory>/...` base-directory idiom, so they resolve when the skill is installed via `npx skills`, which copies each skill folder verbatim with the working directory set to the consumer repo rather than the skill directory.
+- Migrated the skills' source-of-truth and regeneration notes from the dot-ai pipeline (`dot-ai skills generate`, `/dot-ai-skills`, `~/.claude/commands/`) to the `npx skills` model (`npx skills update`, `~/.claude/skills/`), matching the move of this catalog onto the npx package manager (`agent-team`, `agent-permissions`, `done`, `upgrade-advisor`).
 
 ### Removed
 
 - Retired the `cmux` skill family (`cmux`, `cmux-browser`, `cmux-customization`, `cmux-diagnostics`, `cmux-keyboard-shortcuts`, `cmux-markdown`, `cmux-settings`, `cmux-workspace`) into `retired/`. They are no longer discovered as active skills; see `retired/README.md`.
+
+### Fixed
+
+- `done`: the frontmatter `description` contained an unquoted `: ` (colon-space), which the `npx skills` YAML parser rejects ("mapping values are not allowed here"), so npx silently skipped the skill while dot-ai's more lenient parser had accepted it. Reworded to remove the colon-space, and updated the invocation hint from `/dot-ai-done` to `/done`.
 
 ## [0.24.0] - 2026-08-08
 
