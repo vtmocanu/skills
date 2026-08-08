@@ -1,22 +1,55 @@
 # skills
 
-A public collection of agent skills for [dot-ai](https://github.com/vfarcic/dot-ai) and Claude Code.
+A public collection of agent skills for [Claude Code](https://claude.com/claude-code) (and other agents), delivered with [vercel's `npx skills`](https://github.com/vercel-labs/skills).
 
 [![test](https://github.com/vtmocanu/skills/actions/workflows/test.yml/badge.svg)](https://github.com/vtmocanu/skills/actions/workflows/test.yml)
 [![Release](https://img.shields.io/github/v/release/vtmocanu/skills)](https://github.com/vtmocanu/skills/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-Each skill lives at the repository root, either as a single Markdown file (`<name>.md`) or as a folder (`<name>/SKILL.md` plus supporting files; supported since dot-ai v1.21.0), with YAML frontmatter (`name` + `description`). dot-ai serves them to your agent: it fetches this repo and generates the skill files into your agent's skills directory. (Skills live at the root because dot-ai's `?repo=` override reads prompts from the repository root.)
+Each skill is a folder `<name>/SKILL.md` (plus optional supporting files) at the repository root, with YAML frontmatter (`name` + `description`). `npx skills` clones this repo and installs the skills into your agent's skills directory (`~/.claude/skills/<name>/` for Claude Code), where each becomes a `/<name>` slash-command skill. (The older dot-ai-server path still works; see [Legacy: dot-ai](#legacy-dot-ai).)
 
-## Quick Start
+## Install
 
-Generate these skills into Claude Code with the [dot-ai CLI](https://github.com/vfarcic/dot-ai-cli) (v1.21.0+), pointed at a running dot-ai server:
+Install **all** skills once, globally (every project):
 
-```bash
-dot-ai skills generate --agent claude-code --repo https://github.com/vtmocanu/skills
+```sh
+npx skills add https://github.com/vtmocanu/skills -a claude-code -g
 ```
 
-`--repo` composes alongside other sources: each invocation tags its skills with `source:` frontmatter and rewrites only its own slice, so running it once per repo (typically one agent hook per source) lets skills from several repos coexist without clobbering each other.
+They install to `~/.claude/skills/<name>/`; restart Claude Code and the skills (e.g. `/reflect`, `/agent-team`) become available. Drop `-g` to install into the current project only (`.claude/skills/`).
+
+### Specific skills only
+
+Pass `-s` with a comma-separated list to install a subset, or `-l` to list what the repo offers without installing:
+
+```sh
+npx skills add https://github.com/vtmocanu/skills -a claude-code -l                    # list, don't install
+npx skills add https://github.com/vtmocanu/skills -a claude-code -g -s agent-team,reflect
+```
+
+### Auto-update on every session (global hook)
+
+Add a `SessionStart` hook to `~/.claude/settings.json` so the catalog refreshes on each launch:
+
+```json
+"hooks": {
+  "SessionStart": [
+    {
+      "matcher": "startup",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "npx -y skills@latest update -g -p",
+          "async": true,
+          "timeout": 120
+        }
+      ]
+    }
+  ]
+}
+```
+
+`update -g -p` refreshes both global and project skills, `@latest` keeps the `skills` CLI current, and `async` keeps it off the startup path. `update` only re-pulls sources already installed via `npx skills add`, so run an `add` above once first. Edit the source repo (the source of truth), never the installed copy under `~/.claude/skills/` (which `update` overwrites).
 
 ## Skills
 
@@ -37,6 +70,21 @@ dot-ai skills generate --agent claude-code --repo https://github.com/vtmocanu/sk
 ## Contributing
 
 Issues and PRs welcome. See [CONTRIBUTING](.github/CONTRIBUTING.md), the [Code of Conduct](.github/CODE_OF_CONDUCT.md), and the [Security Policy](.github/SECURITY.md).
+
+## Legacy: dot-ai
+
+Before `npx skills`, these were served by the [dot-ai](https://github.com/vfarcic/dot-ai) generator, which cloned the repo server-side and prefixed every skill as `/dot-ai-<name>`. It still works, but `npx skills` above is the recommended path.
+
+<details>
+<summary>dot-ai install</summary>
+
+```sh
+dot-ai skills generate --agent claude-code --path ~/.claude/commands --repo https://github.com/vtmocanu/skills
+```
+
+`--repo` composes alongside other sources: each invocation tags its skills with `source:` frontmatter and rewrites only its own slice, so skills from several repos coexist without clobbering each other. Do not run both dot-ai and npx for this repo, or you get duplicate skills (`/dot-ai-reflect` from dot-ai and `/reflect` from npx); to switch, remove the `dot-ai skills generate … --repo …` line from your `SessionStart` hook and keep the npx hook above.
+
+</details>
 
 ## License
 

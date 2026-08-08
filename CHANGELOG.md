@@ -6,6 +6,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- `skills`: document that an unquoted `: ` (colon-space) in a frontmatter `description` makes the `npx skills` YAML parser silently skip the skill (`mapping values are not allowed here`); reword or double-quote the description.
+- README: lead with the `npx skills` install flow (all skills, a specific subset via `-s`, and the auto-update `SessionStart` hook), and move the dot-ai path into a collapsed Legacy section.
+
 ## [0.25.0] - 2026-08-08
 
 ### Changed

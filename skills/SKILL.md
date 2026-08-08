@@ -47,6 +47,7 @@ Supporting files are the reason to use a folder. A folder containing only `SKILL
 
 `description` — this is where discovery happens, get it right:
 - **Single line.** Keep the description to one line for portability (the Anthropic Skills API) and clean auto-invocation.
+- **No unquoted `: ` (colon-space).** A colon-space in a plain YAML scalar reads as a mapping indicator: the `npx skills` parser rejects it (`mapping values are not allowed here`), returns null, and **silently skips the skill** — a `⚠ Skipped` warning, no error, exit 0 — so it never installs. Reword to avoid `: `, or wrap the whole description in double quotes. dot-ai's parser tolerated this, so a skill that installed under dot-ai can vanish under npx.
 - **Third person** ("Generates X", "Manages Y"). It is injected into the system prompt; first/second person breaks auto-invocation.
 - **Put all "when to use" info here**, not in the body: `Use when (1)… (2)…` and `Triggers include "…"`.
 - **Lean slightly pushy** — models under-trigger skills. Frame triggers to pull the model in, not "use if relevant".
