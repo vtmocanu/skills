@@ -125,8 +125,13 @@ npx -y skills@latest add <source> -a claude-code --skill '*' -g -y && npx -y ski
 ```
 
 - `add … --skill '*'` installs every skill currently in `<source>`, so new ones land automatically. `--skill '*'` keeps the `-a claude-code` agent scope; `--all` instead fans out to every detected agent.
-- Chain with `&&`, not two separate hooks: `add` and `update` both write the lockfile, so they must run sequentially or they race and corrupt it.
-- Add one source per hook; for multiple sources chain multiple `add`s ahead of a single `update`.
+- Keep it a **single shell command**, not two async hooks: `add` and `update` both write the lockfile, so two concurrent hooks race and corrupt it.
+- For multiple sources, chain the `add`s ahead of one `update`. Join reliable steps with `&&`, but decouple any source that can be unreachable (offline, VPN-gated) with `;` and `|| true` and put it **last** — an `&&` chain aborts on the first failure, so a down source would otherwise block every step after it:
+
+  ```bash
+  npx -y skills@latest add <reliable-source> -a claude-code --skill '*' -g -y && npx -y skills@latest update -g -p; npx -y skills@latest add <vpn-only-source> -a claude-code --skill '*' -g -y || true
+  ```
+
 - Removals and renames are still not auto-pruned in a non-TTY hook (see Rename / delete) — drop the old name with `npx skills remove <old> -g -y`.
 
 ### Edit and publish an existing skill
