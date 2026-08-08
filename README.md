@@ -65,7 +65,6 @@ Add a `SessionStart` hook to `~/.claude/settings.json` so the catalog refreshes 
 | [agent-permissions](agent-permissions/SKILL.md) | Manage an AI coding agent's permissions via Dippy (Bash/MCP allow/ask/deny + the auto-mode `[ASK]` fallback wrapper, bundled) and settings.json (Read/WebFetch/Skill). |
 | [agent-team](agent-team/SKILL.md) | Auto-generate and run a per-repo Claude Code agent team: probe the repo, write `.claude/agents/{role}.md` subagent definitions from a role library, then orchestrate tasks with TeamCreate plus spawned teammates. |
 | [done](done/SKILL.md) | End-of-session wrap-up: check git state across the directories touched this session, review for loose ends, and give a plain verdict on whether the session can be closed. |
-| [git-worktrees](git-worktrees/SKILL.md) | Create and clean up short-lived git worktrees (normal by default; optional bare-clone-with-child-worktrees layout for parallel branches). Ships the `git new-wt` / `git clone-wt` aliases. |
 | [prd-close](prd-close/SKILL.md) | Close a PRD that is already implemented or no longer needed. `*` |
 | [prd-create](prd-create/SKILL.md) | Create documentation-first PRDs that guide development through user-facing content. `*` |
 | [prd-done](prd-done/SKILL.md) | Complete a PRD: create branch, push changes, open a PR, merge, and close the issue. `*` |

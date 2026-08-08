@@ -316,7 +316,7 @@ Use when `/agent-team <task description>` is invoked with a non-keyword first ar
 
 - **Put the agent-team artifacts on the work branch, NEVER the default branch.** Decide the feature branch (and, in a bare-clone-with-worktrees repo, which worktree) BEFORE writing any `.claude/agent-team-tasks/` brief or spawning a teammate, then operate from there:
   - **Single shared worktree:** if the session opened on the default branch (`main`/`master`), `git checkout -b <feature>` in THIS worktree first, so the briefs and every commit land on `<feature>`.
-  - **Dedicated work worktree (bare-clone layout / parallel waves):** create the feature worktree (per the `git-worktrees` skill) and write the `.claude/agent-team-tasks/` briefs INTO that worktree — do not write them in a default-branch worktree the agents will not be in.
+  - **Dedicated work worktree (parallel waves):** create the feature worktree (`git worktree add -b <branch> ../<dir> main`, or a `git new-wt` alias if you have one) and write the `.claude/agent-team-tasks/` briefs INTO that worktree — do not write them in a default-branch worktree the agents will not be in.
 
   Always name the exact branch in every spawn prompt, and ensure the lead itself is on/in the work branch before it authors briefs. Stranding these artifacts on the default branch breaks context handoff (the brief is invisible from the work branch/worktree) and pollutes the default branch. Observed 2026-06-13: a session started on `main` while its agents worked on another branch left the `.claude/agent-team-tasks/` ("agents dir") stranded on `main`, invisible from the work branch.
 

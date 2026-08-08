@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.30.0] - 2026-08-08
+
+### Removed
+
+- `git-worktrees` skill (added in 0.29.0). Its value for the maintainer was marginal once the bare-clone layout was de-emphasized: normal `git worktree add`/`remove` are standard git, and the aliases plus the bare-clone rules already live in the user's gitconfig and global instructions. `prd-worktree` (a concrete PRD action with a bundled script) is unaffected.
+
 ## [0.29.0] - 2026-08-08
 
 ### Added
