@@ -153,6 +153,7 @@ Load the role library at `./roles.yaml` (relative to this SKILL.md). For each ro
 - **spec-keeper**: include if a `specs/` directory exists OR the user asks for spec tracking. Maintains `specs/human.md` (user-stated requirements; edits gated on user confirmation) and `specs/ai.md` (AI design decisions; auto-applied), aiming for rebuild-from-specs sufficiency.
 - **fact-checker**: opt-in only; include if the user requests it or the work is claim-heavy (docs sites, READMEs/CHANGELOGs with version/URL/API facts, reports whose statements must hold). Adversarially verifies claims against code, command output, and primary sources; read-only.
 - **web-ux**: include if any of the role's `triggers_on` patterns match (a web UI surface: `web/`, `frontend/`, vite/next/tailwind configs, `*.tsx`/`*.vue`/`*.svelte`). Validates web-interface work by driving it in a real browser via the `agent-browser` CLI (must be on PATH — note in the proposal if missing) and proposes UX refactor improvements; read-only. Dispatch it whenever the team's change touches a web interface.
+- **skill-reviewer**: include if the repo is a skill catalog — any `**/SKILL.md` present (this `agent-team` repo, or another skills repo). Reviews an added or changed skill against skill-authoring best-practices and the repo's linter (agnix plus any repo validator); read-only. Dispatch it whenever the team's change adds or edits a skill.
 
 If a borderline call needs the user, ask via AskUserQuestion before writing files.
 
@@ -171,6 +172,7 @@ For each picked role, the `prompt_body` from `roles.yaml` is the GENERIC body, c
 - **spec-keeper**: name the spec directory path if it differs from `specs/`; note any existing spec files to adopt instead of creating fresh ones.
 - **fact-checker**: name the claim-bearing surfaces in this repo (docs dir, README, CHANGELOG, published specs) and any authoritative sources to check against (the code itself, CI status, official upstream docs).
 - **web-ux**: name how to reach a running instance of the UI (dev-server command, compose service + port, demo/mock build) and the design-token/style-system files if the repo has them; note any repo-specific UX contract (design system, a11y bar, target browsers).
+- **skill-reviewer**: name the repo's authoring guide — the source of truth for house rules (e.g. `docs/authoring.md`, a `skills` skill, or CONTRIBUTING.md) — and the linter/validator command(s) (`agnix --target claude-code <name>/SKILL.md`, plus any repo validator such as `python3 scripts/validate_skills.py .`).
 
 Keep the tail tight: 1-3 sentences per role, the tester's gate-slot table excepted. The generic body already covers the shape; the `## For this repo` tail only carries what is specific to THIS repo (exact commands, file paths, framework names, how to reach the app). Keeping repo-specifics in the tail — never spliced into the generic body — is what lets `update`/library-sync replace the versioned generic body later without clobbering local tuning.
 

@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.24.0] - 2026-08-08
+
+### Added
+
+- `agent-team`: new **skill-reviewer** role (v1). Reviews an added or changed skill (`<name>/SKILL.md` plus supporting files) against skill-authoring best-practices and the repo's linter, read-only, reporting findings by severity. Auto-picked when a repo is a skill catalog (`triggers_on: **/SKILL.md`); wired into Step 2 role-picking and Step 3 tail guidance.
+
 ## [0.23.0] - 2026-08-08
 
 ### Added
