@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.26.0] - 2026-08-08
+
+### Added
+
+- `prd-*` PRD-workflow skills (`prd-create`, `prd-start`, `prd-next`, `prd-update-progress`, `prd-update-decisions`, `prd-done`, `prd-full`, `prd-close`, `prds-get`), vendored from [vfarcic/dot-ai](https://github.com/vfarcic/dot-ai) `shared-prompts/` (MIT, Copyright (c) 2025 Viktor Farcic). Copied largely verbatim, converted to the folder `SKILL.md` layout with the dot-ai `category` frontmatter dropped and a provenance line added to each. See the README Credits section for attribution.
+
 ### Changed
 
 - `skills`: document that an unquoted `: ` (colon-space) in a frontmatter `description` makes the `npx skills` YAML parser silently skip the skill (`mapping values are not allowed here`); reword or double-quote the description.

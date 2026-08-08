@@ -58,6 +58,15 @@ Add a `SessionStart` hook to `~/.claude/settings.json` so the catalog refreshes 
 | [agent-permissions](agent-permissions/SKILL.md) | Manage an AI coding agent's permissions via Dippy (Bash/MCP allow/ask/deny + the auto-mode `[ASK]` fallback wrapper, bundled) and settings.json (Read/WebFetch/Skill). |
 | [agent-team](agent-team/SKILL.md) | Auto-generate and run a per-repo Claude Code agent team: probe the repo, write `.claude/agents/{role}.md` subagent definitions from a role library, then orchestrate tasks with TeamCreate plus spawned teammates. |
 | [done](done/SKILL.md) | End-of-session wrap-up: check git state across the directories touched this session, review for loose ends, and give a plain verdict on whether the session can be closed. |
+| [prd-close](prd-close/SKILL.md) | Close a PRD that is already implemented or no longer needed. `*` |
+| [prd-create](prd-create/SKILL.md) | Create documentation-first PRDs that guide development through user-facing content. `*` |
+| [prd-done](prd-done/SKILL.md) | Complete a PRD: create branch, push changes, open a PR, merge, and close the issue. `*` |
+| [prd-full](prd-full/SKILL.md) | Run a PRD end-to-end autonomously (start, iterate until done, then PR), stopping after PR creation for review. `*` |
+| [prd-next](prd-next/SKILL.md) | Analyze a PRD and recommend the single highest-priority task to work on next. `*` |
+| [prd-start](prd-start/SKILL.md) | Start working on a PRD implementation. `*` |
+| [prd-update-decisions](prd-update-decisions/SKILL.md) | Update a PRD from design decisions and strategic changes made during conversations. `*` |
+| [prd-update-progress](prd-update-progress/SKILL.md) | Update PRD progress from git commits and code changes, enhanced by conversation context. `*` |
+| [prds-get](prds-get/SKILL.md) | Fetch all open GitHub issues in this project labeled `PRD`. `*` |
 | [reflect](reflect/SKILL.md) | Analyze the current session and propose improvements to the skill that was used, then edit and commit it. |
 | [skills](skills/SKILL.md) | Author, lint, and publish Claude Code skills with the `npx skills` package manager: folder `SKILL.md` layout, frontmatter and description limits, design principles, agnix linting, and the add/update/remove scopes. |
 | [upgrade-advisor](upgrade-advisor/SKILL.md) | Evaluate a tool, framework, or dependency upgrade: discover the pinned version, find the latest *installable* one, read the changelog across the whole version delta, and report which breaking changes actually touch this codebase (by grepping usage) plus the features and refactors worth adopting, with a safe / blocked / needs-work verdict and a checklist. |
@@ -86,6 +95,10 @@ dot-ai skills generate --agent claude-code --path ~/.claude/commands --repo http
 
 </details>
 
+## Credits
+
+`*` The `prd-*` skills are vendored from [vfarcic/dot-ai](https://github.com/vfarcic/dot-ai) (the `shared-prompts/` directory), created by **Viktor Farcic** and used under the MIT License (Copyright (c) 2025 Viktor Farcic). They are copied largely verbatim, converted to the folder `SKILL.md` layout with the dot-ai `category` frontmatter dropped; each file keeps a provenance line pointing back to its source. Thank you to Viktor for the excellent PRD workflow.
+
 ## License
 
-[MIT](LICENSE) © Vlad Mocanu
+[MIT](LICENSE) © Vlad Mocanu. Vendored `prd-*` skills remain © 2025 Viktor Farcic (MIT); see [Credits](#credits).
