@@ -117,6 +117,18 @@ npx skills add <source> -a claude-code -g        # -g = global (~/.claude/skills
 
 `<source>` accepts GitHub `owner/repo` shorthand or a full URL. For a **private** repo, use the SSH form `git@host:owner/repo.git` so the clone uses your existing git credentials (SSH agent / credential helper).
 
+### Auto-install new + refresh on session start (hook)
+`update` never discovers a skill not yet in the lockfile, so a SessionStart hook that only runs `update` will not pick up a newly-pushed skill. To auto-install new skills **and** refresh existing ones, run `add` (with `--skill '*'`) then `update`, chained:
+
+```bash
+npx -y skills@latest add <source> -a claude-code --skill '*' -g -y && npx -y skills@latest update -g -p
+```
+
+- `add … --skill '*'` installs every skill currently in `<source>`, so new ones land automatically. `--skill '*'` keeps the `-a claude-code` agent scope; `--all` instead fans out to every detected agent.
+- Chain with `&&`, not two separate hooks: `add` and `update` both write the lockfile, so they must run sequentially or they race and corrupt it.
+- Add one source per hook; for multiple sources chain multiple `add`s ahead of a single `update`.
+- Removals and renames are still not auto-pruned in a non-TTY hook (see Rename / delete) — drop the old name with `npx skills remove <old> -g -y`.
+
 ### Edit and publish an existing skill
 1. Edit the source `<name>/SKILL.md` (and any supporting files) in its repo.
 2. **Lint** with agnix; fix errors, triage warnings.
@@ -129,10 +141,12 @@ npx skills add <source> -a claude-code -g        # -g = global (~/.claude/skills
 
 ## Rename / delete
 
-`npx skills update` reconciles only skills already tracked in the lockfile — it does **not** install a newly-named skill, and in non-interactive mode (a hook, `-y`, or no TTY) it **skips** deletions. So propagate these explicitly:
+`npx skills update` reconciles only skills already tracked in the lockfile — it does **not** install a newly-named skill, and it **never prunes automatically**. On a deletion a non-interactive run (a hook, or no TTY) prints `Skipping deletion in non-interactive mode` and leaves the skill on disk and in the lockfile; `-y` does not change this, and there is no `--prune` flag. So removal is always an explicit `npx skills remove`:
 
-- **Rename**: `git mv <old>/ <new>/`, update the `name:` field, grep the repo for inbound references (`rg "<old>" .`), commit + push. Then on each machine `npx skills add <source>` to install the new name and `npx skills remove <old>` to drop the old one.
-- **Delete**: `git rm -r <name>/`, grep for references, commit + push. Then `npx skills remove <name>` on each machine (an interactive `npx skills update` will also offer to remove it; a non-interactive one will not).
+- **Rename**: `git mv <old>/ <new>/`, update the `name:` field, grep the repo for inbound references (`rg "<old>" .`), commit + push. Then on each machine `npx skills add <source>` to install the new name and `npx skills remove <old> -g -y` to drop the old one.
+- **Delete**: `git rm -r <name>/`, grep for references, commit + push. Then `npx skills remove <name> -g -y` on each machine (an interactive `npx skills update` will also offer to remove it; a non-interactive one will not).
+
+`remove` takes skill **names** (space-separated) or `--all`; there is no `--source <repo>` filter, so name each skill to drop. Flags mirror the others: `-g` global, `-a <agent>` to scope to one agent, `-y` to skip the confirm.
 
 ## Install scopes (npx skills)
 

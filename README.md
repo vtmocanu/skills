@@ -46,9 +46,9 @@ Add a `SessionStart` hook to `~/.claude/settings.json` so the catalog refreshes 
       "hooks": [
         {
           "type": "command",
-          "command": "npx -y skills@latest update -g -p",
+          "command": "npx -y skills@latest add https://github.com/vtmocanu/skills -a claude-code --skill '*' -g -y && npx -y skills@latest update -g -p",
           "async": true,
-          "timeout": 120
+          "timeout": 180
         }
       ]
     }
@@ -56,7 +56,7 @@ Add a `SessionStart` hook to `~/.claude/settings.json` so the catalog refreshes 
 }
 ```
 
-`update -g -p` refreshes both global and project skills, `@latest` keeps the `skills` CLI current, and `async` keeps it off the startup path. `update` only re-pulls sources already installed via `npx skills add`, so run an `add` above once first. Edit the source repo (the source of truth), never the installed copy under `~/.claude/skills/` (which `update` overwrites).
+The `add … --skill '*'` step installs every skill currently in the source, so **new** skills pushed upstream are picked up automatically — `update` alone never discovers a new skill, it only refreshes ones already in the lockfile. `update -g -p` then refreshes both global and project skills for every other tracked source. `--skill '*'` grabs all skills while keeping the `-a claude-code` agent scope (`--all` would fan out to every detected agent); `-y` runs non-interactively; `@latest` keeps the `skills` CLI current; `async` keeps it off the startup path. Chained with `&&` (not two hooks) because `add` and `update` both write the lockfile and must not race. Renames/removals are **not** auto-pruned in a non-TTY hook — drop the old name with `npx skills remove <old> -g -y`. Edit the source repo (the source of truth), never the installed copy under `~/.claude/skills/` (which `update` overwrites).
 
 ## Skills
 
