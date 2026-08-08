@@ -27,6 +27,13 @@ npx skills add https://github.com/vtmocanu/skills -a claude-code -l             
 npx skills add https://github.com/vtmocanu/skills -a claude-code -g -s agent-team,reflect
 ```
 
+For example, just the full PRD workflow plus the agent team:
+
+```sh
+npx skills add https://github.com/vtmocanu/skills -a claude-code -g \
+  -s prd-create,prd-start,prd-worktree,prd-next,prd-update-progress,prd-update-decisions,prd-done,prd-full,prd-close,prds-get,agent-team
+```
+
 ### Auto-update on every session (global hook)
 
 Add a `SessionStart` hook to `~/.claude/settings.json` so the catalog refreshes on each launch:
@@ -66,6 +73,7 @@ Add a `SessionStart` hook to `~/.claude/settings.json` so the catalog refreshes 
 | [prd-start](prd-start/SKILL.md) | Start working on a PRD implementation. `*` |
 | [prd-update-decisions](prd-update-decisions/SKILL.md) | Update a PRD from design decisions and strategic changes made during conversations. `*` |
 | [prd-update-progress](prd-update-progress/SKILL.md) | Update PRD progress from git commits and code changes, enhanced by conversation context. `*` |
+| [prd-worktree](prd-worktree/SKILL.md) | Create a git worktree for PRD work with a descriptive branch name (bundles a `create.sh`). `*` |
 | [prds-get](prds-get/SKILL.md) | Fetch all open GitHub issues in this project labeled `PRD`. `*` |
 | [reflect](reflect/SKILL.md) | Analyze the current session and propose improvements to the skill that was used, then edit and commit it. |
 | [skills](skills/SKILL.md) | Author, lint, and publish Claude Code skills with the `npx skills` package manager: folder `SKILL.md` layout, frontmatter and description limits, design principles, agnix linting, and the add/update/remove scopes. |
@@ -97,7 +105,7 @@ dot-ai skills generate --agent claude-code --path ~/.claude/commands --repo http
 
 ## Credits
 
-`*` The `prd-*` skills are vendored from [vfarcic/dot-ai](https://github.com/vfarcic/dot-ai) (the `shared-prompts/` directory), created by **Viktor Farcic** and used under the MIT License (Copyright (c) 2025 Viktor Farcic). They are copied largely verbatim, converted to the folder `SKILL.md` layout with the dot-ai `category` frontmatter dropped; each file keeps a provenance line pointing back to its source. Thank you to Viktor for the excellent PRD workflow.
+`*` The `prd-*` skills are vendored from [vfarcic/dot-ai](https://github.com/vfarcic/dot-ai), created by **Viktor Farcic** and used under the MIT License (Copyright (c) 2025 Viktor Farcic). Most come from its `shared-prompts/` directory; `prd-worktree` comes from `.claude/skills/dot-ai-worktree-prd/` (renamed from `worktree-prd`, with its bundled `create.sh`). They are copied largely verbatim, converted to the folder `SKILL.md` layout with the dot-ai `category` frontmatter dropped; each keeps a provenance line pointing back to its source. Thank you to Viktor for the excellent PRD workflow.
 
 ## License
 

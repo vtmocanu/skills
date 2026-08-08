@@ -6,6 +6,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.28.0] - 2026-08-08
+
+### Added
+
+- `prd-worktree` skill, vendored from [vfarcic/dot-ai](https://github.com/vfarcic/dot-ai) `.claude/skills/dot-ai-worktree-prd/` (MIT, Copyright (c) 2025 Viktor Farcic) and renamed from `worktree-prd` to fit the `prd-*` family. Creates a git worktree for PRD work with a descriptive branch name; ships its bundled `create.sh`, referenced via the `<this skill's directory>/…` base-directory idiom so it resolves under npx.
+- README: an example installing just the PRD workflow plus the agent team via `-s`.
+
+### Changed
+
+- `prd-full`: updated its cross-reference from `/worktree-prd` to `/prd-worktree`.
+
 ## [0.27.0] - 2026-08-08
 
 ### Added

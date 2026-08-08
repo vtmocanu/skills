@@ -28,7 +28,7 @@ Standard harness guardrails for genuinely destructive actions still apply.
 
 ## Flow
 
-1. **Isolation:** set up per the mode (`$2`) — invoke `/worktree-prd` for PRD #$1 if `worktree`, or create the branch directly otherwise.
+1. **Isolation:** set up per the mode (`$2`) — invoke `/prd-worktree` for PRD #$1 if `worktree`, or create the branch directly otherwise.
 2. **Start:** run `/prd-start $1`. Skip its branch-creation step (Step 1 already handled it).
 3. **Iterate** without resetting conversation context:
    - run `/prd-next`, including implementing the recommended task in the same turn,
