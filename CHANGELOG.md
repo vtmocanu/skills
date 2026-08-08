@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.29.0] - 2026-08-08
+
+### Added
+
+- `git-worktrees` skill, migrated from an internal catalog and generalized for public use. Short-lived **normal** worktrees are the default (raw `git worktree add`, or the optional `git new-wt` alias); the **bare-clone-with-child-worktrees** layout is kept as an opt-in advanced section rather than the default. Ships both `git new-wt` and `git clone-wt` as `~/.gitconfig` alias snippets, sanitized of internal URLs, paths, and tool names.
+
 ## [0.28.0] - 2026-08-08
 
 ### Added
