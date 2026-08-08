@@ -7,7 +7,7 @@ description: End-of-session wrap-up prompt. When invoked, asks Claude to determi
 
 ## Document Location
 
-This document is located at: `~/stuff/gitrepos/gh/vtmocanu/skills/done.md` (public repo: github.com/vtmocanu/skills)
+This document is located at: `~/stuff/gitrepos/gh/vtmocanu/skills/done/SKILL.md` (public repo: github.com/vtmocanu/skills)
 
 > **Note**: This is the source of truth. The skill copy at `~/.claude/commands/dot-ai-done/SKILL.md` is derived from this file. All edits should be made here. After editing, use `/dot-ai-skills` to regenerate; never copy files directly to `~/.claude/commands/`.
 

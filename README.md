@@ -24,21 +24,15 @@ dot-ai skills generate --agent claude-code --repo https://github.com/vtmocanu/sk
 |---|---|
 | [agent-permissions](agent-permissions/SKILL.md) | Manage an AI coding agent's permissions via Dippy (Bash/MCP allow/ask/deny + the auto-mode `[ASK]` fallback wrapper, bundled) and settings.json (Read/WebFetch/Skill). |
 | [agent-team](agent-team/SKILL.md) | Auto-generate and run a per-repo Claude Code agent team: probe the repo, write `.claude/agents/{role}.md` subagent definitions from a role library, then orchestrate tasks with TeamCreate plus spawned teammates. |
-| [cmux](cmux/SKILL.md) | Control [cmux](https://github.com/manaflow-ai/cmux) topology and routing: windows, workspaces, panes/surfaces, focus, moves, reorder, identify, trigger flash. |
-| [cmux-browser](cmux-browser/SKILL.md) | Browser automation with cmux: open sites, interact with pages, wait for state changes, and extract data from cmux browser surfaces. |
-| [cmux-customization](cmux-customization/SKILL.md) | Customize cmux: `cmux.json` actions, custom commands, workspace layouts, buttons, Command Palette, shortcuts, notifications, browser routing, and presets. |
-| [cmux-diagnostics](cmux-diagnostics/SKILL.md) | Run cmux diagnostics and health checks when hooks, notifications, session restore, settings, socket access, or CLI control are not working. |
-| [cmux-keyboard-shortcuts](cmux-keyboard-shortcuts/SKILL.md) | Customize, rebind, unbind, reset, audit, or template cmux keyboard shortcuts (tmux-style, Vim-style, terminal-first, and more). |
-| [cmux-markdown](cmux-markdown/SKILL.md) | Open markdown files in a formatted viewer panel with live reload, alongside the terminal. |
-| [cmux-settings](cmux-settings/SKILL.md) | View and edit cmux settings in `~/.config/cmux/cmux.json`: set values by JSON path, validate the file, and look up recognized keys. |
-| [cmux-workspace](cmux-workspace/SKILL.md) | Work inside the current cmux workspace and terminal: caller surface, panes, surfaces, socket targeting, and non-interfering automation. |
-| [done](done.md) | End-of-session wrap-up: check git state across the directories touched this session, review for loose ends, and give a plain verdict on whether the session can be closed. |
-| [reflect](reflect.md) | Analyze the current session and propose improvements to the skill that was used, then edit and commit it. |
-| [upgrade-advisor](upgrade-advisor.md) | Evaluate a tool, framework, or dependency upgrade: discover the pinned version, find the latest *installable* one, read the changelog across the whole version delta, and report which breaking changes actually touch this codebase (by grepping usage) plus the features and refactors worth adopting — with a safe / blocked / needs-work verdict and a checklist. |
+| [done](done/SKILL.md) | End-of-session wrap-up: check git state across the directories touched this session, review for loose ends, and give a plain verdict on whether the session can be closed. |
+| [reflect](reflect/SKILL.md) | Analyze the current session and propose improvements to the skill that was used, then edit and commit it. |
+| [skills](skills/SKILL.md) | Author, lint, and publish Claude Code skills with the `npx skills` package manager: folder `SKILL.md` layout, frontmatter and description limits, design principles, agnix linting, and the add/update/remove scopes. |
+| [upgrade-advisor](upgrade-advisor/SKILL.md) | Evaluate a tool, framework, or dependency upgrade: discover the pinned version, find the latest *installable* one, read the changelog across the whole version delta, and report which breaking changes actually touch this codebase (by grepping usage) plus the features and refactors worth adopting, with a safe / blocked / needs-work verdict and a checklist. |
 
 ## Other files
 
 - [`CLAUDE.example.md`](CLAUDE.example.md) — a generic starter for `~/.claude/CLAUDE.md` (Claude Code's global instructions): general AI-collaboration guidance only, no setup specifics. Not a skill; copy what's useful into your own config.
+- [`retired/`](retired/) — skills no longer maintained or installed, kept for reference. See [retired/README.md](retired/README.md).
 
 ## Contributing
 

@@ -26,13 +26,13 @@ The skill has four modes selected by the first argument:
 
 ## Version staleness check (on load)
 
-Every generated `.claude/agents/<role>.md` carries a frontmatter `version:` copied from that role's `version:` in `./roles.yaml`. Whenever this skill loads in a repo that already has `.claude/agents/`, do a quick staleness pass before other work: for each agent file, read its `version:` and compare to the current role `version:` in `roles.yaml`. **Compare the BODY too, not only the number** — diff each file's generic body (everything above `## For this repo`) against that role's `prompt_body`. Surface the result in one line, e.g.:
+Every generated `.claude/agents/<role>.md` carries a frontmatter `version:` copied from that role's `version:` in `<this skill's directory>/roles.yaml`. Whenever this skill loads in a repo that already has `.claude/agents/`, do a quick staleness pass before other work: for each agent file, read its `version:` and compare to the current role `version:` in `roles.yaml`. **Compare the BODY too, not only the number** — diff each file's generic body (everything above `## For this repo`) against that role's `prompt_body`. Surface the result in one line, e.g.:
 
 > 3 of 6 agents are behind the library — coder (v1→v2), tester (v1→v3), documenter (missing version → treat as v0). Run `/agent-team update` to refresh.
 
 A file with no `version:` field predates versioning; treat it as v0 (stale). This pass only INFORMS — it never auto-edits. The actual merge happens in `update` mode, which preserves each file's `## For this repo` tail. Skip the pass silently when every agent is current.
 
-**Run it, do not re-derive it by hand: [`./scripts/sync.py`](scripts/sync.py) ships with this skill.**
+**Run it, do not re-derive it by hand: `<this skill's directory>/scripts/sync.py` ships with this skill.**
 
 **The two paths are anchored differently, so spell the script one out.** `./scripts/sync.py` is relative to THIS FILE's directory; `--agents` defaults to `.claude/agents` relative to your CWD, which is the consumer repo. So run it from the repo being checked, giving the script's own absolute path — the directory this SKILL.md was loaded from:
 
@@ -68,7 +68,7 @@ Still requires explicit user confirmation (do NOT auto-act):
 - **Shared-system writes** the team would perform on the user's behalf: release tag pushes, force-pushes, PR merges, sending external messages. Present a verification summary and STOP, per Mode 3 Step 4.
 - **PRD-task transitions** to a NEW scope (a "pick the next task" command or request). Analyze and propose; spawn only after acceptance.
 - **Role-file hotfixes** (Mode 3 Step 6.A) unless pre-authorized in durable instructions.
-- **Editing the role library** at `./roles.yaml`, **or editing this skill's own `agent-team/SKILL.md` workflow**, or running `/agent-team update`. Both files are the shared library: a change propagates to every repo that uses the skill, not just this one.
+- **Editing the role library** at `<this skill's directory>/roles.yaml`, **or editing this skill's own `agent-team/SKILL.md` workflow**, or running `/agent-team update`. Both files are the shared library: a change propagates to every repo that uses the skill, not just this one.
 
 If `.claude/agents/` is missing for the current repo, propose `/agent-team init` before spawning; do not auto-init without surfacing the proposed roster.
 
@@ -142,7 +142,7 @@ Cite the actual files/directories you found in the proposal you present to the u
 
 ### Step 2: pick roles
 
-Load the role library at `./roles.yaml` (relative to this SKILL.md). For each role:
+Load the role library at `<this skill's directory>/roles.yaml`. For each role:
 
 - **coder, reviewer, auditor**: always include. These are the default trio.
 - **tester**: include if any of the role's `triggers_on` patterns match a path in the repo (`tests/`, `test/`, `*_test.go`, `pytest.ini`, etc.), OR if any gate slot other than `test` is populated. A repo with a linter and no test suite still needs someone other than the coder to run that linter — otherwise the gate is back to one self-reporting owner and no verifier, which is the case this whole mechanism exists to fix.
@@ -245,7 +245,7 @@ repo-specifics; the file is then pure generic body at that version.>
 
 Tier guidance (alias names, deliberately not version-pinned — model families rotate; the Claude 5 family shipped after this guidance was first written): reasoning-heavy roles (coder, reviewer, auditor, tester, architect, researcher, spec-keeper, fact-checker, web-ux) get the strong tier (`opus`); mechanical roles (documenter, release) get the mid tier (`sonnet`); never pin the smallest tier (`haiku`) for any role. Rationale for the haiku ban: auto-mode (the bias-to-act permission mode that lets teammates complete shared-system writes like a release push without a manual confirmation round-trip) is gated to specific models — the smallest tier has been excluded; **verify the current auto-mode-capable list in the Claude Code docs** rather than trusting a version list here. The tester is strong-tier because testing in most repos here is adversarial/scenario validation (crafting fixtures to break a guard, reasoning about evasion vectors, probing runtime contracts); keep tester on `sonnet` only when the repo's testing is a purely mechanical unit-test-suite run. Note (per the docs): a subagent's frontmatter `permissionMode` is ignored; its actions are classified under the parent session's rules, but only if the subagent's model is itself auto-mode-capable, which is why the model choice (not a mode flag) is the lever here.
 
-Write `.claude/agent-team.md` as the workflow manifest. **The full template is the sibling file [`manifest-template.md`](./manifest-template.md) — copy it verbatim and fill in the values discovered in Step 1.** It ships in the generated skill directory alongside `roles.yaml`.
+Write `.claude/agent-team.md` as the workflow manifest. **The full template is the sibling file `<this skill's directory>/manifest-template.md` — copy it verbatim and fill in the values discovered in Step 1.** It ships in the generated skill directory alongside `roles.yaml`.
 
 Its sections, so you know what you are filling in without opening it:
 
@@ -646,7 +646,7 @@ If a spawned teammate reports a structural problem with its own role file (missi
 2. Propose the fix to the user via `AskUserQuestion` with the minimal change as the recommended option and 1-2 alternatives (e.g., "workaround via files", "remove the `tools:` line entirely"). Skip the question only if the user has pre-authorized hotfixes in durable instructions.
 3. Apply the patch (`Edit` on `.claude/agents/<role>.md`). Keep the change minimal: add the missing tool, fix the broken YAML, narrow the contradictory instruction. Do NOT rewrite the role wholesale; that's `/agent-team update` work.
 4. Respawn the affected teammate (see slot-collision handling below). The live teammate's tool set AND model are frozen at spawn time; the patched file only takes effect on the next spawn. This also covers mid-run model changes: editing `model:` in a role file does nothing for live teammates; recycle them (graceful shutdown, then respawn), and — for an alias tier — pass the Agent tool's `model` parameter explicitly on the respawn to override regardless of role-file state. If the edited `model:` is an EXACT id (e.g. `claude-opus-4-8`), the param cannot carry it: OMIT the param on the respawn so the patched frontmatter is honored instead (Step 5).
-5. After the run completes, decide whether the hotfix should be backported into the role library at `./roles.yaml` and propagated via `/agent-team update`. Flag this to the user; the team-lead does NOT edit the role library directly.
+5. After the run completes, decide whether the hotfix should be backported into the role library at `<this skill's directory>/roles.yaml` and propagated via `/agent-team update`. Flag this to the user; the team-lead does NOT edit the role library directly.
 
 Out of scope for hotfixes: adding new roles, removing roles, changing a role's responsibilities, changing `model:`. Those are `/agent-team init`/`update` work.
 
@@ -751,7 +751,7 @@ Two cautions when proposing a SKILL.md change, both learned from that same sessi
 Run it as a dedicated read-only reviewer subagent so the critique is not colored by the lead's own in-session choices. Spawn via `Agent(subagent_type: "researcher")` if that role exists in the repo, else any read-only reviewer/general agent. Give it in the prompt:
 
 - the repo's current `.claude/agents/*.md` (roster, `version:`s, and each `## For this repo` tail),
-- the library at `./roles.yaml` (source of truth for generic bodies + current versions),
+- the library at `<this skill's directory>/roles.yaml` (source of truth for generic bodies + current versions),
 - a summary of THIS session: what the team did, where a teammate struggled, missing-context surfaces, any mid-run role-file hotfix (Step 6.A), and tasks that had no good owner.
 - **the durable brief's path and the work branch name**, so item 7 below has something to read. Without these the pass can describe the session but cannot measure it.
 
@@ -796,16 +796,16 @@ Reflect NEVER runs automatically at session end (no hook exists for that) — it
 
 ## Role library reference
 
-The full role library is in `./roles.yaml`. Read it during init/update to see the canonical role descriptions, default tool allowlists, and `triggers_on` patterns. The library may evolve over time; the skill always reads it fresh.
+The full role library is in `<this skill's directory>/roles.yaml`. Read it during init/update to see the canonical role descriptions, default tool allowlists, and `triggers_on` patterns. The library may evolve over time; the skill always reads it fresh.
 
 Besides this file, four others ship with the skill:
 
 | file | what it is |
 |---|---|
-| `./roles.yaml` | the role library — versioned generic bodies, descriptions, tool allowlists, `triggers_on` |
-| [`./manifest-template.md`](manifest-template.md) | the template copied into a repo as `.claude/agent-team.md` at init |
-| [`./scripts/sync.py`](scripts/sync.py) | the check/diff/apply tool for the staleness pass and the Mode 2 merge |
-| [`./scripts/test_sync.py`](scripts/test_sync.py) | its regression suite — `python3 agent-team/scripts/test_sync.py`, stdlib `unittest`, no pytest |
+| `<this skill's directory>/roles.yaml` | the role library — versioned generic bodies, descriptions, tool allowlists, `triggers_on` |
+| `<this skill's directory>/manifest-template.md` | the template copied into a repo as `.claude/agent-team.md` at init |
+| `<this skill's directory>/scripts/sync.py` | the check/diff/apply tool for the staleness pass and the Mode 2 merge |
+| `<this skill's directory>/scripts/test_sync.py` | its regression suite — `python3 agent-team/scripts/test_sync.py`, stdlib `unittest`, no pytest |
 
 `sync.py` needs PyYAML and nothing else; it refuses to run without it rather than hand-parsing `roles.yaml`, whose block scalars a partial parse would silently read as clean bodies it never saw.
 

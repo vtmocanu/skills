@@ -6,6 +6,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- `reflect`, `done`, `upgrade-advisor`: converted from flat `<name>.md` files to `<name>/SKILL.md` folders so the `npx skills` package manager discovers them (npx reads only folder skills; dot-ai continues to accept both forms).
+- `agent-team`: normalized bundled-file references (`roles.yaml`, `manifest-template.md`, `scripts/sync.py`, `scripts/test_sync.py`) from bare-relative paths to the `<this skill's directory>/...` base-directory idiom, so they resolve when the skill is installed via `npx skills`, which copies each skill folder verbatim with the working directory set to the consumer repo rather than the skill directory.
+
+### Removed
+
+- Retired the `cmux` skill family (`cmux`, `cmux-browser`, `cmux-customization`, `cmux-diagnostics`, `cmux-keyboard-shortcuts`, `cmux-markdown`, `cmux-settings`, `cmux-workspace`) into `retired/`. They are no longer discovered as active skills; see `retired/README.md`.
+
 ## [0.24.0] - 2026-08-08
 
 ### Added
