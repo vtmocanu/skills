@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Validate agent skill files for dot-ai / Claude Code.
 
-Skills live at the repository root (a flat ``<name>.md`` per skill, or a
-``<name>/SKILL.md`` for folder skills). dot-ai's ``?repo=`` override reads
-prompts from the repo root, so that is where skills must live.
+Skills live under the ``skills/`` container as ``skills/<name>/SKILL.md`` (the
+prd family under ``skills/prd/<name>/SKILL.md``); ``npx skills`` discovers that
+container to depth 3. ``retired/`` at the repo root is intentionally excluded.
 
 Checks each skill for:
   - a YAML frontmatter block delimited by ---
@@ -44,7 +44,8 @@ def find_skill_files(root: Path) -> list[Path]:
         for p in sorted(root.glob("*.md"))
         if p.name not in META and not p.name.endswith(".example.md")
     ]
-    folder = sorted(root.glob("*/SKILL.md"))
+    skills_dir = root / "skills"
+    folder = sorted(skills_dir.rglob("SKILL.md")) if skills_dir.is_dir() else []
     return flat + folder
 
 

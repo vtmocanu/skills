@@ -34,5 +34,5 @@ jobs:
       - name: Install sync.py's only dependency
         run: python3 -m pip install --disable-pip-version-check pyyaml
 
-      - name: Test agent-team/scripts/sync.py
-        run: python3 agent-team/scripts/test_sync.py
+      - name: Test skills/agent-team/scripts/sync.py
+        run: python3 skills/agent-team/scripts/test_sync.py
