@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-08-08
+
+### Added
+
+- `skills`: new skill for authoring, linting, and publishing Claude Code skills with the `npx skills` package manager. Covers the edit-source-not-installed-copy rule (owner vs consumer paths), folder `SKILL.md` layout and base-directory references, frontmatter and description limits, design principles, the `$1`/`$2` code-block substitution gotcha, agnix linting, and the add/update/remove scopes plus lockfile locations.
+
 ## [0.22.0] - 2026-08-07
 
 ### Added
