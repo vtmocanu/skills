@@ -26,9 +26,9 @@ You are helping initiate active implementation work on a specific Product Requir
 
 ## Step 0: Check for PRD Argument
 
-**If `prdNumber` argument is provided ({{prdNumber}}):**
+**If a PRD number argument is provided (`$ARGUMENTS`):**
 - Skip context check and auto-detection
-- Use PRD #{{prdNumber}} directly
+- Use PRD #$ARGUMENTS directly
 - Proceed to Step 2 (PRD Readiness Validation)
 
 **If `prdNumber` argument is NOT provided:**

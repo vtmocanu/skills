@@ -18,7 +18,7 @@ Run a full PRD lifecycle autonomously, stopping after the pull request is create
 
 ## Arguments
 
-If `{{prdNumber}}` or `{{mode}}` is missing, or `{{mode}}` is anything other than `branch` or `worktree`, abort and tell the user to supply valid values. Do not auto-detect.
+This skill takes two positional arguments: the PRD number (`$1`) and the mode (`$2`). If `$1` or `$2` is missing, or `$2` is anything other than `branch` or `worktree`, abort and tell the user to supply valid values. Do not auto-detect.
 
 ## Global rule
 
@@ -28,8 +28,8 @@ Standard harness guardrails for genuinely destructive actions still apply.
 
 ## Flow
 
-1. **Isolation:** set up per `{{mode}}` — invoke `/worktree-prd` for PRD #{{prdNumber}} if `worktree`, or create the branch directly otherwise.
-2. **Start:** run `/prd-start {{prdNumber}}`. Skip its branch-creation step (Step 1 already handled it).
+1. **Isolation:** set up per the mode (`$2`) — invoke `/worktree-prd` for PRD #$1 if `worktree`, or create the branch directly otherwise.
+2. **Start:** run `/prd-start $1`. Skip its branch-creation step (Step 1 already handled it).
 3. **Iterate** without resetting conversation context:
    - run `/prd-next`, including implementing the recommended task in the same turn,
    - run `/prd-update-progress`,

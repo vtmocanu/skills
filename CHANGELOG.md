@@ -6,6 +6,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.27.0] - 2026-08-08
+
+### Added
+
+- `prd-create`: two uzi options, shown only when the `uzi` CLI or the `uzi-cli` skill is available. **Option 3** commits and pushes the PRD, then seeds it to the uzi factory from a locally-authored plan (`uzi run create --plan-file`) so the worker implements it directly. **Option 4** starts a run and lets uzi plan, then watches for the plan gate (`awaiting_approval`), shows the plan, and approves or rejects it on the user's call.
+
+### Changed
+
+- `prd-start`, `prd-full`: replaced dot-ai's `{{prdNumber}}` / `{{mode}}` prompt templating with Claude Code argument tokens (`$ARGUMENTS`, `$1`, `$2`), so the vendored skills receive invocation arguments under npx / Claude Code.
+
 ## [0.26.0] - 2026-08-08
 
 ### Added
