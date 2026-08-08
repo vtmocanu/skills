@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.25.0] - 2026-08-08
+
 ### Changed
 
 - `reflect`, `done`, `upgrade-advisor`: converted from flat `<name>.md` files to `<name>/SKILL.md` folders so the `npx skills` package manager discovers them (npx reads only folder skills; dot-ai continues to accept both forms).
