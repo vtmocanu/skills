@@ -6,6 +6,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.33.5] - 2026-08-09
+
+### Changed
+
+- README: promoted each install path to a top-level heading (`## 🧰 Just agent-kit`, `## 📦 All skills`) and dropped the collapsibles, so each path's auto-update hook shows inline. Shortened the all-skills bundle note to point at the agent-kit table instead of relisting every skill.
+
+### Added
+
+- Credits: noted that the `agent-team` skill's initial design was based on Viktor Farcic's [dot-agent-deck](https://github.com/vfarcic/dot-agent-deck).
+
 ## [0.33.4] - 2026-08-09
 
 ### Changed

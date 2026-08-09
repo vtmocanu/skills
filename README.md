@@ -8,11 +8,9 @@ A public collection of agent skills for [Claude Code](https://claude.com/claude-
 
 Each skill is a folder `skills/<name>/SKILL.md` with YAML frontmatter (`name` + `description`). `npx skills` installs them to `~/.claude/skills/<name>/`, where each becomes a `/<name>` slash-command skill. Restart Claude Code after installing.
 
-## Install
-
 Two ways in. Pick one.
 
-### 🧰 agent-kit
+## 🧰 Just agent-kit
 
 The agent team plus the full PRD lifecycle (11 skills).
 
@@ -20,8 +18,7 @@ The agent team plus the full PRD lifecycle (11 skills).
 npx skills add vtmocanu/skills/skills/agent-kit -a claude-code -g -y
 ```
 
-<details>
-<summary>Auto-update hook (add to <code>~/.claude/settings.json</code>)</summary>
+**Auto-update hook** (add to `~/.claude/settings.json`):
 
 ```json
 "hooks": {
@@ -41,8 +38,6 @@ npx skills add vtmocanu/skills/skills/agent-kit -a claude-code -g -y
 }
 ```
 
-</details>
-
 | Skill | What it does |
 |---|---|
 | [agent-team](skills/agent-kit/agent-team/SKILL.md) | Auto-generate and run a per-repo Claude Code agent team: probe the repo, write `.claude/agents/{role}.md` subagent definitions from a role library, then orchestrate tasks with spawned teammates. |
@@ -59,7 +54,7 @@ npx skills add vtmocanu/skills/skills/agent-kit -a claude-code -g -y
 
 Anything later added under `skills/agent-kit/` joins the bundle automatically.
 
-### 📦 All skills
+## 📦 All skills
 
 The whole catalog (18 skills), agent-kit included.
 
@@ -67,8 +62,7 @@ The whole catalog (18 skills), agent-kit included.
 npx skills add https://github.com/vtmocanu/skills -a claude-code -g -y
 ```
 
-<details>
-<summary>Auto-update hook (add to <code>~/.claude/settings.json</code>)</summary>
+**Auto-update hook** (add to `~/.claude/settings.json`):
 
 ```json
 "hooks": {
@@ -88,8 +82,6 @@ npx skills add https://github.com/vtmocanu/skills -a claude-code -g -y
 }
 ```
 
-</details>
-
 | Skill | What it does |
 |---|---|
 | [agent-permissions](skills/agent-permissions/SKILL.md) | Manage an AI coding agent's permissions via Dippy (Bash/MCP allow/ask/deny plus the auto-mode `[ASK]` fallback wrapper, bundled) and settings.json (Read/WebFetch/Skill). |
@@ -100,9 +92,9 @@ npx skills add https://github.com/vtmocanu/skills -a claude-code -g -y
 | [skills](skills/skills/SKILL.md) | Author, lint, and publish Claude Code skills with the `npx skills` package manager: folder `SKILL.md` layout, frontmatter and description limits, design principles, agnix linting, and the add/update/remove scopes. |
 | [upgrade-advisor](skills/upgrade-advisor/SKILL.md) | Evaluate a tool, framework, or dependency upgrade: discover the pinned version, find the latest *installable* one, read the changelog across the whole delta, and report which breaking changes actually touch this codebase (by grepping usage), with a safe / blocked / needs-work verdict. |
 
-Plus the 11 [agent-kit](skills/agent-kit/) skills, which this install includes: [agent-team](skills/agent-kit/agent-team/SKILL.md), [prd-create](skills/agent-kit/prd-create/SKILL.md), [prd-start](skills/agent-kit/prd-start/SKILL.md), [prd-next](skills/agent-kit/prd-next/SKILL.md), [prd-update-progress](skills/agent-kit/prd-update-progress/SKILL.md), [prd-update-decisions](skills/agent-kit/prd-update-decisions/SKILL.md), [prd-done](skills/agent-kit/prd-done/SKILL.md), [prd-full](skills/agent-kit/prd-full/SKILL.md), [prd-close](skills/agent-kit/prd-close/SKILL.md), [prd-worktree](skills/agent-kit/prd-worktree/SKILL.md), [prds-get](skills/agent-kit/prds-get/SKILL.md).
+Plus the 11 [agent-kit](skills/agent-kit/) skills from the table above.
 
-### Notes for both paths
+## Notes for both paths
 
 - The hook chains `add … --skill '*'` with `update` because `update` alone never discovers a **new** skill, it only refreshes ones already in the lockfile; the `add` step picks up anything the source has added. `&&` (not two hooks) keeps the two lockfile writers from racing.
 - Renames and removals are **not** auto-pruned in a non-TTY hook; drop an old name with `npx skills remove <old> -g -y`.
@@ -136,6 +128,8 @@ dot-ai skills generate --agent claude-code --path ~/.claude/commands --repo http
 ## Credits
 
 The `prd-*`, `generate-cicd`, and `generate-dockerfile` skills are vendored from [vfarcic/dot-ai](https://github.com/vfarcic/dot-ai), created by **Viktor Farcic** and used under the MIT License (Copyright (c) 2025 Viktor Farcic). Most come from its `shared-prompts/` directory; `prd-worktree` comes from `.claude/skills/dot-ai-worktree-prd/` (renamed from `worktree-prd`, with its bundled `create.sh`). They are copied largely verbatim, converted to the folder `SKILL.md` layout with the dot-ai `category` frontmatter dropped; each keeps a provenance line pointing back to its source. Thank you to Viktor for the excellent PRD workflow and project generators.
+
+The `agent-team` skill's initial design was based on Viktor's [dot-agent-deck](https://github.com/vfarcic/dot-agent-deck).
 
 ## License
 
