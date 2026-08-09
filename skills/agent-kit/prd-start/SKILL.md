@@ -85,7 +85,7 @@ You are helping initiate active implementation work on a specific Product Requir
 Please provide the PRD number (e.g., "12", "PRD 12", or "36").
 
 **Not sure which PRD to work on?**
-Execute `dot-ai:prds-get` prompt to see all available PRDs organized by priority and readiness.
+Run `/prds-get` to see all available PRDs organized by priority and readiness.
 
 **Your choice**: [Wait for user input]
 ```

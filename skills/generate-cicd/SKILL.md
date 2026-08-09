@@ -159,7 +159,7 @@ Ask the user which CI/CD platform they use. Present ONLY these options:
 
 ```text
 [Platform] is not yet supported. Would you like me to open a feature
-request issue at https://github.com/dot-ai-app/dot-ai/issues so we
+request issue at https://github.com/vtmocanu/skills/issues so we
 can prioritize adding it?
 
 1. Yes, open a feature request
