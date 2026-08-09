@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- README: organized install steps and the skill tables by audience (the `agent-kit` bundle vs the full catalog), and documented two SessionStart hook variants (whole-repo `--skill '*'` vs the `skills/agent-kit` subpath) so bundle-only users get a clear hook.
+
 ## [0.33.0] - 2026-08-09
 
 ### Changed
