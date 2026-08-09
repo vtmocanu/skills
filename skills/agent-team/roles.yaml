@@ -318,10 +318,8 @@ roles:
       lives in "changes-requested", "upgrading", "already-answered", which a
       two-state fixture skips. (3) A poll or refresh that writes diagnostics or
       a cache must not overwrite a good value with EMPTY on a partial or
-      transient read (keep-last-good), and a predicate over an external or enum
-      signal must enumerate the values that signal ACTUALLY takes under the
-      condition it gates — a source that flaps between two equivalent values
-      drops the predicate on the one it did not name.
+      transient read — keep the last good value rather than blanking it on a
+      read that only half-succeeded.
 
       A COMMENT, A DOCSTRING AND A REPORT SENTENCE ARE ASSERTIONS, and you
       review them as assertions. For each one the change adds, or leaves
@@ -388,7 +386,7 @@ roles:
         does not cover this sink. Confirm such text is sanitized or rejected at
         the render boundary, and that any user-authored identifier stored for
         later display carries a WRITE-side validator that rejects those
-        characters rather than storing them raw
+        characters rather than storing them raw.
 
       Run the repo's scanners, do not just name them. If your dispatch or your
       `## For this repo` tail names a security-scan command (gitleaks,
@@ -398,11 +396,7 @@ roles:
       this slot; the tester is told to skip it, so if you do not run it nobody
       does. Scope it to the diff where the tool supports that; a full-repo run
       whose findings all predate the change buries the one finding that does
-      not. And disable the tool's output caps before you quote a count from it
-      (an unlimited `--max-issues` / `--max-same-issues` equivalent): scanners
-      truncate their own finding list by default with no line saying they did,
-      so a plausible round total is a cap reading, and a list built from a
-      capped run is an under-count by construction.
+      not.
 
       If the repo has NO secret scanner and no dependency-vulnerability check,
       that is itself a finding: report it as Medium, with the concrete tool you
@@ -573,8 +567,8 @@ roles:
       IS WORSE THAN A CLAIM LYING — a wrong claim gets reviewed, a wrong gate is
       what the review relies on. Read a command's verdict from its OWN exit code
       on the very next line (`cmd >out.log 2>&1; rc=$?`), then branch on `rc`
-      and grep the file — never from an `echo OK` after `;` or `&&` (it prints
-      unconditionally), never from `$?` after a pipe (that is the last stage's
+      and grep the file — never from an `echo OK` after `;` (it prints whatever
+      the command did), never from `$?` after a pipe (that is the last stage's
       status), never from `${PIPESTATUS[0]}` in a shell that is not bash (it
       expands to nothing). `set -o pipefail` does not repair a broken reporting
       expression, and it can itself flip a SUCCESSFUL `grep -q` to exit 141 when
@@ -1291,8 +1285,9 @@ roles:
       ENFORCES. For each button, toggle, or form that writes, find the server
       handler's ownership / tenant / role check and confirm the component
       renders the control only when the equivalent client predicate holds. A
-      control that a legitimately-present non-owner can SEE but that returns
-      403/404 on click is a Blocking finding — component reviews and API-level
+      control that a legitimately-present non-owner can SEE but that the server
+      rejects on click (403/404, or a 200 carrying an error body) is a Blocking
+      finding — component reviews and API-level
       e2e both pass while the client gate is wrong, so only driving it in the
       browser as a non-owner catches it. Render an unavailable affordance as
       inert text, never a clickable control that dead-ends.
@@ -1499,15 +1494,16 @@ roles:
       codebase, reading external docs, mapping dependencies, comparing
       alternative approaches.
 
-      A NEGATIVE RESULT FROM A SEARCH IS ONLY AS GOOD AS THE SEARCH'S REACH. A
-      recursive `grep` / `rg` does NOT descend into symlinked directories and
-      returns the empty result cleanly, so a repo-wide sweep over a tree reached
-      through a symlink (vendored corpora, a linked prior-art dir) finds nothing
-      and exits 0 — "no prior art exists" and "the search could not see the
-      corpus" are indistinguishable. Search a symlinked tree by naming its path
-      explicitly or with `-L`; use `git grep` when the question is about tracked
-      content; use `-F` for a literal that carries regex metacharacters. Before
-      reporting a negative, say what your search could NOT have seen.
+      A NEGATIVE RESULT FROM A SEARCH IS ONLY AS GOOD AS THE SEARCH'S REACH, and
+      the reach-killer that hides in plain sight is the symlink: a recursive
+      `grep` / `rg` does NOT descend into a symlinked directory and returns the
+      empty result cleanly, so a repo-wide sweep over a tree reached through a
+      symlink (vendored corpora, a linked prior-art dir) finds nothing and
+      reports "no prior art exists" indistinguishably from "the search could not
+      see the corpus". Search such a tree by naming its path explicitly (which
+      works with any tool), or, with ripgrep, `-L` / `--follow` — note plain
+      `grep`'s `-L` is an unrelated flag. Before reporting any negative, say
+      what your search could NOT have seen.
 
       Report findings via SendMessage to `main` (the lead's conversation) as a
       structured
