@@ -10,26 +10,18 @@ Each skill is a folder `skills/<name>/SKILL.md` with YAML frontmatter (`name` + 
 
 ## Install
 
-**Two ways in. Pick one:**
+Two ways in. Pick one.
 
-🧰 **agent-kit** (the agent team + the full PRD lifecycle, 11 skills):
+### 🧰 agent-kit
+
+The agent team plus the full PRD lifecycle (11 skills).
 
 ```sh
 npx skills add vtmocanu/skills/skills/agent-kit -a claude-code -g -y
 ```
 
-📦 **All skills** (the whole catalog, 18):
-
-```sh
-npx skills add https://github.com/vtmocanu/skills -a claude-code -g -y
-```
-
-Open your path below for the **auto-update hook** and the **full skill list**.
-
 <details>
-<summary>🧰 <b>agent-kit</b>: auto-update hook + 11 skills</summary>
-
-**Auto-update on every session** (add to `~/.claude/settings.json`)
+<summary>Auto-update hook (add to <code>~/.claude/settings.json</code>)</summary>
 
 ```json
 "hooks": {
@@ -49,7 +41,7 @@ Open your path below for the **auto-update hook** and the **full skill list**.
 }
 ```
 
-**Skills**
+</details>
 
 | Skill | What it does |
 |---|---|
@@ -67,12 +59,16 @@ Open your path below for the **auto-update hook** and the **full skill list**.
 
 Anything later added under `skills/agent-kit/` joins the bundle automatically.
 
-</details>
+### 📦 All skills
+
+The whole catalog (18 skills), agent-kit included.
+
+```sh
+npx skills add https://github.com/vtmocanu/skills -a claude-code -g -y
+```
 
 <details>
-<summary>📦 <b>All skills</b>: auto-update hook + 18 skills</summary>
-
-**Auto-update on every session** (add to `~/.claude/settings.json`)
+<summary>Auto-update hook (add to <code>~/.claude/settings.json</code>)</summary>
 
 ```json
 "hooks": {
@@ -92,7 +88,7 @@ Anything later added under `skills/agent-kit/` joins the bundle automatically.
 }
 ```
 
-**Skills**
+</details>
 
 | Skill | What it does |
 |---|---|
@@ -106,9 +102,7 @@ Anything later added under `skills/agent-kit/` joins the bundle automatically.
 
 Plus the 11 [agent-kit](skills/agent-kit/) skills, which this install includes: [agent-team](skills/agent-kit/agent-team/SKILL.md), [prd-create](skills/agent-kit/prd-create/SKILL.md), [prd-start](skills/agent-kit/prd-start/SKILL.md), [prd-next](skills/agent-kit/prd-next/SKILL.md), [prd-update-progress](skills/agent-kit/prd-update-progress/SKILL.md), [prd-update-decisions](skills/agent-kit/prd-update-decisions/SKILL.md), [prd-done](skills/agent-kit/prd-done/SKILL.md), [prd-full](skills/agent-kit/prd-full/SKILL.md), [prd-close](skills/agent-kit/prd-close/SKILL.md), [prd-worktree](skills/agent-kit/prd-worktree/SKILL.md), [prds-get](skills/agent-kit/prds-get/SKILL.md).
 
-</details>
-
-Notes for both paths:
+### Notes for both paths
 
 - The hook chains `add … --skill '*'` with `update` because `update` alone never discovers a **new** skill, it only refreshes ones already in the lockfile; the `add` step picks up anything the source has added. `&&` (not two hooks) keeps the two lockfile writers from racing.
 - Renames and removals are **not** auto-pruned in a non-TTY hook; drop an old name with `npx skills remove <old> -g -y`.

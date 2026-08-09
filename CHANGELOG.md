@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.33.4] - 2026-08-09
+
+### Changed
+
+- README: each install path (agent-kit, all skills) is now its own visible section, with the install command and skill table shown outright; only the auto-update hook sits in a collapsible. Skill tables are no longer hidden behind the expander.
+
 ## [0.33.3] - 2026-08-09
 
 ### Changed
