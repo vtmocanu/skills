@@ -775,15 +775,16 @@ class TestHistoricalCorpus(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.repo = pathlib.Path(__file__).resolve().parents[3]
-        cls.library = cls.repo / "skills" / "agent-team" / "roles.yaml"
+        cls.repo = pathlib.Path(__file__).resolve().parents[4]
+        cls.library = cls.repo / "skills" / "agent-kit" / "agent-team" / "roles.yaml"
         if not (cls.repo / ".git").exists() or not cls.library.exists():
             raise unittest.SkipTest("not a git checkout of the skills repo")
-        # roles.yaml moved from agent-team/ to skills/agent-team/; --follow walks
-        # across the rename so the corpus still spans the full history.
+        # roles.yaml moved agent-team/ -> skills/agent-team/ -> skills/agent-kit/
+        # agent-team/; --follow walks across the renames so the corpus still
+        # spans the full history.
         out = subprocess.run(
             ["git", "-C", str(cls.repo), "log", "--follow", "--format=%H", "--",
-             "skills/agent-team/roles.yaml"],
+             "skills/agent-kit/agent-team/roles.yaml"],
             capture_output=True, text=True,
         )
         cls.revisions = out.stdout.split()[: cls.MAX_REVISIONS]
@@ -803,10 +804,10 @@ class TestHistoricalCorpus(unittest.TestCase):
         )
 
     def _roster_from(self, rev, dest):
-        # roles.yaml lived at agent-team/roles.yaml before the move to
-        # skills/agent-team/roles.yaml; try the current path first, then the old.
+        # roles.yaml moved agent-team/ -> skills/agent-team/ -> skills/agent-kit/
+        # agent-team/; try the current path first, then the older ones.
         blob = ""
-        for path in ("skills/agent-team/roles.yaml", "agent-team/roles.yaml"):
+        for path in ("skills/agent-kit/agent-team/roles.yaml", "skills/agent-team/roles.yaml", "agent-team/roles.yaml"):
             res = subprocess.run(
                 ["git", "-C", str(self.repo), "show", f"{rev}:{path}"],
                 capture_output=True, text=True,

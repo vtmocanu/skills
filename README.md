@@ -6,7 +6,7 @@ A public collection of agent skills for [Claude Code](https://claude.com/claude-
 [![Release](https://img.shields.io/github/v/release/vtmocanu/skills)](https://github.com/vtmocanu/skills/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-Each skill is a folder `<name>/SKILL.md` (plus optional supporting files) under the `skills/` directory (the `prd-*` skills grouped under `skills/prd/`), with YAML frontmatter (`name` + `description`). `npx skills` clones this repo and installs the skills into your agent's skills directory (`~/.claude/skills/<name>/` for Claude Code), where each becomes a `/<name>` slash-command skill. (The older dot-ai-server path still works; see [Legacy: dot-ai](#legacy-dot-ai).)
+Each skill is a folder `<name>/SKILL.md` (plus optional supporting files) under the `skills/` directory (`agent-team` and the `prd-*` skills grouped together under `skills/agent-kit/`), with YAML frontmatter (`name` + `description`). `npx skills` clones this repo and installs the skills into your agent's skills directory (`~/.claude/skills/<name>/` for Claude Code), where each becomes a `/<name>` slash-command skill. (The older dot-ai-server path still works; see [Legacy: dot-ai](#legacy-dot-ai).)
 
 ## Install
 
@@ -27,12 +27,13 @@ npx skills add https://github.com/vtmocanu/skills -a claude-code -l             
 npx skills add https://github.com/vtmocanu/skills -a claude-code -g -s agent-team,reflect
 ```
 
-For example, just the full PRD workflow plus the agent team:
+Or grab the **agent-kit** bundle (the agent team plus the full PRD workflow, which live together under `skills/agent-kit/`) with a single subpath install:
 
 ```sh
-npx skills add https://github.com/vtmocanu/skills -a claude-code -g \
-  -s prd-create,prd-start,prd-worktree,prd-next,prd-update-progress,prd-update-decisions,prd-done,prd-full,prd-close,prds-get,agent-team
+npx skills add vtmocanu/skills/skills/agent-kit -a claude-code -g -y
 ```
+
+That installs `agent-team` plus all ten `prd-*` skills. Any skill later added under `skills/agent-kit/` joins the bundle automatically.
 
 ### Auto-update on every session (global hook)
 
@@ -63,20 +64,20 @@ The `add … --skill '*'` step installs every skill currently in the source, so 
 | Skill | What it does |
 |---|---|
 | [agent-permissions](skills/agent-permissions/SKILL.md) | Manage an AI coding agent's permissions via Dippy (Bash/MCP allow/ask/deny + the auto-mode `[ASK]` fallback wrapper, bundled) and settings.json (Read/WebFetch/Skill). |
-| [agent-team](skills/agent-team/SKILL.md) | Auto-generate and run a per-repo Claude Code agent team: probe the repo, write `.claude/agents/{role}.md` subagent definitions from a role library, then orchestrate tasks with TeamCreate plus spawned teammates. |
+| [agent-team](skills/agent-kit/agent-team/SKILL.md) | Auto-generate and run a per-repo Claude Code agent team: probe the repo, write `.claude/agents/{role}.md` subagent definitions from a role library, then orchestrate tasks with TeamCreate plus spawned teammates. |
 | [done](skills/done/SKILL.md) | End-of-session wrap-up: check git state across the directories touched this session, review for loose ends, and give a plain verdict on whether the session can be closed. |
 | [generate-cicd](skills/generate-cicd/SKILL.md) | Generate CI/CD workflows through an interactive conversation that analyzes the repo structure and your preferences. `*` |
 | [generate-dockerfile](skills/generate-dockerfile/SKILL.md) | Generate a production-ready, secure, multi-stage Dockerfile and `.dockerignore` for the project. `*` |
-| [prd-close](skills/prd/prd-close/SKILL.md) | Close a PRD that is already implemented or no longer needed. `*` |
-| [prd-create](skills/prd/prd-create/SKILL.md) | Create documentation-first PRDs that guide development through user-facing content. `*` |
-| [prd-done](skills/prd/prd-done/SKILL.md) | Complete a PRD: create branch, push changes, open a PR, merge, and close the issue. `*` |
-| [prd-full](skills/prd/prd-full/SKILL.md) | Run a PRD end-to-end autonomously (start, iterate until done, then PR), stopping after PR creation for review. `*` |
-| [prd-next](skills/prd/prd-next/SKILL.md) | Analyze a PRD and recommend the single highest-priority task to work on next. `*` |
-| [prd-start](skills/prd/prd-start/SKILL.md) | Start working on a PRD implementation. `*` |
-| [prd-update-decisions](skills/prd/prd-update-decisions/SKILL.md) | Update a PRD from design decisions and strategic changes made during conversations. `*` |
-| [prd-update-progress](skills/prd/prd-update-progress/SKILL.md) | Update PRD progress from git commits and code changes, enhanced by conversation context. `*` |
-| [prd-worktree](skills/prd/prd-worktree/SKILL.md) | Create a git worktree for PRD work with a descriptive branch name (bundles a `create.sh`). `*` |
-| [prds-get](skills/prd/prds-get/SKILL.md) | Fetch all open GitHub issues in this project labeled `PRD`. `*` |
+| [prd-close](skills/agent-kit/prd-close/SKILL.md) | Close a PRD that is already implemented or no longer needed. `*` |
+| [prd-create](skills/agent-kit/prd-create/SKILL.md) | Create documentation-first PRDs that guide development through user-facing content. `*` |
+| [prd-done](skills/agent-kit/prd-done/SKILL.md) | Complete a PRD: create branch, push changes, open a PR, merge, and close the issue. `*` |
+| [prd-full](skills/agent-kit/prd-full/SKILL.md) | Run a PRD end-to-end autonomously (start, iterate until done, then PR), stopping after PR creation for review. `*` |
+| [prd-next](skills/agent-kit/prd-next/SKILL.md) | Analyze a PRD and recommend the single highest-priority task to work on next. `*` |
+| [prd-start](skills/agent-kit/prd-start/SKILL.md) | Start working on a PRD implementation. `*` |
+| [prd-update-decisions](skills/agent-kit/prd-update-decisions/SKILL.md) | Update a PRD from design decisions and strategic changes made during conversations. `*` |
+| [prd-update-progress](skills/agent-kit/prd-update-progress/SKILL.md) | Update PRD progress from git commits and code changes, enhanced by conversation context. `*` |
+| [prd-worktree](skills/agent-kit/prd-worktree/SKILL.md) | Create a git worktree for PRD work with a descriptive branch name (bundles a `create.sh`). `*` |
+| [prds-get](skills/agent-kit/prds-get/SKILL.md) | Fetch all open GitHub issues in this project labeled `PRD`. `*` |
 | [reflect](skills/reflect/SKILL.md) | Analyze the current session and propose improvements to the skill that was used, then edit and commit it. |
 | [skills](skills/skills/SKILL.md) | Author, lint, and publish Claude Code skills with the `npx skills` package manager: folder `SKILL.md` layout, frontmatter and description limits, design principles, agnix linting, and the add/update/remove scopes. |
 | [upgrade-advisor](skills/upgrade-advisor/SKILL.md) | Evaluate a tool, framework, or dependency upgrade: discover the pinned version, find the latest *installable* one, read the changelog across the whole version delta, and report which breaking changes actually touch this codebase (by grepping usage) plus the features and refactors worth adopting, with a safe / blocked / needs-work verdict and a checklist. |

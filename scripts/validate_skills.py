@@ -2,8 +2,9 @@
 """Validate agent skill files for dot-ai / Claude Code.
 
 Skills live under the ``skills/`` container as ``skills/<name>/SKILL.md`` (the
-prd family under ``skills/prd/<name>/SKILL.md``); ``npx skills`` discovers that
-container to depth 3. ``retired/`` at the repo root is intentionally excluded.
+``agent-team`` and ``prd-*`` skills grouped under ``skills/agent-kit/``); ``npx
+skills`` discovers that container to depth 3. ``retired/`` at the repo root is
+intentionally excluded.
 
 Checks each skill for:
   - a YAML frontmatter block delimited by ---

@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.33.0] - 2026-08-09
+
+### Changed
+
+- Grouped `agent-team` and the ten `prd-*` skills together under a new `skills/agent-kit/` container so the whole set installs in one command via a subpath: `npx skills add vtmocanu/skills/skills/agent-kit -a claude-code -g -y`. Invocation names are unchanged (they come from frontmatter, not the path). Anything added under `skills/agent-kit/` later joins the bundle automatically. Updated the CI test path, the historical-corpus test's rename-aware roles.yaml walk, the validator docstring, and the README accordingly.
+
 ## [0.32.0] - 2026-08-09
 
 ### Changed
