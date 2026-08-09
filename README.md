@@ -10,16 +10,24 @@ Each skill is a folder `skills/<name>/SKILL.md` with YAML frontmatter (`name` + 
 
 ## Install
 
-Pick one path and open only that section. Each is self-contained: install command, auto-update hook, skill list.
+**Two ways in. Pick one:**
 
-<details>
-<summary><b>A. agent-kit only</b> (11 skills): the agent team plus the full PRD lifecycle</summary>
-
-**Install**
+🧰 **agent-kit** (the agent team + the full PRD lifecycle, 11 skills):
 
 ```sh
 npx skills add vtmocanu/skills/skills/agent-kit -a claude-code -g -y
 ```
+
+📦 **All skills** (the whole catalog, 18):
+
+```sh
+npx skills add https://github.com/vtmocanu/skills -a claude-code -g -y
+```
+
+Open your path below for the **auto-update hook** and the **full skill list**.
+
+<details>
+<summary>🧰 <b>agent-kit</b>: auto-update hook + 11 skills</summary>
 
 **Auto-update on every session** (add to `~/.claude/settings.json`)
 
@@ -46,29 +54,23 @@ npx skills add vtmocanu/skills/skills/agent-kit -a claude-code -g -y
 | Skill | What it does |
 |---|---|
 | [agent-team](skills/agent-kit/agent-team/SKILL.md) | Auto-generate and run a per-repo Claude Code agent team: probe the repo, write `.claude/agents/{role}.md` subagent definitions from a role library, then orchestrate tasks with spawned teammates. |
-| [prd-create](skills/agent-kit/prd-create/SKILL.md) | Create documentation-first PRDs that guide development through user-facing content. `*` |
-| [prd-start](skills/agent-kit/prd-start/SKILL.md) | Start working on a PRD implementation. `*` |
-| [prd-next](skills/agent-kit/prd-next/SKILL.md) | Analyze a PRD and recommend the single highest-priority task to work on next. `*` |
-| [prd-update-progress](skills/agent-kit/prd-update-progress/SKILL.md) | Update PRD progress from git commits and code changes, enhanced by conversation context. `*` |
-| [prd-update-decisions](skills/agent-kit/prd-update-decisions/SKILL.md) | Update a PRD from design decisions and strategic changes made during conversations. `*` |
-| [prd-done](skills/agent-kit/prd-done/SKILL.md) | Complete a PRD: create branch, push changes, open a PR, merge, and close the issue. `*` |
-| [prd-full](skills/agent-kit/prd-full/SKILL.md) | Run a PRD end-to-end autonomously (start, iterate until done, then PR), stopping after PR creation for review. `*` |
-| [prd-close](skills/agent-kit/prd-close/SKILL.md) | Close a PRD that is already implemented or no longer needed. `*` |
-| [prd-worktree](skills/agent-kit/prd-worktree/SKILL.md) | Create a git worktree for PRD work with a descriptive branch name (bundles a `create.sh`). `*` |
-| [prds-get](skills/agent-kit/prds-get/SKILL.md) | Fetch all open GitHub issues in this project labeled `PRD`. `*` |
+| [prd-create](skills/agent-kit/prd-create/SKILL.md) | Create documentation-first PRDs that guide development through user-facing content. |
+| [prd-start](skills/agent-kit/prd-start/SKILL.md) | Start working on a PRD implementation. |
+| [prd-next](skills/agent-kit/prd-next/SKILL.md) | Analyze a PRD and recommend the single highest-priority task to work on next. |
+| [prd-update-progress](skills/agent-kit/prd-update-progress/SKILL.md) | Update PRD progress from git commits and code changes, enhanced by conversation context. |
+| [prd-update-decisions](skills/agent-kit/prd-update-decisions/SKILL.md) | Update a PRD from design decisions and strategic changes made during conversations. |
+| [prd-done](skills/agent-kit/prd-done/SKILL.md) | Complete a PRD: create branch, push changes, open a PR, merge, and close the issue. |
+| [prd-full](skills/agent-kit/prd-full/SKILL.md) | Run a PRD end-to-end autonomously (start, iterate until done, then PR), stopping after PR creation for review. |
+| [prd-close](skills/agent-kit/prd-close/SKILL.md) | Close a PRD that is already implemented or no longer needed. |
+| [prd-worktree](skills/agent-kit/prd-worktree/SKILL.md) | Create a git worktree for PRD work with a descriptive branch name (bundles a `create.sh`). |
+| [prds-get](skills/agent-kit/prds-get/SKILL.md) | Fetch all open GitHub issues in this project labeled `PRD`. |
 
 Anything later added under `skills/agent-kit/` joins the bundle automatically.
 
 </details>
 
 <details>
-<summary><b>B. All skills</b> (18): the whole catalog, agent-kit included</summary>
-
-**Install**
-
-```sh
-npx skills add https://github.com/vtmocanu/skills -a claude-code -g -y
-```
+<summary>📦 <b>All skills</b>: auto-update hook + 18 skills</summary>
 
 **Auto-update on every session** (add to `~/.claude/settings.json`)
 
@@ -96,8 +98,8 @@ npx skills add https://github.com/vtmocanu/skills -a claude-code -g -y
 |---|---|
 | [agent-permissions](skills/agent-permissions/SKILL.md) | Manage an AI coding agent's permissions via Dippy (Bash/MCP allow/ask/deny plus the auto-mode `[ASK]` fallback wrapper, bundled) and settings.json (Read/WebFetch/Skill). |
 | [done](skills/done/SKILL.md) | End-of-session wrap-up: check git state across the directories touched this session, review for loose ends, and give a plain verdict on whether the session can be closed. |
-| [generate-cicd](skills/generate-cicd/SKILL.md) | Generate CI/CD workflows through an interactive conversation that analyzes the repo structure and your preferences. `*` |
-| [generate-dockerfile](skills/generate-dockerfile/SKILL.md) | Generate a production-ready, secure, multi-stage Dockerfile and `.dockerignore` for the project. `*` |
+| [generate-cicd](skills/generate-cicd/SKILL.md) | Generate CI/CD workflows through an interactive conversation that analyzes the repo structure and your preferences. |
+| [generate-dockerfile](skills/generate-dockerfile/SKILL.md) | Generate a production-ready, secure, multi-stage Dockerfile and `.dockerignore` for the project. |
 | [reflect](skills/reflect/SKILL.md) | Analyze the current session and propose improvements to the skill that was used, then edit and commit it. |
 | [skills](skills/skills/SKILL.md) | Author, lint, and publish Claude Code skills with the `npx skills` package manager: folder `SKILL.md` layout, frontmatter and description limits, design principles, agnix linting, and the add/update/remove scopes. |
 | [upgrade-advisor](skills/upgrade-advisor/SKILL.md) | Evaluate a tool, framework, or dependency upgrade: discover the pinned version, find the latest *installable* one, read the changelog across the whole delta, and report which breaking changes actually touch this codebase (by grepping usage), with a safe / blocked / needs-work verdict. |
@@ -108,7 +110,6 @@ Plus the 11 [agent-kit](skills/agent-kit/) skills, which this install includes: 
 
 Notes for both paths:
 
-- `*` marks skills vendored from [vfarcic/dot-ai](https://github.com/vfarcic/dot-ai); see [Credits](#credits).
 - The hook chains `add … --skill '*'` with `update` because `update` alone never discovers a **new** skill, it only refreshes ones already in the lockfile; the `add` step picks up anything the source has added. `&&` (not two hooks) keeps the two lockfile writers from racing.
 - Renames and removals are **not** auto-pruned in a non-TTY hook; drop an old name with `npx skills remove <old> -g -y`.
 - Drop `-g` to install into the current project only (`.claude/skills/`). Add `-l` to list without installing, or `-s a b` (space-separated) to pick a subset.
@@ -140,7 +141,7 @@ dot-ai skills generate --agent claude-code --path ~/.claude/commands --repo http
 
 ## Credits
 
-`*` The `prd-*`, `generate-cicd`, and `generate-dockerfile` skills are vendored from [vfarcic/dot-ai](https://github.com/vfarcic/dot-ai), created by **Viktor Farcic** and used under the MIT License (Copyright (c) 2025 Viktor Farcic). Most come from its `shared-prompts/` directory; `prd-worktree` comes from `.claude/skills/dot-ai-worktree-prd/` (renamed from `worktree-prd`, with its bundled `create.sh`). They are copied largely verbatim, converted to the folder `SKILL.md` layout with the dot-ai `category` frontmatter dropped; each keeps a provenance line pointing back to its source. Thank you to Viktor for the excellent PRD workflow and project generators.
+The `prd-*`, `generate-cicd`, and `generate-dockerfile` skills are vendored from [vfarcic/dot-ai](https://github.com/vfarcic/dot-ai), created by **Viktor Farcic** and used under the MIT License (Copyright (c) 2025 Viktor Farcic). Most come from its `shared-prompts/` directory; `prd-worktree` comes from `.claude/skills/dot-ai-worktree-prd/` (renamed from `worktree-prd`, with its bundled `create.sh`). They are copied largely verbatim, converted to the folder `SKILL.md` layout with the dot-ai `category` frontmatter dropped; each keeps a provenance line pointing back to its source. Thank you to Viktor for the excellent PRD workflow and project generators.
 
 ## License
 

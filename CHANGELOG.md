@@ -6,6 +6,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.33.3] - 2026-08-09
+
+### Changed
+
+- README: made the install choice impossible to miss. Both one-line install commands (agent-kit vs the full catalog) now show up front, above the collapsibles; each collapsible holds only that path's auto-update hook and skill list.
+- README: dropped the `*` vendored markers from the skill tables and their inline legend for readability; the full vendoring attribution stays in Credits.
+
 ## [0.33.2] - 2026-08-09
 
 ### Changed
