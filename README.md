@@ -65,6 +65,8 @@ The `add … --skill '*'` step installs every skill currently in the source, so 
 | [agent-permissions](skills/agent-permissions/SKILL.md) | Manage an AI coding agent's permissions via Dippy (Bash/MCP allow/ask/deny + the auto-mode `[ASK]` fallback wrapper, bundled) and settings.json (Read/WebFetch/Skill). |
 | [agent-team](skills/agent-team/SKILL.md) | Auto-generate and run a per-repo Claude Code agent team: probe the repo, write `.claude/agents/{role}.md` subagent definitions from a role library, then orchestrate tasks with TeamCreate plus spawned teammates. |
 | [done](skills/done/SKILL.md) | End-of-session wrap-up: check git state across the directories touched this session, review for loose ends, and give a plain verdict on whether the session can be closed. |
+| [generate-cicd](skills/generate-cicd/SKILL.md) | Generate CI/CD workflows through an interactive conversation that analyzes the repo structure and your preferences. `*` |
+| [generate-dockerfile](skills/generate-dockerfile/SKILL.md) | Generate a production-ready, secure, multi-stage Dockerfile and `.dockerignore` for the project. `*` |
 | [prd-close](skills/prd/prd-close/SKILL.md) | Close a PRD that is already implemented or no longer needed. `*` |
 | [prd-create](skills/prd/prd-create/SKILL.md) | Create documentation-first PRDs that guide development through user-facing content. `*` |
 | [prd-done](skills/prd/prd-done/SKILL.md) | Complete a PRD: create branch, push changes, open a PR, merge, and close the issue. `*` |
@@ -105,8 +107,8 @@ dot-ai skills generate --agent claude-code --path ~/.claude/commands --repo http
 
 ## Credits
 
-`*` The `prd-*` skills are vendored from [vfarcic/dot-ai](https://github.com/vfarcic/dot-ai), created by **Viktor Farcic** and used under the MIT License (Copyright (c) 2025 Viktor Farcic). Most come from its `shared-prompts/` directory; `prd-worktree` comes from `.claude/skills/dot-ai-worktree-prd/` (renamed from `worktree-prd`, with its bundled `create.sh`). They are copied largely verbatim, converted to the folder `SKILL.md` layout with the dot-ai `category` frontmatter dropped; each keeps a provenance line pointing back to its source. Thank you to Viktor for the excellent PRD workflow.
+`*` The `prd-*`, `generate-cicd`, and `generate-dockerfile` skills are vendored from [vfarcic/dot-ai](https://github.com/vfarcic/dot-ai), created by **Viktor Farcic** and used under the MIT License (Copyright (c) 2025 Viktor Farcic). Most come from its `shared-prompts/` directory; `prd-worktree` comes from `.claude/skills/dot-ai-worktree-prd/` (renamed from `worktree-prd`, with its bundled `create.sh`). They are copied largely verbatim, converted to the folder `SKILL.md` layout with the dot-ai `category` frontmatter dropped; each keeps a provenance line pointing back to its source. Thank you to Viktor for the excellent PRD workflow and project generators.
 
 ## License
 
-[MIT](LICENSE) © Vlad Mocanu. Vendored `prd-*` skills remain © 2025 Viktor Farcic (MIT); see [Credits](#credits).
+[MIT](LICENSE) © Vlad Mocanu. Vendored `prd-*`, `generate-cicd`, and `generate-dockerfile` skills remain © 2025 Viktor Farcic (MIT); see [Credits](#credits).

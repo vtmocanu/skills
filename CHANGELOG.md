@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.31.0] - 2026-08-09
+
+### Added
+
+- `generate-cicd` and `generate-dockerfile` skills, vendored from [vfarcic/dot-ai](https://github.com/vfarcic/dot-ai) `shared-prompts/` (MIT, Copyright (c) 2025 Viktor Farcic). Copied verbatim with the dot-ai `category` frontmatter dropped and a provenance line added. `projectSetup` is a stateful dot-ai MCP tool rather than a prompt, so it cannot be vendored as a standalone skill.
+
 ## [0.30.0] - 2026-08-08
 
 ### Removed
