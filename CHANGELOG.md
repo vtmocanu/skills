@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.33.6] - 2026-08-09
+
+### Changed
+
+- README: made the chooser a heading and reworded "ways" to "options" (`## Two options, pick one`).
+
 ## [0.33.5] - 2026-08-09
 
 ### Changed

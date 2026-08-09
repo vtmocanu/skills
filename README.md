@@ -8,7 +8,7 @@ A public collection of agent skills for [Claude Code](https://claude.com/claude-
 
 Each skill is a folder `skills/<name>/SKILL.md` with YAML frontmatter (`name` + `description`). `npx skills` installs them to `~/.claude/skills/<name>/`, where each becomes a `/<name>` slash-command skill. Restart Claude Code after installing.
 
-Two ways in. Pick one.
+## Two options, pick one
 
 ## 🧰 Just agent-kit
 
