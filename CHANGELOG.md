@@ -6,6 +6,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.33.2] - 2026-08-09
+
+### Changed
+
+- README: reworked into two self-contained collapsible sections (agent-kit-only vs the full catalog), each with its own install command, SessionStart hook, and skill list, over a shared notes block. Trimmed for terseness.
+
+### Fixed
+
+- README: the subset-install example used comma-separated skill names (`-s a,b`); npx `-s` does not split on commas, so it is now space-separated (`-s a b`).
+
 ## [0.33.1] - 2026-08-09
 
 ### Changed

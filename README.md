@@ -6,52 +6,22 @@ A public collection of agent skills for [Claude Code](https://claude.com/claude-
 [![Release](https://img.shields.io/github/v/release/vtmocanu/skills)](https://github.com/vtmocanu/skills/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-Each skill is a folder `<name>/SKILL.md` (plus optional supporting files) under the `skills/` directory (`agent-team` and the `prd-*` skills grouped together under `skills/agent-kit/`), with YAML frontmatter (`name` + `description`). `npx skills` clones this repo and installs the skills into your agent's skills directory (`~/.claude/skills/<name>/` for Claude Code), where each becomes a `/<name>` slash-command skill. (The older dot-ai-server path still works; see [Legacy: dot-ai](#legacy-dot-ai).)
+Each skill is a folder `skills/<name>/SKILL.md` with YAML frontmatter (`name` + `description`). `npx skills` installs them to `~/.claude/skills/<name>/`, where each becomes a `/<name>` slash-command skill. Restart Claude Code after installing.
 
 ## Install
 
-Install **all** skills once, globally (every project):
+Pick one path and open only that section. Each is self-contained: install command, auto-update hook, skill list.
 
-```sh
-npx skills add https://github.com/vtmocanu/skills -a claude-code -g
-```
+<details>
+<summary><b>A. agent-kit only</b> (11 skills): the agent team plus the full PRD lifecycle</summary>
 
-They install to `~/.claude/skills/<name>/`; restart Claude Code and the skills (e.g. `/reflect`, `/agent-team`) become available. Drop `-g` to install into the current project only (`.claude/skills/`).
-
-### Specific skills only
-
-Pass `-s` with a comma-separated list to install a subset, or `-l` to list what the repo offers without installing:
-
-```sh
-npx skills add https://github.com/vtmocanu/skills -a claude-code -l                    # list, don't install
-npx skills add https://github.com/vtmocanu/skills -a claude-code -g -s agent-team,reflect
-```
-
-Or grab the **agent-kit** bundle (the agent team plus the full PRD workflow, which live together under `skills/agent-kit/`) with a single subpath install:
+**Install**
 
 ```sh
 npx skills add vtmocanu/skills/skills/agent-kit -a claude-code -g -y
 ```
 
-That installs `agent-team` plus all ten `prd-*` skills. Any skill later added under `skills/agent-kit/` joins the bundle automatically.
-
-### Auto-update on every session (global hook)
-
-Add a `SessionStart` hook to `~/.claude/settings.json` so the catalog refreshes on each launch. Choose the scope you want, then paste that `command` into the hook block below.
-
-**All skills** (the whole catalog):
-
-```sh
-npx -y skills@latest add https://github.com/vtmocanu/skills -a claude-code --skill '*' -g -y && npx -y skills@latest update -g -p
-```
-
-**Just the agent-kit bundle** (agent-team + the PRD workflow):
-
-```sh
-npx -y skills@latest add vtmocanu/skills/skills/agent-kit -a claude-code --skill '*' -g -y && npx -y skills@latest update -g -p
-```
-
-The hook block (swap in whichever `command` you picked):
+**Auto-update on every session** (add to `~/.claude/settings.json`)
 
 ```json
 "hooks": {
@@ -71,26 +41,11 @@ The hook block (swap in whichever `command` you picked):
 }
 ```
 
-The `add … --skill '*'` step installs every skill the source currently offers (the whole repo, or just `skills/agent-kit/` with the subpath form), so **new** skills are picked up automatically; `update` alone never discovers a new skill, it only refreshes ones already in the lockfile. `update -g -p` then refreshes both global and project skills for every tracked source. `--skill '*'` grabs all skills while keeping the `-a claude-code` agent scope (`--all` would fan out to every detected agent); `-y` runs non-interactively; `@latest` keeps the `skills` CLI current; `async` keeps it off the startup path. Chained with `&&` (not two hooks) because `add` and `update` both write the lockfile and must not race. Renames and removals are **not** auto-pruned in a non-TTY hook; drop the old name with `npx skills remove <old> -g -y`. Edit the source repo (the source of truth), never the installed copy under `~/.claude/skills/` (which `update` overwrites).
-
-## Skills
-
-Two kinds of users, two ways in:
-
-- **Just want the agent workflow?** Grab the **agent-kit** bundle (agent-team plus the full PRD lifecycle) in one command, and hook it with the [agent-kit hook](#auto-update-on-every-session-global-hook).
-- **Want the whole toolbox?** Install every skill (see [Install](#install)); agent-kit is included.
-
-### agent-kit bundle
-
-`agent-team` plus the full PRD workflow, grouped under `skills/agent-kit/` and installed together:
-
-```sh
-npx skills add vtmocanu/skills/skills/agent-kit -a claude-code -g -y
-```
+**Skills**
 
 | Skill | What it does |
 |---|---|
-| [agent-team](skills/agent-kit/agent-team/SKILL.md) | Auto-generate and run a per-repo Claude Code agent team: probe the repo, write `.claude/agents/{role}.md` subagent definitions from a role library, then orchestrate tasks with TeamCreate plus spawned teammates. |
+| [agent-team](skills/agent-kit/agent-team/SKILL.md) | Auto-generate and run a per-repo Claude Code agent team: probe the repo, write `.claude/agents/{role}.md` subagent definitions from a role library, then orchestrate tasks with spawned teammates. |
 | [prd-create](skills/agent-kit/prd-create/SKILL.md) | Create documentation-first PRDs that guide development through user-facing content. `*` |
 | [prd-start](skills/agent-kit/prd-start/SKILL.md) | Start working on a PRD implementation. `*` |
 | [prd-next](skills/agent-kit/prd-next/SKILL.md) | Analyze a PRD and recommend the single highest-priority task to work on next. `*` |
@@ -102,24 +57,67 @@ npx skills add vtmocanu/skills/skills/agent-kit -a claude-code -g -y
 | [prd-worktree](skills/agent-kit/prd-worktree/SKILL.md) | Create a git worktree for PRD work with a descriptive branch name (bundles a `create.sh`). `*` |
 | [prds-get](skills/agent-kit/prds-get/SKILL.md) | Fetch all open GitHub issues in this project labeled `PRD`. `*` |
 
-### Other skills
+Anything later added under `skills/agent-kit/` joins the bundle automatically.
 
-Standalone skills, all included in the full-catalog install (see [Install](#install)):
+</details>
+
+<details>
+<summary><b>B. All skills</b> (18): the whole catalog, agent-kit included</summary>
+
+**Install**
+
+```sh
+npx skills add https://github.com/vtmocanu/skills -a claude-code -g -y
+```
+
+**Auto-update on every session** (add to `~/.claude/settings.json`)
+
+```json
+"hooks": {
+  "SessionStart": [
+    {
+      "matcher": "startup",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "npx -y skills@latest add https://github.com/vtmocanu/skills -a claude-code --skill '*' -g -y && npx -y skills@latest update -g -p",
+          "async": true,
+          "timeout": 180
+        }
+      ]
+    }
+  ]
+}
+```
+
+**Skills**
 
 | Skill | What it does |
 |---|---|
-| [agent-permissions](skills/agent-permissions/SKILL.md) | Manage an AI coding agent's permissions via Dippy (Bash/MCP allow/ask/deny + the auto-mode `[ASK]` fallback wrapper, bundled) and settings.json (Read/WebFetch/Skill). |
+| [agent-permissions](skills/agent-permissions/SKILL.md) | Manage an AI coding agent's permissions via Dippy (Bash/MCP allow/ask/deny plus the auto-mode `[ASK]` fallback wrapper, bundled) and settings.json (Read/WebFetch/Skill). |
 | [done](skills/done/SKILL.md) | End-of-session wrap-up: check git state across the directories touched this session, review for loose ends, and give a plain verdict on whether the session can be closed. |
 | [generate-cicd](skills/generate-cicd/SKILL.md) | Generate CI/CD workflows through an interactive conversation that analyzes the repo structure and your preferences. `*` |
 | [generate-dockerfile](skills/generate-dockerfile/SKILL.md) | Generate a production-ready, secure, multi-stage Dockerfile and `.dockerignore` for the project. `*` |
 | [reflect](skills/reflect/SKILL.md) | Analyze the current session and propose improvements to the skill that was used, then edit and commit it. |
 | [skills](skills/skills/SKILL.md) | Author, lint, and publish Claude Code skills with the `npx skills` package manager: folder `SKILL.md` layout, frontmatter and description limits, design principles, agnix linting, and the add/update/remove scopes. |
-| [upgrade-advisor](skills/upgrade-advisor/SKILL.md) | Evaluate a tool, framework, or dependency upgrade: discover the pinned version, find the latest *installable* one, read the changelog across the whole version delta, and report which breaking changes actually touch this codebase (by grepping usage) plus the features and refactors worth adopting, with a safe / blocked / needs-work verdict and a checklist. |
+| [upgrade-advisor](skills/upgrade-advisor/SKILL.md) | Evaluate a tool, framework, or dependency upgrade: discover the pinned version, find the latest *installable* one, read the changelog across the whole delta, and report which breaking changes actually touch this codebase (by grepping usage), with a safe / blocked / needs-work verdict. |
+
+Plus the 11 [agent-kit](skills/agent-kit/) skills, which this install includes: [agent-team](skills/agent-kit/agent-team/SKILL.md), [prd-create](skills/agent-kit/prd-create/SKILL.md), [prd-start](skills/agent-kit/prd-start/SKILL.md), [prd-next](skills/agent-kit/prd-next/SKILL.md), [prd-update-progress](skills/agent-kit/prd-update-progress/SKILL.md), [prd-update-decisions](skills/agent-kit/prd-update-decisions/SKILL.md), [prd-done](skills/agent-kit/prd-done/SKILL.md), [prd-full](skills/agent-kit/prd-full/SKILL.md), [prd-close](skills/agent-kit/prd-close/SKILL.md), [prd-worktree](skills/agent-kit/prd-worktree/SKILL.md), [prds-get](skills/agent-kit/prds-get/SKILL.md).
+
+</details>
+
+Notes for both paths:
+
+- `*` marks skills vendored from [vfarcic/dot-ai](https://github.com/vfarcic/dot-ai); see [Credits](#credits).
+- The hook chains `add … --skill '*'` with `update` because `update` alone never discovers a **new** skill, it only refreshes ones already in the lockfile; the `add` step picks up anything the source has added. `&&` (not two hooks) keeps the two lockfile writers from racing.
+- Renames and removals are **not** auto-pruned in a non-TTY hook; drop an old name with `npx skills remove <old> -g -y`.
+- Drop `-g` to install into the current project only (`.claude/skills/`). Add `-l` to list without installing, or `-s a b` (space-separated) to pick a subset.
+- Edit the source repo, never the installed copy under `~/.claude/skills/`, which `update` overwrites.
 
 ## Other files
 
-- [`CLAUDE.example.md`](CLAUDE.example.md) — a generic starter for `~/.claude/CLAUDE.md` (Claude Code's global instructions): general AI-collaboration guidance only, no setup specifics. Not a skill; copy what's useful into your own config.
-- [`retired/`](retired/) — skills no longer maintained or installed, kept for reference. See [retired/README.md](retired/README.md).
+- [`CLAUDE.example.md`](CLAUDE.example.md): a generic starter for `~/.claude/CLAUDE.md` (Claude Code's global instructions), general AI-collaboration guidance only, no setup specifics. Not a skill; copy what's useful into your own config.
+- [`retired/`](retired/): skills no longer maintained or installed, kept for reference. See [retired/README.md](retired/README.md).
 
 ## Contributing
 
