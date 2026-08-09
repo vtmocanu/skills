@@ -9,8 +9,7 @@ intentionally excluded.
 Checks each skill for:
   - a YAML frontmatter block delimited by ---
   - non-empty `name`: lowercase letters/digits/hyphens, <= 64 chars,
-    no reserved substrings ('anthropic', 'claude'); matches the filename
-    for flat skills
+    matching the skill's folder name
   - non-empty single-line `description`, <= 1024 chars (rejects multi-line
     YAML block scalars, which render empty downstream)
 
@@ -28,7 +27,6 @@ import sys
 from pathlib import Path
 
 NAME_RE = re.compile(r"^[a-z0-9-]{1,64}$")
-RESERVED = ("anthropic", "claude")
 BLOCK_SCALARS = {">", ">-", ">+", "|", "|-", "|+"}
 META = {
     "README.md",
@@ -81,9 +79,6 @@ def validate(path: Path) -> list[str]:
     else:
         if not NAME_RE.match(name):
             errs.append(f"`name` must match [a-z0-9-]{{1,64}}: {name!r}")
-        for r in RESERVED:
-            if r in name.lower():
-                errs.append(f"`name` contains reserved substring {r!r}")
         expected = skill_id(path)
         if name != expected:
             errs.append(f"`name` {name!r} != expected {expected!r}")

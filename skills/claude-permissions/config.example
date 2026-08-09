@@ -1,4 +1,4 @@
-# Example Dippy config for the agent-permissions skill.
+# Example Dippy config for the claude-permissions skill.
 # Dippy gates an AI coding agent's Bash + MCP tool calls via allow / ask / deny rules.
 # Docs: https://github.com/ldayton/Dippy/wiki
 #

@@ -1,5 +1,5 @@
 ---
-name: agent-permissions
+name: claude-permissions
 description: Manage Claude Code permissions via Dippy config files (global and project-level) and settings.json (for non-Bash/non-MCP permissions like Read, WebFetch, Skill). Use when user asks to "permit", "allow", "whitelist", or "add permission" for a command or tool. Also use when troubleshooting "permission denied" errors, reviewing current permissions, or cleaning up stale entries.
 ---
 
@@ -7,9 +7,9 @@ description: Manage Claude Code permissions via Dippy config files (global and p
 
 ## Document Location
 
-This document is located at: `~/stuff/gitrepos/gh/vtmocanu/skills/agent-permissions/SKILL.md` (public repo: github.com/vtmocanu/skills)
+This document is located at: `~/stuff/gitrepos/gh/vtmocanu/skills/claude-permissions/SKILL.md` (public repo: github.com/vtmocanu/skills)
 
-> **Note**: This is the source of truth. The installed copy at `~/.claude/skills/agent-permissions/SKILL.md` is derived from this file by the `npx skills` package manager; edit here, then run `npx skills update` to re-pull it. Never edit the installed copy.
+> **Note**: This is the source of truth. The installed copy at `~/.claude/skills/claude-permissions/SKILL.md` is derived from this file by the `npx skills` package manager; edit here, then run `npx skills update` to re-pull it. Never edit the installed copy.
 
 > **Dippy docs**: Configuration syntax and behavior are documented at <https://github.com/ldayton/Dippy/wiki>. If you encounter syntax you're unsure about, fetch the relevant wiki page to verify before making changes. Key pages: [Configuration](https://github.com/ldayton/Dippy/wiki/Configuration), [MCP Tools](https://github.com/ldayton/Dippy/wiki/MCP-Tools), [File Editing](https://github.com/ldayton/Dippy/wiki/File-Editing), [Afterthoughts](https://github.com/ldayton/Dippy/wiki/Afterthoughts), [Handler Model](https://github.com/ldayton/Dippy/wiki/Handler-Model), [Security Model](https://github.com/ldayton/Dippy/wiki/Security-Model).
 
@@ -36,7 +36,7 @@ Permissions are split across two systems:
 
 Dippy runs as a PreToolUse hook (configured in settings.json) for both `Bash` and `mcp__.*` matchers. A PostToolUse hook enables afterthoughts.
 
-> **CRITICAL: Dippy is invoked through a wrapper, not directly.** The settings.json hook command is `~/stuff/gitrepos/gh/vtmocanu/skills/agent-permissions/dippy-with-auto-fallback.sh`, not bare `dippy`. The wrapper changes how `ask` verdicts behave **in auto mode** (the permission mode that autonomous runs and spawned agents/teammates use). See [Auto-mode fallback wrapper](#auto-mode-fallback-wrapper) below. This is the single most surprising part of the setup: in auto mode a plain `ask` rule does **not** prompt the human.
+> **CRITICAL: Dippy is invoked through a wrapper, not directly.** The settings.json hook command is `~/stuff/gitrepos/gh/vtmocanu/skills/claude-permissions/dippy-with-auto-fallback.sh`, not bare `dippy`. The wrapper changes how `ask` verdicts behave **in auto mode** (the permission mode that autonomous runs and spawned agents/teammates use). See [Auto-mode fallback wrapper](#auto-mode-fallback-wrapper) below. This is the single most surprising part of the setup: in auto mode a plain `ask` rule does **not** prompt the human.
 
 ### Auto-mode fallback wrapper
 
@@ -132,11 +132,11 @@ ls -la ~/.dippy/OFF ~/.dippy/ALLOW_ONLY 2>/dev/null
 
 # end-to-end check — a denied command (empty = bypassed or allow-only; JSON deny = active)
 printf '%s' '{"permission_mode":"default","tool_name":"Bash","tool_input":{"command":"helm install foo bar"}}' \
-  | ~/stuff/gitrepos/gh/vtmocanu/skills/agent-permissions/dippy-with-auto-fallback.sh
+  | ~/stuff/gitrepos/gh/vtmocanu/skills/claude-permissions/dippy-with-auto-fallback.sh
 
 # end-to-end check — a whitelisted command (JSON allow = active or allow-only; empty = bypassed)
 printf '%s' '{"permission_mode":"default","tool_name":"Bash","tool_input":{"command":"cat /etc/hosts"}}' \
-  | ~/stuff/gitrepos/gh/vtmocanu/skills/agent-permissions/dippy-with-auto-fallback.sh
+  | ~/stuff/gitrepos/gh/vtmocanu/skills/claude-permissions/dippy-with-auto-fallback.sh
 ```
 
 > **Note: Native settings.json capabilities** (for context, not to use): settings.json supports wildcards at any position since v2.1.0 (Jan 2026), has allow/ask/deny directives, per-project overrides via `settings.local.json`, and MCP tool permissions. **Dippy's unique advantages**: guidance messages on ask/deny rules, last-match-wins ordering (vs deny>ask>allow fixed priority), plain text config with comments, and file redirect controls (`deny-redirect`).
@@ -393,7 +393,7 @@ fd -H -t f '^\\.dippy$' ~/stuff/gitrepos/wxs/
 
 The following hooks must exist in `~/mackup/confs/claude/settings.json` for Dippy to function. The PreToolUse `Bash` + `mcp__.*` matchers invoke the **auto-fallback wrapper** (`dippy-with-auto-fallback.sh`, bundled with this skill), not bare `dippy`, so that auto-mode `ask` handling works as described in [Auto-mode fallback wrapper](#auto-mode-fallback-wrapper). The PostToolUse hook (afterthoughts) calls `dippy` directly.
 
-> **Hook command paths must be absolute.** Claude Code does NOT expand `~` in hook `command` strings — the `~/...` paths shown below are for readability; in your actual `settings.json` use the fully expanded path (e.g. `/home/you/stuff/gitrepos/gh/vtmocanu/skills/agent-permissions/dippy-with-auto-fallback.sh`). Point the hook at your local clone of this repo, not at the installed `~/.claude/skills/agent-permissions/` copy (that directory is overwritten on every `npx skills update`).
+> **Hook command paths must be absolute.** Claude Code does NOT expand `~` in hook `command` strings — the `~/...` paths shown below are for readability; in your actual `settings.json` use the fully expanded path (e.g. `/home/you/stuff/gitrepos/gh/vtmocanu/skills/claude-permissions/dippy-with-auto-fallback.sh`). Point the hook at your local clone of this repo, not at the installed `~/.claude/skills/claude-permissions/` copy (that directory is overwritten on every `npx skills update`).
 
 ```json
 {
@@ -402,13 +402,13 @@ The following hooks must exist in `~/mackup/confs/claude/settings.json` for Dipp
       {
         "matcher": "Bash",
         "hooks": [
-          { "type": "command", "command": "~/stuff/gitrepos/gh/vtmocanu/skills/agent-permissions/dippy-with-auto-fallback.sh" }
+          { "type": "command", "command": "~/stuff/gitrepos/gh/vtmocanu/skills/claude-permissions/dippy-with-auto-fallback.sh" }
         ]
       },
       {
         "matcher": "mcp__.*",
         "hooks": [
-          { "type": "command", "command": "~/stuff/gitrepos/gh/vtmocanu/skills/agent-permissions/dippy-with-auto-fallback.sh" }
+          { "type": "command", "command": "~/stuff/gitrepos/gh/vtmocanu/skills/claude-permissions/dippy-with-auto-fallback.sh" }
         ]
       }
     ],

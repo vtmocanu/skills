@@ -6,6 +6,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.34.0] - 2026-08-09
+
+### Changed
+
+- Renamed the `agent-permissions` skill back to its original name `claude-permissions`: it manages Claude Code permissions specifically, so the Claude-specific name is accurate. Dropped the brand-substring ban from `scripts/validate_skills.py`, so skill names may now contain `claude`/`anthropic` when the skill is genuinely tied to that product.
+
+### Migration
+
+- Consumers that pinned the old name must re-add and drop it: `npx skills add vtmocanu/skills --skill claude-permissions -g -y` then `npx skills remove agent-permissions -g -y`. If you wired the bundled `dippy-with-auto-fallback.sh` into a hook, repoint it from `~/.claude/skills/agent-permissions/` to `~/.claude/skills/claude-permissions/`.
+
 ## [0.33.6] - 2026-08-09
 
 ### Changed
