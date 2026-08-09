@@ -117,6 +117,9 @@ npx skills add <source> -a claude-code -g        # -g = global (~/.claude/skills
 
 `<source>` accepts GitHub `owner/repo` shorthand or a full URL. For a **private** repo, use the SSH form `git@host:owner/repo.git` so the clone uses your existing git credentials (SSH agent / credential helper).
 
+- **Audit a source without installing**: `npx skills add <source> -l` lists every skill the repo offers (name + description). Use it to survey a source, or to spot skills added upstream — `update` never discovers new skills, so this is how you learn one exists.
+- **`--skill` is include-only; there is no exclude flag.** To install all-but-some, either pass a positive name list (`--skill a b c`) or install `--skill '*'` then `npx skills remove <name> -g -y`. Reason to exclude: a skill whose `name:` duplicates a built-in (see the name-collision caveat under Enable / disable).
+
 ### Auto-install new + refresh on session start (hook)
 `update` never discovers a skill not yet in the lockfile, so a SessionStart hook that only runs `update` will not pick up a newly-pushed skill. To auto-install new skills **and** refresh existing ones, run `add` (with `--skill '*'`) then `update`, chained:
 
@@ -125,6 +128,7 @@ npx -y skills@latest add <source> -a claude-code --skill '*' -g -y && npx -y ski
 ```
 
 - `add … --skill '*'` installs every skill currently in `<source>`, so new ones land automatically. `--skill '*'` keeps the `-a claude-code` agent scope; `--all` instead fans out to every detected agent.
+- **`update` reinstalls to every *detected* agent, and cannot be scoped.** `update` has no `-a` flag, and its internal `add` (run per changed skill) passes none — so it reinstalls each changed skill to **every** agent it detects. Detection is just "the agent's config dir exists" (e.g. `~/.config/crush`, `~/.codex`). Non-universal agents (claude, crush) each get their own copy; universal ones share `~/.agents/skills`. Consequence: even a hook whose every `add` is `-a claude-code` still leaks copies to other agents through the chained `update`. There is no per-`update` agent scope — the only way to keep installs to one agent is to make the others undetectable (remove/rename their config dir).
 - Keep it a **single shell command**, not two async hooks: `add` and `update` both write the lockfile, so two concurrent hooks race and corrupt it.
 - For multiple sources, chain the `add`s ahead of one `update`. Join reliable steps with `&&`, but decouple any source that can be unreachable (offline, VPN-gated) with `;` and `|| true` and put it **last** — an `&&` chain aborts on the first failure, so a down source would otherwise block every step after it:
 
@@ -157,3 +161,19 @@ npx -y skills@latest add <source> -a claude-code --skill '*' -g -y && npx -y ski
 
 - **Scope**: global skills live in `~/.claude/skills/`; project skills in that repo's `.claude/skills/`. `add`/`update`/`remove` default to **project** scope; pass `-g` for global. `update -g -p` does both.
 - **Lockfiles**: global → `~/.agents/.skill-lock.json`; project → `<project-root>/skills-lock.json`. They record each installed skill's source; the installed copies under `~/.claude/skills/` carry no lockfile.
+
+## Enable / disable an installed skill
+
+npx has no enable/disable — a skill is installed (active) or removed. To keep a skill on disk but **turn it off**, use Claude Code's `skillOverrides` in `~/.claude/settings.json`. It is a four-state control, keyed by skill **name** (not source), the richer analogue of a plugin's boolean `enabledPlugins`:
+
+| State | Listed to the model | In `/` menu | Auto-trigger | Manual `/name` |
+|-------|--------------------|-------------|--------------|----------------|
+| `on` (default) | name + description | yes | yes | yes |
+| `name-only` | name only (saves context) | yes | yes | yes |
+| `user-invocable-only` | hidden | yes | no | yes |
+| `off` | hidden | hidden | no | no |
+
+Cycle states live in the `/skills` menu (Space to cycle, Enter to save) or edit `skillOverrides` directly. `skillOverrides` persists in settings.json, so the enable/disable state is version-controllable.
+
+- Prefer `off` over `permissions.deny: ["Skill(<name>)"]` to disable: deny only blocks at call time and **still surfaces** the skill in context; `off` removes it entirely (no context cost, no auto-trigger).
+- **Name-collision caveat**: because overrides key by name, never install a skill whose `name:` duplicates a built-in (e.g. `claude-api`) — a single `"claude-api": "off"` would target the built-in too. Exclude such a skill at install (see the include-only note under Install a source).
