@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.32.0] - 2026-08-09
+
+### Changed
+
+- `skills`: documented that `npx skills update` (and any `add` without `-a`) reinstalls each changed skill to every *detected* agent (detection is just "the agent's config dir exists") and cannot be scoped, so a SessionStart hook whose every `add` is `-a claude-code` still leaks copies to other agents through the chained `update`; the only fix is to make the other agents undetectable. Added an "Enable / disable an installed skill" section covering the four-state `skillOverrides` control (`on` / `name-only` / `user-invocable-only` / `off`), why `off` beats `permissions.deny: ["Skill(name)"]`, and the name-collision caveat (never install a skill whose `name:` duplicates a built-in such as `claude-api`, or an `off` override would disable the built-in). Noted `npx skills add <source> -l` (list a source without installing, to audit it or spot new upstream skills) and that `--skill` is include-only with no exclude flag.
+
 ## [0.31.0] - 2026-08-09
 
 ### Added
