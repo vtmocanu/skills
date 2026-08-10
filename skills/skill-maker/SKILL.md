@@ -163,6 +163,7 @@ npx -y skills@latest add <source> -a claude-code --skill '*' -g -y && npx -y ski
 
 - **Scope**: global skills live in `~/.claude/skills/`; project skills in that repo's `.claude/skills/`. `add`/`update`/`remove` default to **project** scope; pass `-g` for global. `update -g -p` does both.
 - **Lockfiles**: global → `~/.agents/.skill-lock.json`; project → `<project-root>/skills-lock.json`. They record each installed skill's source; the installed copies under `~/.claude/skills/` carry no lockfile.
+- **Where files land (shared store + per-agent symlinks)**: `npx` keeps each skill's real files once under the shared **`~/.agents/skills/<name>/`**, then points every detected agent at it. A freshly `add`-ed skill can be a real copy under `~/.claude/skills/<name>/`, but `update` re-pulling a changed skill tends to replace that with a **symlink** `~/.claude/skills/<name>` → `../../../../../../../.agents/skills/<name>` (relative, into the shared store). So per-agent dirs migrate to symlinks over time while the actual content lives in `~/.agents/skills`. **Dotfiles impact**: track the content at `~/.agents/skills` (e.g. symlink `~/.agents` into the repo) and let the per-agent copies be symlinks; gitignore the machine-local `~/.agents/.skill-lock.json` (it rewrites on every add/update).
 
 ## Enable / disable an installed skill
 
