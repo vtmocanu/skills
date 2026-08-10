@@ -20,12 +20,14 @@ You are helping create a Product Requirements Document (PRD) for a new feature. 
 Ask the user to describe the feature idea to understand the core concept and scope.
 
 ### Step 1.5: Capture the post-PRD workflow up front (before creating anything)
-Before creating the issue or PRD, detect whether **uzi** is available (the `uzi` CLI is on `PATH`, i.e. `command -v uzi` succeeds, **or** the `uzi-cli` skill is installed at `~/.claude/skills/uzi-cli/`), then use the **AskUserQuestion** tool to capture two choices in a single prompt:
+Before creating the issue or PRD, detect whether **uzi** is available (`command -v uzi` succeeds, **or** the `uzi-cli` skill is installed at `~/.claude/skills/uzi-cli/`), then gather **every** downstream choice now, back to back, so nothing interrupts the PRD writing later:
 
-1. **Next step** (what happens once the PRD exists): `Start working now`, `Commit & push for later`, and, **only when uzi is detected**, `Send to uzi`. Present 2 options without uzi, 3 with. `Send to uzi` hands the PRD to the `uzi-cli` skill's own **Send to uzi** menu (Auto / Supervised / Seed & ship / Custom), so do not ask the uzi mode here; that second menu picks it.
-2. **PRD review**: whether agent(s) review the freshly created PRD: `No review`, `One reviewer`, or `Let the skill decide` (the skill picks a count from the PRD's size and complexity). The user can pick "Other" to name an exact number.
+1. **AskUserQuestion (next step + review)**, one prompt with two questions:
+   - **Next step**: `Start working now`, `Commit & push for later`, and, **only when uzi is detected**, `Send to uzi`. (2 options without uzi, 3 with.)
+   - **PRD review**: `No review`, `One reviewer`, or `Let the skill decide` (the skill picks a count from the PRD's size and complexity). The user can pick "Other" for an exact count.
+2. **If the user picked `Send to uzi`, immediately present a second AskUserQuestion for the uzi mode**: load the `uzi-cli` skill and use its **Send to uzi** menu (Auto / Supervised / Seed & ship / Custom). Ask this **now**, right after the first prompt and **before** the PRD is written; do not defer it to after PRD creation.
 
-Hold both answers and act on them **after** the PRD is created (review first, then the chosen next step); do not present a trailing numbered menu. If running non-interactively (no user to prompt), default to `Commit & push for later` with `No review`.
+Hold all answers and act on them **after** the PRD is created: run the review first, then execute the chosen next step (for `Send to uzi`, use the mode already selected here; do not re-ask). Do not present a trailing numbered menu. If running non-interactively (no user to prompt), default to `Commit & push for later` with `No review`.
 
 ### Step 2: Create GitHub Issue FIRST
 Create the GitHub issue immediately to get the issue ID. This ID is required for proper PRD file naming.
@@ -212,11 +214,11 @@ prd-start [issue-id]
 
 ### Option 3: Send to uzi (hand off to the uzi-cli skill)
 
-**Only offer this option when uzi is available** (`command -v uzi` succeeds, or the `uzi-cli` skill is installed). Do not re-implement the uzi flow here. Hand the freshly created PRD to the `uzi-cli` skill's **Send to uzi** orchestration, which asks how much to automate (Auto / Supervised / Seed & ship / Custom) and drives the run from there.
+**Only offer this option when uzi is available** (`command -v uzi` succeeds, or the `uzi-cli` skill is installed). Do not re-implement the uzi flow here. Hand the freshly created PRD to the `uzi-cli` skill's **Send to uzi** orchestration, using the mode already chosen up front in Step 1.5 (Auto / Supervised / Seed & ship / Custom), and drive the run from there.
 
 1. **Commit and push the PRD first** (exactly as Option 2) so the issue and `prds/` file are on the remote for the uzi worker to clone. Capture the pushed commit for the seeded path: `PRD_SHA=$(git rev-parse HEAD)`.
 2. **Confirm uzi tracks this repo.** Load the `uzi-cli` skill (Skill tool) if not already loaded, then run `uzi repo list --json` and note the repo `id`. If the repo is not listed, tell the user it is not registered with uzi and fall back to Option 2.
-3. **Hand off to the uzi-cli skill's *Send to uzi* section**, giving it this PRD's coordinates: repo `id`, issue `#[issue-id]`, and, for a seeded run, `--planned-commit "$PRD_SHA"`. Its menu picks the mode:
+3. **Hand off to the uzi-cli skill's *Send to uzi* section**, giving it this PRD's coordinates: repo `id`, issue `#[issue-id]`, and, for a seeded run, `--planned-commit "$PRD_SHA"`. Use the mode already chosen in Step 1.5:
    - **Auto / Supervised / let uzi plan it**: uzi plans from the pushed PRD issue, so no local plan is needed.
    - **Seed & ship**: write the plan locally from the PRD's milestones and technical scope (the uzi-cli *Authoring a seeded plan* section is the guide), then seed it.
 4. **If uzi rejects the issue for a missing `PRD` label** even though this skill added it, its poller has not synced yet. Use the forge's **Promote** action on the issue (it writes the label and refreshes uzi's cache in one request), then retry.
