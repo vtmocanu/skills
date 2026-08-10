@@ -15,6 +15,8 @@ arguments:
 
 You are helping initiate active implementation work on a specific Product Requirements Document (PRD). This command sets up the implementation context (validates readiness, creates branch, prepares environment) then hands off to `/prd-next` for task identification.
 
+**Forge-agnostic**: The `gh` commands below are GitHub examples. Detect the forge from `git remote get-url origin` and use the matching CLI, mapping each verb to its equivalent: **GitHub** → `gh`; **GitLab** → `glab` (a PR is a *merge request*, `glab mr …`); **Forgejo/Gitea** → `tea`. If the needed CLI is missing, tell the user and link its install page.
+
 **IMPORTANT**: Do NOT include time estimates or effort estimates in your responses. Focus on setup and readiness without speculating on duration.
 
 ## Process Overview

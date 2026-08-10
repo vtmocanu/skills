@@ -111,7 +111,7 @@ Work through the PRD template focusing on project management, milestone tracking
 - **Focus on major milestones**: Create 5-10 meaningful milestones rather than exhaustive micro-tasks
 - **Think cross-functionally**: Consider impact on different teams, systems, and stakeholders
 
-**Note**: If any `gh` command fails with "command not found", inform the user that GitHub CLI is required and provide the installation link: https://cli.github.com/
+**Forge-agnostic**: The `gh` commands below are GitHub examples. Detect the forge from `git remote get-url origin` and use the matching CLI, mapping each verb to its equivalent: **GitHub** → `gh`; **GitLab** → `glab` (a PR is a *merge request*, `glab mr …`); **Forgejo/Gitea** → `tea`. If the needed CLI is missing, tell the user and link its install page.
 
 **Note**: If creating the GitHub issue fails because the "PRD" label does not exist, create the label first (`gh label create "PRD" --description "Product Requirements Document" --color 0052CC`) and then retry creating the issue.
 

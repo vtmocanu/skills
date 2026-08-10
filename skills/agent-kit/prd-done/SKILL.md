@@ -9,7 +9,7 @@ description: Complete PRD implementation workflow - create branch, push changes,
 
 Complete the PRD implementation workflow including branch management, pull request creation, and issue closure.
 
-**Note**: If any `gh` command fails with "command not found", inform the user that GitHub CLI is required and provide the installation link: https://cli.github.com/
+**Forge-agnostic**: The `gh` commands below are GitHub examples. Detect the forge from `git remote get-url origin` and use the matching CLI, mapping each verb to its equivalent: **GitHub** → `gh`; **GitLab** → `glab` (a PR is a *merge request*, `glab mr …`); **Forgejo/Gitea** → `tea`. If the needed CLI is missing, tell the user and link its install page.
 
 ## Workflow Steps
 

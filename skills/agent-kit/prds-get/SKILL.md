@@ -1,19 +1,19 @@
 ---
 name: prds-get
-description: Fetch all open GitHub issues from this project that have the 'PRD' label
+description: Fetch all open issues labeled 'PRD' from this project's git forge (GitHub, GitLab, or Forgejo)
 ---
 
 > Vendored from [vfarcic/dot-ai](https://github.com/vfarcic/dot-ai) `shared-prompts/prds-get.md` (MIT, Copyright (c) 2025 Viktor Farcic). Original author: Viktor Farcic.
 
 # Get All PRDs
 
-Fetch all open GitHub issues from this project that have the 'PRD' label.
+Fetch all open issues labeled 'PRD' from this project's git forge.
 
-**Note**: If any `gh` command fails with "command not found", inform the user that GitHub CLI is required and provide the installation link: https://cli.github.com/
+**Forge-agnostic**: The `gh` commands below are GitHub examples. Detect the forge from `git remote get-url origin` and use the matching CLI, mapping each verb to its equivalent: **GitHub** → `gh`; **GitLab** → `glab` (`glab issue list`); **Forgejo/Gitea** → `tea` (`tea issues list`). If the needed CLI is missing, tell the user and link its install page.
 
 ## Process
 
-1. **Fetch Issues**: Use GitHub CLI to get all open issues with PRD label
+1. **Fetch Issues**: Use the forge CLI to list all open issues with the PRD label
    ```bash
    gh issue list --label PRD --state open --json number,title,url,labels,assignees,createdAt,updatedAt
    ```
