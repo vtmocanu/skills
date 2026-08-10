@@ -1,5 +1,5 @@
 ---
-name: skills
+name: skill-maker
 description: Creates, updates, lints, and publishes Claude Code skills, and keeps them in sync with the npx skills package manager. Use when (1) writing a new skill, (2) editing an existing one, (3) linting a skill with agnix, (4) publishing a change so machines pick it up, (5) renaming or deleting a skill, or (6) deciding flat-vs-folder layout or frontmatter/description shape. Triggers include "new skill", "add a skill", "update skill", "skill not loading", "npx skills", "skills update", "lint skill", "agnix", "SKILL.md".
 ---
 

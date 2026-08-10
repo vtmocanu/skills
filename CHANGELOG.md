@@ -6,6 +6,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- Renamed the `skills` skill to `skill-maker`: the old name shadowed Claude Code's built-in `/skills` menu (the enable/disable UI), so `/skills` never reached the authoring skill and a `skillOverrides` entry keyed `"skills"` would have hit the built-in too. `skill-maker` is collision-free and matches the skill's `# Skills authoring` purpose. Content unchanged.
+
+### Migration
+
+- Re-add under the new name and drop the old one: `npx skills add vtmocanu/skills --skill skill-maker -g -y` then `npx skills remove skills -g -y`.
+
 ## [0.34.0] - 2026-08-09
 
 ### Changed
