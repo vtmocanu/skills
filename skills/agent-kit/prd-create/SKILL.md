@@ -1,6 +1,6 @@
 ---
 name: prd-create
-description: Create documentation-first PRDs that guide development through user-facing content
+description: Creates documentation-first PRDs (a short forge issue plus a detailed prds/ file with milestones), then offers to start work, commit for later, or send the PRD to uzi. Use when the user wants to create a PRD, spec out a new feature, write a product requirements document, or turn a feature idea into a tracked GitHub/GitLab/Forgejo issue. Triggers include "create a PRD", "new PRD", "/prd-create", "write a PRD for", "spec this feature".
 ---
 
 > Vendored from [vfarcic/dot-ai](https://github.com/vfarcic/dot-ai) `shared-prompts/prd-create.md` (MIT, Copyright (c) 2025 Viktor Farcic). Original author: Viktor Farcic.
