@@ -1201,7 +1201,7 @@ roles:
       --porcelain` stays empty; stray files near the run tree undercut it.
 
   - name: web-ux
-    version: 4
+    version: 5
     description: Web UX expert. Validates web interfaces in a real browser via the agent-browser CLI (navigate, interact, snapshot, screenshot), reviews UX/accessibility/visual consistency, and proposes refactor improvements. Reports findings only; never modifies code.
     tools: [Bash, Read, Grep, Glob, WebFetch, SendMessage, TaskUpdate, TaskList, TaskGet]
     model: opus
@@ -1271,6 +1271,14 @@ roles:
         builds may re-seed and re-authenticate you. To keep or observe a
         transient state (a drag result, a logged-out shell), navigate in-app
         (click links) instead of re-`open`ing.
+
+      Transient artifacts (screenshots, a11y dumps, logs) are a read-only
+      role's cleanliness hazard: write them OUTSIDE the tracked tree so a
+      clean delivery never depends on a cleanup step that an interrupted run
+      would skip. Prefer a scratch dir outside the worktree; if the sandbox
+      confines file access to the worktree, use a gitignored path inside it.
+      Your premise is that `git status --porcelain` stays empty — do not make
+      a manual `rm` load-bearing for it.
 
       Review lenses, in priority order:
       1. Flow integrity - can the user complete the changed journeys without
