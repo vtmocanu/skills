@@ -19,6 +19,14 @@ You are helping create a Product Requirements Document (PRD) for a new feature. 
 ### Step 1: Understand the Feature Concept
 Ask the user to describe the feature idea to understand the core concept and scope.
 
+### Step 1.5: Capture the post-PRD workflow up front (before creating anything)
+Before creating the issue or PRD, detect whether **uzi** is available (the `uzi` CLI is on `PATH`, i.e. `command -v uzi` succeeds, **or** the `uzi-cli` skill is installed at `~/.claude/skills/uzi-cli/`), then use the **AskUserQuestion** tool to capture two choices in a single prompt:
+
+1. **Next step** (what happens once the PRD exists): `Start working now`, `Commit & push for later`, and, **only when uzi is detected**, `Plan locally, seed to uzi` and `Let uzi plan it`. Present 2 options without uzi, 4 with.
+2. **PRD review**: whether agent(s) review the freshly created PRD: `No review`, `One reviewer`, or `Let the skill decide` (the skill picks a count from the PRD's size and complexity). The user can pick "Other" to name an exact number.
+
+Hold both answers and act on them **after** the PRD is created (review first, then the chosen next step); do not present a trailing numbered menu. If running non-interactively (no user to prompt), default to `Commit & push for later` with `No review`.
+
 ### Step 2: Create GitHub Issue FIRST
 Create the GitHub issue immediately to get the issue ID. This ID is required for proper PRD file naming.
 
@@ -138,40 +146,30 @@ Format: `- [Brief feature description] (PRD #[issue-id])`
 
 The ROADMAP.md update will be included in the commit at the end of the workflow (Option 2).
 
-## Next Steps After PRD Creation
+## After PRD Creation: review, then the chosen next step
 
-After completing the PRD, first detect whether **uzi** is available: the `uzi` CLI is on `PATH` (`command -v uzi` succeeds) **or** the `uzi-cli` skill is installed (`~/.claude/skills/uzi-cli/`). Include **Option 3** below only when uzi is detected; otherwise present only Options 1 and 2 and accept `1` or `2`.
-
-Present the user with numbered options:
+The **next step** and **PRD review** choices were captured up front (Step 1.5, via AskUserQuestion, before anything was created). Now that the PRD file and issue exist, act on them in order: run the review first (if requested), then execute the chosen next step. Show the confirmation:
 
 ```
 ✅ PRD Created Successfully!
 
 **PRD File**: prds/[issue-id]-[feature-name].md
-**GitHub Issue**: #[issue-id]
-
-What would you like to do next?
-
-**1. Start working on this PRD now**
-   Begin implementation immediately (recommended if you're ready to start)
-
-**2. Commit and push PRD for later**
-   Save the PRD and work on it later (will use [skip ci] flag)
-
-**3. Plan locally and seed to uzi**    (show only if uzi is available)
-   Commit and push, write the implementation plan yourself, and seed it to the
-   uzi factory; the worker implements your plan directly (no approval gate)
-
-**4. Start a run in uzi (uzi plans)**  (show only if uzi is available)
-   Commit and push, start a uzi run on the issue and let uzi write the plan;
-   we watch for its plan, review it with you, and approve or reject on your call
-
-Please enter a number:                 (options 3-4 only if uzi is available)
+**Issue**: #[issue-id]
 ```
+
+### PRD Review (if requested)
+
+If the user asked for review, spawn reviewer agent(s) with the **Agent** tool (`subagent_type: Explore` or `general-purpose`) to read `prds/[issue-id]-[feature-name].md` and critique it: milestone sizing (5-10 meaningful milestones, not micro-tasks), testability, clarity, missing risks and dependencies, and scope realism.
+
+- **One reviewer**: a single agent.
+- **Let the skill decide**: pick the count from the PRD's size and complexity: 1 for a small single-component PRD, 2-3 for a large or multi-component one, each agent taking a distinct lens (scope/feasibility, milestones/testability, risks/dependencies). Run them in parallel.
+- **A specific number**: spawn exactly that many, dividing the lenses among them.
+
+Collect the findings, present them to the user, and apply the fixes they approve to the PRD file. Then continue to the chosen next step below.
 
 ### Option 1: Start Working Now
 
-If user chooses option 1, first commit and push the PRD (same as Option 2), then instruct them:
+If the user picked **Start working now**, first commit and push the PRD (same as **Commit & push for later**), then instruct them:
 
 ---
 
@@ -183,7 +181,7 @@ To start working on this PRD, run `/prd-start [issue-id]`
 
 ### Option 2: Commit and Push for Later
 
-If user chooses option 2:
+If the user picked **Commit & push for later**:
 
 ```bash
 # Stage the PRD file (and ROADMAP.md if it was updated)
