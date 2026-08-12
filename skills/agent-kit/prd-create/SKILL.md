@@ -29,6 +29,8 @@ Before creating the issue or PRD, detect whether **uzi** is available (`command 
 
 Hold all answers and act on them **after** the PRD is created: run the review first, then execute the chosen next step (for `Send to uzi`, use the mode already selected here; do not re-ask). Do not present a trailing numbered menu. If running non-interactively (no user to prompt), default to `Commit & push for later` with `No review`.
 
+**If `Send to uzi` is the chosen next step, the PRD must be self-contained for an offline worker.** uzi workers run with restricted egress: an allowlist that reaches the forge, `*.anthropic.com`, and the package caches, but **not the open web** (no arbitrary GitHub, no external docs sites, no `WebFetch`/`WebSearch`). A worker therefore cannot perform any investigation that needs the internet. So during PRD authoring (Step 5), **front-load every internet-requiring investigation now, locally, and write its findings into the PRD body as resolved facts** — never leave a milestone that says "the implementer will confirm X online." See the callout in Step 5.
+
 ### Step 2: Create GitHub Issue FIRST
 Create the GitHub issue immediately to get the issue ID. This ID is required for proper PRD file naming.
 
@@ -42,6 +44,11 @@ Add the PRD file link to the GitHub issue description now that the filename is k
 
 ### Step 5: Create PRD as a Project Management Document
 Work through the PRD template focusing on project management, milestone tracking, and implementation planning. Documentation updates should be included as part of the implementation milestones.
+
+> **🔴 When `Send to uzi` was chosen (Step 1.5): resolve internet-dependent investigations in the PRD body NOW.** The uzi worker has no open-web access (restricted egress: forge + `*.anthropic.com` + package caches only). Anything a milestone relies on that can only be learned from the open internet — external API or library semantics, upstream source you would have to browse rather than clone, a docs page, a web search, a CVE lookup — the worker cannot do, so the milestone stalls or the worker guesses. Before handoff:
+> - **Do the lookup locally and bake the answer into the PRD** as a stated fact with its source, not as a task. Turn "confirm the widget API is rate-limited" into "the widget API is rate-limited at N/min per `<link>`, so M2 must back off."
+> - **Prefer an offline-resolvable form** where one exists: an empirical measurement from the product's own data or logs, or a codebase read, beats an external lookup — and it lets the worker re-verify without egress. State such a check as offline in the milestone.
+> - **If a load-bearing fact genuinely cannot be settled without the internet**, settle it yourself before sending, or the PRD is not ready for uzi. Flag any you could not resolve rather than shipping a milestone that silently depends on it.
 
 **Key Principle**: Focus on 5-10 major milestones rather than exhaustive task lists. Each milestone should represent meaningful progress that can be clearly validated.
 
@@ -216,6 +223,7 @@ prd-start [issue-id]
 
 **Only offer this option when uzi is available** (`command -v uzi` succeeds, or the `uzi-cli` skill is installed). Do not re-implement the uzi flow here. Hand the freshly created PRD to the `uzi-cli` skill's **Send to uzi** orchestration, using the mode already chosen up front in Step 1.5 (Auto / Supervised / Seed & ship / Custom), and drive the run from there.
 
+0. **Pre-flight: the PRD must be internet-independent.** The worker has no open-web egress (see Step 5's callout), so re-scan the PRD for any milestone whose completion needs the open internet and resolve it into the body first. If a load-bearing external fact is still unresolved, settle it now or tell the user the PRD is not yet ready for uzi.
 1. **Commit and push the PRD first** (exactly as Option 2) so the issue and `prds/` file are on the remote for the uzi worker to clone. Capture the pushed commit for the seeded path: `PRD_SHA=$(git rev-parse HEAD)`.
 2. **Confirm uzi tracks this repo.** Load the `uzi-cli` skill (Skill tool) if not already loaded, then run `uzi repo list --json` and note the repo `id`. If the repo is not listed, tell the user it is not registered with uzi and fall back to Option 2.
 3. **Hand off to the uzi-cli skill's *Send to uzi* section**, giving it this PRD's coordinates: repo `id`, issue `#[issue-id]`, and, for a seeded run, `--planned-commit "$PRD_SHA"`. Use the mode already chosen in Step 1.5:
