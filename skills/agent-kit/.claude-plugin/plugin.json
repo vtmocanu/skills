@@ -1,0 +1,16 @@
+{
+  "name": "agent-kit",
+  "skills": [
+    "./agent-team",
+    "./prd/prd-create",
+    "./prd/prd-start",
+    "./prd/prd-next",
+    "./prd/prd-update-progress",
+    "./prd/prd-update-decisions",
+    "./prd/prd-done",
+    "./prd/prd-full",
+    "./prd/prd-close",
+    "./prd/prd-worktree",
+    "./prd/prds-get"
+  ]
+}

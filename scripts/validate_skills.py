@@ -2,9 +2,13 @@
 """Validate agent skill files for dot-ai / Claude Code.
 
 Skills live under the ``skills/`` container as ``skills/<name>/SKILL.md`` (the
-``agent-team`` and ``prd-*`` skills grouped under ``skills/agent-kit/``); ``npx
-skills`` discovers that container to depth 3. ``retired/`` at the repo root is
-intentionally excluded.
+``agent-team`` skill under ``skills/agent-kit/`` and the ``prd-*`` skills nested
+one level deeper under ``skills/agent-kit/prd/``); ``npx skills`` discovers that
+container to depth 3. The ``agent-kit`` bundle is installed via the
+``skills/agent-kit`` subpath, where npx walks only one level deep, so the nested
+``prd/`` skills are reached via ``skills/agent-kit/.claude-plugin/plugin.json``;
+``scripts/check_bundle_coverage.py`` guards that every bundle skill stays
+reachable. ``retired/`` at the repo root is intentionally excluded.
 
 Checks each skill for:
   - a YAML frontmatter block delimited by ---
