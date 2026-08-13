@@ -29,6 +29,9 @@ jobs:
       - name: Validate skill frontmatter
         run: python3 scripts/validate_skills.py .
 
+      - name: Check agent-kit bundle coverage
+        run: python3 scripts/check_bundle_coverage.py skills/agent-kit
+
       # validate_skills.py reads frontmatter and never opens a .py file, so it
       # was green on a tree containing every defect this suite now covers.
       - name: Install sync.py's only dependency
