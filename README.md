@@ -41,16 +41,16 @@ npx skills add vtmocanu/skills/skills/agent-kit -a claude-code -g -y
 | Skill | What it does |
 |---|---|
 | [agent-team](skills/agent-kit/agent-team/SKILL.md) | Auto-generate and run a per-repo Claude Code agent team: probe the repo, write `.claude/agents/{role}.md` subagent definitions from a role library, then orchestrate tasks with spawned teammates. |
-| [prd-create](skills/agent-kit/prd/prd-create/SKILL.md) | Create documentation-first PRDs that guide development through user-facing content. |
-| [prd-start](skills/agent-kit/prd/prd-start/SKILL.md) | Start working on a PRD implementation. |
-| [prd-next](skills/agent-kit/prd/prd-next/SKILL.md) | Analyze a PRD and recommend the single highest-priority task to work on next. |
-| [prd-update-progress](skills/agent-kit/prd/prd-update-progress/SKILL.md) | Update PRD progress from git commits and code changes, enhanced by conversation context. |
-| [prd-update-decisions](skills/agent-kit/prd/prd-update-decisions/SKILL.md) | Update a PRD from design decisions and strategic changes made during conversations. |
-| [prd-done](skills/agent-kit/prd/prd-done/SKILL.md) | Complete a PRD: create branch, push changes, open a PR, merge, and close the issue. |
-| [prd-full](skills/agent-kit/prd/prd-full/SKILL.md) | Run a PRD end-to-end autonomously (start, iterate until done, then PR), stopping after PR creation for review. |
-| [prd-close](skills/agent-kit/prd/prd-close/SKILL.md) | Close a PRD that is already implemented or no longer needed. |
-| [prd-worktree](skills/agent-kit/prd/prd-worktree/SKILL.md) | Create a git worktree for PRD work with a descriptive branch name (bundles a `create.sh`). |
-| [prds-get](skills/agent-kit/prd/prds-get/SKILL.md) | Fetch all open GitHub issues in this project labeled `PRD`. |
+| [prd-create](skills/agent-kit/prd-create/SKILL.md) | Create documentation-first PRDs that guide development through user-facing content. |
+| [prd-start](skills/agent-kit/prd-start/SKILL.md) | Start working on a PRD implementation. |
+| [prd-next](skills/agent-kit/prd-next/SKILL.md) | Analyze a PRD and recommend the single highest-priority task to work on next. |
+| [prd-update-progress](skills/agent-kit/prd-update-progress/SKILL.md) | Update PRD progress from git commits and code changes, enhanced by conversation context. |
+| [prd-update-decisions](skills/agent-kit/prd-update-decisions/SKILL.md) | Update a PRD from design decisions and strategic changes made during conversations. |
+| [prd-done](skills/agent-kit/prd-done/SKILL.md) | Complete a PRD: create branch, push changes, open a PR, merge, and close the issue. |
+| [prd-full](skills/agent-kit/prd-full/SKILL.md) | Run a PRD end-to-end autonomously (start, iterate until done, then PR), stopping after PR creation for review. |
+| [prd-close](skills/agent-kit/prd-close/SKILL.md) | Close a PRD that is already implemented or no longer needed. |
+| [prd-worktree](skills/agent-kit/prd-worktree/SKILL.md) | Create a git worktree for PRD work with a descriptive branch name (bundles a `create.sh`). |
+| [prds-get](skills/agent-kit/prds-get/SKILL.md) | Fetch all open GitHub issues in this project labeled `PRD`. |
 
 Anything later added under `skills/agent-kit/` joins the bundle automatically.
 
