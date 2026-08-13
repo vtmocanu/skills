@@ -10,6 +10,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Renamed the `skills` skill to `skill-maker`: the old name shadowed Claude Code's built-in `/skills` menu (the enable/disable UI), so `/skills` never reached the authoring skill and a `skillOverrides` entry keyed `"skills"` would have hit the built-in too. `skill-maker` is collision-free and matches the skill's `# Skills authoring` purpose.
 - `skill-maker` (formerly `skills`): noted that recent agnix versions deprecate the `target` field, so `agnix --target claude-code` now prints a benign `Field 'target' is deprecated` warning; documented the `.agnix.toml` `tools = ["claude-code"]` config that silences it (there is no `--tools` CLI flag).
+- Grouped the ten `prd-*` skills under `skills/agent-kit/prd/` (previously flat under `skills/agent-kit/`). `agent-team` stays at `skills/agent-kit/`. Install names are unchanged (`/prd-create`, `/prds-get`, and so on) since names come from frontmatter, not the folder path, and the `skills/agent-kit` bundle install still discovers all eleven skills.
 
 ### Migration
 
