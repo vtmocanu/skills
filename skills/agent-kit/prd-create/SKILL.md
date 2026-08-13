@@ -20,16 +20,18 @@ You are helping create a Product Requirements Document (PRD) for a new feature. 
 Ask the user to describe the feature idea to understand the core concept and scope.
 
 ### Step 1.5: Capture the post-PRD workflow up front (before creating anything)
-Before creating the issue or PRD, detect whether **uzi** is available (`command -v uzi` succeeds, **or** the `uzi-cli` skill is installed at `~/.claude/skills/uzi-cli/`), then gather **every** downstream choice now, back to back, so nothing interrupts the PRD writing later:
+Before creating the issue or PRD, detect whether **uzi** is available (`command -v uzi` succeeds, **or** the `uzi-cli` skill is installed at `~/.claude/skills/uzi-cli/`). When uzi is available, also run `uzi schedule list --json` once to learn whether any **sweep** schedule exists and its label(s) — this gates the `Commit & push + queue for uzi sweep` option and its label choice below. Then gather **every** downstream choice now, back to back, so nothing interrupts the PRD writing later:
 
 1. **AskUserQuestion (next step + review)**, one prompt with two questions:
-   - **Next step**: `Start working now`, `Commit & push for later`, and, **only when uzi is detected**, `Send to uzi`. (2 options without uzi, 3 with.)
+   - **Next step**: `Start working now`, `Commit & push for later`, and, **only when uzi is detected**, `Commit & push + queue for uzi sweep` and `Send to uzi`. (2 options without uzi; up to 4 with.) `Commit & push + queue for uzi sweep` is a *deferred* handoff (see Option 4): it commits and pushes exactly like `Commit & push for later`, then labels the issue so a uzi **sweep schedule** implements it later, with no run started now. Offer it only when uzi is detected **and** `uzi schedule list --json` reports at least one sweep schedule.
    - **PRD review**: `No review`, `One reviewer`, or `Let the skill decide` (the skill picks a count from the PRD's size and complexity). The user can pick "Other" for an exact count.
-2. **If the user picked `Send to uzi`, immediately present a second AskUserQuestion for the uzi mode**: load the `uzi-cli` skill and use its **Send to uzi** menu (Auto / Supervised / Seed & ship / Custom). Ask this **now**, right after the first prompt and **before** the PRD is written; do not defer it to after PRD creation.
+2. **Immediately present any needed second AskUserQuestion, right after the first prompt and BEFORE the PRD is written** (do not defer to after PRD creation):
+   - If the user picked `Send to uzi`: ask the uzi **mode** — load the `uzi-cli` skill and use its **Send to uzi** menu (Auto / Supervised / Seed & ship / Custom).
+   - If the user picked `Commit & push + queue for uzi sweep` **and** `uzi schedule list --json` shows more than one sweep schedule: ask **which sweep label** to queue for (e.g. `Night`, `bug`). With exactly one sweep, use it and ask nothing.
 
 Hold all answers and act on them **after** the PRD is created: run the review first, then execute the chosen next step (for `Send to uzi`, use the mode already selected here; do not re-ask). Do not present a trailing numbered menu. If running non-interactively (no user to prompt), default to `Commit & push for later` with `No review`.
 
-**If `Send to uzi` is the chosen next step, the PRD must be self-contained for an offline worker.** uzi workers run with restricted egress: an allowlist that reaches the forge, `*.anthropic.com`, and the package caches, but **not the open web** (no arbitrary GitHub, no external docs sites, no `WebFetch`/`WebSearch`). A worker therefore cannot perform any investigation that needs the internet. So during PRD authoring (Step 5), **front-load every internet-requiring investigation now, locally, and write its findings into the PRD body as resolved facts** — never leave a milestone that says "the implementer will confirm X online." See the callout in Step 5.
+**If `Send to uzi` or `Commit & push + queue for uzi sweep` is the chosen next step, the PRD must be self-contained for an offline worker** (both hand the PRD to a uzi worker — the sweep option via a scheduled sweep rather than an immediate run). uzi workers run with restricted egress: an allowlist that reaches the forge, `*.anthropic.com`, and the package caches, but **not the open web** (no arbitrary GitHub, no external docs sites, no `WebFetch`/`WebSearch`). A worker therefore cannot perform any investigation that needs the internet. So during PRD authoring (Step 5), **front-load every internet-requiring investigation now, locally, and write its findings into the PRD body as resolved facts** — never leave a milestone that says "the implementer will confirm X online." See the callout in Step 5.
 
 ### Step 2: Create GitHub Issue FIRST
 Create the GitHub issue immediately to get the issue ID. This ID is required for proper PRD file naming.
@@ -45,7 +47,7 @@ Add the PRD file link to the GitHub issue description now that the filename is k
 ### Step 5: Create PRD as a Project Management Document
 Work through the PRD template focusing on project management, milestone tracking, and implementation planning. Documentation updates should be included as part of the implementation milestones.
 
-> **🔴 When `Send to uzi` was chosen (Step 1.5): resolve internet-dependent investigations in the PRD body NOW.** The uzi worker has no open-web access (restricted egress: forge + `*.anthropic.com` + package caches only). Anything a milestone relies on that can only be learned from the open internet — external API or library semantics, upstream source you would have to browse rather than clone, a docs page, a web search, a CVE lookup — the worker cannot do, so the milestone stalls or the worker guesses. Before handoff:
+> **🔴 When `Send to uzi` or `Commit & push + queue for uzi sweep` was chosen (Step 1.5): resolve internet-dependent investigations in the PRD body NOW.** The uzi worker has no open-web access (restricted egress: forge + `*.anthropic.com` + package caches only). Anything a milestone relies on that can only be learned from the open internet — external API or library semantics, upstream source you would have to browse rather than clone, a docs page, a web search, a CVE lookup — the worker cannot do, so the milestone stalls or the worker guesses. Before handoff:
 > - **Do the lookup locally and bake the answer into the PRD** as a stated fact with its source, not as a task. Turn "confirm the widget API is rate-limited" into "the widget API is rate-limited at N/min per `<link>`, so M2 must back off."
 > - **Prefer an offline-resolvable form** where one exists: an empirical measurement from the product's own data or logs, or a codebase read, beats an external lookup — and it lets the worker re-verify without egress. State such a check as offline in the milestone.
 > - **If a load-bearing fact genuinely cannot be settled without the internet**, settle it yourself before sending, or the PRD is not ready for uzi. Flag any you could not resolve rather than shipping a milestone that silently depends on it.
@@ -233,10 +235,29 @@ prd-start [issue-id]
 
 If the installed `uzi-cli` skill predates its *Send to uzi* section (older uzi binary), fall back to its *Authoring a seeded plan* section for the seeded path, or `uzi run create --repo <id> --issue [issue-id]` for the gated path.
 
+### Option 4: Commit & push + queue for a uzi sweep
+
+**Only offer this when uzi is available AND `uzi schedule list --json` reports at least one sweep schedule.** It is the *deferred* sibling of Option 2: unlike **Send to uzi** (which starts a run now), it commits and pushes the PRD and then labels the issue so a uzi **sweep schedule** implements it on its own cadence (for example a nightly sweep). No run is started here.
+
+0. **Pre-flight: the PRD must be internet-independent** (a sweep runs an offline worker, same as Option 3). Re-scan the PRD and resolve any open-web dependency into the body first; if a load-bearing external fact is unresolved, settle it or tell the user it is not yet ready.
+1. **Commit and push the PRD first** (exactly as Option 2), so the issue and `prds/` file are on the remote before the sweep fires.
+2. **Discover the sweep label — never hardcode it.** From the `uzi schedule list --json` read in Step 1.5, take the schedules whose target/kind is `sweep` and read their `labels`:
+   - exactly one sweep → use its label;
+   - several (e.g. `Night`, `bug`) → use the label chosen up front in Step 1.5;
+   - none → there is nothing to queue for; fall back to **Option 2** and say so.
+3. **Apply the label to the issue** with the forge CLI already detected for this repo (`glab` / `gh` / `tea`), keeping the `PRD` label the skill added. GitLab example:
+   ```bash
+   glab issue update [issue-id] --label "[sweep-label]"
+   ```
+4. **Do not start a run.** Confirm to the user that the PRD is pushed and the issue is labeled for the `[sweep-label]` sweep, which will pick it up on its schedule.
+
+This runs the `uzi` **binary** directly (like Option 3's `uzi repo list --json`); the `uzi-cli` **skill** does not need to be loaded, and no label name is baked into this skill.
+
 ## Important Notes
 
 - **Option 1**: Best when you have time to begin implementation immediately
 - **Option 2**: Best when creating multiple PRDs or planning future work
 - **Option 3 (send to uzi)**: hands the PRD to the `uzi-cli` skill's **Send to uzi** menu, which picks how much to automate (Auto / Supervised / Seed & ship / let uzi plan it) and explains the budget tradeoff. A seeded run uses uzi's global default budget (keep the plan small), while the gated path scales the budget to the milestones uzi freezes (fits large or multi-component PRDs).
+- **Option 4 (queue for a uzi sweep)**: the deferred sibling of Option 2 — commits & pushes the PRD, then labels the issue for a uzi **sweep schedule** (label discovered at runtime via `uzi schedule list --json`, never hardcoded) so a scheduled sweep implements it later, with no run started now. Offered only when uzi is detected and a sweep schedule exists.
 - **Skip CI flag**: Always use `[skip ci]` when committing PRD-only changes
 - **Issue reference**: Include issue number in commit message for traceability
