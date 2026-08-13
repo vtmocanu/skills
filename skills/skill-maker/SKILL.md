@@ -38,6 +38,10 @@ Reference supporting files by the **skill's own base directory**, which the harn
 
 Supporting files are the reason to use a folder. A folder containing only `SKILL.md` behaves like a flat prompt — still use the folder form so npx discovers it.
 
+### Subpath installs cap nesting at depth 1
+
+A whole-repo install (container `skills/`) discovers catalog nesting up to 3 levels deep (`skills/<cat>/<name>/SKILL.md`, `skills/<cat>/<cat>/<name>/SKILL.md`). A **subpath** install (`npx skills add owner/repo/skills/<sub>`) does **not** — npx's default GitHub tree-API discovery caps a subpath at **depth 1**, so any skill at `<sub>/<group>/<name>/SKILL.md` is **silently dropped** (no error; the bundle just omits it). Verified 2026-08-13: nesting `skills/agent-kit/prd/*` under the `skills/agent-kit` subpath bundle made it resolve to only the one depth-1 skill. Keep every skill at `<sub>/<name>/SKILL.md`. To group deeper, give the group its own subpath (`add owner/repo/skills/agent-kit/prd`, a second install line) or install the whole-repo container instead. Do not trust `add --branch <x> -l` to verify this — that path git-clones and walks the FS, which tolerates depth; the real install uses the tree API.
+
 ## Frontmatter
 
 `name`:
