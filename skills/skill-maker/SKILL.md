@@ -38,9 +38,20 @@ Reference supporting files by the **skill's own base directory**, which the harn
 
 Supporting files are the reason to use a folder. A folder containing only `SKILL.md` behaves like a flat prompt — still use the folder form so npx discovers it.
 
-### Subpath installs cap nesting at depth 1
+### Nesting under a subpath needs a `.claude-plugin/plugin.json` manifest
 
-A whole-repo install (container `skills/`) discovers catalog nesting up to 3 levels deep (`skills/<cat>/<name>/SKILL.md`, `skills/<cat>/<cat>/<name>/SKILL.md`). A **subpath** install (`npx skills add owner/repo/skills/<sub>`) does **not** — npx's default GitHub tree-API discovery caps a subpath at **depth 1**, so any skill at `<sub>/<group>/<name>/SKILL.md` is **silently dropped** (no error; the bundle just omits it). Verified 2026-08-13: nesting `skills/agent-kit/prd/*` under the `skills/agent-kit` subpath bundle made it resolve to only the one depth-1 skill. Keep every skill at `<sub>/<name>/SKILL.md`. To group deeper, give the group its own subpath (`add owner/repo/skills/agent-kit/prd`, a second install line) or install the whole-repo container instead. Do not trust `add --branch <x> -l` to verify this — that path git-clones and walks the FS, which tolerates depth; the real install uses the tree API.
+A whole-repo install (container `skills/`) discovers catalog nesting up to 3 levels deep (`skills/<cat>/<name>/SKILL.md`, `skills/<cat>/<cat>/<name>/SKILL.md`) with nothing extra. A **subpath** install (`npx skills add owner/repo/skills/<sub>`) does not: npx walks the subpath dir only **one level deep**, so a skill at `<sub>/<group>/<name>/SKILL.md` is **silently dropped** (no error; the bundle just omits it). This depth cap is independent of the fetch engine — npx uses its fast GitHub tree-API only for a hardcoded owner allowlist (`vercel`, `vercel-labs`, `heygen-com`, plus a couple of self-hosted repos) and **clones every other owner** and walks the filesystem, and both paths cap the subpath at one level.
+
+Fix: a **`<sub>/.claude-plugin/plugin.json`** manifest. Manifest-declared skill paths bypass the depth walk (npx: *"searched at their declared depth, not subject to the bounded depth-3 catalog walk"*).
+
+```json
+// skills/agent-kit/.claude-plugin/plugin.json
+{ "name": "agent-kit", "skills": ["./agent-team", "./prd/prd-create", "./prd/prds-get"] }
+```
+
+npx resolves each entry under the subpath dir and registers its **parent** directory, then walks that dir one level for `SKILL.md`. So one entry `./prd/<any-skill>` registers the whole `prd/` folder and finds every skill directly inside it — new skills dropped into an already-registered folder **auto-join with no manifest edit**. The gap the manifest does not close on its own: a brand-new nested folder that no entry registers. Guard it in CI with a coverage check that recomputes what the subpath install would find and fails if any on-disk `SKILL.md` is unreachable (see `scripts/check_bundle_coverage.py`).
+
+Verified 2026-08-13 on the `skills/agent-kit` bundle, default-branch install (no `--branch`): nested `prd/*` **without** the manifest resolved to only the one depth-1 skill; **with** the manifest, all eleven installed. Verify layout changes with a real default-branch `add` (e.g. push to a throwaway repo's default branch) — `add --branch <x>` and `add … -l` can take a different code path than the plain default-branch install a SessionStart hook runs, so a green result there is not proof the hook will agree.
 
 ## Frontmatter
 
