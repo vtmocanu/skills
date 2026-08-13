@@ -12,6 +12,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `skill-maker` (formerly `skills`): noted that recent agnix versions deprecate the `target` field, so `agnix --target claude-code` now prints a benign `Field 'target' is deprecated` warning; documented the `.agnix.toml` `tools = ["claude-code"]` config that silences it (there is no `--tools` CLI flag).
 - Grouped the ten `prd-*` skills under `skills/agent-kit/prd/` (previously flat under `skills/agent-kit/`). `agent-team` stays at `skills/agent-kit/`. Install names are unchanged (`/prd-create`, `/prds-get`, and so on) since names come from frontmatter, not the folder path, and the `skills/agent-kit` bundle install still discovers all eleven skills.
 
+### Fixed
+
+- Corrected the vestigial `VERSION` file from `0.24.0` to `0.34.0` to match the latest release tag. Releases run off `v*` tags with auto-generated notes, so nothing reads this file; it had simply drifted.
+
 ### Migration
 
 - Re-add under the new name and drop the old one: `npx skills add vtmocanu/skills --skill skill-maker -g -y` then `npx skills remove skills -g -y`.
