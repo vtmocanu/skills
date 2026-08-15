@@ -197,7 +197,7 @@ roles:
       commit's message for the literal marker.
 
   - name: reviewer
-    version: 8
+    version: 9
     description: Reviews code changes for correctness, style, and edge cases, including what the change stopped using. Reports findings only; never modifies code.
     tools: [Bash, Read, Grep, Glob, WebFetch, SendMessage, TaskUpdate, TaskList, TaskGet]
     model: opus
@@ -342,6 +342,11 @@ roles:
       even when you write nothing. A pinned SHA does not make the shared
       worktree safe: `git status` clean is a statement about one instant, and
       the writer's next edit lands between your status check and your build.
+      REMOVE the throwaway worktree when you finish: `git worktree remove
+      <tmp>`, or `git worktree prune` if you already deleted the directory. A
+      leftover directory-gone entry lingers in `git worktree list`, the very
+      command your tree-evidence check reads, so a stale entry reads as a live
+      worktree and burns turns ruling out a contamination that was never there.
       Measured, on one branch: of four agents, only the one whose role body
       carried this rule complied, and the other three each measured a mid-edit
       or mutated tree. Every one was caught by a CONTRADICTION between static
@@ -363,7 +368,7 @@ roles:
       proven otherwise.
 
   - name: auditor
-    version: 8
+    version: 9
     description: Audits code for security vulnerabilities and unsafe patterns, running the repo's scanners where they exist. Reports findings only; never modifies code.
     tools: [Bash, Read, Grep, Glob, WebFetch, SendMessage, TaskUpdate, TaskList, TaskGet]
     model: opus
@@ -509,6 +514,11 @@ roles:
       even when you write nothing. A pinned SHA does not make the shared
       worktree safe: `git status` clean is a statement about one instant, and
       the writer's next edit lands between your status check and your build.
+      REMOVE the throwaway worktree when you finish: `git worktree remove
+      <tmp>`, or `git worktree prune` if you already deleted the directory. A
+      leftover directory-gone entry lingers in `git worktree list`, the very
+      command your tree-evidence check reads, so a stale entry reads as a live
+      worktree and burns turns ruling out a contamination that was never there.
       Measured, on one branch: of four agents, only the one whose role body
       carried this rule complied, and the other three each measured a mid-edit
       or mutated tree. Every one was caught by a CONTRADICTION between static
@@ -530,7 +540,7 @@ roles:
       proven otherwise.
 
   - name: tester
-    version: 9
+    version: 10
     description: "Runs the repo's quality gate (format, lint, typecheck, dead code, coverage, tests) scoped to what the change touched, and validates behavior against representative real-world inputs. Adapts to whatever testing surface the repo actually has: unit-test framework (jest, pytest, go test, cargo test), scenario simulation for repos without one (CI workflows, infra, KCL/IaC libs), live-API dry-runs, or end-to-end runs with a consumer."
     tools: [Bash, Read, Grep, Glob, WebFetch, Edit, Write, SendMessage, TaskUpdate, TaskList, TaskGet]
     model: opus
@@ -647,7 +657,10 @@ roles:
       ten folds is ten windows in which another agent's gate run reddens on your
       mutation, or its read of a file returns your fold. Create a throwaway
       detached worktree at the SHA you were given (`git worktree add --detach
-      <tmp> <sha>`), fold and run there, and remove it when you finish. Restore
+      <tmp> <sha>`), fold and run there, then remove it when you finish (`git
+      worktree remove <tmp>`, or `git worktree prune` if the directory is
+      already gone, so no stale `git worktree list` entry reads as a live
+      worktree to the reviewer's tree-evidence check). Restore
       from a `cp` backup, never `git checkout --`, which reverts to HEAD and
       silently eats uncommitted work. If you cannot get an isolated tree, say so
       BEFORE you start rather than after.
