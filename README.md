@@ -56,7 +56,7 @@ Anything later added under `skills/agent-kit/` joins the bundle automatically.
 
 ## 📦 All skills
 
-The whole catalog (18 skills), agent-kit included.
+The whole catalog (19 skills), agent-kit included.
 
 ```sh
 npx skills add https://github.com/vtmocanu/skills -a claude-code -g -y
@@ -90,6 +90,7 @@ npx skills add https://github.com/vtmocanu/skills -a claude-code -g -y
 | [generate-dockerfile](skills/generate-dockerfile/SKILL.md) | Generate a production-ready, secure, multi-stage Dockerfile and `.dockerignore` for the project. |
 | [reflect](skills/reflect/SKILL.md) | Analyze the current session and propose improvements to the skill that was used, then edit and commit it. |
 | [skill-maker](skills/skill-maker/SKILL.md) | Author, lint, and publish Claude Code skills with the `npx skills` package manager: folder `SKILL.md` layout, frontmatter and description limits, design principles, agnix linting, and the add/update/remove scopes. |
+| [token-audit](skills/token-audit/SKILL.md) | Audit a Claude Code setup for token waste (report only, change nothing): measure in-scope CLAUDE.md sizes and @imports, MCP servers/tool counts and whether tool deferral is active, any proxy that silently disables it, model/effort and mid-session switches, output-reducing hooks, per-agent model inheritance, cron/loop intervals vs the measured cache TTL, and the newest session log's cache-read/creation/input/output token split; emit one severity-ranked table plus the single highest-leverage fix. |
 | [upgrade-advisor](skills/upgrade-advisor/SKILL.md) | Evaluate a tool, framework, or dependency upgrade: discover the pinned version, find the latest *installable* one, read the changelog across the whole delta, and report which breaking changes actually touch this codebase (by grepping usage), with a safe / blocked / needs-work verdict. |
 
 Plus the 11 [agent-kit](skills/agent-kit/) skills from the table above.
