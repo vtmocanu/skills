@@ -29,7 +29,7 @@ Non-negotiable rules, from the audit contract:
 
 Run the independent ones in parallel. Each produces evidence for the final table.
 
-### 1. MEMORY — in-scope CLAUDE.md and @imports
+### 1. MEMORY — launch-loaded CLAUDE.md, imports, and rules
 
 Run the bundled scanner from the directory you are auditing:
 
@@ -37,7 +37,7 @@ Run the bundled scanner from the directory you are auditing:
 <skill dir>/scripts/memory-scan.py
 ```
 
-It enumerates the project chain (`CLAUDE.md`, `.claude/CLAUDE.md`, `CLAUDE.local.md` from cwd up to root), the user memory (`~/.claude/CLAUDE.md`), managed/enterprise memory if present, then follows `@import` lines recursively. It prints exact bytes/lines and an approx-token count (bytes/4) per file, and totals. **Flag any single file over 5k tokens and any total over 10k tokens.** Reconcile the approximation against the `/context` "Memory files" figure once pasted; if they disagree, trust `/context`.
+It enumerates everything Claude Code loads at launch, matching CC's real rules: managed/enterprise CLAUDE.md if present, user memory (`~/.claude/CLAUDE.md`), the project chain (`CLAUDE.md` + `CLAUDE.local.md` up the ancestor tree, plus `.claude/CLAUDE.md` at the cwd), and unconditional `*.md` under `.claude/rules/` and `~/.claude/rules/`. It follows `@import` lines (bare `@README`, `@dir/file.md`, `~/…`, absolute) recursively, capped at CC's real 4-hop limit, skipping code spans/fenced blocks so an example `@path` is not counted. `paths:`-scoped rules load on demand, so they are listed but kept out of the launch total. It prints exact bytes/lines and an approx-token count (bytes/4) per file. **Flag any single file over 5k tokens and any launch total over 10k tokens.** Reconcile the approximation against the `/context` "Memory files" figure once pasted; if they disagree, trust `/context`.
 
 ### 2. TOOLS — MCP servers, tool counts, deferral, and any proxy
 
@@ -111,7 +111,7 @@ Run the bundled reporter (defaults to the newest log for the current project):
 <skill dir>/scripts/cache-report.sh --list    # list this project's logs, newest first
 ```
 
-It sums, across every assistant turn, `cache_read_input_tokens`, `cache_creation_input_tokens`, `input_tokens`, `output_tokens`, reports each as a percentage of the grand total, and gives the context size (input side) on the first and last turn plus the cache TTL actually in use. These are the API's own logged counts — exact, not estimated. Feed the TTL into step 6.
+It sums, across every assistant turn, `cache_read_input_tokens`, `cache_creation_input_tokens`, `input_tokens`, `output_tokens`, reports each as a percentage of the grand total, and gives the context size (input side) on the first and last turn plus the cache TTL actually in use. These are the API's own logged counts — exact, not estimated. Feed the TTL into step 6. The token sums include subagent (sidechain) turns as total session spend; the first/last context sizes exclude them (`subagent_turns` and `context_basis` in the output say which), so the context figures reflect the main thread, not a subagent.
 
 Read the split: healthy sessions are dominated by `cache_read` (a high read share means the cache is working). A large `cache_creation` share relative to `cache_read` means the cache is being rebuilt repeatedly — churn worth explaining (model switch, expired TTL, edited early context). Report the numbers; name the driver only if another measurement supports it.
 

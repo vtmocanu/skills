@@ -18,10 +18,12 @@
 set -euo pipefail
 
 projdir() {
-  # Claude Code names the project dir by replacing every '/' and '.' in the
-  # absolute cwd with '-'. Reproduce that to locate the current project's logs.
+  # Claude Code names the project dir by replacing every character that is not
+  # [A-Za-z0-9] in the absolute cwd with '-' (repeats are NOT collapsed, so a
+  # leading '/' plus a dotfile like '/.bb' becomes '--bb'). Reproduce exactly.
+  # tr '/.' would miss '_', spaces, '@', etc. and point at a nonexistent dir.
   local slug
-  slug=$(printf '%s' "$PWD" | tr '/.' '--')
+  slug=$(printf '%s' "$PWD" | tr -c 'A-Za-z0-9' '-')
   printf '%s/.claude/projects/%s' "$HOME" "$slug"
 }
 
@@ -62,23 +64,31 @@ fi
 echo "log: $LOG"
 
 jq -s '
-  # Keep only assistant turns that carry a usage block.
-  [ .[] | select(.type=="assistant" and (.message.usage != null)) | .message.usage ] as $u
-  | ($u | length) as $turns
+  # Keep assistant turns that carry a usage block; retain the sidechain flag so
+  # subagent turns can be handled separately.
+  [ .[] | select(.type=="assistant" and (.message.usage != null))
+    | {u: .message.usage, side: (.isSidechain // false)} ] as $all
+  | ($all | length) as $turns
   | if $turns == 0 then
       {error: "no assistant turns with usage in this log"}
     else
-      # Per-turn field extraction with safe defaults.
-      ($u | map(.cache_read_input_tokens // 0))     as $cr
-    | ($u | map(.cache_creation_input_tokens // 0))  as $cc
-    | ($u | map(.input_tokens // 0))                 as $in
-    | ($u | map(.output_tokens // 0))                as $out
+      # Token sums cover ALL turns = total session spend, subagents included.
+      ($all | map(.u))                             as $u
+      # Context size is a main-thread property, so exclude sidechain turns for
+      # first/last; fall back to all turns if the log is somehow all-sidechain.
+    | ($all | map(select(.side | not) | .u))       as $main
+    | ($main | length)                             as $mturns
+    | (if $mturns > 0 then $main else $u end)       as $ctx
+    | ($u | map(.cache_read_input_tokens // 0))     as $cr
+    | ($u | map(.cache_creation_input_tokens // 0)) as $cc
+    | ($u | map(.input_tokens // 0))                as $in
+    | ($u | map(.output_tokens // 0))               as $out
     | ($cr | add) as $scr | ($cc | add) as $scc
     | ($in | add) as $sin | ($out | add) as $sout
     | ($scr + $scc + $sin + $sout) as $tot
     # Context size (input side) fed to a turn = cache_read + cache_creation + input.
-    | ($cr[0]  + $cc[0]  + $in[0])  as $ctx_first
-    | ($cr[-1] + $cc[-1] + $in[-1]) as $ctx_last
+    | (($ctx[0].cache_read_input_tokens // 0) + ($ctx[0].cache_creation_input_tokens // 0) + ($ctx[0].input_tokens // 0))    as $ctx_first
+    | (($ctx[-1].cache_read_input_tokens // 0) + ($ctx[-1].cache_creation_input_tokens // 0) + ($ctx[-1].input_tokens // 0)) as $ctx_last
     # Which ephemeral cache bucket the session actually wrote to.
     | ([ $u[] | .cache_creation.ephemeral_1h_input_tokens // 0 ] | add) as $e1h
     | ([ $u[] | .cache_creation.ephemeral_5m_input_tokens // 0 ] | add) as $e5m
@@ -89,6 +99,7 @@ jq -s '
     | def pct($x): if $tot == 0 then 0 else (($x * 1000 / $tot | round) / 10) end;
       {
         assistant_turns: $turns,
+        subagent_turns:  ($turns - $mturns),
         cache_read_input_tokens:     {sum: $scr,  pct: pct($scr)},
         cache_creation_input_tokens: {sum: $scc,  pct: pct($scc)},
         input_tokens:                {sum: $sin,  pct: pct($sin)},
@@ -96,7 +107,9 @@ jq -s '
         grand_total: $tot,
         context_first_turn: $ctx_first,
         context_last_turn:  $ctx_last,
-        cache_ttl_in_use:   $ttl
+        context_basis: (if $mturns > 0 then "main-thread turns" else "all turns (no main-thread turn found)" end),
+        cache_ttl_in_use:   $ttl,
+        note: "sums cover all turns (subagents included); context sizes exclude sidechain turns"
       }
     end
 ' "$LOG"
