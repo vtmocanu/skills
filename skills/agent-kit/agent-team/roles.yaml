@@ -63,6 +63,11 @@
 # `## For this repo` section in the generated `.claude/agents/<name>.md`, NOT
 # inline in the generic body. That keeps the two separable: update/sync
 # replaces the generic body (keyed by version) and never touches the local tail.
+#
+# Downstream consumer: the public uzi repo parses this file's `name:`/`version:`
+# structure. Bumping a `version:` is fine (it signals uzi to re-sync); RENAMING or
+# RESTRUCTURING those fields breaks uzi's parser. Read ./CLAUDE.md before changing
+# the field structure.
 
 roles:
   - name: coder
