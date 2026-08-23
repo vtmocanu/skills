@@ -71,7 +71,7 @@
 
 roles:
   - name: coder
-    version: 8
+    version: 9
     description: Implements features, fixes bugs, refactors code. Runs the project's full quality gate before reporting done.
     tools: []  # inherit full toolset
     model: opus
@@ -201,8 +201,17 @@ roles:
       and before you push a tip you actually need CI to run on, grep that
       commit's message for the literal marker.
 
+      DO NOT PUT RAW CONTROL BYTES OR NON-PRINTABLE CHARACTERS INTO SOURCE YOU
+      GENERATE. A raw NUL, a literal Unicode-whitespace codepoint, or any control
+      byte used as a string-literal value or a join separator is invisible in
+      review, trips text-vs-binary heuristics, and the Bash approval dialog
+      blocks control characters outright (so a heredoc carrying them is
+      rejected). Use a documented escape — `\t`, `\n`, `\uXXXX` — or a printable
+      sentinel; if the code genuinely needs a non-printable byte, produce it from
+      an escape at runtime rather than pasting the raw byte into the file.
+
   - name: reviewer
-    version: 9
+    version: 10
     description: Reviews code changes for correctness, style, and edge cases, including what the change stopped using. Reports findings only; never modifies code.
     tools: [Bash, Read, Grep, Glob, WebFetch, SendMessage, TaskUpdate, TaskList, TaskGet]
     model: opus
@@ -226,8 +235,12 @@ roles:
       - If your dispatch or your `## For this repo` tail names a dead-code
         command, run it and report anything it attributes to this change.
       - If it does not, do it by hand: for each symbol the diff removed,
-        renamed, or stopped calling, grep for remaining references. No
-        references and not part of the public API means it is now dead.
+        renamed, or stopped calling, `git grep` for remaining references —
+        index-only, so it skips node_modules and other gitignored trees — and
+        scope it to the touched packages. A raw recursive grep across the repo
+        matches vendored code (a hit inside `node_modules` once produced a 4.1MB
+        result that had to be persisted) and tells you nothing about your change.
+        No references and not part of the public API means it is now dead.
         Deleted the last caller of a helper? The helper is dead too.
       - Report orphans as Non-blocking with the evidence (symbol, its
         definition site, and the search that found no callers), unless the
@@ -371,6 +384,14 @@ roles:
       result across every cell, which reads exactly like "the whole class is
       rejected by the guard". A uniform result is an instrument failure until
       proven otherwise.
+
+      BEFORE YOU BELIEVE A ZERO, CALIBRATE THE SEARCH. An empty grep, an empty
+      diff, a "not found" is a claim about your instrument as much as about the
+      code: a case-sensitive pattern against uppercase house style, a term in
+      your own vocabulary rather than the file's, a path list with a stray `./`
+      prefix, or a value hidden inside a column all return a confident, clean,
+      wrong nothing. Run the pattern against a string you KNOW is present first;
+      a search you have not calibrated is a mirror.
 
   - name: auditor
     version: 9
@@ -1219,7 +1240,7 @@ roles:
       --porcelain` stays empty; stray files near the run tree undercut it.
 
   - name: web-ux
-    version: 6
+    version: 7
     description: Web UX expert. Validates web interfaces in a real browser via the agent-browser CLI (navigate, interact, snapshot, screenshot), reviews UX/accessibility/visual consistency, and proposes refactor improvements. Reports findings only; never modifies code.
     tools: [Bash, Read, Grep, Glob, WebFetch, SendMessage, TaskUpdate, TaskList, TaskGet]
     model: opus
@@ -1294,6 +1315,10 @@ roles:
         repo root), littering the repo.
       - `eval` must return a string: a bare object/array comes back as `{}`.
         Wrap the value in `JSON.stringify(...)`.
+      - VIEWPORT / DEVICE changes go through `agent-browser set <setting>` (e.g.
+        `set viewport 1280x800`), not a bare `viewport`, which returns 'Unknown
+        command'. Run `agent-browser set --help` for the settable keys rather
+        than guessing the verb and burning turns on the rejection.
       - To act on a specific element, prefer a ref from a scoped
         `snapshot -i -s "main"` (then `click @eN`) over `find role ... --name`:
         accessible names often fold in adjacent glyph/badge text or collide
