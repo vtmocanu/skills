@@ -38,6 +38,8 @@ META = {
     "CONTRIBUTING.md",
     "CODE_OF_CONDUCT.md",
     "SECURITY.md",
+    "CLAUDE.md",
+    "AGENTS.md",
 }
 
 
