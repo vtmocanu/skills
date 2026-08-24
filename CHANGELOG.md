@@ -11,6 +11,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Renamed the `skills` skill to `skill-maker`: the old name shadowed Claude Code's built-in `/skills` menu (the enable/disable UI), so `/skills` never reached the authoring skill and a `skillOverrides` entry keyed `"skills"` would have hit the built-in too. `skill-maker` is collision-free and matches the skill's `# Skills authoring` purpose.
 - `skill-maker` (formerly `skills`): noted that recent agnix versions deprecate the `target` field, so `agnix --target claude-code` now prints a benign `Field 'target' is deprecated` warning; documented the `.agnix.toml` `tools = ["claude-code"]` config that silences it (there is no `--tools` CLI flag).
 - Grouped the ten `prd-*` skills under `skills/agent-kit/prd/`. Because the bundle installs via the `skills/agent-kit` subpath (where npx walks only one level deep), a new `skills/agent-kit/.claude-plugin/plugin.json` registers the `prd/` folder so all eleven skills still install with the same one command. Install names are unchanged (`/prd-create`, `/prds-get`, and so on). New skills dropped into `prd/` auto-join with no manifest edit; adding a brand-new subfolder needs a one-line `plugin.json` entry, which `scripts/check_bundle_coverage.py` now enforces in CI.
+- Renamed and expanded the `generate-cicd` skill to `cicd-expert`. It keeps Viktor Farcic's interactive pipeline generator (now `references/generate.md`) and grows into a full CI/CD expert with two modes, generate and advise, plus a progressively-loaded `references/security.md` (supply-chain threat model: SHA-pinned actions after the tj-actions/reviewdog tag-repoint compromise, cache poisoning across the fork/release trust boundary, `pull_request_target` pwn requests, template injection, and the account/repo hardening checklist) and `references/speed.md` (pinned prebuilt tool binaries over compile-from-source, path filters, job DAG, the shared Actions-cache eviction trap, and a repo-local Renovate `customManager` for CI tool versions pinned inline in shell). The name signals the dual role better than the old task-verb name.
 
 ### Fixed
 
@@ -19,6 +20,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Migration
 
 - Re-add under the new name and drop the old one: `npx skills add vtmocanu/skills --skill skill-maker -g -y` then `npx skills remove skills -g -y`.
+- `generate-cicd` became `cicd-expert`: `npx skills add vtmocanu/skills --skill cicd-expert -g -y` then `npx skills remove generate-cicd -g -y`. The `/generate-cicd` behavior is unchanged, now reached via `/cicd-expert` (GENERATE mode).
 
 ## [0.34.0] - 2026-08-09
 

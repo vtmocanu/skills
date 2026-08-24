@@ -84,9 +84,9 @@ npx skills add https://github.com/vtmocanu/skills -a claude-code -g -y
 
 | Skill | What it does |
 |---|---|
+| [cicd-expert](skills/cicd-expert/SKILL.md) | The CI/CD expert. Generate a repo's pipelines through an interactive analyze-then-confirm conversation, or review, harden, debug, and speed up existing CI (supply-chain security, caching, path filters, job DAG, Renovate tool pins). |
 | [claude-permissions](skills/claude-permissions/SKILL.md) | Manage Claude Code permissions via Dippy (Bash/MCP allow/ask/deny plus the auto-mode `[ASK]` fallback wrapper, bundled) and settings.json (Read/WebFetch/Skill). |
 | [done](skills/done/SKILL.md) | End-of-session wrap-up: check git state across the directories touched this session, review for loose ends, and give a plain verdict on whether the session can be closed. |
-| [generate-cicd](skills/generate-cicd/SKILL.md) | Generate CI/CD workflows through an interactive conversation that analyzes the repo structure and your preferences. |
 | [generate-dockerfile](skills/generate-dockerfile/SKILL.md) | Generate a production-ready, secure, multi-stage Dockerfile and `.dockerignore` for the project. |
 | [reflect](skills/reflect/SKILL.md) | Analyze the current session and propose improvements to the skill that was used, then edit and commit it. |
 | [skill-maker](skills/skill-maker/SKILL.md) | Author, lint, and publish Claude Code skills with the `npx skills` package manager: folder `SKILL.md` layout, frontmatter and description limits, design principles, agnix linting, and the add/update/remove scopes. |
@@ -128,10 +128,10 @@ dot-ai skills generate --agent claude-code --path ~/.claude/commands --repo http
 
 ## Credits
 
-The `prd-*`, `generate-cicd`, and `generate-dockerfile` skills are vendored from [vfarcic/dot-ai](https://github.com/vfarcic/dot-ai), created by **Viktor Farcic** and used under the MIT License (Copyright (c) 2025 Viktor Farcic). Most come from its `shared-prompts/` directory; `prd-worktree` comes from `.claude/skills/dot-ai-worktree-prd/` (renamed from `worktree-prd`, with its bundled `create.sh`). They are copied largely verbatim, converted to the folder `SKILL.md` layout with the dot-ai `category` frontmatter dropped; each keeps a provenance line pointing back to its source. Thank you to Viktor for the excellent PRD workflow and project generators.
+The `prd-*`, `cicd-expert`, and `generate-dockerfile` skills draw on work vendored from [vfarcic/dot-ai](https://github.com/vfarcic/dot-ai), created by **Viktor Farcic** and used under the MIT License (Copyright (c) 2025 Viktor Farcic). Most come from its `shared-prompts/` directory; `prd-worktree` comes from `.claude/skills/dot-ai-worktree-prd/` (renamed from `worktree-prd`, with its bundled `create.sh`). The `prd-*` and `generate-dockerfile` skills are copied largely verbatim, converted to the folder `SKILL.md` layout with the dot-ai `category` frontmatter dropped; `cicd-expert` keeps Viktor's interactive generator (formerly the `generate-cicd` skill) and substantially expands it with a security and speed reference set. Each keeps a provenance line pointing back to its source. Thank you to Viktor for the excellent PRD workflow and project generators.
 
 The `agent-team` skill's initial design was based on Viktor's [dot-agent-deck](https://github.com/vfarcic/dot-agent-deck).
 
 ## License
 
-[MIT](LICENSE) © Vlad Mocanu. Vendored `prd-*`, `generate-cicd`, and `generate-dockerfile` skills remain © 2025 Viktor Farcic (MIT); see [Credits](#credits).
+[MIT](LICENSE) © Vlad Mocanu. The `prd-*` and `generate-dockerfile` skills, and the interactive generator inside `cicd-expert`, remain © 2025 Viktor Farcic (MIT); see [Credits](#credits).
