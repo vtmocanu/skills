@@ -30,7 +30,7 @@ The entire repository is context. Read, do not skim.
 3. **Existing CI**: analyze what is already configured and why. In Step 2 ask whether to update it or add new workflows.
 4. **Container and registry**: check for a Dockerfile and container config; search existing CI, automation, and docs for the registry. If there is no Dockerfile but the project would benefit, suggest the `generate-dockerfile` skill.
 5. **Branching and release strategy**: infer from existing CI triggers, git tags, and docs.
-6. **Environment and secrets**: find env documentation and examples; search the code for required variables; identify what secrets the workflow needs.
+6. **Environment and secrets**: find env documentation and examples; search the code for required variables; identify what secrets the workflow needs. Inspect variable **names and references only**. A config, `.env`, or example file may hold a live credential, so never echo a matched value into the transcript or a finding; redact it.
 7. **App definition**: Helm chart, Kustomize, plain manifests, or container-only.
 8. **Deployment mechanism**: GitOps (ArgoCD, Flux), direct (Helm, kubectl), manual, or external. For GitOps, CI must NOT deploy directly; it updates manifests and the controller syncs. Find where the image tag lives for the bump, and whether the GitOps resources exist or must be created.
 9. **Tool manager**: DevBox, mise, asdf. If present, use it; otherwise ask in Step 3.

@@ -22,9 +22,9 @@ You are the CI/CD expert for this repo. Work in one of two modes. Pick the mode 
 
 **Pin every third-party action to a full commit SHA, never a tag or `@latest`.** A mutable tag can be re-pointed at a malicious commit (see `references/security.md`). Where the forge supports it, also turn on the platform setting that enforces SHA pinning.
 
-**Fail fast, cheapest first.** Order the job DAG so a quick check (lint, format, typecheck) gates the expensive one (build, integration tests). Run independent jobs in parallel. Do not build an artifact if its tests have not passed.
+**Fail fast, cheapest first.** Order the job DAG so a quick check (lint, format, typecheck) gates the expensive one (build, integration tests). Run independent jobs in parallel. Do not publish or package a release artifact until its required tests pass, but do allow the prerequisite builds that produce the inputs those tests need to run.
 
-**Cache and scope deliberately.** Cache the package manager and build output keyed on the lock file. Path-filter jobs so a change to one component does not rebuild the others. Add a `concurrency:` group with `cancel-in-progress` so a new push cancels a superseded run. See `references/speed.md` for the tradeoffs, including when a cache costs more than it saves.
+**Cache and scope deliberately.** Key the package-manager cache on the lock-file hash (the `setup-*` actions do this). Key a build-output cache separately, on the source revision or a source hash plus the build config and toolchain, not the lock file alone (a lock file can be unchanged while the source changes, so a lock-only key restores stale output). Path-filter jobs so a change to one component does not rebuild the others. Add a `concurrency:` group with `cancel-in-progress` so a new push cancels a superseded run. See `references/speed.md` for the tradeoffs, including when a cache costs more than it saves.
 
 **Verify before you claim.** CI instruments lie in reassuring ways: a tokenless registry probe returns 401 for public and private alike, a grep for a literal that is read as a regex returns a false zero, a linter that never installed prints a green nothing. Before reporting "secure", "green", or "private", run the real check and read its output. `references/security.md` and `references/speed.md` each end with the specific traps.
 
