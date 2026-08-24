@@ -53,9 +53,9 @@ Add this to the PR and branch gate so a new push cancels the in-flight run on th
 
 ## Cache, but mind the shared budget
 
-Cache the package manager and build output keyed on the lock file (the `setup-*` actions do this with `cache:`). Two traps:
+Key the cache to what invalidates it, and do not reuse one key for two kinds of data. **Package-manager data** (downloaded dependencies) is keyed on the lock-file hash; the `setup-*` actions do exactly this with `cache:`, and it covers nothing else. **Build output** (compiled objects, a build cache) is invalidated by more than the lock file, so its key must also include the source files, the build configuration, and the toolchain version; keying build output on the lock file alone serves stale artifacts. Two traps:
 
-- **Budget and eviction.** The Actions cache is capped per repo (10 GB on GitHub). Several large build caches evict each other and the package-manager caches, so adding a per-job build cache can make other jobs slower. A dedicated per-job cache is only worth it when it reliably hits; watch the hit rate across several runs (`gh cache list`) before trusting it, and prefer a registry cache for the largest artifacts (a container base image) so it does not count against the cap.
+- **Budget and eviction.** The Actions cache has a per-repo quota (10 GB by default on GitHub, configurable and billable above it); entries evict once usage reaches the configured limit. Several large build caches evict each other and the package-manager caches, so adding a per-job build cache can make other jobs slower. A dedicated per-job cache is only worth it when it reliably hits; watch the hit rate across several runs (`gh cache list`) before trusting it, and prefer a registry cache for the largest artifacts (a container base image) so it does not count against the cap.
 - **A mis-keyed cache is invisible in one run.** It simply never hits; the job just runs cold while the cache silently uploads and evicts. It looks like a working optimization. Verify hits, do not assume them.
 
 For a container build, reuse layers with `cache-from` (read-only in a validation build, so it never writes the cache a release consumes) and let the release job own `cache-to`.

@@ -16,7 +16,15 @@ A tag is mutable. In March 2025 the `tj-actions/changed-files` action (CVE-2025-
 ```
 
 - Pin actions you author too, or reference them by a SHA the ruleset protects.
-- Turn on the platform enforcement so a future unpinned action is rejected mechanically, not just by review. On GitHub: `gh api -X PUT repos/OWNER/REPO/actions/permissions -F enabled=true --raw-field allowed_actions=all -F sha_pinning_required=true`.
+- Turn on the platform enforcement so a future unpinned action is rejected mechanically, not just by review. On GitHub the flag is `sha_pinning_required` on `PUT /repos/OWNER/REPO/actions/permissions`. That PUT **replaces the whole Actions policy**, so hardcoding `allowed_actions=all` would silently widen a repository that was restricted to `local_only` or `selected`. Read the current policy and pass it back, changing only the pin flag:
+
+  ```bash
+  cur=$(gh api repos/OWNER/REPO/actions/permissions)
+  gh api -X PUT repos/OWNER/REPO/actions/permissions \
+    -F enabled="$(jq -r .enabled <<<"$cur")" \
+    --raw-field allowed_actions="$(jq -r .allowed_actions <<<"$cur")" \
+    -F sha_pinning_required=true
+  ```
 - Gate it in CI as well with `zizmor` (its `unpinned-uses` audit) and `actionlint`, both pinned. Belt and braces: the repo setting covers actions the linter's file scope might miss, and the linter covers a bypass of the setting.
 - Renovate keeps the SHA current: `helpers:pinGitHubActionDigests` in the config pins and bumps action digests with a readable version comment.
 
@@ -26,11 +34,11 @@ A forge does not segregate its build cache by trust level. A low-privilege pull-
 
 - A privileged job (release, publish, sign) must not restore a cache that a fork-writable job can populate. Give release jobs their own cache namespace, or no shared cache at all.
 - Prefer a **registry** cache (`type=registry`, written only by the trusted release job under `packages: write`) over the shared **Actions** cache (`type=gha`) for anything a publish path consumes. A PR validation build should read a cache, never write the one a release reads (`cache-from` without `cache-to`).
-- The shared Actions cache has a per-repo size cap (10 GB on GitHub). Several large build caches evict each other and the package-manager caches, so a poorly keyed cache can be a correctness and a speed problem at once (see `references/speed.md`).
+- The shared Actions cache has a per-repo quota (10 GB by default on GitHub, configurable and billable above the free tier). When usage reaches the configured limit, entries evict, so several large build caches evict each other and the package-manager caches, and a poorly keyed cache becomes a correctness and a speed problem at once (see `references/speed.md`).
 
 ### Never run unreviewed fork code with secrets (pull_request_target)
 
-`pull_request_target` runs with the base repository's secrets and a writable token, in the context of the base branch. Checking out and running the fork's head in that context hands an attacker your secrets and write scope (a "pwn request"). Prefer the plain `pull_request` trigger, which gives a fork PR a read-only token and no secrets. If you genuinely need base context, never check out or execute the PR head in the same job that holds the secrets. Keep the PR gate free of `secrets:`, `environment:`, and `pull_request_target` so it runs clean on an untrusted fork.
+`pull_request_target` runs with access to the base repository's secrets and a `GITHUB_TOKEN` whose scope depends on the repository and workflow settings (write access unless narrowed by a `permissions:` block or the read-only default), in the context of the base branch. Checking out and running the fork's head in that context can hand an attacker your secrets and, if the token is writable, write scope (a "pwn request"). Prefer the plain `pull_request` trigger, which gives a fork PR a read-only token and no secrets. If you genuinely need base context, never check out or execute the PR head in the same job that holds the secrets. Keep the PR gate free of `secrets:`, `environment:`, and `pull_request_target` so it runs clean on an untrusted fork.
 
 ### Never interpolate untrusted input into a run body (template injection)
 
@@ -59,13 +67,19 @@ These are settings, not files. Verify each with the API, not by reading the repo
 
 ## Secret handling
 
-Fork PRs cannot read base-repo secrets. Skip a step that needs one instead of failing:
+Fork PRs cannot read base-repo secrets. Skip a step that needs one instead of failing. The `secrets` context is **not** available in an `if:` expression (job or step level), and a step's `if:` cannot read an `env` value set in that same step, so map the presence check to a **job-level** env flag and gate on it:
 
 ```yaml
-- if: secrets.API_KEY != ''
-  run: npm run test:integration
-  env:
-    API_KEY: ${{ secrets.API_KEY }}
+jobs:
+  integration:
+    runs-on: ubuntu-latest
+    env:
+      HAS_API_KEY: ${{ secrets.API_KEY != '' }}   # secrets are unusable in if:; a job-level env flag is
+    steps:
+      - if: env.HAS_API_KEY == 'true'
+        run: npm run test:integration
+        env:
+          API_KEY: ${{ secrets.API_KEY }}
 ```
 
 Document every required secret (name, purpose, how to create it) and show the `gh secret set NAME` command as guidance; do not run it.
@@ -74,7 +88,7 @@ Document every required secret (name, purpose, how to create it) and show the `g
 
 A security review fails when the instrument returns a reassuring answer for the wrong reason. Run the real check and read its output.
 
-- **Registry visibility is not a raw curl.** A tokenless `GET https://ghcr.io/v2/OWNER/PKG/manifests/TAG` returns 401 for a public package too, because the registry demands the anonymous-token handshake first. 401 is not proof of "private". Check visibility with the API (`gh api /users/OWNER/packages/container/PKG --jq .visibility`) or complete the token dance (`GET /token?scope=repository:OWNER/PKG:pull`, then use the token); a public package then answers 200, or 404 for an absent tag, never 401.
+- **Registry visibility is not a raw curl.** A tokenless `GET https://ghcr.io/v2/OWNER/PKG/manifests/TAG` returns 401 for a public package too, because the registry demands the anonymous-token handshake first. 401 is not proof of "private". Check visibility with the API (`gh api /users/OWNER/packages/container/PKG --jq .visibility` for a user-owned package, or `/orgs/OWNER/packages/container/PKG` for an organization-owned one) or complete the token dance (`GET /token?scope=repository:OWNER/PKG:pull`, then use the token); a public package then answers 200, or 404 for an absent tag, never 401.
 - **A comment that starts with the word `shellcheck` becomes a directive.** In a workflow `run:` block that `actionlint` feeds to shellcheck, a prose comment line beginning `# shellcheck ...` is parsed as a shellcheck directive and fails to parse (SC1072 or SC1073), reddening the lint over nothing. Do not start a comment line with `shellcheck`; put a word before it.
 - **Trust a linter's output, not its silence.** A skipped or never-installed linter prints a green nothing indistinguishable from a clean pass. Give every install a positive control (run `TOOL --version` after installing) and, in CI, fail closed when a required tool is absent rather than skipping.
 - **Grep the literal.** A grep for a string containing regex metacharacters (`^`, `.`, `{`, `---`) is read as a pattern and can return a false zero. Use `-F` for a literal, and confirm a restore with the version control status, not a grep count.

@@ -16,9 +16,9 @@ PHASE 3: GENERATE     create workflows from the confirmed choices
 
 ## Step 0: platform gate (blocking)
 
-Ask which CI/CD platform the user runs, and nothing else, first. Present only: (1) GitHub Actions, (2) Other.
+Detect the forge from `origin` first (see the host-only, credential-safe command in `SKILL.md`), then ask which CI/CD platform the user runs, and nothing else. Present only: (1) GitHub Actions, (2) Other.
 
-- **GitHub Actions**: proceed to Step 1.
+- **GitHub Actions**: only proceed to Step 1 if `origin` is a GitHub remote. If the user picks GitHub Actions but `origin` is GitLab or Forgejo/Gitea, stop and say so: generating a GitHub workflow for a non-GitHub repo would not run. Confirm the intended forge, and route to the matching tooling (`glab`, `tea`) rather than generating a mismatched workflow.
 - **Other**: stop. Ask which platform, then offer to open a feature request at `https://github.com/vtmocanu/skills/issues` so it can be prioritized. Do not analyze the repo for an unsupported platform.
 
 ## Step 1: analyze the whole repo
@@ -54,7 +54,7 @@ Ask targeted clarifiers when a strategy is unclear (feature branches with PRs ve
 
 ## Step 4: generate
 
-Write the workflow(s) from the analysis and the confirmed choices. Apply every principle in `SKILL.md` and `references/security.md`: pin actions to SHAs, minimal `permissions:`, call project automation, path-filter and add `concurrency`, fail fast.
+Write the workflow(s) from the analysis and the confirmed choices. Apply every principle in `SKILL.md` and `references/security.md`: pin actions to SHAs, minimal `permissions:`, call project automation, add `concurrency`, fail fast. Add **path filters only after** confirming the repo has real component boundaries (Step 1) and that every shared input (fixtures, root config, the workflow file itself) triggers all the jobs that read it; a single-component repo, or incomplete shared-file coverage, means a filter would skip a check that should run, so leave it unfiltered. If a filtered job is a required status check, add a stable aggregator job that always reports and require that instead (see `references/speed.md`).
 
 ## Step 5: validate before presenting
 
@@ -68,6 +68,11 @@ Write the workflow(s) from the analysis and the confirmed choices. Apply every p
 
 Provide the workflow file(s) with explanatory comments, a summary of what was detected and decided, the required secrets with setup guidance, and the repository settings the workflow needs (permissions, environments, protected branches). Tell the user what to configure upfront rather than letting the first run fail. Show `gh secret set` (or the forge equivalent) as guidance; do not execute it.
 
-## Step 7: commit and iterate
+## Step 7: commit, then execute with separate approval
 
-After the user approves, commit following the repo's established process, trigger the workflows, watch the runs, and fix failures until they pass.
+Approval to edit is not approval to execute. After the user approves the generated files, commit them following the repo's established process. Before triggering anything, separate the two cases:
+
+- A validation-only workflow (lint, test, build with no push) can be triggered and watched directly.
+- A workflow that publishes artifacts, pushes an image, cuts a release, or changes an environment is side-effecting. Ask for explicit confirmation before the first trigger, and prefer a non-deploy validation path first (for example run the PR checks, or a `workflow_dispatch` with deploy steps gated off), so the first run cannot deploy on the strength of the edit approval alone.
+
+Then trigger, watch the runs, and fix failures until they pass.

@@ -12,7 +12,7 @@ You are the CI/CD expert for this repo. Work in one of two modes. Pick the mode 
 - **GENERATE** a pipeline for a repo that has none, or add a workflow. This is interactive: analyze the repo, present findings, confirm the policy choices, then generate. Load `<this skill's directory>/references/generate.md` and follow it step by step.
 - **ADVISE**: review, harden, debug, or speed up existing CI, or answer a best-practice or security question. Apply the core principles below and load the reference that matches the question.
 
-**Detect the forge from the remote; do not assume GitHub.** Run `git remote get-url origin`: `github.com` means GitHub Actions (`gh` CLI); GitLab means `glab`; Forgejo or Gitea means `tea`. Never cross them. Every example here is GitHub Actions, but the principles are forge-agnostic. On a Forgejo/wxs repo, also load the `fj-ci` skill for the reusable-workflow implementation of these principles.
+**Detect the forge from the remote; do not assume GitHub.** Read the host from `git remote get-url origin`, but read only the host: a remote URL can embed a `user:token@` credential, so strip any userinfo and do not echo the full URL into the transcript (for example `git remote get-url origin | sed -E 's#^[^@]*@##; s#^[a-z]+://##; s#[/:].*##'`). `github.com` means GitHub Actions (`gh` CLI); GitLab means `glab`; Forgejo or Gitea means `tea`. Never cross them. Every example here is GitHub Actions, but the principles are forge-agnostic. On a Forgejo/wxs repo, also load the `fj-ci` skill for the reusable-workflow implementation of these principles.
 
 ## Core principles (both modes)
 
