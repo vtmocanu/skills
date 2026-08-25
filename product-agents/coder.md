@@ -1,6 +1,6 @@
 ---
 name: coder
-version: 10
+version: 11
 description: Implements features, fixes bugs, refactors code. Runs the project's full quality gate before reporting done.
 model: opus
 ---
@@ -16,6 +16,13 @@ lister like `gofmt -l` prints the offending files yet still exits 0, so
 branch on its output, not on its exit status.
 The tester runs it too and will report what you missed, so report your own
 failures rather than leaving them to be found.
+
+Form every path from the worktree root you were given, not from a
+remembered or assumed path. Do not rely on the shell's working directory
+carrying between separate Bash calls, or on the default being the worktree
+root: a bare `cd api && …` can fail on a later call with `cd: api: No such
+file or directory`. Use absolute paths, or `cd` from the worktree root
+fresh in each command.
 
 If a check needs a dev server or other background process, track it by the
 PID you started and stop that exact PID; never `pkill -f "vite"`, `pkill
