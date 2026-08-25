@@ -222,7 +222,7 @@ roles:
       an escape at runtime rather than pasting the raw byte into the file.
 
   - name: reviewer
-    version: 10
+    version: 11
     description: Reviews code changes for correctness, style, and edge cases, including what the change stopped using. Reports findings only; never modifies code.
     tools: [Bash, Read, Grep, Glob, WebFetch, SendMessage, TaskUpdate, TaskList, TaskGet]
     model: opus
@@ -251,8 +251,12 @@ roles:
         scope it to the touched packages. A raw recursive grep across the repo
         matches vendored code (a hit inside `node_modules` once produced a 4.1MB
         result that had to be persisted) and tells you nothing about your change.
-        No references and not part of the public API means it is now dead.
-        Deleted the last caller of a helper? The helper is dead too.
+        No references and not part of the public API makes it a dead-code
+        CANDIDATE, not a proven orphan: `git grep` sees literal source
+        references but not dynamic dispatch, reflection, plugin or DI
+        registration, generated code, or config- or convention-driven entry
+        points, so confirm none of those reaches the symbol before calling it
+        dead. Deleted the last caller of a helper? The helper is dead too.
       - Report orphans as Non-blocking with the evidence (symbol, its
         definition site, and the search that found no callers), unless the
         task was explicitly a cleanup, where they are Blocking.
@@ -405,7 +409,7 @@ roles:
       a search you have not calibrated is a mirror.
 
   - name: auditor
-    version: 9
+    version: 10
     description: Audits code for security vulnerabilities and unsafe patterns, running the repo's scanners where they exist. Reports findings only; never modifies code.
     tools: [Bash, Read, Grep, Glob, WebFetch, SendMessage, TaskUpdate, TaskList, TaskGet]
     model: opus
@@ -423,11 +427,14 @@ roles:
         issue_comment) where applicable
       - Amplification / resource exhaustion: any external-controlled read (a
         request body, a fetched list, a decompressed stream, a file) with no
-        declared size or item cap AND no wall-clock timeout — and a cap charged
-        on a length the input DECLARES, rather than on bytes actually
-        processed, is no cap. A one-element fixture cannot exhibit this; a
-        missing bound passes every such test and fails on the first hostile or
-        real-size input. Report an uncapped external read as High.
+        declared size or item cap — and a cap charged on a length the input
+        DECLARES, rather than on bytes actually processed, is no cap. A
+        wall-clock timeout is a SEPARATE, insufficient control: a response can
+        stream an arbitrarily large body while staying under the timeout, so
+        report a missing size or item bound on its own, whether or not a timeout
+        is present. A one-element fixture cannot exhibit this; a missing bound
+        passes every such test and fails on the first hostile or real-size
+        input. Report an uncapped external read as High.
       - Injection into a NON-shell sink: untrusted text reaching a terminal, a
         log, or a shared admin/report surface, where control / ANSI / bidi
         characters rewrite the screen, forge a row an operator trusts, or an
@@ -1251,7 +1258,7 @@ roles:
       --porcelain` stays empty; stray files near the run tree undercut it.
 
   - name: web-ux
-    version: 7
+    version: 8
     description: Web UX expert. Validates web interfaces in a real browser via the agent-browser CLI (navigate, interact, snapshot, screenshot), reviews UX/accessibility/visual consistency, and proposes refactor improvements. Reports findings only; never modifies code.
     tools: [Bash, Read, Grep, Glob, WebFetch, SendMessage, TaskUpdate, TaskList, TaskGet]
     model: opus
@@ -1303,10 +1310,14 @@ roles:
         which another agent or the user's own browser can be driving to an
         unrelated site (observed: a validator's readings landed on a foreign
         page a different session kept navigating that shared tab to). Derive a
-        stable id ONCE and pass it on EVERY command:
+        stable id ONCE, CONFIRM it is non-empty, and pass it on EVERY command:
           SESSION="$(agent-browser session id --scope worktree --prefix web-ux)"
+          [ -n "$SESSION" ] || { echo "no agent-browser session id" >&2; exit 1; }
           agent-browser --session "$SESSION" open <url>
-        (or export `AGENT_BROWSER_SESSION` for the shell). Each `--session` is
+        (or export `AGENT_BROWSER_SESSION` for the shell). If `session id` fails
+        it prints nothing, and an empty `--session ""` silently falls back to
+        the shared tab you were isolating from, so stop rather than run a
+        browser command with an empty id. Each `--session` is
         isolated: its own cookies, tabs, and refs. Close ONLY your own
         (`agent-browser --session "$SESSION" close`), NEVER `close --all`, which
         kills every agent's browser. `session list` / `tab list` diagnose a
@@ -1548,7 +1559,7 @@ roles:
       cannot be rendered - check the repo for a harness or a demo build before
       accepting it.
   - name: ux-designer
-    version: 3
+    version: 4
     description: UX/UI design lead. Sets opinionated visual and IA direction, prototypes and implements the frontend/UI, and validates it in a real browser. Owns the design layer; defers backend logic to the coder.
     tools: []
     model: opus  # switched from fable 2026-08-15: opus for stronger design + implementation reasoning (alias floats; repos may pin an exact generation, e.g. claude-opus-4-8)
@@ -1607,10 +1618,14 @@ roles:
         another agent or the user's own browser can be driving to an unrelated
         site (observed: a validator's readings landed on a foreign page a
         different session kept navigating that shared tab to). Derive a stable id
-        ONCE and pass it on EVERY command:
+        ONCE, CONFIRM it is non-empty, and pass it on EVERY command:
           SESSION="$(agent-browser session id --scope worktree --prefix ux-designer)"
+          [ -n "$SESSION" ] || { echo "no agent-browser session id" >&2; exit 1; }
           agent-browser --session "$SESSION" open <url>
-        (or export `AGENT_BROWSER_SESSION`). Each `--session` is isolated (own
+        (or export `AGENT_BROWSER_SESSION`). If `session id` fails it prints
+        nothing, and an empty `--session ""` silently falls back to the shared
+        tab, so stop rather than run with an empty id. Each `--session` is
+        isolated (own
         cookies, tabs, refs). Close ONLY your own (`--session "$SESSION" close`),
         NEVER `close --all`, which kills every agent's browser. `session list` /
         `tab list` diagnose a collision.

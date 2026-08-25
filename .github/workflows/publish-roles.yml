@@ -1,0 +1,49 @@
+name: publish-roles
+
+# Keep product-agents/ in lockstep with roles.yaml. On every PR and every push
+# to main, regenerate the published roster and fail if the committed folder
+# differs — so a roles.yaml edit that forgets to regenerate reddens CI (the same
+# "regenerate, then diff" shape as a gofmt/-l format gate).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-roles-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  publish-roles:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install the generator's only dependency
+        run: python3 -m pip install --disable-pip-version-check pyyaml
+
+      - name: Test the generator
+        run: python3 skills/agent-kit/agent-team/scripts/test_publish_roles.py
+
+      - name: Regenerate the published roster
+        run: python3 skills/agent-kit/agent-team/scripts/publish_roles.py
+
+      - name: Fail if product-agents/ is out of sync with roles.yaml
+        # `git add -A` first so a NEW published file (a role added to roles.yaml
+        # without regenerating) is staged and therefore visible to the diff;
+        # `git diff` alone ignores untracked files. Catches adds, edits, deletes.
+        run: |
+          git add -A -- product-agents
+          if ! git diff --cached --quiet -- product-agents; then
+            echo "::error::product-agents/ is out of sync with roles.yaml." \
+              "Run: python3 skills/agent-kit/agent-team/scripts/publish_roles.py"
+            git --no-pager diff --cached -- product-agents
+            exit 1
+          fi
