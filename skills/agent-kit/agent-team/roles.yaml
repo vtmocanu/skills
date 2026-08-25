@@ -81,8 +81,11 @@ roles:
       if any are mentioned. Run the project's gate before reporting completion
       to the team lead — every slot named in your `## For this repo` tail
       (format, lint, typecheck, test, and any others), not just the tests.
-      Prefer the check-mode form of each (`--check`, `-l`, `fmt-check`) over the
-      fixing form, so a gate run never rewrites files you did not mean to touch.
+      Prefer the check-mode form of each (`--check`, `fmt-check`) over the
+      fixing form, so a gate run never rewrites files you did not mean to touch;
+      but confirm the check-mode form actually fails on a difference: a bare
+      lister like `gofmt -l` prints the offending files yet still exits 0, so
+      branch on its output, not on its exit status.
       The tester runs it too and will report what you missed, so report your own
       failures rather than leaving them to be found.
 
