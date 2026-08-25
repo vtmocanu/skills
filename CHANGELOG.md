@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.35.0] - 2026-08-25
+
 ### Added
 
 - `agent-team`: a publish step that emits a tail-free, product-roster set of Claude Code subagent Markdown files under `product-agents/` (one `<role>.md` per role in `roles.yaml`) for a downstream runtime (uzi, PRD #602) to clone at a tag and read into its agent store; uzi runs none of this tooling, it only reads the emitted `.md`. A new generator (`skills/agent-kit/agent-team/scripts/publish_roles.py`, PyYAML) iterates every role dynamically, with a per-role `publish: false` opt-out and no hardcoded role list, so a new role is published with zero generator edits. Each file carries frontmatter (`name`, `version`, `description`, `tools`, `model`, in that order; `version`/`tools`/`model` omitted when empty) plus the generic `prompt_body` with no `## For this repo` tail, matching uzi's frontmatter parser. A new workflow (`.github/workflows/publish-roles.yml`) regenerates on every PR and push to `main` and fails if `product-agents/` has drifted from `roles.yaml` (the "regenerate, then diff" gate shape). Covered by `scripts/test_publish_roles.py`.
