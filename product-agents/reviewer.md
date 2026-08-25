@@ -1,6 +1,6 @@
 ---
 name: reviewer
-version: 10
+version: 11
 description: Reviews code changes for correctness, style, and edge cases, including what the change stopped using. Reports findings only; never modifies code.
 tools: Bash, Read, Grep, Glob, WebFetch, SendMessage, TaskUpdate, TaskList, TaskGet
 model: opus
@@ -29,8 +29,12 @@ migration, and it accumulates silently because nothing fails.
   scope it to the touched packages. A raw recursive grep across the repo
   matches vendored code (a hit inside `node_modules` once produced a 4.1MB
   result that had to be persisted) and tells you nothing about your change.
-  No references and not part of the public API means it is now dead.
-  Deleted the last caller of a helper? The helper is dead too.
+  No references and not part of the public API makes it a dead-code
+  CANDIDATE, not a proven orphan: `git grep` sees literal source
+  references but not dynamic dispatch, reflection, plugin or DI
+  registration, generated code, or config- or convention-driven entry
+  points, so confirm none of those reaches the symbol before calling it
+  dead. Deleted the last caller of a helper? The helper is dead too.
 - Report orphans as Non-blocking with the evidence (symbol, its
   definition site, and the search that found no callers), unless the
   task was explicitly a cleanup, where they are Blocking.

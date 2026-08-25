@@ -178,6 +178,18 @@ class TestRendering(unittest.TestCase):
         with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
             pr.render_role(r)
 
+    def test_boolean_version_is_refused(self):
+        # YAML `true`/`false`/`yes`/`no` load as bool, an int subtype; without a
+        # `type() is int` guard `version: True` would render (strict parser
+        # rejects it) and `version: False` would silently omit the line.
+        for bad in (True, False):
+            with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+                pr.render_role(role("r", version=bad))
+
+    def test_negative_version_is_refused(self):
+        with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+            pr.render_role(role("r", version=-1))
+
     def test_a_double_quote_that_forces_quoting_is_refused(self):
         # A `"` mid-value that does NOT otherwise need quoting is emitted bare
         # (valid YAML, read verbatim downstream). The refusal is only for a value
@@ -187,6 +199,28 @@ class TestRendering(unittest.TestCase):
         self.assertIn('description: mid " quote, no colon\n', text)  # bare, fine
         with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
             pr.render_role(role("r", description='needs quoting: a " here'))
+
+
+class TestReservedNames(unittest.TestCase):
+    def test_a_role_named_readme_is_refused(self):
+        # README.md is a keep-file; a role named README would otherwise overwrite
+        # it (KEEP guards pruning, not writing).
+        with tempfile.TemporaryDirectory() as d:
+            tmp = pathlib.Path(d)
+            roles_path = write_roles(tmp, [role("README")])
+            with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+                pr.generate(roles_path, tmp / "out")
+
+
+class TestTailContract(unittest.TestCase):
+    def test_tail_regex_matches_sync_py(self):
+        # The generator's tail refusal must track sync.py's tail definition; if
+        # sync.py ever changes its tail form, this fails rather than silently
+        # letting a new tail shape through the publisher.
+        sync_spec = importlib.util.spec_from_file_location("sync", HERE / "sync.py")
+        sync = importlib.util.module_from_spec(sync_spec)
+        sync_spec.loader.exec_module(sync)
+        self.assertEqual(sync.TAIL_RE.pattern, pr.TAIL_RE.pattern)
 
 
 class TestPublishOptOut(unittest.TestCase):

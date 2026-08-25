@@ -125,10 +125,18 @@ def render_role(role: dict) -> str:
     lines = ["---", f"name: {scalar('name', name)}"]
 
     version = role.get("version")
-    if isinstance(version, int) and version > 0:
-        lines.append(f"version: {version}")
-    elif version is not None and not (isinstance(version, int) and version == 0):
-        die(f"role {name!r} has a non-integer version {version!r}")
+    if version is not None:
+        # bool is a subtype of int, and YAML `true`/`false` load as bool, so an
+        # `isinstance(version, int)` check would emit `version: True` or silently
+        # omit `version: False`. `type(...) is int` rejects both.
+        if type(version) is not int:
+            die(f"role {name!r} has a non-integer version {version!r}; want a positive integer")
+        if version < 0:
+            die(f"role {name!r} has a negative version {version}")
+        if version > 0:
+            lines.append(f"version: {version}")
+        # version == 0 => omit (unstamped), matching the downstream "zero means
+        # unstamped" convention.
 
     lines.append(f"description: {scalar('description', str(role['description']))}")
 
@@ -173,6 +181,8 @@ def desired(data: dict) -> dict[str, str]:
         fname = f"{name}.md"
         if pathlib.Path(fname).name != fname or name in ("", ".", ".."):
             die(f"role name {name!r} does not yield a safe filename")
+        if fname in KEEP:
+            die(f"role name {name!r} collides with the reserved file {fname}")
         if fname in out:
             die(f"duplicate role name {name!r}")
         out[fname] = render_role(role)
