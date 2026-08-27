@@ -125,6 +125,8 @@ Add `--show-fixes` to preview rewrites, or `--fix-safe` for high-confidence ones
 
 ## Workflow
 
+**First, check whether the source is already wired into a SessionStart hook** that runs `npx skills add <source> --skill '*'` (grep `~/.claude/settings.json` for `skills@latest add`). If it is, publishing a new or edited skill to that source is just **commit + push**: the hook's `add --skill '*'` installs new skills and overwrites existing ones on the next session start, so the manual `add` / `update` steps below are redundant for that source. Run them by hand only for immediate use in the **current** session, or for a source with no such hook. Two things the hook never does, so still do them by hand: prune a removed or renamed skill (`npx skills remove`), and set any machine-local `skillOverrides` state such as `name-only` in `settings.json`.
+
 ### Install a source the first time
 `npx skills update` only refreshes skills already recorded in the lockfile, so a brand-new skill (or a source never installed on this machine) must be **added** first:
 
