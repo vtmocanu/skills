@@ -55,6 +55,25 @@ A `${{ github.event.pull_request.title }}`, `.body`, `.head_ref`, or a `workflow
 
 Apply the same `env:` indirection to any `${{ }}` in a `run:` body, even a value you believe is validated; it costs nothing and future-proofs the step. `zizmor`'s `template-injection` audit flags these.
 
+### Let Renovate raise vulnerability-fix PRs for known-vulnerable dependencies
+
+Pinning stops a hijacked upstream; it does nothing about a dependency sitting on a version with a published CVE. Renovate has two independent sources for that, and enabling both widens coverage.
+
+- **`vulnerabilityAlerts`** consumes the platform's own alerts (GitHub Dependabot alerts). It is **enabled by default**, its fix PRs carry a `[SECURITY]` commit suffix and `prCreation: immediate`, and they bypass any `minimumReleaseAge` / stability hold so a security fix is not delayed by the cooldown that throttles routine bumps. It is **GitHub-only** (`supportedPlatforms: ['github']`) and has two prerequisites a config review will not surface:
+  1. The repo must have **Dependency graph** and **Dependabot alerts** both enabled (Settings, Code security, or `gh api -X PUT repos/OWNER/REPO/vulnerability-alerts`).
+  2. The token Renovate runs as must be able to **read** those alerts: on a fine-grained PAT that is `Dependabot alerts: Read-only`, on the Renovate GitHub App the equivalent read grant. Missing it fails in the quiet direction: Renovate posts `WARN: Cannot access vulnerability alerts` to the Dependency Dashboard issue and raises no security PRs, with no failed run to notice. Grant the permission, then re-run; the WARN clearing is the confirmation.
+
+- **`osvVulnerabilityAlerts: true`** is **opt-in** (off by default) and adds the OSV.dev database as a second source for direct dependencies. It queries a locally downloaded copy, so it needs **no** platform permission and is not GitHub-only, which makes it the right complement wherever the Dependabot-alerts path is unavailable or the token cannot be widened.
+
+```json
+{
+  "osvVulnerabilityAlerts": true,
+  "vulnerabilityAlerts": { "labels": ["security"] }
+}
+```
+
+`vulnerabilityAlerts` is an override block applied only to security PRs; set `labels` there to make them triage-visible without relabeling routine bumps. Confirm the GitHub path is actually live by checking the dashboard WARN is gone after the next run, not by assuming the default did it, because the default is inert until both prerequisites above hold.
+
 ## Account and repository hardening checklist
 
 These are settings, not files. Verify each with the API, not by reading the repo.
@@ -65,6 +84,7 @@ These are settings, not files. Verify each with the API, not by reading the repo
 - **Tag ruleset for releases.** Restrict who can create `v*` tags so the tag push itself is the release authorization.
 - **Scope environment secrets to a deployment branch/tag policy.** An Actions *environment* secret (a cross-repo publish PAT, a signing key) with no deployment-branch policy is reachable from *any* ref. A write-collaborator, or a leaked bot token, can push a workflow that references `environment: NAME` to an unprotected feature branch and `workflow_dispatch` it, exfiltrating the secret — protecting the default branch does not help, because the malicious workflow runs on the feature branch, not on `main`. Restrict the environment to the refs that legitimately deploy: `gh api -X PUT repos/OWNER/REPO/environments/ENV -F 'deployment_branch_policy[protected_branches]=false' -F 'deployment_branch_policy[custom_branch_policies]=true'`, then add a pattern (`gh api -X POST repos/OWNER/REPO/environments/ENV/deployment-branch-policies -f name='v*' -f type=tag`). A `v*` tag pattern still permits tag-triggered releases and a `workflow_dispatch` run selected against that tag, while blocking access from an arbitrary branch.
 - **SHA pinning enforced** (above).
+- **Dependency vulnerability alerts reach the bumper.** If Renovate (or another bot) raises your dependency PRs, enable the dependency graph + Dependabot alerts and grant the bot's token `Dependabot alerts: Read-only`, or its `vulnerabilityAlerts` feature is silently dead (see Supply-chain threats above). Add `osvVulnerabilityAlerts: true` for a permission-free second source.
 
 ## Secret handling
 
