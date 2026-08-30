@@ -1,0 +1,98 @@
+# CodeRabbit Configuration
+# Documentation: https://docs.coderabbit.ai/guides/configure-coderabbit
+# Adapted from the uzi repo's .coderabbit.yaml for the skills repo (Markdown
+# skill/agent definitions plus a few helper Python scripts). The core review
+# settings and root-level tone_instructions are carried over verbatim; the tool
+# and path rules are skills-repo-specific.
+
+# Reduce review noise by focusing on actionable issues
+reviews:
+  # Only the most important findings inline; minor comments are collapsed into
+  # the summary. The structural counterpart to tone_instructions below.
+  profile: quiet
+
+  # Two-step review: submit "Request changes" while issues are open, auto-switch
+  # to "Approve" once they are resolved. (Not a severity filter; it can request
+  # changes for lower-severity comments too.)
+  request_changes_workflow: true
+
+  # Reduce comment verbosity
+  high_level_summary: true
+  poem: false
+  review_status: false
+
+  # Collapse less important sections
+  collapse_walkthrough: true
+
+  # Leaner walkthrough (defaults are on; these PRs don't need the effort estimate)
+  estimate_code_review_effort: false
+  review_details: false
+
+  # NOTE (deliberately different from uzi): this repo's CI is Python validation
+  # scripts plus one test (validate_skills.py, check_bundle_coverage.py,
+  # test_sync.py) and owns no linter or secret scanner, so there is nothing for
+  # CodeRabbit's bundled tools (ruff, gitleaks, ...) to duplicate. Leaving them
+  # at default gives this repo lint/secret coverage it otherwise has none of, so
+  # unlike uzi we do NOT disable them.
+
+  # Skip generated, vendored, and build output
+  path_filters:
+    - "!**/__pycache__/**"
+    - "!**/*.pyc"
+    - "!.venv/**"                             # local virtualenv
+    - "!.devbox/**"                           # devbox state
+
+  auto_review:
+    enabled: true
+    drafts: false
+    # Only auto-review PRs whose base is one of these. Add more (or a regex like
+    # "release/.*") if you open PRs against non-default branches.
+    base_branches:
+      - main
+    # Skip dependency bots: CI is the correct validator for a version bump, and a
+    # lockfile/version diff review is noise. Username covers the Mend GitHub App;
+    # the title keywords are the belt-and-braces fallback for any Renovate PR
+    # opened under a different account.
+    ignore_usernames:
+      - "renovate[bot]"
+    ignore_title_keywords:
+      - "chore(deps)"
+      - "fix(deps)"
+      - "build(deps)"
+
+  # Path-specific instructions
+  path_instructions:
+    # Python helper scripts and their tests: correctness/coverage only, and
+    # specifically hunt the vacuous-assertion trap — an assertion against a
+    # falsy/zero default or mere absence-of-exception passes even when the
+    # behavior regressed.
+    - path: "**/test_*.py"
+      instructions: "Focus on test correctness and coverage gaps only; skip style. Flag vacuous assertions: a test must assert the meaningful value, not merely a falsy/zero default or the absence of an exception, which would still pass if the behavior regressed."
+
+    # Skill definitions are the product here: prose instructions an agent
+    # follows, not code. Review for whether the instructions are correct,
+    # unambiguous, and internally consistent, not for prose/markdown style.
+    - path: "skills/**/*.md"
+      instructions: "These are skill instructions an AI agent executes. Flag instructions that are ambiguous, internally contradictory, factually wrong (a path/command/flag that does not exist), or that would send the agent down a path that cannot work. Do NOT flag prose or markdown style, tone, or wording preferences."
+
+    - path: "product-agents/**/*.md"
+      instructions: "These are agent role definitions. Flag contradictions, wrong tool references, or scope that conflicts with another role. Skip prose/markdown style."
+
+    - path: "prds/**"
+      instructions: "Only review for clarity and completeness. Skip markdown style suggestions."
+
+    # Retired skills/agents kept for reference; do not review them at all beyond
+    # obvious factual breakage.
+    - path: "retired/**"
+      instructions: "Archived, retired content kept for reference. Do NOT flag issues here unless a file actively misleads a reader into thinking it is still live. Skip everything else."
+
+# Limit review scope
+language: "en-US"
+early_access: false
+
+# Reduce nitpick comments (root-level per the CodeRabbit schema; it is ignored
+# when nested under reviews:).
+tone_instructions: "Focus only on critical bugs, security issues, and architectural concerns. Skip style nitpicks and minor improvements unless they significantly impact code quality or maintainability."
+
+chat:
+  auto_reply: false
