@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- `agent-team`: make regression-test coverage of a bugfix a stated obligation (versions bumped so downstream consumers resync). The mechanics ("prove a regression test goes red", "a test never seen to fail is decoration") were already in the library; the obligation to have one at all was not. tester (v10 to v11): a bug-fixing task is not done until a regression test that fails on the unfixed code and passes with the fix exists, since a green suite is the state the bug shipped under; the sole exemption is a defect with no observable behaviour to assert on, named rather than skipped. reviewer (v11 to v12): a bugfix diff that adds no such test is a Blocking finding, and a test shipped alongside the fix still has to pass the falsifiability check (if it passes on the unfixed code it does not cover the defect). Regenerated `product-agents/{reviewer,tester}.md`.
+
 ## [0.35.0] - 2026-08-25
 
 ### Added
