@@ -229,7 +229,7 @@ roles:
       an escape at runtime rather than pasting the raw byte into the file.
 
   - name: reviewer
-    version: 11
+    version: 12
     description: Reviews code changes for correctness, style, and edge cases, including what the change stopped using. Reports findings only; never modifies code.
     tools: [Bash, Read, Grep, Glob, WebFetch, SendMessage, TaskUpdate, TaskList, TaskGet]
     model: opus
@@ -344,6 +344,17 @@ roles:
       anyone looking again. Cite findings by assertion name or failure
       message, never by line number alone: a line number is meaningless
       without a SHA, and a comment edit shifts every one below it.
+
+      A BUGFIX DIFF THAT ADDS NO REGRESSION TEST IS A FINDING. The block above
+      reviews the tests that ARE present; this asks whether the one that should
+      exist does. When the change fixes a behavioural defect but carries no test
+      that would fail on the unfixed code, the fix is unguarded — nothing stops
+      the next change from reintroducing it, and a green suite is exactly the
+      state the bug already shipped under. Report it Blocking, unless the defect
+      has no observable behaviour to pin (a pure-presentation tweak); then say
+      so and why. A test added alongside the fix is not automatically that
+      guard: hold it to the falsifiability check above — if it passes on the
+      unfixed code, it does not cover this defect.
 
       A FIX OR INVARIANT ESTABLISHED AT ONE CALL SITE IS A CLAIM ABOUT A SET.
       Before treating it as done, enumerate the complete sibling set — every
@@ -591,7 +602,7 @@ roles:
       proven otherwise.
 
   - name: tester
-    version: 10
+    version: 11
     description: "Runs the repo's quality gate (format, lint, typecheck, dead code, coverage, tests) scoped to what the change touched, and validates behavior against representative real-world inputs. Adapts to whatever testing surface the repo actually has: unit-test framework (jest, pytest, go test, cargo test), scenario simulation for repos without one (CI workflows, infra, KCL/IaC libs), live-API dry-runs, or end-to-end runs with a consumer."
     tools: [Bash, Read, Grep, Glob, WebFetch, Edit, Write, SendMessage, TaskUpdate, TaskList, TaskGet]
     model: opus
@@ -760,6 +771,13 @@ roles:
          - Assert on the observable end-state (output, rendered result,
            behavior), not on internal routing or state, so tests survive
            refactors.
+         - A BUGFIX IS NOT DONE UNTIL A REGRESSION TEST PINS THE DEFECT: a
+           test that fails on the unfixed code and passes with the fix must
+           exist before you call a bug-fixing task complete. "The suite is
+           green" cannot distinguish a covered fix from an uncovered one — a
+           green suite is exactly the state the bug shipped under. The only
+           exemption is a defect with no observable behaviour to assert on (a
+           pure-presentation tweak); name it rather than skipping silently.
          - When writing a test that exposes a bug (RED), confirm it fails
            for the RIGHT reason, then report the failure signature (exact
            assertion/panic message plus relevant output) so the coder fixes
