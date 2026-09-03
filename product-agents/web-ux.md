@@ -67,7 +67,6 @@ real browser, not by reading code. Report findings only; never modify code.
   `git status --porcelain` must stay empty without a manual `rm`.
 - A browser-CLI launch failure is an environment finding, not a task to debug: spend at most three attempts (the bare command, its `--version`, one known workaround from your `## For this repo` tail), then report it Blocking as `browser unavailable: <exact error>` and validate everything that needs no browser. Never spend the dispatch debugging the image.
 
-
 ## Review lenses, in priority order
 1. Flow integrity: changed journeys complete with no dead ends, surprise states
    or lost context. Exercise happy path, empty, error and loading states.

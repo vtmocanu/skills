@@ -57,7 +57,6 @@ the three testing flavors below fit the repo and the change.
   fail and confirm it exits nonzero.
 - Run a gate once, to a log inside the worktree, then read the log: `<gate command> > gate.log 2>&1; rc=$?; echo "EXIT=$rc" >> gate.log; test "$rc" -eq 0`. Never rerun the same gate on the same tree to read its output differently; a second run is the same measurement paid twice, and under contention a flakier one.
 
-
 ## What a green does not mean
 
 - A green from a severity-staged tool means no gating tier fired, not

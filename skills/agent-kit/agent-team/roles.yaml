@@ -421,7 +421,6 @@ roles:
         fail and confirm it exits nonzero.
       - Run a gate once, to a log inside the worktree, then read the log: `<gate command> > gate.log 2>&1; rc=$?; echo "EXIT=$rc" >> gate.log; test "$rc" -eq 0`. Never rerun the same gate on the same tree to read its output differently; a second run is the same measurement paid twice, and under contention a flakier one.
 
-
       ## What a green does not mean
 
       - A green from a severity-staged tool means no gating tier fired, not
@@ -943,7 +942,6 @@ roles:
         tree, or a gitignored path if the sandbox confines you to the worktree;
         `git status --porcelain` must stay empty without a manual `rm`.
       - A browser-CLI launch failure is an environment finding, not a task to debug: spend at most three attempts (the bare command, its `--version`, one known workaround from your `## For this repo` tail), then report it Blocking as `browser unavailable: <exact error>` and validate everything that needs no browser. Never spend the dispatch debugging the image.
-
 
       ## Review lenses, in priority order
       1. Flow integrity: changed journeys complete with no dead ends, surprise states
