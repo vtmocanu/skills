@@ -73,10 +73,10 @@ BETA_BODY = (
 def agent_file(version="1", body=ALPHA_BODY, tail=None, **fm):
     """A fixture that differs from the library ONLY where the test says so.
 
-    `apply` syncs the body and the version stamp and deliberately does not
-    touch description/tools/model, so a fixture missing those comes back
-    MODIFIED after a perfectly correct apply — which reads as a script defect
-    and is a fixture defect. Defaults match the library exactly.
+    `apply` syncs the body, the description and the version stamp and
+    deliberately does not touch tools/model, so a fixture missing those comes
+    back MODIFIED after a perfectly correct apply — which reads as a script
+    defect and is a fixture defect. Defaults match the library exactly.
     """
     head = {
         "name": "alpha",
@@ -335,6 +335,43 @@ class TestInlineTuningWarning(SyncTestCase):
         proc = self.run_sync("apply", "alpha", "--force")
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("Repo rule.", self.body_of("alpha"))
+
+    def test_a_stale_file_takes_the_library_description(self):
+        """A library rewording of the one-line description could never be
+        synced: apply left the line alone, so every consumer read
+        `MODIFIED description differs` forever, and the revision-walk test
+        reddened the first time a shipped description changed."""
+        self.write("alpha", agent_file(description="The alpha role, old wording.", tail="Repo rule."))
+        proc = self.run_sync("apply", "alpha")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("description: The alpha role.\n", self.body_of("alpha"))
+        self.assertIn("description updated", proc.stdout)
+        self.assertIn("Repo rule.", self.body_of("alpha"))
+        self.assertNotIn("MODIFIED", self.run_sync("check").stdout)
+
+    def test_an_equal_version_description_difference_refuses_like_a_body(self):
+        self.write("alpha", agent_file(version="2", description="Tuned locally.", tail="Repo rule."))
+        proc = self.run_sync("apply", "alpha")
+        self.assertEqual(proc.returncode, 1, proc.stdout)
+        self.assertIn("description differs at EQUAL version", proc.stderr)
+        self.assertIn("description: Tuned locally.", self.body_of("alpha"))
+        forced = self.run_sync("apply", "alpha", "--force")
+        self.assertEqual(forced.returncode, 0, forced.stderr)
+        self.assertIn("description: The alpha role.\n", self.body_of("alpha"))
+
+    def test_a_colon_space_description_is_written_quoted(self):
+        """The tester's description holds `: `; written bare it is invalid
+        YAML, and `check` would report BAD-FM on the file apply just wrote."""
+        self.library.write_text(
+            LIBRARY.replace("description: The alpha role.", 'description: "Alpha: the first role."')
+        )
+        self.write("alpha", agent_file(tail="Repo rule."))
+        proc = self.run_sync("apply", "alpha")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn('description: "Alpha: the first role."', self.body_of("alpha"))
+        after = self.run_sync("check").stdout
+        self.assertNotIn("BAD-FM", after)
+        self.assertNotIn("MODIFIED", after)
 
     def test_delta_counts_lines_starting_with_dashes(self):
         role = {"prompt_body": "a\n--oneline -3\nb\n"}

@@ -536,6 +536,57 @@ def stamp_version(raw_frontmatter: str, version: int, newline: str = "\n") -> st
     return new if count == 1 else None
 
 
+def yaml_scalar(value: str) -> str | None:
+    """Render `value` so `key: <value>` re-parses as YAML yielding `value`.
+
+    Bare when that round-trips, double-quoted otherwise (a description holding
+    `: ` is the common case: the tester's). None when no plain form exists: a
+    value carrying a `"`, a backslash or a control character would make YAML
+    and a verbatim reader disagree, and publish_roles.py refuses those too.
+    """
+    try:
+        bare_ok = yaml.safe_load(f"k: {value}") == {"k": value}
+    except yaml.YAMLError:
+        bare_ok = False
+    if bare_ok:
+        return value
+    if '"' in value or "\\" in value or any(ord(c) < 32 for c in value):
+        return None
+    quoted = '"' + value + '"'
+    try:
+        return quoted if yaml.safe_load(f"k: {quoted}") == {"k": value} else None
+    except yaml.YAMLError:
+        return None
+
+
+def stamp_description(raw_frontmatter: str, description: str) -> str | None:
+    """Rewrite the `description:` line to the library's text.
+
+    The description is library-owned like the body (`check` reports a
+    differing one as MODIFIED), yet `apply` used to leave the line alone, so a
+    library rewording could never be synced: every consumer read MODIFIED
+    forever, and the revision-walk test caught it the first time a shipped
+    description changed. Same single-line match as `stamp_version`; a file
+    with no `description:` line, or a library text with no plain YAML form,
+    is left for the operator (None).
+    """
+    rendered = yaml_scalar(description)
+    if rendered is None:
+        return None
+    # The whole scalar, not just its first line: a description written by
+    # `yaml.dump` (or by hand as a `>-` block) continues on INDENTED lines, and
+    # replacing only the `description:` line left those continuation lines
+    # behind, so the file re-read as new-first-line plus old-tail and the
+    # post-write check refused it on every historical revision.
+    new, count = re.subn(
+        r"(?m)^description:[^\r\n]*(?:\r?\n[ \t]+[^\r\n]*)*",
+        lambda _m: f"description: {rendered}",
+        raw_frontmatter,
+        count=1,
+    )
+    return new if count == 1 else None
+
+
 def resolve_target(agents_dir: pathlib.Path, name: str) -> pathlib.Path | None:
     """The file for `name`, or None if it would land outside `agents_dir`.
 
@@ -682,9 +733,18 @@ def cmd_apply(
                 f"the change was not committed, it is in no git object at all."
             )
 
-        if body_differs and agent.version == role["version"] and not force:
+        # The description is held to the same rule as the body: library-owned,
+        # replaced on a version bump, and an UNEXPLAINED difference at equal
+        # version is a hand edit that only --force may overwrite.
+        description_differs = (
+            (agent.frontmatter.get("description") or "").strip()
+            != role["description"].strip()
+        )
+
+        if (body_differs or description_differs) and agent.version == role["version"] and not force:
+            what = "body" if body_differs else "description"
             print(
-                f"{name}: body differs at EQUAL version {agent.version} — this is a "
+                f"{name}: {what} differs at EQUAL version {agent.version} — this is a "
                 f"local modification, not staleness. Read it first (`sync.py diff "
                 f"{name}`) and decide whether it belongs back in the library; "
                 f"re-run with --force to overwrite it.",
@@ -702,14 +762,27 @@ def cmd_apply(
                 file=sys.stderr,
             )
             return 1
+        if description_differs:
+            new_frontmatter = stamp_description(new_frontmatter, role["description"])
+            if new_frontmatter is None:
+                print(
+                    f"{name}: cannot rewrite the `description:` line (the file has "
+                    f"none, or the library text has no plain YAML form) — fix it by "
+                    f"hand and re-run.",
+                    file=sys.stderr,
+                )
+                return 1
 
-        planned.append((agent, role, new_frontmatter, warnings, backup, lost))
+        planned.append(
+            (agent, role, new_frontmatter, warnings, backup, lost, description_differs)
+        )
 
-    for warning in [w for _, _, _, ws, _, _ in planned for w in ws]:
+    for warning in [w for _, _, _, ws, _, _, _ in planned for w in ws]:
         print(f"warning: {warning}", file=sys.stderr)
 
     dropped_lines = False
-    for agent, role, new_frontmatter, warnings, backup, lost in planned:
+    descriptions_moved = 0
+    for agent, role, new_frontmatter, warnings, backup, lost, description_differs in planned:
         dropped_lines = dropped_lines or bool(warnings)
         body = role["prompt_body"].rstrip("\n")
         if agent.newline != "\n":
@@ -761,8 +834,15 @@ def cmd_apply(
                 file=sys.stderr,
             )
             return 2
+        if (after.frontmatter.get("description") or "").strip() != role["description"].strip():
+            print(f"{agent.name}: description did not land as written", file=sys.stderr)
+            return 2
 
         tail_note = f"tail {len(agent.tail)}B preserved" if agent.tail else "no tail"
+        desc_note = ""
+        if description_differs:
+            descriptions_moved += 1
+            desc_note = ", description updated"
         # The drop is named on STDOUT beside its own success line. It used to be
         # a stderr paragraph in a block printed before any write, so at roster
         # scale eleven warnings preceded eleven success lines saying "preserved"
@@ -781,7 +861,7 @@ def cmd_apply(
                 f", {lost} body line(s) NOT CARRIED OVER" if lost else ""
             ) + f" — previous body kept at {backup.name}"
         print(
-            f"{agent.name}: version -> {role['version']}, "
+            f"{agent.name}: version -> {role['version']}{desc_note}, "
             f"body {len(role['prompt_body'])}B replaced, {tail_note}{drop_note}"
         )
 
@@ -798,7 +878,10 @@ def cmd_apply(
             "backups once you have checked them."
         )
     else:
-        print("\nno body changed; only the version stamp moved")
+        moved = "the version stamp"
+        if descriptions_moved:
+            moved += f" and {descriptions_moved} description(s)"
+        print(f"\nno body changed; only {moved} moved")
     return 0
 
 
