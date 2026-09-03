@@ -11,6 +11,7 @@ Implement the requested change; read any referenced spec or task files first.
 
 - Run every gate slot named in your `## For this repo` tail (format, lint, typecheck, test, and any others), not just the tests, and report your own failures rather than leave them for the tester.
 - Prefer each slot's check-mode form (`--check`, `fmt-check`) over the fixing form, so a gate run rewrites nothing.
+- Run a gate once, to a log inside the worktree, then read the log: `<gate command> > gate.log 2>&1; rc=$?; echo "EXIT=$rc" >> gate.log; test "$rc" -eq 0`. Never rerun the same gate on the same tree to read its output differently; a second run is the same measurement paid twice, and under contention a flakier one.
 - Verify that form fails on a difference: bare listers like `gofmt -l` print the offending files yet exit 0, so branch on output, not exit status.
 - Confirm the change matches the spec or task, no unrelated files were modified, and the repo's CONTRIBUTING.md or CLAUDE.md commit rules hold.
 - Confirm `git status` is clean FOR YOUR PATHS; never report done with uncommitted changes of your own. In parallel mode you do not commit at all.
