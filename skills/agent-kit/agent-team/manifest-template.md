@@ -157,11 +157,8 @@ because having checked it felt like knowing it."*
 
 **Lead's share of this:** relay findings as claims to check, not facts to apply.
 When you forward a teammate's finding, say what was measured and what was
-inferred. Twice in that run the lead propagated a validator's inherited
-attribution as verified, and once told a reviewer a rule ("focus is proven by
-identity, never text") that was half right: identity fails too, when the selector
-drifts. Verify a load-bearing claim yourself before acting on it, and say plainly
-when you did not.
+inferred. Verify a load-bearing claim yourself before acting on it, and say
+plainly when you did not.
 
 ## Sweep per FACT after the last behavioural commit
 
@@ -171,31 +168,21 @@ After the last behavioural commit — before the final review wave, not after it
 grep for every *fact* the batch established and find every place that asserts
 otherwise.
 
-Validated 2026-07-27 on a batch that shipped **six code defects and ten prose
-ones**. Every prose defect was a true statement a neighbouring commit falsified,
-and none had an executable control: four sibling comments left asserting a
-mechanism the fix had disproved (one directly contradicting another comment three
-files away), an assertion that could not fail, a doc headline falsified by the
-function one line beneath it, and a freshness claim true of only three rungs of a
-six-rung fallback chain. The code was right every time. They cost four review
+Validated 2026-07-27 on a batch that shipped six code defects and ten prose ones.
+Every prose defect was a true statement a neighbouring commit falsified, and none
+had an executable control. The code was right every time. They cost four review
 rounds and were found by four different agents.
 
-Three things make the sweep work, each learned by its absence:
+Three things make the sweep work:
 
-- **Sweep for the CLAIM, not the wording.** A grep for the phrase misses a
-  sentence asserting the same thing in different words — one file carried the
-  superseded measurement table without ever using the phrase being searched for.
-- **The correction must state the mechanism, not just delete the false clause.**
-  "Dropped the wrong claim" and "states the right one" are different edits, and
-  only the second prevents the next round: a comment that is no longer false but
-  no longer explains anything leaves the next reader to re-derive it and get it
-  wrong. That happened three times to one paragraph in a single batch.
-- **A CITATION is an assertion too, and `git log -S` is its control.** "Commit X
-  fixed this" is checkable and almost never checked. The same two commits were
-  transposed **twice** — one apart, touching the same field, differing only in
-  *channel*, which was the very distinction the sentence existed to teach. A
-  reader following it landed on a commit whose subject line contradicted the claim
-  in its first six words, which discredits the true half along with the false one.
+- **Sweep for the CLAIM, not the wording.** A grep for the phrase misses a sentence
+  asserting the same thing in different words; one file carried the superseded
+  measurement table without ever using the searched phrase.
+- **The correction must state the mechanism, not just delete the false clause.** A
+  comment that is no longer false but no longer explains anything leaves the next
+  reader to re-derive it and get it wrong.
+- **A CITATION is an assertion too; `git log -S` locates the commit and reading it is the control.** "Commit X
+  fixed this" is checkable and almost never checked.
 
 **Corollary for the lead:** when you dispatch a fix that names N sites, verify all
 N landed. The one that got missed was missed because the lead checked the site it
@@ -257,21 +244,19 @@ Three habits follow:
 - **Fix at the composition point, not the render sites.** One descriptor feeding
   five renderers gets one fix where it is composed. But state the coverage
   honestly: in that batch the comment claimed all five were covered when only two
-  consumed that descriptor, and the "one place cannot drift out of step with four
-  others" argument ran backwards — four constructors of the same shape already
-  existed and the fix touched one.
+  consumed that descriptor.
 - **A test that renders the wrong component passes forever.** One test rendered a
   component that does not render the field under test. It was green and worthless,
-  and only its own control caught it. **Five files in that batch needed a
-  component extracted to make the claim assertable at all** — if the value is not
-  reachable by a test, that is a finding about the code's shape, not a licence to
-  assert something adjacent.
+  and only its own control caught it. **Files in that batch needed a component
+  extracted to make the claim assertable at all** — if the value is not reachable
+  by a test, that is a finding about the code's shape, not a licence to assert
+  something adjacent.
 - **A guarded render can make an assertion VACUOUS rather than weak.** Where the
   markup renders behind a truthiness guard and the fixture leaves the field empty,
   the subtree never mounts and a "no bad characters present" assertion passes over
-  nothing. Require a **positive** assertion that the value is on screen. Note the
-  two mechanisms differ: one branch did not mount at all, while a sibling mounted
-  with a partial string, so only the positive assertion caught the second.
+  nothing. Require a **positive** assertion that the value reaches its channel (text, attribute, control value, title). The two
+  mechanisms differ: one branch did not mount at all, while a sibling mounted with
+  a partial string, so only the positive assertion caught the second.
 
 ## Mutate at the CALL SITE, not in the shared helper
 
@@ -287,12 +272,11 @@ that control unchanged — which is what happened, and it was caught by an audit
 reading a comment rather than by any test.
 
 **The discriminating instrument is per-call-site:** fold each site separately and
-require **each** to red on its own, on disjoint sets. The tester who found this had
-*already* used that instrument on eight render sites in the same batch; the shared
-function simply made one fold look sufficient. As they put it: *"mutating the
-shared helper is the composition-point mistake one level down — the same shape as
-the finding itself, which is presumably why neither of us saw it from inside."* A
-control written from inside an abstraction inherits that abstraction's blind spot.
+require **each** to red on its own, on disjoint sets. As the tester who found it
+put it: *"mutating the shared helper is the composition-point mistake one level
+down — the same shape as the finding itself, which is presumably why neither of us
+saw it from inside."* A control written from inside an abstraction inherits that
+abstraction's blind spot.
 
 ## TYPECHECK the mutated tree before reading the test result
 
