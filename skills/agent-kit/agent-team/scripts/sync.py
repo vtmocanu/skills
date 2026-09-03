@@ -5,7 +5,7 @@ Three subcommands:
 
     sync.py check              report drift for every agent file (default)
     sync.py diff <role> ...    show the body diff, library vs repo
-    sync.py apply <role> ...   replace the generic body, bump version, keep tail
+    sync.py apply <role> ...   replace the generic body, bump version and description, keep tail
 
 `check` implements the load-time staleness pass: it compares the frontmatter
 `version:` AND the generic body, because the two disagree. roles.yaml allows one
@@ -14,7 +14,7 @@ without an increment and is invisible to a version-keyed comparison by
 construction.
 
 `apply` implements the Mode 2 Step 5 merge: everything above `## For this repo`
-is replaced from the library, the `version:` line is rewritten, and the tail is
+is replaced from the library, the `version:` and `description:` lines are rewritten, and the tail is
 preserved. Files are read and written with newline translation DISABLED, so a
 CRLF file stays CRLF; the post-write check then compares the tail as BYTES,
 because a comparison that shares the reader's newline normalization cannot
