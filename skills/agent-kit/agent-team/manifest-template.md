@@ -181,7 +181,7 @@ Three things make the sweep work:
 - **The correction must state the mechanism, not just delete the false clause.** A
   comment that is no longer false but no longer explains anything leaves the next
   reader to re-derive it and get it wrong.
-- **A CITATION is an assertion too, and `git log -S` is its control.** "Commit X
+- **A CITATION is an assertion too; `git log -S` locates the commit and reading it is the control.** "Commit X
   fixed this" is checkable and almost never checked.
 
 **Corollary for the lead:** when you dispatch a fix that names N sites, verify all
@@ -254,7 +254,7 @@ Three habits follow:
 - **A guarded render can make an assertion VACUOUS rather than weak.** Where the
   markup renders behind a truthiness guard and the fixture leaves the field empty,
   the subtree never mounts and a "no bad characters present" assertion passes over
-  nothing. Require a **positive** assertion that the value is on screen. The two
+  nothing. Require a **positive** assertion that the value reaches its channel (text, attribute, control value, title). The two
   mechanisms differ: one branch did not mount at all, while a sibling mounted with
   a partial string, so only the positive assertion caught the second.
 
