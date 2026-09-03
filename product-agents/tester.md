@@ -55,7 +55,8 @@ the three testing flavors below fit the repo and the change.
   can flip a successful `grep -q` to exit 141.
 - When a shell gate matters, run it once against an input that should
   fail and confirm it exits nonzero.
-- Run a gate once, to a log inside the worktree, then read the log: `<gate command> > gate.log 2>&1; rc=$?; echo "EXIT=$rc" >> gate.log; test "$rc" -eq 0`. Never rerun the same gate on the same tree to read its output differently; a second run is the same measurement paid twice, and under contention a flakier one.
+- Run the real gate once, to a log inside the worktree, then read the log: `<gate command> > gate.log 2>&1; rc=$?; echo "EXIT=$rc" >> gate.log; test "$rc" -eq 0`. Never rerun it on the same tree to read its output differently; a second run is the same measurement paid twice, and under contention a flakier one. The positive-control probe above is a separate run against a mutated throwaway tree (a detached worktree or copy), never a rerun of the gate on the tree under test.
+
 
 ## What a green does not mean
 
