@@ -6,6 +6,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- `agent-team`: trimmed the manifest template's dated illustrative examples in four
+  sections to match a downstream resync (uzi's `.claude/agent-team.md`, merged at
+  vtmocanu/uzi@d584ea3b), keeping every rule and dropping only the story that
+  illustrated it: "Re-derive the claim at the moment you assert it" (the "Twice in
+  that run the lead..." example under "Lead's share of this"), "Sweep per FACT
+  after the last behavioural commit" (the ten-prose-defect enumeration and the
+  three corollary bullets), "An assertion defines its CHANNEL" (the "one place
+  cannot drift out of step" passage, "Five files" to "Files"), and "Mutate at the
+  CALL SITE, not in the shared helper" (the "already used that instrument on eight
+  render sites" example). 360 to 344 lines; rule counts unchanged (12/12, 5/5,
+  4/4, 3/3 across the four sections).
+
 ## [0.36.0] - 2026-09-03
 
 ### Changed
