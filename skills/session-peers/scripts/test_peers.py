@@ -3578,6 +3578,7 @@ class TestConfigReaderPaths(Base):
             self.assertEqual(cfg[key]["trusted_hash"], "abc")
             self.assertIs(cfg[key]["enabled"], False)
 
+    @unittest.skipUnless(HAS_TOMLLIB, "the warning is the parser path handing over; 3.9/3.10 have no parser")
     def test_a_file_that_does_not_parse_falls_back_with_a_warning(self):
         self.config().write_text('model = "gpt-5"\nthis line is not toml\n')
         err = io.StringIO()
