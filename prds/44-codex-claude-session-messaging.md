@@ -2,7 +2,7 @@
 
 **Issue**: [#44](https://github.com/vtmocanu/skills/issues/44) | **Label**: PRD | **Priority**: Medium
 **Area**: new skill `skills/session-peers/` (`SKILL.md`, `scripts/peers.py`, `scripts/test_peers.py`, `references/spike-checklist.md`), one `test.yml` step, README rows, CHANGELOG. macOS and Linux only (Windows uses named pipes, which the stdlib cannot speak).
-**Status**: Draft, created 2026-09-07, reviewed by two reviewers the same day (27 findings folded in).
+**Status**: Draft, created 2026-09-07. Reviewed the same day by two Claude reviewers (27 findings) and by a Codex CLI session (13 findings in round 1, 7 in round 2), all folded in or answered below.
 
 **Evidence basis**: every mechanism below was measured on this machine on
 2026-09-07 with Claude Code 2.1.263 (`~/.local/share/claude/versions/2.1.263`)
@@ -14,11 +14,12 @@ inferred from a blog post: the widely quoted `codex queue --session <name>` and
 `--thread` and `--message`.
 
 **Terms**: a *Claude session* is one running `claude` process with its inbox
-socket; a *Codex thread* is one running `codex` TUI with its rollout; a *peer*
-is either, as the other side lists it; a *shim* is the process that stands in
-for one Codex thread inside Claude's peer fabric. Outcomes are recorded inline
-under each milestone box (PRD #13 style) and in the Status line at close;
-there is no separate progress section.
+socket; a *Codex thread* is one conversation held open by a `codex` process
+(one TUI process can hold several, `/new` starts another in the same process);
+a *peer* is either, as the other side lists it; a *shim* is the process that
+stands in for one Codex thread inside Claude's peer fabric. Outcomes are
+recorded inline under each milestone box (PRD #13 style) and in the Status line
+at close; there is no separate progress section.
 
 ## Problem
 
@@ -47,8 +48,8 @@ Both vendors shipped the primitives that make a direct bridge small:
 
 | direction | primitive | verified |
 |---|---|---|
-| Claude to Codex | `codex queue --thread <uuid or exact name> --message "<text>"` (Codex 0.149.0+). No daemon: it inserts into `$CODEX_HOME/queue_1.sqlite` (`queued_items`), a running TUI polls SQLite's `data_version` and starts the item as its next user turn, queuing if mid-turn. The turn runs under the thread's own approval mode, exactly like a typed prompt. | Live: message queued into the user's TUI by UUID and by `/rename`d name, reply in 2 to 4 s |
-| Codex to Claude | One newline-delimited JSON line to the session's inbox socket (path read from its registry record): `{"type":"user","message":{"role":"user","content":"..."}}`. Documented as a supported injection point (the session logs a `socat` recipe at startup). | Live from a host shell: arrived instantly. From inside Codex's `exec`: **exit 1**, blocked by the default sandbox (`workspace-write`, `network_access=false` also denies Unix-socket connects) |
+| Claude to Codex | `codex queue --thread <uuid or exact name> --message "<text>"` (Codex 0.149.0+). In the default standalone layout (no shared daemon) it inserts into the queue store (`$CODEX_HOME/queue_1.sqlite`, `queued_items`) and the process holding the thread polls SQLite's `data_version` and starts the item as its next user turn, queuing if mid-turn; with a shared app-server daemon the same CLI goes through `thread/queue/add`. The turn runs under the thread's own approval mode, exactly like a typed prompt. | Live, no daemon present: message queued by UUID and by `/rename`d name, reply in 2 to 4 s. A thread that has had no turn yet is not found by name (`No active session found`) but is by UUID |
+| Codex to Claude | One newline-delimited JSON line to the session's inbox socket (path read from its registry record): `{"type":"user","message":{"role":"user","content":"..."}}`. Documented as a supported injection point (the session logs a `socat` recipe at startup). | Live from a host shell: arrived instantly. From inside Codex's `exec` on macOS: **exit 1**, the measured default sandbox (`workspace-write`, `network_access=false`) denies the Unix-socket connect |
 
 ## Solution
 
@@ -57,28 +58,35 @@ agents (D9). It contains:
 
 1. **`scripts/peers.py`** (Python 3 stdlib only, `#!/usr/bin/env python3`,
    0755): the whole bridge behind one CLI. `list`, `send` (either direction),
-   `shim` (run as one Codex thread's peer, D2), `up` / `down` (manual shim
-   control), `stop-hook` and `session-hook` (the Codex hook entry points, D2/D4),
-   `install-hook`, `doctor`. Roots come from `$CLAUDE_CONFIG_DIR` (default
-   `~/.claude`) and `$CODEX_HOME` (default `~/.codex`); tests point both at temp
-   directories and never touch the real ones.
-2. **Peer shims**: for every *named* live Codex thread, one small process that
-   owns a Claude-style registry record `$CLAUDE_CONFIG_DIR/sessions/<shim-pid>.json`
-   and listens on a socket in Claude's allowlisted socket directory. To every
-   Claude session the thread is then a normal peer: it appears in `ListAgents`
-   and the `@` typeahead under its Codex name, `SendMessage` delivers a frame to
-   the shim, the shim tags it with the sender and runs `codex queue`. A Codex
-   `SessionStart` hook starts the shim; `SessionEnd` or the death of the `codex`
-   process ends it.
-3. **A Codex `Stop` hook** (`$CODEX_HOME/hooks.json`, installed by `peers.py
-   install-hook` together with the `SessionStart`/`SessionEnd` entries): runs on
-   the host outside the sandbox, receives `last_assistant_message`, `session_id`,
-   `turn_id` and `transcript_path`, and posts the reply into the addressed Claude
-   session(s): auto reply-to-sender for a turn that a Claude session queued, plus
-   explicit `@<name>` on the first line of the final message (D4).
+   `shim` (run as one Codex thread's peer, D2), `up` / `down`, `session-hook`
+   (optional Codex `SessionStart` entry that runs `up`), `install-hook`,
+   `doctor`. Roots come from `$CLAUDE_CONFIG_DIR` (default `~/.claude`) and
+   `$CODEX_HOME` (default `~/.codex`, with `sqlite_home` /
+   `CODEX_SQLITE_HOME` honoured for the databases); tests point everything at
+   temp directories and never touch the real ones.
+2. **Peer shims**: for every registered live Codex thread (D6), one small process
+   that owns a Claude-style registry record
+   `$CLAUDE_CONFIG_DIR/sessions/<shim-pid>.json` and listens on a socket in
+   Claude's allowlisted socket directory. To every Claude session the thread is
+   then a normal peer: it appears in `ListAgents` and the `@` typeahead under its
+   Codex name, `SendMessage` delivers a frame to the shim, the shim tags it with
+   the sender and queues it by UUID. The same shim tails the thread's rollout
+   and delivers Codex's replies (D4): when a turn completes, its
+   `task_complete.last_agent_message` goes to the Claude session that queued
+   the turn, and to a session named on the first line with `@<name>`. The shim
+   keeps a small persisted state file (cursor, pending turns, delivered turn
+   ids, budgets) and exits when the process that held the thread no longer
+   holds its rollout open.
+3. **No mandatory Codex hook.** `up <name|uuid>` registers a thread once and
+   starts its shim; a bare `up` reconciles every registered live thread from
+   any shell; an optional `SessionStart` hook (installed by `install-hook`,
+   trusted once in `/hooks`) runs that reconcile on every invocation so
+   registered threads come back after a restart without a manual step. A newly
+   `/rename`d thread still needs one `up <name>`. Nothing in the delivery path
+   depends on a hook (D5).
 4. **`SKILL.md`** with one body that branches by agent: what a Claude session
-   does (message `@<codex-name>` natively; `up` as the manual fallback), what a
-   Codex thread does (list Claude peers, address a reply with `@name`).
+   does (`up`, then message `@<codex-name>` natively), what a Codex thread does
+   (list Claude peers, address a reply with a first-line `@name`).
 
 ### Facts the implementation relies on (undocumented unless linked)
 
@@ -123,41 +131,61 @@ agents (D9). It contains:
   Linux. A connection with no complete line in 30 s is closed; a line over about
   a million characters drops the connection. The receiver rate-limits per
   sender, drops identical repeats, and queues at most 50 messages.
-- **Codex names** come from `/rename` in the TUI (or `thread/name/set`), are
-  indexed in `$CODEX_HOME/session_index.jsonl` (`{"id","thread_name",
-  "updated_at"}`) and in the `threads` table of the highest-numbered
-  `$CODEX_HOME/state_*.sqlite` (`id, rollout_path, cwd, name, updated_at, ...`;
-  the numeric suffix is a schema version). A live thread is one whose
-  `rollout_path` is held open by a `codex` process, checked with `lsof` (a
-  `flock` probe on `$CODEX_HOME/thread-writer-locks/<uuid>.lock` was rejected:
-  a probe acquires the lock for an instant and can make Codex's own acquire
-  fail). `codex queue` resolves UUID first, then exact name, rejects an
-  ambiguous name, and errors with `No active session found matching '<name>'`.
-  Cap 100 items per thread (`MAX_QUEUE_ITEMS`), text cap 1 048 576 chars
+- **Codex names and threads**: `/rename <name>` in the TUI (or the app-server
+  method `thread/name/set`) writes `threads.name` in the `threads` table of
+  `$CODEX_HOME/state_*.sqlite` (numeric suffix = schema version; the reader
+  picks the file whose schema it recognises, not the largest number) and an
+  entry in `$CODEX_HOME/session_index.jsonl`. **Codex's title suggester also
+  writes `name`** (measured: 11 of 93 threads have one, several of them
+  generated, e.g. `Retrieve Codex login token`), and the suggester's schema
+  allows one-word titles while the first prompt is persisted as a provisional
+  name (`hello` appeared in the index before `Respond to greeting`), so
+  **nothing in `name` distinguishes a user's `/rename` from a generated title**;
+  opt-in is explicit registration (D6). A thread is held by a runtime when its
+  `rollout_path` (`$CODEX_HOME/sessions/<y>/<m>/<d>/rollout-...jsonl`) is open
+  in a `codex` process, checked with `lsof`; an open rollout proves a runtime
+  holds it, not that a TUI is attached (a `codex exec` or daemon can hold one
+  too). A `flock` probe on `$CODEX_HOME/thread-writer-locks/<uuid>.lock` was
+  rejected: a probe acquires the lock for an instant and can make Codex's own
+  acquire fail. Name resolution in `codex queue` cannot be relied on to reject
+  duplicates (the 0.153.2 source picks a match), so the bridge resolves names
+  itself, refuses duplicates, and always queues by UUID. Cap 100 items per
+  thread (`MAX_QUEUE_ITEMS`), text cap 1 048 576 chars
   (`MAX_USER_INPUT_TEXT_CHARS`); only threads loaded in a live process drain; an
   interrupted turn pauses the queue. Source says a 10 s poll; measured under 1 s
-  in three trials.
-- **Codex hooks** (`features.hooks = true`, `$CODEX_HOME/hooks.json`, events
-  `SessionStart SessionEnd UserPromptSubmit PreToolUse PermissionRequest
-  PostToolUse Stop SubagentStart SubagentStop PreCompact PostCompact
-  Interrupt`): every hook gets `session_id, cwd, hook_event_name,
-  transcript_path, model, permission_mode` on stdin; turn-scoped ones add
-  `turn_id`; `Stop` adds `last_assistant_message` and `stop_hook_active` and
-  MUST answer with JSON (plain text is invalid); `SessionStart` adds `source`
-  (`startup|resume|clear|compact`). Every entry is trust-gated:
-  `config.toml` `[hooks.state."<file>:<event>:<i>:<j>"]` carries `enabled` and
-  `trusted_hash`; a newly added entry is reviewed in the TUI (`/hooks`), and
-  `--dangerously-bypass-hook-trust` is per-invocation only. The user's
-  `hooks.json` already carries two third-party `Stop` entries (Clawd on Desk,
-  Orca), so the installer MUST append into existing arrays, never replace, and
-  any `Stop` hook may continue the turn, re-firing `Stop` with
-  `stop_hook_active=true`.
-- **Where Codex finds the skill**: `$CODEX_HOME/skills` and the npx shared
-  store `~/.agents/skills/<name>/` (real files; the per-agent copies under
+  in three trials, so the latency bound holds only for an idle, unpaused thread.
+- **Rollout events the shim reads** (measured on 0.153.4): `event_msg` of type
+  `task_started` `{turn_id, started_at, ...}`; `turn_context` `{turn_id, cwd,
+  model, approval_policy, sandbox_policy, ...}`; `response_item` `{role: user,
+  content: [{type: input_text, text}]}` for the prompt (this item carries **no
+  `turn_id`**; it sits between its `task_started` and `task_complete`);
+  `response_item` `{role: assistant}` for messages; `event_msg`
+  `task_complete` `{turn_id, last_agent_message, started_at, completed_at,
+  duration_ms}` once per completed turn, or `turn_aborted` `{turn_id, reason,
+  ...}` on an interrupt (2 seen today). `last_agent_message` may be null.
+  Correlation is therefore by turn boundary, never by "last user item before
+  EOF", and a turn ends on either event.
+- **Codex hooks** (`features.hooks = true`, `$CODEX_HOME/hooks.json`;
+  https://learn.chatgpt.com/docs/hooks): event-specific schemas (`SessionEnd`
+  has no `model` or `permission_mode`; `Stop`'s `last_assistant_message` is
+  nullable); `SessionStart` runs when the first turn starts, not at TUI launch
+  (0.153.2 source, `core/src/session/turn.rs`), and fires again on `resume`,
+  `clear` and `compact` (`source` field); `SessionEnd` is synchronous, 1 s
+  default timeout, 3 s cap, and does not run on a crash; an active-turn Ctrl-C
+  is `Interrupt`. The runner lets a detached child survive but waits for
+  inherited stdout/stderr pipes, so a daemonised child MUST use
+  `start_new_session=True`, redirect all three fds and close inherited ones.
+  Trust state lives in `config.toml` `[hooks.state."<file>:<snake_case_event>:<i>:<j>"]`
+  with `trusted_hash` (and `enabled`, which may be omitted); a new or edited
+  entry is reviewed in the TUI (`/hooks`); `--dangerously-bypass-hook-trust` is
+  per-invocation only. The user's `hooks.json` already carries third-party
+  entries for most events, so the installer MUST append into existing arrays.
+- **Where Codex finds the skill**: `$CODEX_HOME/skills`, the repo's
+  `.agents/skills`, and the user-level `~/.agents/skills/<name>/` (the npx
+  shared store, independent of `$CODEX_HOME`; the per-agent copies under
   `~/.claude/skills/` flip between symlink and copy on every `update`). The hook
-  command is `python3 <realpath of peers.py> <verb>`, resolved at install time
-  from the script's own location, so it works for a global or a project install
-  and does not depend on npx preserving the exec bit.
+  command is `python3 <realpath of peers.py> session-hook`, resolved at install
+  time from the script's own location.
 
 ## Decision log
 
@@ -168,21 +196,28 @@ agents (D9). It contains:
   app-server` own their own threads; `codex-plugin-cc`'s broker is the wrong
   layer for this and is unmaintained.
 - **D2. One shim process per Codex thread, registering the shim's own pid,
-  started by a Codex `SessionStart` hook.** The per-process record is forced by
-  the sender-side endpoint check and the one-record-per-pid registry layout. The
-  hook shape replaces a supervisor: `session-hook` (on `SessionStart`)
-  daemonises `peers.py shim --thread <session_id>`, which waits until the thread
-  has a name (D6), writes the record, binds the socket, and serves; `SessionEnd`
-  or the death of the `codex` pid ends it. `up` reconciles shims for already
-  running named threads by hand, `down` stops them. Constraints: the shim
-  accepts and handles in its own pid (a forked handler changes the peer pid);
-  it unlinks a leftover socket before binding (orphan sockets from earlier
-  sessions sit in `/tmp/cc-socks`); if a Claude session's stale cleaner deletes
-  its record, it rewrites at most twice and then stops, so a disagreement never
-  becomes write/delete churn; it mirrors `status` from the rollout's
-  `task_started` / `task_complete` events. Registering the real `codex` pid was
-  rejected: the socket's peer pid would not match. Sleep is a non-issue
-  (`procStart` is stable); reboot clears `/tmp` and the hook restarts the shim.
+  owning both directions.** The per-process record is forced by the sender-side
+  endpoint check and the one-record-per-pid registry layout. The shim writes the
+  record, unlinks a leftover socket, binds in the allowlisted directory, serves
+  NDJSON in its own pid (a forked handler changes the peer pid), tails the
+  thread's rollout for status and replies (D4), and exits when the process
+  that held the thread no longer holds its rollout open, which it re-checks
+  every few seconds with `lsof` against the recorded pid (a live daemon can
+  unload one thread while staying alive, so pid existence alone would leave a
+  stale peer accepting messages into an undrained queue; `SessionEnd` is
+  best-effort and absent on a crash). If a Claude session's stale cleaner
+  deletes its record, it rewrites at most twice and then stops, so a
+  disagreement never becomes write/delete churn. `up` starts one shim per
+  registered live thread (idempotent: it deduplicates shims, never
+  reconciliation, so it is safe to run on every hook invocation), `down` stops
+  them. **State and restart**: each shim persists
+  `$CODEX_HOME/session-peers/<uuid>.json` (rollout byte cursor, pending
+  turn-to-sender map, delivered turn ids, budgets, contact list). On start it
+  resumes from the cursor when the file exists and starts at EOF otherwise; it
+  never transmits a completion that happened before its cursor, so a restart
+  cannot resend history. Delivery across a shim crash is best-effort: a turn
+  that completed while no shim was running is not delivered. Sleep is a non-issue (`procStart` is
+  stable); reboot clears `/tmp` and the next `up` restarts the shims.
 - **D3. Python 3 stdlib only.** `sqlite3` reads Codex's databases, `socket`
   speaks the Unix socket without a `nc`/`socat` dependency, `subprocess` runs
   `codex queue`, `ps` and `lsof`, `json` does the rest. Matches this repo's
@@ -190,37 +225,55 @@ agents (D9). It contains:
   `agent-team/scripts/sync.py`, tested by `test.yml`) and the skill-maker rule
   "stdlib only where possible". The `hooks.json` merge therefore lives in
   `peers.py install-hook`, not in a shell script.
-- **D4. Reply policy: auto reply-to-sender plus explicit first-line `@<name>`.**
-  The shim prefixes every queued message with one tag line
-  `[session-peers from=@<claude-name> sid=<sessionId> reply=uds:<socket> hop=N]`.
-  The `Stop` hook: skips when `stop_hook_active` is true; locates the user item
-  for its `turn_id` in `transcript_path` (the rollout JSONL; M0 records whether
-  the rollout carries `turn_id` or the last `role: user` item before EOF is
-  used); parses the tag; re-reads the record for `reply=`, applies the liveness
-  filter and posts only if its `sessionId` equals `sid=` (pids are reused and
-  Claude's own sender guards do not run inside the hook); strips the tag line
-  from the body; records `(session_id, turn_id)` in a small state file so a
-  re-fired `Stop` never re-posts. Independently, when the **first line** of
-  `last_assistant_message` begins with `@<claude-name>`, the hook posts to that
-  session by name (prior-contact rule, D8). Both may fire on one turn;
-  duplicates to one target collapse. `hop=N` is incremented by the shim and
-  dropped at `hop>2` with a stderr line; there is no content-based drop, so a
-  quoted tag in prose is harmless.
-- **D5. Codex to Claude goes through a hook, never through sandboxed `exec`.**
-  Measured: the default sandbox blocks the socket connect. Hooks run on the host.
-  Asking Codex to escalate out of its sandbox per message was tried and is the
-  wrong shape (and the Claude auto-mode classifier refuses to ask a peer to do
-  it). `UserPromptSubmit` is not used: the tag travels inside the queued
-  message, which the model sees anyway. `peers.py send` still exists for host
-  shells; the SKILL.md tells Codex to use a first-line `@name` and let the hook
-  deliver.
-- **D6. Names are Codex's own thread names, and only named threads become
-  peers.** `/rename <name>` in the TUI is the source; the shim registers the
-  name verbatim and appears under it. An unnamed thread gets no shim (this
-  machine holds 15 writer locks; most are throwaway threads that would only add
-  noise and attack surface). The SKILL.md tells users to `/rename` and to add
-  `thread-title` to `[tui] status_line` so the name is visible. `codex queue`
-  refuses an ambiguous name; the shim falls back to the UUID on that error.
+- **D4. Reply policy: auto reply-to-sender plus explicit first-line `@<name>`,
+  delivered by the shim on `task_complete`.** The shim prefixes every queued
+  message with one tag line
+  `[session-peers from=@<claude-name> sid=<sessionId> reply=uds:<socket>]` and
+  remembers, per turn it started, who asked. Tailing the rollout it pairs
+  `task_started.turn_id` with the following `role: user` item and the matching
+  `task_complete`; on completion it posts `last_agent_message` (tag stripped)
+  to the recorded sender, after re-reading that sender's record, applying the
+  liveness filter and checking `sessionId == sid` (pids are reused and Claude's
+  own sender guards do not run here). Independently, when the first line of
+  `last_agent_message` begins with `@<claude-name>`, it posts to that session by
+  name (prior-contact rule, D8). Duplicates to one target collapse;
+  `task_complete` fires once per turn, so a `Stop` hook that continues the turn
+  changes nothing here; a `turn_aborted` or a null `last_agent_message` ends
+  the turn with no deliverable reply and clears the pending entry. A `Stop`
+  hook was the first design and was dropped: it can fire more than once per
+  turn, loses a revised answer when skipped, and `transcript_path` is nullable.
+  **Reply budget** instead of a hop counter (Claude's native reply carries no
+  bridge tag, so a counter restarts each round trip): per (thread, Claude
+  session) the shim delivers at most 3 replies to bridge-originated turns in a
+  row, **first-line `@name` included**, since the model can write `@name` on
+  its own; the counter never resets by inference (an untagged user item can
+  come from another `codex queue` caller or a hook continuation), only by the
+  user: `peers.py budget reset <thread>` or a fresh `up <thread>`. Past the
+  budget the shim drops the reply with a stderr line and the human sees it in
+  the Codex TUI as usual.
+- **D5. Codex to Claude never goes through sandboxed `exec`, and needs no
+  hook.** Measured on macOS: the default sandbox blocks the socket connect
+  (platform- and profile-dependent, so stated as a measurement, not a law). The
+  shim is a host process, so delivery is unsandboxed by construction. `peers.py
+  send --to cc:<name>` still exists for host shells; the SKILL.md tells Codex to
+  use a first-line `@name` and let the shim deliver. `UserPromptSubmit` and
+  `Stop` are not used.
+- **D6. Names are Codex's own thread names; opt-in is explicit registration.**
+  `/rename <name>` in the TUI is the source; the shim registers the name
+  verbatim. Because Codex's title suggester also writes `name` (one-word titles
+  allowed, and the first prompt is persisted as a provisional name), the bridge
+  never infers consent from a name: a thread becomes a peer only after
+  `peers.py up <name|uuid>`, which resolves the name once, refuses a name held
+  by more than one live thread, and persists the UUID in
+  `$CODEX_HOME/session-peers/registered.json`; `down <name|uuid>` unregisters.
+  Registration survives restarts, so the reconcile in a bare `up` (from a shell
+  or the optional hook) brings a registered thread back without a manual step,
+  while a newly `/rename`d thread needs one `up <name>`. Whitespace-free names
+  stay an addressing convention (Claude's typeahead needs quotes otherwise),
+  not a consent signal. The model cannot rename a thread (no tool exposes
+  `thread/name/set`), so a repo's `AGENTS.md` cannot opt a thread in. The
+  SKILL.md tells users to `/rename` and to add `thread-title` to
+  `[tui] status_line` so the name is visible.
 - **D7. Frame content: wrapped without a permission claim when the spike
   proves it, bare otherwise.** M0 sends, from a shim socket as `from`, a wrapper
   carrying `from`, `from-session` and `from-name` but **no `from-mode`**, and a
@@ -232,12 +285,12 @@ agents (D9). It contains:
 - **D8. Security: same-uid filesystem model, narrowed where the bridge would
   widen it.** Modes as measured: socket 0600, record 0644, both directories
   0700. The shim accepts a frame only from a client whose peer uid is ours, caps
-  the body at `MAX_USER_INPUT_TEXT_CHARS`, and applies D4's hop cap. A Codex
+  the body at `MAX_USER_INPUT_TEXT_CHARS`, and applies D4's budget. A Codex
   thread can only be steered (by a repo's `AGENTS.md`, say) into a Claude session
   that already messaged it: explicit `@name` delivery is allowed only to a
-  session recorded in the shim's contact list, while reply-to-sender always
-  works; `SESSION_PEERS_ALLOW_UNSOLICITED=1` lifts the rule for a user who wants
-  it. The hook refuses a `reply=` path outside the allowlisted directories or
+  session in the shim's contact list, while reply-to-sender always works;
+  `SESSION_PEERS_ALLOW_UNSOLICITED=1` lifts the rule for a user who wants it.
+  The shim refuses a `reply=` path outside the allowlisted directories or
   through a symlink. A Claude-to-Codex message is a Codex user turn executed
   under Codex's own approval mode, so Claude gains nothing Codex's user did not
   already allow. Nothing new is exposed on the network.
@@ -253,11 +306,15 @@ agents (D9). It contains:
   `SendMessage` to the shim.
 - **D11. Drift is detected, not prevented.** `peers.py` pins the Claude Code
   and Codex versions it was validated against and prints a one-line warning
-  (never a failure) from `list`, `send` and `doctor` when the installed version
-  is newer (records on this machine already span 2.1.247 to 2.1.263, so
+  (never a failure) from `list`, `send`, `up` and `doctor` when the installed
+  version is newer (records on this machine already span 2.1.247 to 2.1.263, so
   mid-run upgrades are normal). When the registry format changes,
   `send --to codex:<name>` keeps working through `codex queue` without the shim;
-  only the `@`-typeahead degrades.
+  only the `@`-typeahead and reply delivery degrade, and `doctor` says so. When
+  the Codex side is what drifted (unknown `state_*` schema), name resolution
+  and liveness are unavailable: `send --to codex:<uuid>` still queues, prints
+  "liveness unverified", and a name target reports sending unavailable rather
+  than guessing.
 
 ## Milestones
 
@@ -272,78 +329,100 @@ agents (D9). It contains:
   session; record which renders as a named peer and whether the reply lands on
   the shim. Fill D7.
 - [ ] Confirm `notify_when_idle` arrives at the shim as a `control` frame and
-  that `peer_idle_notice` is accepted; confirm whether a rollout item carries
-  `turn_id` (fill D4); confirm `Stop` fires for a queued turn (Q3).
+  that `peer_idle_notice` is accepted.
+- [ ] Rollout tailing: confirm turn-boundary correlation on a thread with two
+  queued items landing back to back, and that `task_complete` for a queued
+  turn carries the reply (Q3).
+- [ ] Hook timing on 0.153.4: when `SessionStart` runs relative to the first
+  turn, and whether a child started with `start_new_session=True` and
+  redirected fds survives the hook's exit.
 - [ ] Write the steps as `references/spike-checklist.md` so R1 can be re-run
   after an upgrade.
 Success: D2, D4 and D7 carry measured answers; the checklist exists; no spike
 code is committed.
 
 **M1. `peers.py` core: roots, discovery, rollout reader, one-shot send.**
-- [ ] Roots from `CLAUDE_CONFIG_DIR` / `CODEX_HOME`; every read tolerates a
-  missing file, DB or unknown schema (empty result plus a stderr warning, never
-  a traceback).
+- [ ] Roots from `CLAUDE_CONFIG_DIR` / `CODEX_HOME` / `sqlite_home`; every read
+  tolerates a missing file, DB or unknown schema (empty result plus a stderr
+  warning, never a traceback).
 - [ ] `list --json`: Claude sessions with the exact liveness filter (pid alive,
   `pidDomain`, `procStart` via `ps -o lstart=` under `LC_ALL=C TZ=UTC`); Codex
-  threads from the highest-numbered `state_*.sqlite` plus `session_index.jsonl`,
-  filtered to rollouts held open per `lsof`.
-- [ ] One rollout reader used by both hooks: events to idle/busy status; the
-  user item for a `turn_id` (or last `role: user`, per M0), with and without a
-  tag line.
-- [ ] `send --to codex:<name|uuid>`: liveness check first, tag line, `codex
-  queue`, UUID fallback on the ambiguous-name error.
+  threads from the recognised `state_*.sqlite` schema plus
+  `session_index.jsonl`, filtered to rollouts held open per `lsof`, with the
+  D6 registration flag and the holding pid.
+- [ ] Rollout reader: incremental tail from a byte cursor that yields turn
+  records `(turn_id, user_text, tag, outcome, last_agent_message)` from the
+  boundary events (`task_started`, `task_complete`, `turn_aborted`), with and
+  without a tag line, null completion text, across a file that grows while
+  read.
+- [ ] `send --to codex:<name|uuid>`: bridge-side name resolution (refuses
+  duplicates), liveness check first, tag line, `codex queue --thread <uuid>`;
+  the D11 degraded mode when the schema is unknown.
 - [ ] `send --to cc:<name>`: registry lookup, optional auth line from the `.key`
   file, frame per D7, `from` set when a shim socket exists for the calling Codex
   thread, otherwise omitted; refuses a socket outside the allowlisted dirs.
 - [ ] D11 version pin and warning.
 Success: `list --json`, the rollout reader and both `send` forms pass
 `test_peers.py` against M4's fixtures with a fake `codex`, `ps` and `lsof` on
-`PATH` and both roots in temp dirs.
+`PATH` and every root in a temp dir.
 
-**M2. Shim, `session-hook`, `up` / `down`.**
-- [ ] `shim --thread <id>`: waits for a name, writes the record, unlinks a
-  leftover socket, binds in the allowlisted directory, serves NDJSON in its own
-  pid, translates `user` frames to a tagged `codex queue`, keeps the contact
-  list (D8), answers `notify_when_idle` with `peer_idle_notice` when the thread
-  goes idle, ignores unknown `control` actions, applies the rewrite-at-most-twice
-  rule, removes record and socket on `SIGTERM` or when the `codex` pid dies.
-- [ ] `session-hook`: on `SessionStart` daemonises one shim for `session_id`
-  (idempotent on `resume`); on `SessionEnd` stops it.
-- [ ] `up` / `down`: manual reconcile against `list`, idempotent.
-Success: a shim started against a temp registry and a temp socket accepts a
-`user` frame from a test client, invokes the fake `codex queue` with the tagged
-body, answers `notify_when_idle`, refuses a foreign-uid client, and removes its
-record and socket on `SIGTERM`; `session-hook` is idempotent on a fixture
-payload.
+**M2. Shim, `up` / `down`.**
+- [ ] `shim --thread <uuid>`: D2 in full (record, socket, own-pid serving,
+  foreign-uid refusal, rewrite-at-most-twice, persisted state, resume-from-
+  cursor, exit when the rollout is no longer held) plus D4 in full (tag,
+  pending-turn map, rollout tail, reply-to-sender with `sid` verification,
+  first-line `@name` with the contact list, reply budget, abort and null-text
+  handling), `notify_when_idle` answered with `peer_idle_notice` on
+  `task_complete` or `turn_aborted`, unknown `control` actions ignored,
+  `status` mirrored busy on `task_started` and idle on either end event.
+- [ ] `up [<name|uuid>]` / `down [<name|uuid>]` / `budget reset <thread>`:
+  registration per D6, reconcile of registered live threads, idempotent (one
+  shim per thread, reconciliation on every call), daemonising with
+  `start_new_session=True` and redirected fds so it is safe from a hook.
+Success: a shim started against a temp registry, a temp socket and a growing
+fixture rollout accepts a `user` frame from a test client, invokes the fake
+`codex queue` with the tagged body and the UUID, posts the fixture's
+`task_complete` reply to the test's listening socket exactly once (and nothing
+for a `turn_aborted` or a null text), does not resend a completion that lies
+before its persisted cursor after a restart, answers `notify_when_idle`,
+refuses a foreign-uid client, enforces the budget including an `@name` reply,
+and removes its record and socket on `SIGTERM` and when the fake `lsof` stops
+listing the rollout.
 
-**M3. `stop-hook`, `install-hook`, `doctor`.**
-- [ ] `stop-hook`: D4 in full (skip on `stop_hook_active`, `turn_id` lookup,
-  `sid=` verification, prior-contact rule, tag strip, dedupe state file, hop
-  cap); always prints `{}` on stdout; exits 0 on a delivery failure (stderr).
-- [ ] `install-hook`: backs up `$CODEX_HOME/hooks.json`, appends one entry each
-  to the existing `SessionStart`, `SessionEnd` and `Stop` arrays (creating the
-  file or an array if absent) keyed by the command string for idempotency, sets
+**M3. `install-hook`, `session-hook`, `doctor`.**
+- [ ] `session-hook`: reads the `SessionStart` payload, runs the bare `up`
+  reconcile detached, prints `{}`; runs on every invocation (`startup`,
+  `resume`, `clear`, `compact`) and relies on `up`'s one-shim-per-thread
+  dedupe.
+- [ ] `install-hook`: backs up `$CODEX_HOME/hooks.json`, appends one
+  `SessionStart` entry into the existing array (creating the file or the array
+  if absent) keyed by the command string for idempotency, sets
   `features.hooks = true` in `config.toml` if unset, and prints the `/hooks`
-  trust step the user must do in Codex.
-- [ ] `doctor`: reports each entry's trust state from `[hooks.state]`, the
-  installed versions against the pins, the socket directory in use, and whether
+  trust step. Optional: the skill works without it.
+- [ ] `doctor`: each bridge entry's trust state by comparing the current
+  definition's hash with `[hooks.state]`, installed versions against the pins,
+  the socket directory in use, live shims versus opted-in threads, and whether
   `codex` and `lsof` are on `PATH`.
-Success: `stop-hook` fed a fixture payload and rollout posts one frame per
-target to a temp socket the test listens on, prints `{}`, exits 0 on a refused
-connect, and posts nothing on a second identical run; `install-hook` is
-idempotent on a fixture `hooks.json` and preserves the two existing `Stop`
-entries; `doctor` reads a fixture `config.toml`.
+Success: `session-hook` on fixture payloads runs the fake `up` on each of the
+four `source` values and `up` starts at most one shim per thread across them;
+`install-hook` is idempotent on a fixture
+`hooks.json` and preserves every existing entry; `doctor` reads a fixture
+`config.toml`.
 
 **M4. Tests in `test.yml`, no live agents needed.**
 - [ ] `scripts/test_peers.py` (unittest, stdlib): registry parsing and
-  liveness with a fake `ps`; Codex discovery against an in-test `state_5.sqlite`
-  schema and a fake `lsof`; rollout reader (status, user item, tag); tag build
-  and parse round trip; target extraction and dedupe; frame construction (auth
+  liveness with a fake `ps`; Codex discovery against an in-test `state`
+  schema, a fixture `session_index.jsonl` and a fake `lsof`; D6 registration (name resolved
+  once, duplicate refused, unregistered thread ignored even when named);
+  rollout reader on a fixture that grows mid-test, with `turn_aborted` and null
+  text; cursor persistence and no-replay on restart; tag build and parse round
+  trip; target extraction, contact list, budget (including `@name`) and dedupe;
+  the degraded mode on an unknown schema; frame construction (auth
   line present/absent, wrapped/bare per D7); socket directory allowlist with
   both dir shapes as fixtures; shim end to end on a temp socket in a thread
-  (socket paths kept under the 104-byte macOS cap); `stop-hook` end to end;
-  `install-hook` merge, backup and idempotency; `doctor` on fixtures; version
-  warning with injected version strings.
+  (socket paths kept under the 104-byte macOS cap); `install-hook` merge, backup
+  and idempotency; `doctor` on fixtures; version warning with injected version
+  strings.
 - [ ] One `test.yml` step: `python3 skills/session-peers/scripts/test_peers.py`;
   `scripts/validate_skills.py` green.
 Success: green on `ubuntu-latest`; macOS is covered by the local run recorded in
@@ -353,42 +432,49 @@ M6.
 - [ ] `SKILL.md`: frontmatter per skill-maker (third person, single line, no
   unquoted colon-space, triggers such as "message the codex session", "tell
   codex", "list codex sessions", "reply to the claude session", "@codex"); body
-  under 500 lines, branched by agent, with install (`npx skills add`,
-  `install-hook`, the `/hooks` trust step, `/rename`, `thread-title` in
-  `[tui] status_line`, the optional Claude `SessionStart` snippet that runs `up`),
-  the reply policy, and the limits (sizes, ambiguous names, sandbox, macOS and
-  Linux only). `agnix --target claude-code skills/session-peers/SKILL.md` clean
-  before commit (local step; agnix is not in CI).
+  under 500 lines, branched by agent, with install (`npx skills add`, `up`,
+  the optional `install-hook` and its `/hooks` trust step, `/rename`,
+  `thread-title` in `[tui] status_line`, the optional Claude `SessionStart`
+  snippet that runs `up`), the registration step after `/rename`, the reply
+  policy and budget, and the limits (sizes, duplicate names, sandbox, macOS and
+  Linux only, replies need a running shim, best-effort across a shim restart).
+  `agnix --target claude-code skills/session-peers/SKILL.md` clean before
+  commit (local step; agnix is not in CI).
 - [ ] README: one row in "All skills" and the count 19 to 20; CHANGELOG
   `Unreleased` under `### Added` as "`session-peers`: ...".
 Success: M6 records that its first round trip was done by following `SKILL.md`
 verbatim.
 
 **M6. End-to-end validation on this machine, recorded inline here.**
-- [ ] Claude `@codex-uzi` (a `/rename`d thread) via `SendMessage` starts a
+- [ ] `up <renamed thread>` then Claude `@<name>` via `SendMessage` starts a
   Codex turn (time it).
-- [ ] Codex first-line `@<claude-name>` reply arrives in that Claude session via
-  the hook, after prior contact.
-- [ ] Auto reply-to-sender: a Claude-queued turn's answer lands in the sender
-  with no `@`.
+- [ ] Auto reply-to-sender: the Claude-queued turn's answer lands in the sender
+  with no `@`, once, including when a third-party `Stop` hook is installed.
+- [ ] Codex first-line `@<claude-name>` reply arrives in that Claude session
+  after prior contact.
 - [ ] `notify_when_idle` from Claude on a Codex peer fires once when the Codex
   turn ends.
-- [ ] Negatives: a message to a thread whose TUI has exited is refused with the
-  "no active session" text; an echo loop stops at `hop>2`; an unsolicited
-  `@name` to a session with no prior contact is dropped with a stderr line.
+- [ ] Negatives: a message to a thread whose process has exited is refused with
+  the "no active session" text; a Claude-Codex ping-pong stops at the budget
+  with the stderr line; an unsolicited `@name` to a session with no prior
+  contact is dropped with a stderr line; a generated-title thread is not a
+  peer until `up`; an interrupted turn (Ctrl-C) leaves the peer idle and
+  delivers nothing; a shim restarted after a completed turn does not resend it.
 Success: all five boxes carry timestamps and measured figures; the header
 Status line is updated.
 
 ## Success criteria
 
-1. A Claude session lists every live `/rename`d Codex thread on the machine as
-   a peer with no Claude-side configuration.
-2. Claude to Codex delivery by `@name` completes in under 15 s worst case (the
-   10 s queue poll plus the turn start), typically under 2 s.
-3. Codex to Claude delivery through the `Stop` hook needs no sandbox change and
-   no per-message approval in Codex.
+1. A Claude session lists every live, registered (D6) Codex thread on the
+   machine as a peer with no Claude-side configuration.
+2. Claude to Codex delivery by `@name` completes in under 15 s worst case for an
+   idle, unpaused thread (the 10 s queue poll plus the turn start), typically
+   under 2 s; a busy or interrupted thread has no bound and `send` says so.
+3. Codex to Claude delivery needs no sandbox change, no Codex hook and no
+   per-message approval in Codex.
 4. A turn that a Claude session queued is answered back to that session with
-   no addressing by the Codex model.
+   no addressing by the Codex model, exactly once while the shim runs
+   (best-effort across a shim restart).
 5. All logic is covered by stdlib unit tests in `test.yml`; the only untested
    paths are the real `codex` binary and a real Claude session, both exercised
    in M6.
@@ -404,29 +490,35 @@ Criteria 2, 3 and 4 need a live agent and are measured in M6 only.
   change the record shape, add a mandatory field, or tighten the endpoint
   checks. Mitigation: D11's warning, `references/spike-checklist.md` re-run after
   an upgrade, and the skill-only send path that survives any registry change.
-- **R2. Codex internals used by discovery (`state_*.sqlite` schema,
-  `session_index.jsonl`, rollout event names) are undocumented.** `codex queue`
-  itself is a supported CLI and is the only thing `send` needs; discovery
-  degrades to "name your thread and pass it" if the DB moves. Every DB read is
-  wrapped; an unknown schema yields an empty list plus a warning.
-- **R3. Codex's sandbox.** Handled by D5; a future Codex release could run
-  hooks inside the sandbox, which M6's negative test would catch.
-- **R4. Hook trust UX.** A new entry is inert until trusted in `/hooks`; a
-  skipped step looks like "replies never arrive". `install-hook` prints the
-  step and `doctor` reports an untrusted entry.
+- **R2. Codex internals used by discovery and delivery (`state_*.sqlite`
+  schema, `session_index.jsonl`, rollout event names and layout) are
+  undocumented.** `codex queue` itself is a supported CLI and is the only thing
+  `send --to codex:` needs; discovery degrades to "name your thread and pass
+  it by UUID with liveness unverified" and reply delivery degrades to none,
+  with `doctor` naming the cause.
+  Every DB read is wrapped; an unknown schema yields an empty list plus a
+  warning; an unrecognised rollout event is skipped.
+- **R3. Sandbox and platform.** The measured macOS sandbox blocks sockets from
+  `exec`; the shim avoids `exec` entirely. Linux socket dir is
+  `/run/user/<uid>/cc-socks`; both shapes are fixtures in M4.
+- **R4. Hook trust UX (optional path only).** A `SessionStart` entry is inert
+  until trusted in `/hooks`; `up` by hand covers it and `doctor` reports an
+  untrusted entry.
 - **R5. Queue latency and lost wakes.** The queue reader polls every 10 s and a
   thread not loaded in any live process accumulates silently; `send` checks
-  liveness first and says so instead of queueing into a dead thread.
+  liveness first and says so instead of queueing into a dead thread; a thread
+  with no turn yet is addressed by UUID.
 - **R6. Loops and cost.** Each delivered message is a paid turn on the
   receiving side. Claude's inbound rate limit, identical-repeat drop and 50-item
-  queue cap cover the Codex-originated leg; D4's hop cap covers the other.
-- **R7. Name collisions.** Two Codex threads named the same, or a Codex name
-  equal to a Claude session's, make `@name` ambiguous. Codex refuses the queue;
-  Claude disambiguates with its `[ref]` as it does for same-named Claude
-  sessions.
-- **R8. Multiple `Stop` hooks.** A third-party hook that continues the turn
-  re-fires `Stop`; the dedupe state file and the `stop_hook_active` skip keep
-  delivery to exactly once.
+  queue cap cover the Codex-originated leg; D4's reply budget covers the
+  other and resets only by explicit user action.
+- **R7. Name collisions.** `up <name>` refuses a name held by two live
+  threads (register by UUID instead); a Codex name equal to a Claude session's is
+  disambiguated by Claude with its `[ref]` as for same-named Claude sessions.
+- **R8. One process, several threads.** A TUI can hold several threads (`/new`);
+  `lsof` attributes each rollout to the same pid, which is correct for liveness,
+  each thread still gets its own shim, and a thread unloaded from a live
+  process (its rollout closed) is unregistered by the next liveness check.
 
 ## Open questions (resolved during implementation)
 
@@ -435,8 +527,9 @@ Criteria 2, 3 and 4 need a live agent and are measured in M6 only.
   written into D7.
 - Q2. Is a record without a `.key` file accepted by `SendMessage`? Resolved by
   M0.
-- Q3. Does Codex fire `Stop` for a turn started by a queued message exactly as
-  for a typed one (expected yes; the transcript shows the queued message as an
-  ordinary `role: user` item)? Resolved by M0.
-- Q4. Does the rollout carry `turn_id` on items, so the hook can find its own
-  turn's user message when several queued items landed? Resolved by M0.
+- Q3. Does a queued turn produce the same `task_started` / `task_complete`
+  pair as a typed one? Measured today for four queued turns: yes, with
+  `last_agent_message` carrying the reply. M0 re-checks the two-items
+  back-to-back case.
+- Q4. Where exactly does `SessionStart` fire on 0.153.4 (first turn vs launch),
+  and does a detached `up` survive the hook runner? Resolved by M0.
