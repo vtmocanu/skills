@@ -813,15 +813,31 @@ class TestCodexDiscovery(Base):
         with contextlib.redirect_stderr(err):
             self.assertEqual(peers.codex_threads(), ([], False))
 
-    def test_sqlite_home_comes_from_config_toml(self):
+    def test_configured_sqlite_home_beats_the_environment(self):
+        # P6: Codex's own resolver prefers the configured value, so the bridge
+        # must too, or it reads a different database than Codex writes.
         alt = self.root / "dbs"
         alt.mkdir()
         (self.codex_dir / "config.toml").write_text(
             'model = "gpt-5"\nsqlite_home = "%s"\n' % alt
         )
         self.assertEqual(peers.codex_sqlite_home(), str(alt))
-        os.environ["CODEX_SQLITE_HOME"] = str(self.root / "env-wins")
-        self.assertEqual(peers.codex_sqlite_home(), str(self.root / "env-wins"))
+        os.environ["CODEX_SQLITE_HOME"] = str(self.root / "env-loses")
+        self.assertEqual(peers.codex_sqlite_home(), str(alt))
+
+    def test_the_environment_is_used_when_the_config_says_nothing(self):
+        (self.codex_dir / "config.toml").write_text('model = "gpt-5"\n')
+        os.environ["CODEX_SQLITE_HOME"] = str(self.root / "from-env")
+        self.assertEqual(peers.codex_sqlite_home(), str(self.root / "from-env"))
+        os.environ.pop("CODEX_SQLITE_HOME")
+        self.assertEqual(peers.codex_sqlite_home(), str(self.codex_dir))
+
+    def test_a_sqlite_home_inside_another_table_is_ignored(self):
+        # P6: that key belongs to that table, not to the bridge.
+        (self.codex_dir / "config.toml").write_text(
+            '[some_tool]\nsqlite_home = "%s"\n' % (self.root / "wrong")
+        )
+        self.assertEqual(peers.codex_sqlite_home(), str(self.codex_dir))
 
     def test_lsof_missing_from_path_is_reported_not_fatal(self):
         os.environ["PATH"] = str(self.root / "empty")
@@ -1089,10 +1105,11 @@ class TestRolloutTail(Base):
 class TestSendToCodex(Base):
     def test_send_queues_by_uuid_with_the_tag_line(self):
         tid, _r = self.one_thread()
+        listener, _rec = self.add_listener(name="cc-main", session_id="s1")
         rc, out, _err = self.cli(
             "send", "--to", "codex:%s" % tid, "--message", "hello",
             "--from-name", "cc-main", "--from-sid", "s1",
-            "--from-socket", str(self.socks / "1.sock"),
+            "--from-socket", listener.path,
         )
         self.assertEqual(rc, 0)
         calls = self.queue_calls()
@@ -1100,7 +1117,7 @@ class TestSendToCodex(Base):
         self.assertEqual(calls[0][:4], ["queue", "--thread", tid, "--message"])
         tag, body = peers.parse_tag(calls[0][4])
         self.assertEqual(tag["from"], "cc-main")
-        self.assertEqual(tag["reply"], str(self.socks / "1.sock"))
+        self.assertEqual(tag["reply"], listener.path)
         self.assertEqual(body, "hello")
         self.assertIn("queued to", out)
 
@@ -2131,13 +2148,16 @@ class TestInstallHook(Base):
         self.assertEqual(self.hooks_path().read_text(), first)
         self.assertEqual(len(list(self.codex_dir.glob("hooks.json.*bak*"))), 1)
 
-    def test_a_missing_hooks_file_is_created(self):
+    def test_a_missing_hooks_file_is_created_in_the_shape_codex_uses(self):
+        # P4: the real ~/.codex/hooks.json wraps the event map in "hooks".
         rc, out, _err = self.cli("install-hook")
         self.assertEqual(rc, 0)
         self.assertNotIn("backed up", out)
         data = json.loads(self.hooks_path().read_text())
-        self.assertEqual(len(data["SessionStart"]), 1)
-        self.assertEqual(data["SessionStart"][0]["hooks"][0]["timeout"], 10)
+        self.assertIn("hooks", data)
+        self.assertEqual(len(data["hooks"]["SessionStart"]), 1)
+        self.assertEqual(data["hooks"]["SessionStart"][0]["hooks"][0]["timeout"], 10)
+        self.assertNotIn("SessionStart", set(data) - {"hooks"})
 
     def test_the_nested_hooks_shape_is_handled_too(self):
         self.hooks_path().write_text(json.dumps({"hooks": self.EXISTING}))
@@ -2898,6 +2918,332 @@ class TestBudgetResetPersistence(ShimBase):
         self.assertEqual(shim.budgets, {})
         state = peers.read_json(peers.thread_state_path(tid))
         self.assertEqual(state["budgets"], {})
+
+
+# ==========================================================================
+# PR review round: P1..P9
+# ==========================================================================
+
+
+class TestTomlHeaderHandling(Base):
+    """P1: a header may carry a trailing comment; a comment is not a header."""
+
+    def config(self):
+        return self.codex_dir / "config.toml"
+
+    def test_a_header_with_a_trailing_comment_is_one_table(self):
+        self.config().write_text('[features] # flags\nweb_search = true\n')
+        self.cli("install-hook")
+        text = self.config().read_text()
+        self.assertEqual(text.count("[features]"), 1)
+        self.assertEqual(text.count("hooks ="), 1)
+        self.assertIn("web_search = true", text)
+        self.assertTrue(peers.features_hooks_valid(text))
+
+    def test_a_commented_out_header_is_not_edited(self):
+        self.config().write_text(
+            "# [features]\n# hooks = false\n\n[features]\nweb_search = true\n"
+        )
+        self.cli("install-hook")
+        text = self.config().read_text()
+        lines = text.splitlines()
+        self.assertEqual(lines[0], "# [features]")
+        self.assertEqual(lines[1], "# hooks = false")
+        self.assertEqual(text.count("hooks = true"), 1)
+        self.assertTrue(peers.features_hooks_valid(text))
+
+    def test_a_trailing_comment_on_a_later_header_still_ends_the_table(self):
+        self.config().write_text(
+            "[features]\nweb_search = true\n[tui] # ui\nhooks = 1\n"
+        )
+        self.cli("install-hook")
+        text = self.config().read_text()
+        lines = text.splitlines()
+        self.assertEqual(lines[lines.index("[features]") + 1], "hooks = true")
+        self.assertIn("hooks = 1", text)
+
+    def test_the_lite_reader_sees_a_header_with_a_comment(self):
+        self.config().write_text('[features] # flags\nhooks = true\n')
+        cfg = peers.read_toml_lite(str(self.config()))
+        self.assertIs(cfg["features"]["hooks"], True)
+        self.assertNotIn("hooks", cfg[""])
+
+    def test_a_config_that_would_not_parse_is_left_alone(self):
+        # P1: refuse rather than write a file Codex cannot read.
+        broken = "[features]\nhooks = false\nthis line is not toml\n"
+        self.config().write_text(broken)
+        _rc, _out, err = self.cli("install-hook")
+        self.assertEqual(self.config().read_text(), broken)
+        self.assertIn("add it by hand", err)
+        self.assertEqual(list(self.codex_dir.glob("config.toml.*bak*")), [])
+
+    def test_a_pre_existing_duplicate_key_is_collapsed(self):
+        self.config().write_text("[features]\nhooks = false\nhooks = false\n")
+        self.cli("install-hook")
+        text = self.config().read_text()
+        self.assertEqual(text.count("hooks ="), 1)
+        self.assertTrue(peers.features_hooks_valid(text))
+
+
+class TestShimOwnershipIsExclusive(Base):
+    """P2: a second shim must change nothing that belongs to the first."""
+
+    def test_a_second_shim_leaves_the_first_shims_files_untouched(self):
+        tid, _rollout = self.one_thread()
+        owner = self.hold_pidfile(tid)
+        state_path = peers.thread_state_path(tid)
+        peers.write_json_atomic(
+            state_path, {"thread_id": tid, "sentinel": "do-not-touch",
+                         "budgets": {"s1": 2}}
+        )
+        record = self.sessions / ("%d.json" % owner)
+        record.write_text(json.dumps(
+            {"pid": owner, "entrypoint": "codex", "sessionId": tid,
+             "messagingSocketPath": str(self.socks / "owner.sock")}
+        ))
+        state_before = pathlib.Path(state_path).read_text()
+
+        proc = self.spawn("shim", "--thread", tid)
+        out, _ = proc.communicate(timeout=30)
+        self.assertEqual(proc.returncode, 4, out)
+        self.assertIn("already owns thread", out)
+        self.assertEqual(
+            pathlib.Path(peers.thread_pid_path(tid)).read_text().strip(),
+            str(owner),
+        )
+        self.assertEqual(pathlib.Path(state_path).read_text(), state_before)
+        self.assertTrue(record.exists())
+
+    def test_the_owner_still_cleans_up_its_own_files(self):
+        tid, _rollout = self.one_thread()
+        proc = subprocess.Popen(
+            [sys.executable, str(PEERS), "shim", "--thread", tid],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, env=dict(os.environ),
+        )
+        self._children.append(proc)
+        # Wait for SERVING, not merely for the ownership lock: the lock is
+        # taken first, and a shim killed before its handlers are in cannot
+        # clean up.
+        self.assertIsNotNone(wait_for(lambda: peers.shim_ready(tid)))
+        proc.terminate()
+        proc.wait(timeout=10)
+        self.assertFalse(os.path.exists(peers.thread_pid_path(tid)))
+        self.assertEqual(self.shim_records(), [])
+
+    def test_shim_ready_waits_for_the_record_not_just_the_lock(self):
+        tid, _rollout = self.one_thread()
+        self.hold_pidfile(tid)
+        # The lock is held but no record exists, which is what a shim looks
+        # like between taking ownership and binding its socket.
+        self.assertIsNotNone(peers.shim_pid(tid))
+        self.assertIsNone(peers.shim_ready(tid))
+
+
+class TestReplyNeedsASessionId(ShimBase):
+    """P3: a socket is named after a pid, and pids are reused."""
+
+    def test_a_tag_without_a_session_id_is_not_delivered(self):
+        shim, _tid, _rollout = self.make_shim()
+        listener, _rec = self.add_listener(name="cc-main", session_id="s1")
+        turn = peers.Turn(
+            "t1", "ping", {"from": "cc-main", "sid": None, "reply": listener.path},
+            "complete", "the answer", None,
+        )
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            shim._handle_turn_end(turn)
+        time.sleep(0.2)
+        self.assertEqual(listener.of_type("user"), [])
+        self.assertIn("no session id", err.getvalue())
+
+    def test_a_tag_whose_sid_is_the_absent_sentinel_is_not_delivered(self):
+        shim, _tid, _rollout = self.make_shim()
+        listener, _rec = self.add_listener(name="cc-main", session_id="s1")
+        line = peers.build_tag("cc-main", None, listener.path)
+        tag, _body = peers.parse_tag(line + "\nping")
+        turn = peers.Turn("t1", "ping", tag, "complete", "the answer", None)
+        with contextlib.redirect_stderr(io.StringIO()):
+            shim._handle_turn_end(turn)
+        time.sleep(0.2)
+        self.assertEqual(listener.of_type("user"), [])
+
+    def test_send_fills_the_session_id_from_the_registry(self):
+        tid, _r = self.one_thread()
+        listener, _rec = self.add_listener(name="cc-main", session_id="s-real")
+        rc, _out, _err = self.cli(
+            "send", "--to", "codex:%s" % tid, "--message", "hi",
+            "--from-socket", listener.path,
+        )
+        self.assertEqual(rc, 0)
+        tag, _body = peers.parse_tag(self.queue_calls()[0][4])
+        self.assertEqual(tag["sid"], "s-real")
+        self.assertEqual(tag["from"], "cc-main")
+
+    def test_send_refuses_a_from_socket_nothing_listens_on(self):
+        tid, _r = self.one_thread()
+        rc, _out, err = self.cli(
+            "send", "--to", "codex:%s" % tid, "--message", "hi",
+            "--from-socket", str(self.socks / "nobody.sock"),
+        )
+        self.assertEqual(rc, 1)
+        self.assertIn("no live Claude session listens", err)
+        self.assertEqual(self.queue_calls(), [])
+
+
+class TestByteBudget(Base):
+    """P5: the argv budget is bytes; characters are not bytes."""
+
+    def test_truncate_utf8_never_splits_a_character(self):
+        text = "\u00e9" * 100  # two bytes each
+        cut = peers.truncate_utf8(text, 101)
+        self.assertEqual(peers.utf8_len(cut), 100)
+        self.assertEqual(cut, "\u00e9" * 50)
+        cut.encode("utf-8").decode("utf-8")  # must not raise
+
+    def test_a_multibyte_body_is_trimmed_to_the_byte_budget(self):
+        tid, rollout = self.one_thread()
+        shim = peers.Shim(peers.resolve_thread(tid))
+        listener, _rec = self.add_listener(name="cc-main", session_id="s1")
+        # Three bytes per character, so a character-based cap would overshoot
+        # the argv budget by a factor of three and the exec would fail.
+        body = "\u4e2d" * (peers.argv_text_budget() // 2)
+        wrapped = peers.build_wrapper(body, listener.path, "s1", "cc-main")
+        frame = peers.build_user_frame(wrapped, listener.path)
+        with contextlib.redirect_stderr(io.StringIO()):
+            shim._handle_line(json.dumps(frame))
+        queued = self.queue_calls()[0][4]
+        self.assertLessEqual(peers.utf8_len(queued), peers.argv_text_budget())
+        queued.encode("utf-8").decode("utf-8")
+
+    def test_the_queue_refuses_a_body_over_the_byte_budget(self):
+        tid, _r = self.one_thread()
+        with self.assertRaises(peers.QueueError) as ctx:
+            peers.codex_queue(tid, "\u4e2d" * peers.argv_text_budget())
+        self.assertIn("bytes", str(ctx.exception))
+        self.assertEqual(self.queue_calls(), [])
+
+    def test_the_environment_is_measured_in_bytes_too(self):
+        plain = peers.argv_text_budget()
+        os.environ["SESSION_PEERS_PADDING"] = "\u4e2d" * 2000
+        try:
+            padded = peers.argv_text_budget()
+        finally:
+            os.environ.pop("SESSION_PEERS_PADDING")
+        # 2000 characters of three bytes each must cost about 6000, not 2000.
+        self.assertGreater(plain - padded, 5000)
+
+
+class TestStatusAtStart(Base):
+    """P7: a shim that starts mid-turn must not advertise idle."""
+
+    def mid_turn_thread(self):
+        tid = str(uuidlib.uuid4())
+        rollout = self.make_rollout(lines=[
+            ev("task_started", turn_id="t-old"),
+            user_item("older"),
+            ev("task_complete", turn_id="t-old", last_agent_message="older answer"),
+            ev("task_started", turn_id="t-live"),
+            user_item("a turn already running"),
+        ])
+        self.make_state_db([{"id": tid, "name": "codex-uzi",
+                             "rollout_path": str(rollout)}])
+        self.set_holder(rollout)
+        return tid, rollout
+
+    def test_a_shim_starting_during_a_turn_reports_busy(self):
+        tid, _rollout = self.mid_turn_thread()
+        shim = peers.Shim(peers.resolve_thread(tid))
+        self.assertEqual(shim.tail.last_boundary, "started")
+        self.assertEqual(shim.status, "busy")
+        self.assertEqual(shim.record()["status"], "busy")
+
+    def test_the_record_goes_busy_then_idle_across_a_real_start(self):
+        tid, rollout = self.mid_turn_thread()
+        proc = subprocess.Popen(
+            [sys.executable, str(PEERS), "shim", "--thread", tid],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, env=dict(os.environ),
+        )
+        self._children.append(proc)
+        try:
+            rec = wait_for(lambda: (self.shim_records() or [None])[0])
+            self.assertIsNotNone(rec)
+            self.assertEqual(rec["status"], "busy")
+            append(rollout, ev("task_complete", turn_id="t-live",
+                               last_agent_message="done"))
+            self.assertTrue(wait_for(
+                lambda: (self.shim_records() or [{}])[0].get("status") == "idle"
+            ))
+        finally:
+            proc.terminate()
+            proc.wait(timeout=10)
+
+    def test_an_idle_thread_still_starts_idle(self):
+        tid, _rollout = self.one_thread()
+        self.assertEqual(peers.Shim(peers.resolve_thread(tid)).status, "idle")
+
+
+class TestHookCommandQuoting(Base):
+    """P8: a path with a space would split into two arguments."""
+
+    def test_a_path_with_a_space_is_quoted(self):
+        command = peers.hook_command("/Users/x/My Skills/peers.py")
+        self.assertEqual(
+            command, "python3 '/Users/x/My Skills/peers.py' session-hook"
+        )
+        import shlex as _shlex
+        self.assertEqual(
+            _shlex.split(command),
+            ["python3", "/Users/x/My Skills/peers.py", "session-hook"],
+        )
+
+    def test_an_ordinary_path_is_left_unquoted(self):
+        self.assertEqual(
+            peers.hook_command("/Users/x/peers.py"),
+            "python3 /Users/x/peers.py session-hook",
+        )
+
+    def test_the_installed_entry_uses_the_quoted_form(self):
+        self.cli("install-hook")
+        data = json.loads((self.codex_dir / "hooks.json").read_text())
+        command = data["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+        self.assertEqual(command, peers.hook_command())
+
+
+class TestRegistrationIsLocked(Base):
+    """P9: two `up` calls at once must not lose one registration."""
+
+    def test_two_concurrent_registrations_both_survive(self):
+        script = self.root / "reg.py"
+        script.write_text(
+            "import importlib.util, sys\n"
+            "spec = importlib.util.spec_from_file_location('peers', %r)\n"
+            "peers = importlib.util.module_from_spec(spec)\n"
+            "spec.loader.exec_module(peers)\n"
+            "peers.register_thread({'id': sys.argv[1], 'name': sys.argv[2]})\n"
+            % str(PEERS)
+        )
+        procs = [
+            subprocess.Popen(
+                [sys.executable, str(script), "thread-%d" % i, "codex-%d" % i],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                env=dict(os.environ), text=True,
+            )
+            for i in range(6)
+        ]
+        for proc in procs:
+            out, _ = proc.communicate(timeout=30)
+            self.assertEqual(proc.returncode, 0, out)
+        registered = peers.read_registered()
+        self.assertEqual(
+            sorted(registered), ["thread-%d" % i for i in range(6)]
+        )
+
+    def test_unregister_is_locked_the_same_way(self):
+        peers.write_registered({"a": {"name": "x"}, "b": {"name": "y"}})
+        self.assertTrue(peers.unregister_thread("a"))
+        self.assertEqual(sorted(peers.read_registered()), ["b"])
 
 
 class TestCliSurface(Base):

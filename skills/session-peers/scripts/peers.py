@@ -34,6 +34,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import signal
 import socket
 import sqlite3
@@ -81,6 +82,9 @@ AT_NAME_RE = re.compile(r"^@([A-Za-z0-9][A-Za-z0-9_.\-]*)")
 
 # Sentinel for a tag field the sender could not fill in. Parses back to None.
 TAG_ABSENT = "-"
+
+# `[features] # flags` is a valid TOML header; `# [features]` is a comment.
+TOML_HEADER_RE = re.compile(r"^\s*\[([^\]]+)\]\s*(?:#.*)?$")
 
 # A peer name reaches Claude inside a wrapper attribute and inside the tag line,
 # so it is restricted at the door rather than escaped at every use (B1).
@@ -305,22 +309,28 @@ def read_toml_lite(path):
     `[features] hooks` flag, and the `[hooks.state."..."]` blocks. Section keys
     are the raw text between the brackets, so a quoted dotted key survives.
     """
-    out = {"": {}}
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as fh:
-            lines = fh.read().splitlines()
+            text = fh.read()
     except FileNotFoundError:
-        return out
+        return {"": {}}
     except OSError as exc:
         log("ignoring unreadable %s: %s" % (path, exc))
-        return out
+        return {"": {}}
+    return read_toml_lite_text(text)
+
+
+def read_toml_lite_text(text):
+    out = {"": {}}
+    lines = text.splitlines()
     section = ""
     for line in lines:
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
             continue
-        if stripped.startswith("[") and stripped.endswith("]"):
-            section = stripped[1:-1].strip()
+        header = TOML_HEADER_RE.match(line)
+        if header:
+            section = header.group(1).strip()
             if section.startswith("[") and section.endswith("]"):
                 section = section[1:-1].strip()  # array of tables
             out.setdefault(section, {})
@@ -354,20 +364,19 @@ def codex_config_path():
 
 
 def codex_sqlite_home():
-    """CODEX_SQLITE_HOME, else config.toml `sqlite_home`, else CODEX_HOME."""
+    """config.toml `sqlite_home`, else CODEX_SQLITE_HOME, else CODEX_HOME.
+
+    P6: the configured value wins, matching Codex's own resolver, and only a
+    TOP-LEVEL key counts. A `sqlite_home` inside another table belongs to that
+    table, and taking it would point the bridge at the wrong database.
+    """
+    cfg = read_toml_lite(codex_config_path())
+    value = cfg.get("", {}).get("sqlite_home")
+    if isinstance(value, str) and value:
+        return os.path.expanduser(value)
     env = os.environ.get("CODEX_SQLITE_HOME")
     if env:
         return os.path.expanduser(env)
-    cfg = read_toml_lite(codex_config_path())
-    value = cfg.get("", {}).get("sqlite_home")
-    if not value:
-        # Tolerate the key living under a table rather than at the root.
-        for section, keys in cfg.items():
-            if section and "sqlite_home" in keys:
-                value = keys["sqlite_home"]
-                break
-    if isinstance(value, str) and value:
-        return os.path.expanduser(value)
     return codex_home()
 
 
@@ -877,17 +886,21 @@ def register_thread(thread):
     name = thread.get("name")
     if name is not None:
         require_peer_name(name)
-    threads = read_registered()
-    threads[thread["id"]] = {"name": name, "registered_at": now_iso()}
-    write_registered(threads)
+    # P9: a read-modify-write on one shared file, so it runs under the lock the
+    # reconcile uses. Two `up` calls at once would otherwise lose one.
+    with reconcile_lock():
+        threads = read_registered()
+        threads[thread["id"]] = {"name": name, "registered_at": now_iso()}
+        write_registered(threads)
 
 
 def unregister_thread(thread_id) -> bool:
-    threads = read_registered()
-    if thread_id in threads:
-        del threads[thread_id]
-        write_registered(threads)
-        return True
+    with reconcile_lock():
+        threads = read_registered()
+        if thread_id in threads:
+            del threads[thread_id]
+            write_registered(threads)
+            return True
     return False
 
 
@@ -1330,8 +1343,26 @@ class QueueError(Exception):
     pass
 
 
+def utf8_len(text) -> int:
+    return len(text.encode("utf-8"))
+
+
+def truncate_utf8(text, max_bytes):
+    """Trim `text` to at most `max_bytes` UTF-8 bytes, on a character boundary.
+
+    P5: the budget is a byte budget, so cutting by characters overshoots on any
+    non-ASCII text, and cutting by bytes alone can split a code point.
+    """
+    encoded = text.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return text
+    if max_bytes <= 0:
+        return ""
+    return encoded[:max_bytes].decode("utf-8", "ignore")
+
+
 def argv_text_budget():
-    """What `codex queue --message <text>` can actually carry.
+    """BYTES that `codex queue --message <text>` can actually carry.
 
     The message is one argv element, so the real ceiling is ARG_MAX minus the
     environment, not Codex's MAX_USER_INPUT_TEXT_CHARS. On macOS both are
@@ -1342,7 +1373,7 @@ def argv_text_budget():
         arg_max = os.sysconf("SC_ARG_MAX")
     except (ValueError, OSError, AttributeError):
         return MAX_TEXT_CHARS
-    env_bytes = sum(len(k) + len(v) + 2 for k, v in os.environ.items())
+    env_bytes = sum(utf8_len(k) + utf8_len(v) + 2 for k, v in os.environ.items())
     budget = arg_max - env_bytes - 8192
     if sys.platform.startswith("linux"):
         # Linux caps ONE argv element at MAX_ARG_STRLEN (32 pages), far below
@@ -1361,11 +1392,17 @@ def codex_queue(thread_id, text):
     rc != 0, or "No active session" on stderr, means the thread is not live.
     """
     budget = argv_text_budget()
-    if len(text) > budget:
+    size = utf8_len(text)
+    if size > budget:
         raise QueueError(
-            "message is %d chars, over the %d cap this machine can pass to "
-            "`codex queue` (Codex itself stops at %d)"
-            % (len(text), budget, MAX_TEXT_CHARS)
+            "message is %d bytes, over the %d cap this machine can pass to "
+            "`codex queue` (Codex itself stops at %d characters)"
+            % (size, budget, MAX_TEXT_CHARS)
+        )
+    if len(text) > MAX_TEXT_CHARS:
+        raise QueueError(
+            "message is %d characters, over Codex's %d cap"
+            % (len(text), MAX_TEXT_CHARS)
         )
     rc, out, err = run_cmd(
         ["codex", "queue", "--thread", str(thread_id), "--message", text], timeout=60
@@ -1451,7 +1488,10 @@ class Shim:
             self.tail.last_boundary = last_boundary(self.rollout_path)
 
         self.started_at = time.time()
-        self.status = "idle"
+        # P7: the cursor starts at EOF, so a shim that starts DURING a turn
+        # never sees its task_started. The reconstructed boundary is the only
+        # thing that knows, and advertising idle mid-turn is a visible lie.
+        self.status = "busy" if self.tail.last_boundary == "started" else "idle"
         self.poll_interval = _float_env(
             "SESSION_PEERS_POLL_INTERVAL", POLL_INTERVAL_DEFAULT
         )
@@ -1489,15 +1529,23 @@ class Shim:
         parsed = parse_version(raw)
         self.codex_version = ".".join(str(n) for n in parsed) if parsed else CODEX_TESTED
 
-        self._consume_budget_marker(initial=True)
-        self._bind()
+        # P2: ownership FIRST. Everything below mutates state another shim may
+        # own (the pidfile, the per-thread state file, the budget marker), and
+        # _cleanup would delete the live shim's pidfile on the way out.
+        if not self._acquire_ownership():
+            log(
+                "another shim already owns thread %s; exiting without touching "
+                "its pidfile, state or record" % self.thread_id
+            )
+            return 4
+        # From here on this process owns files that need removing, so the
+        # handlers go in BEFORE the bind rather than after the record write.
+        signal.signal(signal.SIGTERM, self._on_signal)
+        signal.signal(signal.SIGINT, self._on_signal)
         try:
-            # Everything past the bind is inside the cleanup guard: a refusal
-            # here must not leave a socket or a record behind.
+            self._consume_budget_marker(initial=True)
+            self._bind()
             self._write_record()
-            self._write_pidfile()
-            signal.signal(signal.SIGTERM, self._on_signal)
-            signal.signal(signal.SIGINT, self._on_signal)
 
             accept = threading.Thread(
                 target=self._accept_loop, name="accept", daemon=True
@@ -1524,8 +1572,12 @@ class Shim:
             if self._cleaned:
                 return
             self._cleaned = True
-        self._save_state()
-        for path in (self.record_path, self.sock_path, thread_pid_path(self.thread_id)):
+        paths = [self.record_path, self.sock_path]
+        if self._pidfile_fd is not None:
+            # Only the owner removes the pidfile (P2).
+            self._save_state()
+            paths.append(thread_pid_path(self.thread_id))
+        for path in paths:
             try:
                 os.unlink(path)
             except (FileNotFoundError, OSError):
@@ -1641,11 +1693,12 @@ class Shim:
             mode=0o600,
         )
 
-    def _write_pidfile(self):
+    def _acquire_ownership(self) -> bool:
         """Take the exclusive flock that proves this shim owns the thread.
 
         Held for the process's whole life; the kernel releases it on exit,
         crash included, so nothing else can mistake a recycled pid for us.
+        Returns False when another shim holds it, having changed nothing.
         """
         path = thread_pid_path(self.thread_id)
         fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
@@ -1658,14 +1711,13 @@ class Shim:
                 # instant, so a single failure is not proof of another shim.
                 if attempt == 4:
                     os.close(fd)
-                    raise SystemExit(
-                        "another shim already owns thread %s" % self.thread_id
-                    )
+                    return False
                 time.sleep(0.1)
         os.ftruncate(fd, 0)
         os.write(fd, ("%d\n" % os.getpid()).encode("utf-8"))
         # Deliberately not closed: closing would drop the lock.
         self._pidfile_fd = fd
+        return True
 
     # -- inbound -----------------------------------------------------------
 
@@ -1810,12 +1862,14 @@ class Shim:
         tag = build_tag(sender_name, sender_sid, sock_path if sender else None)
         # The tag rides inside the same text Codex caps, so the body is trimmed
         # to leave room for it rather than pushing the whole message over.
-        room = argv_text_budget() - len(tag) - 1
+        # P5: the argv budget is bytes; the Codex cap is characters. Both.
+        room_bytes = argv_text_budget() - utf8_len(tag) - 1
+        room_chars = MAX_TEXT_CHARS - len(tag) - 1
         trimmed_from = None
-        if len(body) > room:
-            log("truncating an inbound body of %d chars to %d" % (len(body), room))
+        if utf8_len(body) > room_bytes or len(body) > room_chars:
             trimmed_from = len(body)
-            body = body[:room]
+            body = truncate_utf8(body, room_bytes)[:room_chars]
+            log("truncating an inbound body of %d chars to %d" % (trimmed_from, len(body)))
         text = "%s\n%s" % (tag, body)
 
         held, _pid = thread_is_held(self.rollout_path, self.holder_pid)
@@ -2012,9 +2066,16 @@ class Shim:
                 rec = claude_record_by_socket(reply_socket, records)
                 if rec is None:
                     log("the session that queued turn %s is gone" % turn.turn_id)
-                elif tag.get("sid") and rec.get("sessionId") != tag.get("sid"):
-                    # Pids are reused and Claude's own sender guards do not run
-                    # here, so the session id is re-checked before delivery.
+                elif not tag.get("sid"):
+                    # P3: sockets are named after a pid and pids are reused, so
+                    # a tag with no session id cannot prove the session at that
+                    # socket is the one that asked. No id, no auto-delivery.
+                    log(
+                        "the tag for turn %s carries no session id; not "
+                        "auto-delivering to %s" % (turn.turn_id, reply_socket)
+                    )
+                elif rec.get("sessionId") != tag.get("sid"):
+                    # Claude's own sender guards do not run here.
                     log("session id at %s changed; not delivering" % reply_socket)
                 else:
                     targets.append(rec)
@@ -2173,7 +2234,20 @@ def _send_codex(target, args):
                 "thread %s is paused after an interrupt: the message is queued "
                 "but drains only when its user types the next prompt" % thread["id"]
             )
-    tag = build_tag(args.from_name, args.from_sid, args.from_socket)
+    from_name, from_sid = args.from_name, args.from_sid
+    if args.from_socket:
+        # P3: a reply address without a session id can be delivered to whoever
+        # holds that socket next, so the id is resolved here, from the registry.
+        rec = claude_record_by_socket(args.from_socket)
+        if rec is None:
+            sys.stderr.write(
+                "error: no live Claude session listens on %s, so --from-socket "
+                "would name a reply address nothing answers\n" % args.from_socket
+            )
+            return 1
+        from_sid = from_sid or rec.get("sessionId")
+        from_name = from_name or rec.get("name")
+    tag = build_tag(from_name, from_sid, args.from_socket)
     text = "%s\n%s" % (tag, args.message)
     try:
         codex_queue(thread["id"], text)
@@ -2227,6 +2301,22 @@ def _send_claude(name, args):
         return 1
     print("sent to %s (pid %s)" % (name, rec.get("pid")))
     return 0
+
+
+def shim_ready(thread_id):
+    """The pid of a shim that owns the thread AND has written its record.
+
+    The ownership lock is taken before the socket is bound, so `shim_pid`
+    alone answers "starting", not "serving". `up` waits for this.
+    """
+    pid = shim_pid(thread_id)
+    if pid is None:
+        return None
+    rec = read_json(os.path.join(claude_sessions_dir(), "%d.json" % pid), None)
+    if not isinstance(rec, dict) or rec.get("sessionId") != thread_id:
+        return None
+    sock = rec.get("messagingSocketPath")
+    return pid if sock and os.path.exists(sock) else None
 
 
 def shim_pid(thread_id):
@@ -2324,7 +2414,7 @@ def spawn_shim(thread):
     # inside the same lock sees the shim rather than starting a second one.
     deadline = time.time() + 10.0
     while time.time() < deadline:
-        pid = shim_pid(thread["id"])
+        pid = shim_ready(thread["id"])
         if pid:
             return pid
         if proc.poll() is not None:
@@ -2544,8 +2634,14 @@ def cmd_session_hook(_args):
 # --------------------------------------------------------------------------
 
 
-def hook_command():
-    return "python3 %s session-hook" % os.path.realpath(__file__)
+def hook_command(script=None):
+    """The exact command string the SessionStart entry runs.
+
+    The path is quoted: a checkout under a directory with a space would
+    otherwise split into two arguments and the hook would fail (P8).
+    """
+    script = script or os.path.realpath(__file__)
+    return "python3 %s session-hook" % shlex.quote(script)
 
 
 def hook_entry():
@@ -2601,6 +2697,10 @@ def cmd_install_hook(_args):
     created = status == "absent"
     if not isinstance(data, dict):
         data = {}
+    if not data:
+        # P4: the real ~/.codex/hooks.json wraps the event map in "hooks";
+        # a file we create must match, and a file we read may use either shape.
+        data = {"hooks": {}}
     events, root = _hooks_event_map(data)
     entries = events.get("SessionStart")
     if not isinstance(entries, list):
@@ -2664,42 +2764,105 @@ def write_text_preserving_mode(path, text):
     os.replace(tmp, path)
 
 
+def _toml_header(line):
+    """The table name on this line, or None.
+
+    P1: `[features] # flags` is a header and `# [features]` is not, so neither
+    a bare-string comparison nor a startswith("[") test is enough.
+    """
+    if line.lstrip().startswith("#"):
+        return None
+    m = TOML_HEADER_RE.match(line)
+    if not m:
+        return None
+    name = m.group(1).strip()
+    if name.startswith("[") and name.endswith("]"):
+        name = name[1:-1].strip()  # array of tables
+    return name
+
+
+def _features_span(lines):
+    """(start, end) of the [features] table's body, or None."""
+    start = None
+    for i, line in enumerate(lines):
+        if _toml_header(line) == "features":
+            start = i
+            break
+    if start is None:
+        return None
+    end = len(lines)
+    for i in range(start + 1, len(lines)):
+        if _toml_header(lines[i]) is not None:
+            end = i
+            break
+    return start, end
+
+
+def _hooks_key_lines(lines, span):
+    """Indexes of every `hooks = ...` line inside the [features] table."""
+    found = []
+    for i in range(span[0] + 1, span[1]):
+        stripped = lines[i].strip()
+        if stripped.startswith("#") or "=" not in stripped:
+            continue
+        if stripped.split("=", 1)[0].strip().strip("\"'") == "hooks":
+            found.append(i)
+    return found
+
+
 def _set_features_hooks_lines(lines):
     """(new_lines, changed): set `hooks = true` inside [features], once.
 
     An existing `hooks = false` is REWRITTEN, never shadowed by a second key:
     a duplicate key makes the file invalid TOML and Codex rejects it, and the
-    old code appended one on every run (B3).
+    first version appended one on every run (B3).
     """
     out = list(lines)
-    start = None
-    for i, line in enumerate(out):
-        if line.strip() == "[features]":
-            start = i
-            break
-    if start is None:
+    span = _features_span(out)
+    if span is None:
         if out and out[-1].strip():
             out.append("")
         out.append("[features]")
         out.append("hooks = true")
         return out, True
-    end = len(out)
-    for i in range(start + 1, len(out)):
-        stripped = out[i].strip()
-        if stripped.startswith("[") and stripped.endswith("]"):
-            end = i
-            break
-    for i in range(start + 1, end):
-        stripped = out[i].strip()
-        if stripped.startswith("#") or "=" not in stripped:
-            continue
-        if stripped.split("=", 1)[0].strip().strip("\"'") == "hooks":
-            if stripped == "hooks = true":
-                return out, False
-            out[i] = "hooks = true"
-            return out, True
-    out.insert(start + 1, "hooks = true")
+    existing = _hooks_key_lines(out, span)
+    if not existing:
+        out.insert(span[0] + 1, "hooks = true")
+        return out, True
+    if len(existing) == 1 and out[existing[0]].strip() == "hooks = true":
+        return out, False
+    for i in existing[1:][::-1]:
+        del out[i]  # a pre-existing duplicate is removed, not preserved
+    out[existing[0]] = "hooks = true"
     return out, True
+
+
+def features_hooks_valid(text) -> bool:
+    """P1: prove the edit produced a file that still parses with one `hooks`.
+
+    tomllib settles it where it exists (3.11+); on 3.9 and 3.10 the lite reader
+    plus a duplicate-key count is the check, which is what the editor can break.
+    """
+    try:
+        import tomllib
+    except ImportError:
+        tomllib = None
+    if tomllib is not None:
+        try:
+            data = tomllib.loads(text)
+        except Exception:
+            return False
+        features = data.get("features")
+        return isinstance(features, dict) and features.get("hooks") is True
+    lines = text.splitlines()
+    span = _features_span(lines)
+    if span is None:
+        return False
+    keys = _hooks_key_lines(lines, span)
+    if len(keys) != 1:
+        return False
+    section = read_toml_lite_text(text).get("features", {})
+    return section.get("hooks") is True
 
 
 def _ensure_features_hooks():
@@ -2717,13 +2880,23 @@ def _ensure_features_hooks():
     out, changed = _set_features_hooks_lines(lines)
     if not changed:
         return
+    candidate = "\n".join(out) + "\n"
+    if not features_hooks_valid(candidate):
+        # P1: never leave a config Codex cannot parse. The file is untouched.
+        sys.stderr.write(
+            "error: editing %s would not produce a valid [features] hooks = true; "
+            "add it by hand and re-run\n" % path
+        )
+        return
+    backup = None
     if existed:
         try:
-            print("backed up %s to %s" % (path, backup_file(path)))
+            backup = backup_file(path)
+            print("backed up %s to %s" % (path, backup))
         except OSError as exc:
             sys.stderr.write("error: could not back up %s: %s\n" % (path, exc))
             return
-    write_text_preserving_mode(path, "\n".join(out) + "\n")
+    write_text_preserving_mode(path, candidate)
     print("set [features] hooks = true in %s" % path)
 
 

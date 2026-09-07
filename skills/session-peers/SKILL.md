@@ -57,16 +57,19 @@ it; Codex runs it as its next user turn under the thread's own approval mode.
 - **Busy thread**: the message queues and runs after the current turn.
 - **Paused thread**: after the user's Ctrl-C in Codex the queue stays paused,
   even across `codex resume`, until they type any prompt there. Your message is
-  still queued and you get a status `held` with the detail "queued, but the
+  still queued; the shim posts a status `held` with the detail "queued, but the
   Codex thread is paused after an interrupt; it drains when its user types the
-  next prompt"; tell the user to type something in that Codex window.
+  next prompt", but whether that renders as a notice in your session is not yet
+  verified on 2.1.263. The reliable diagnostic is the shim log
+  `$CODEX_HOME/session-peers/<thread uuid>.log`, which records `paused after an
+  interrupt`. Tell the user to type something in that Codex window.
 - **Dead thread**: `send` refuses with `no active session ... its process has
   exited`; the shim reports status `failed`. Ask the user to
   `codex resume <uuid>` and type a prompt.
 - **Size**: the text must fit one `codex queue` argument, so the real cap is
-  the OS argv budget (well under Codex's own 1 MiB on macOS); `send` refuses an
-  oversized text, the shim trims it and reports status `truncated` with the
-  trimmed length.
+  the OS argv budget in UTF-8 bytes (well under Codex's own 1 MiB character cap
+  on macOS); `send` refuses an oversized text, the shim trims it on a UTF-8
+  boundary and reports status `truncated` with the trimmed length.
 - **Status frames** you may receive about a message: `held` (queued, thread
   paused), `failed` (queue error or thread died), `truncated` (delivered, but
   cut to the argv budget).
@@ -78,18 +81,23 @@ it; Codex runs it as its next user turn under the thread's own approval mode.
 <this skill's directory>/scripts/peers.py send --to codex:<name|uuid> --message "<text>"
 ```
 
-`send` checks liveness first and queues by UUID. Without a shim the reply is
-visible only in the Codex TUI. `--from-name`, `--from-sid` and `--from-socket`
-let a host script route the reply to a Claude session it knows; an unfilled
-field is sent as `-`. `send --to cc:<name>` posts a wrapped message straight
+When the Codex state schema is recognised, `send` checks liveness first and
+queues by UUID. In degraded mode (unknown schema, see `doctor`), a UUID target
+still queues and prints `liveness unverified`, while a name target is refused.
+Without a shim the reply is visible only in the Codex TUI. `--from-socket <path>` routes the reply to the
+Claude session listening on that socket: `send` resolves its live registry
+record to fill the name and session id itself and refuses when nothing
+listens there; a tag without a session id is never auto-delivered. `send --to cc:<name>` posts a wrapped message straight
 into a Claude session from a host shell.
 
 ### Keeping shims alive
 
 Shims exit when their thread's process stops holding the rollout, on `down`, or
-on reboot (`/tmp` is cleared). To restart them at Claude start, add a
-`SessionStart` hook to `~/.claude/settings.json` that runs
-`<this skill's directory>/scripts/peers.py up`. A bare `down` stops every shim
+on reboot (`/tmp` is cleared). No Claude-side hook is part of delivery. As a
+convenience only, a Claude `SessionStart` hook in `~/.claude/settings.json`
+that runs `<this skill's directory>/scripts/peers.py up` re-creates shims for
+already registered threads at Claude start; it registers nothing and is safe to
+omit. A bare `down` stops every shim
 and keeps the registrations (a bare `up` brings them back); `down <name|uuid>`
 also unregisters. A restarted shim delivers a reply that completed while it was
 down only if that turn finished within the last 15 minutes. An unnamed thread

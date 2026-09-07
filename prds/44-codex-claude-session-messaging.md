@@ -449,8 +449,10 @@ Success met 2026-09-07: `test.yml` step added; 215 tests (51 added in the review
   codex", "list codex sessions", "reply to the claude session", "@codex"); body
   under 500 lines, branched by agent, with install (`npx skills add`, `up`,
   the optional `install-hook` and its `/hooks` trust step, `/rename`,
-  `thread-title` in `[tui] status_line`, the optional Claude `SessionStart`
-  snippet that runs `up`), the registration step after `/rename`, the reply
+  `thread-title` in `[tui] status_line`, and an optional convenience Claude
+  `SessionStart` snippet that only re-runs `up` for already registered threads,
+  consistent with D10: no Claude-side hook takes part in delivery), the
+  registration step after `/rename`, the reply
   policy and budget, and the limits (sizes, duplicate names, sandbox, macOS and
   Linux only, replies need a running shim, best-effort across a shim restart).
   `agnix --target claude-code skills/session-peers/SKILL.md` clean before
