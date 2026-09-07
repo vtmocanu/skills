@@ -37,6 +37,15 @@ the agent you are.
    (register by UUID instead), persists the UUID, and daemonises the shim. A
    later `/rename` of a new thread needs another `up <name>`; a bare `up`
    restarts shims for every registered thread that is live again.
+
+   A brand-new thread registers even before it has run a turn: liveness comes
+   from the writer lock Codex holds from thread creation, not from the rollout
+   `.jsonl`, which newer Codex writes lazily (the file appears only once the
+   first turn completes, measured on codex-cli 0.153.4). If an old build ever
+   refuses `up <name>` on a just-renamed thread with "no live Codex thread
+   named ... (N past thread(s) carried that name)", send the thread one turn
+   (any prompt, or `peers.py send --to codex:<uuid> --message ...`) so its
+   rollout is written, then retry.
 3. Confirm with `/list-agents` (or `ListAgents`): the thread appears under its
    Codex name as `interactive`, `idle` or `busy`.
 

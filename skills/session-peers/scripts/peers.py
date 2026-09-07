@@ -791,6 +791,22 @@ def lsof_holders(paths):
     return out
 
 
+def writer_lock_path(thread_id, sqlite_home=None):
+    """The per-thread writer lock a live Codex process holds, under
+    `<home>/thread-writer-locks/<uuid>.lock`.
+
+    It is a more reliable liveness signal than the rollout file: Codex writes
+    the rollout lazily -- the `.jsonl` appears only once the thread's first turn
+    completes (measured on codex-cli 0.153.4) -- so a just-created or renamed
+    thread is live with the lock held and no rollout on disk yet. An older
+    Codex that never creates the lock simply contributes no holder here, and
+    the rollout stays the signal. The home matches thread discovery
+    (`codex_sqlite_home`), where the state DB and thread records live.
+    """
+    home = sqlite_home or codex_sqlite_home()
+    return os.path.join(home, "thread-writer-locks", "%s.lock" % thread_id)
+
+
 def codex_threads(check_live=True):
     """(threads, schema_ok). Each thread is a dict; degraded mode returns []."""
     db = find_state_db()
@@ -836,28 +852,46 @@ def codex_threads(check_live=True):
             }
         )
     if check_live and threads:
-        holders = lsof_holders([t["rollout_path"] for t in threads])
+        home = os.path.dirname(db)
+        lock_of = {t["id"]: writer_lock_path(t["id"], home) for t in threads}
+        probe = [t["rollout_path"] for t in threads if t["rollout_path"]]
+        probe += list(lock_of.values())
+        holders = lsof_holders(probe)
         for t in threads:
-            found = holders.get(t["rollout_path"]) or []
+            # Either handle a live Codex process keeps proves the thread is
+            # live; the lock covers a fresh thread whose rollout is not written
+            # yet, the rollout covers an older Codex with no writer lock.
+            found = (holders.get(t["rollout_path"]) or []) or (
+                holders.get(lock_of[t["id"]]) or []
+            )
             if found:
                 t["live"] = True
                 t["holder_pid"] = found[0][0]
     return threads, True
 
 
-def thread_is_held(rollout_path, holder_pid=None):
-    """True when a codex process still holds this rollout open.
+def thread_is_held(rollout_path, holder_pid=None, lock_path=None):
+    """True when a codex process still holds this thread open.
 
-    With `holder_pid` given, that exact pid must still hold it (D2: a live
-    daemon can unload one thread while staying alive).
+    Liveness comes from either handle a live Codex process keeps: the rollout
+    file, or the writer lock (`lock_path`). The lock is held from thread
+    creation, while the rollout is written lazily on the first completed turn
+    (measured on codex-cli 0.153.4), so a just-created thread reads as live
+    through the lock alone. With `holder_pid` given, that exact pid must still
+    hold one of them (D2: a live daemon can unload one thread while staying
+    alive).
     """
-    holders = lsof_holders([rollout_path]).get(rollout_path) or []
+    paths = [p for p in (rollout_path, lock_path) if p]
+    holders = lsof_holders(paths)
+    found = []
+    for p in paths:
+        found += holders.get(p) or []
     if holder_pid is None:
-        return bool(holders), (holders[0][0] if holders else None)
-    for pid, _cmd in holders:
+        return bool(found), (found[0][0] if found else None)
+    for pid, _cmd in found:
         if pid == holder_pid:
             return True, pid
-    return False, (holders[0][0] if holders else None)
+    return False, (found[0][0] if found else None)
 
 
 class ResolveError(Exception):
@@ -1525,6 +1559,7 @@ class Shim:
         self.thread = thread
         self.thread_id = thread["id"]
         self.rollout_path = thread.get("rollout_path")
+        self.lock_path = writer_lock_path(self.thread_id)
         self.holder_pid = thread.get("holder_pid")
         # B1: the name reaches Claude inside a wrapper attribute. Refuse a
         # name that could break out of it rather than escaping it downstream.
@@ -1583,7 +1618,7 @@ class Shim:
         if not self.rollout_path:
             log("thread %s has no rollout path; nothing to tail" % self.thread_id)
             return 2
-        held, pid = thread_is_held(self.rollout_path, self.holder_pid)
+        held, pid = thread_is_held(self.rollout_path, self.holder_pid, self.lock_path)
         if not held:
             log(
                 "thread %s is not held by a live codex process; not starting"
@@ -1940,7 +1975,7 @@ class Shim:
             log("truncating an inbound body of %d chars to %d" % (trimmed_from, len(body)))
         text = "%s\n%s" % (tag, body)
 
-        held, _pid = thread_is_held(self.rollout_path, self.holder_pid)
+        held, _pid = thread_is_held(self.rollout_path, self.holder_pid, self.lock_path)
         if not held:
             log("thread %s is no longer live; refusing to queue" % self.thread_id)
             self._status_back(
@@ -2056,11 +2091,13 @@ class Shim:
             self._ensure_record()
             if time.time() - last_live >= self.liveness_interval:
                 last_live = time.time()
-                held, _pid = thread_is_held(self.rollout_path, self.holder_pid)
+                held, _pid = thread_is_held(
+                    self.rollout_path, self.holder_pid, self.lock_path
+                )
                 if not held:
                     log(
-                        "codex pid %s no longer holds %s; exiting"
-                        % (self.holder_pid, self.rollout_path)
+                        "codex pid %s no longer holds %s or its writer lock; "
+                        "exiting" % (self.holder_pid, self.rollout_path)
                     )
                     self.stop.set()
 
@@ -2290,7 +2327,9 @@ def _send_codex(target, args):
     if degraded:
         log("liveness unverified: the Codex state schema is unknown")
     else:
-        held, _pid = thread_is_held(thread["rollout_path"])
+        held, _pid = thread_is_held(
+            thread["rollout_path"], lock_path=writer_lock_path(thread["id"])
+        )
         if not held:
             sys.stderr.write(
                 "error: no active session for thread %s; its process has exited "
