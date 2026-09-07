@@ -64,7 +64,8 @@ versions tested. Last full run: 2026-09-07, Claude Code 2.1.263, Codex CLI 0.153
    instead of pretending delivery.
 10. **Dead thread keeps its queue.** When the holding process exits, items stay
     in `queued_items` (measured 2026-09-07). Liveness must be checked before
-    queueing, and the shim must exit when its thread's rollout is no longer held.
+    queueing, and the shim must exit when its thread is no longer held (neither
+    its rollout nor its writer lock, see item 14).
 11. **Signal cleanup.** A shim killed with SIGTERM must remove its record and
     socket. Python's default handler skips `finally`, so the shim installs a
     handler (measured 2026-09-07: orphan files left behind without one).
@@ -75,3 +76,16 @@ versions tested. Last full run: 2026-09-07, Claude Code 2.1.263, Codex CLI 0.153
 13. **Hook timing (open).** Where `SessionStart` fires on this version (source
     for 0.153.2 defers it to the first turn) and whether a detached `up` survives
     the hook runner. Not measured yet; the bridge does not depend on it.
+14. **Rollout is lazy; the writer lock is not.** A brand-new thread (`/rename`d
+    but not yet run a turn) has a `threads.rollout_path` in the DB but NO file at
+    that path: Codex writes the rollout only once the first turn completes.
+    Meanwhile a live Codex process holds `<CODEX_HOME>/thread-writer-locks/<thread
+    uuid>.lock` open from thread creation. So liveness (`codex_threads`,
+    `thread_is_held`) checks whichever handle is held; a fresh thread reads as
+    live through the lock alone, and the rollout file appears in time for the
+    reply tail. Confirm both: `lsof -- <rollout_path>` finds no holder on a
+    just-created thread while `lsof -- <lock path>` finds the `codex` process;
+    after one turn the rollout exists and is (transiently) held.
+    - 2026-09-07, Codex CLI 0.153.4: measured exactly this. `up hi` refused a
+      just-renamed thread until it had run one turn (rollout absent); the lock
+      was held throughout. The lock-aware liveness landed in this same change.

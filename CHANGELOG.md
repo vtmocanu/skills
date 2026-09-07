@@ -13,7 +13,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   process that appears in Claude's `ListAgents` and `@` typeahead under its
   Codex name; a message to it is queued with `codex queue --thread <uuid>`, and
   the thread's replies come back through the sender's inbox socket, with a
-  per-sender reply budget. Python 3 stdlib only; macOS and Linux.
+  per-sender reply budget. Python 3 stdlib only; macOS and Linux. Thread
+  liveness is read from the Codex writer lock
+  (`<CODEX_HOME>/thread-writer-locks/<uuid>.lock`), held from thread creation, in
+  addition to the rollout file, so a just-created or just-`/rename`d thread can be
+  registered with `up <name>` before it has run its first turn (newer Codex writes
+  the rollout `.jsonl` lazily, only once a turn completes; measured on codex-cli
+  0.153.4).
 
 ### Changed
 
