@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import collections
 import contextlib
+import copy
 import errno
 import fcntl
 import glob
@@ -82,6 +83,11 @@ AT_NAME_RE = re.compile(r"^@([A-Za-z0-9][A-Za-z0-9_.\-]*)")
 
 # Sentinel for a tag field the sender could not fill in. Parses back to None.
 TAG_ABSENT = "-"
+
+# Built rather than written literally so this file has no stray triple
+# quotes; _scan_multiline compares against them.
+TRIPLE_DQ = '"' * 3
+TRIPLE_SQ = "'" * 3
 
 # `[features] # flags` is a valid TOML header; `# [features]` is a comment.
 TOML_HEADER_RE = re.compile(r"^\s*\[([^\]]+)\]\s*(?:#.*)?$")
@@ -333,7 +339,7 @@ def read_toml_lite_text(text):
             section = header.group(1).strip()
             if section.startswith("[") and section.endswith("]"):
                 section = section[1:-1].strip()  # array of tables
-            out.setdefault(section, {})
+            out.setdefault(_unquote_table_name(section), {})
             continue
         if "=" not in stripped:
             continue
@@ -894,14 +900,18 @@ def register_thread(thread):
         write_registered(threads)
 
 
+def _unregister_thread_unlocked(thread_id) -> bool:
+    threads = read_registered()
+    if thread_id in threads:
+        del threads[thread_id]
+        write_registered(threads)
+        return True
+    return False
+
+
 def unregister_thread(thread_id) -> bool:
     with reconcile_lock():
-        threads = read_registered()
-        if thread_id in threads:
-            del threads[thread_id]
-            write_registered(threads)
-            return True
-    return False
+        return _unregister_thread_unlocked(thread_id)
 
 
 # --------------------------------------------------------------------------
@@ -2527,16 +2537,21 @@ def cmd_down(args):
             if tid is None:
                 sys.stderr.write("error: no thread matches %r\n" % args.target)
                 return 1
-        stopped = stop_shim(tid)
-        if unregister_thread(tid):
+        # R2: stop and unregister under ONE hold of the reconcile lock. A bare
+        # `up` landing between them would restart the still-registered thread,
+        # leaving an unregistered peer running while `down` reported success.
+        with reconcile_lock():
+            stopped = stop_shim(tid)
+            removed = _unregister_thread_unlocked(tid)
+        if removed:
             print("unregistered %s%s" % (tid, " and stopped its shim" if stopped else ""))
         else:
             print("%s was not registered%s" % (tid, "; shim stopped" if stopped else ""))
         return 0
-    ids = sorted(read_registered())
-    for tid in ids:
-        if stop_shim(tid):
-            print("stopped the shim for %s" % tid)
+    with reconcile_lock():
+        stopped = [tid for tid in sorted(read_registered()) if stop_shim(tid)]
+    for tid in stopped:
+        print("stopped the shim for %s" % tid)
     print("registrations kept; `peers.py up` brings them back")
     return 0
 
@@ -2768,6 +2783,70 @@ def write_text_preserving_mode(path, text):
     os.replace(tmp, path)
 
 
+def _load_tomllib():
+    """The stdlib TOML parser, or None on 3.9 and 3.10.
+
+    A seam, so a test can prove the no-parser path without a second runtime.
+    """
+    try:
+        import tomllib
+    except ImportError:
+        return None
+    return tomllib
+
+
+def _unquote_table_name(name):
+    """`["features"]` names the same table as `[features]` (R1c)."""
+    name = name.strip()
+    if len(name) >= 2 and name[0] == name[-1] and name[0] in "\"'":
+        inner = name[1:-1]
+        if inner and '"' not in inner and "'" not in inner:
+            return inner.strip()
+    return name
+
+
+def _scan_multiline(line, delim):
+    """The open multiline-string delimiter after this line, or None.
+
+    Good enough to tell whether a `[features]` line is real config or an
+    example inside a triple-quoted block (R1); the parser diff backstops it.
+    """
+    i = 0
+    while i < len(line):
+        if delim is not None:
+            j = line.find(delim, i)
+            if j == -1:
+                return delim
+            i = j + 3
+            delim = None
+            continue
+        if line.startswith(TRIPLE_DQ, i) or line.startswith(TRIPLE_SQ, i):
+            delim = line[i:i + 3]
+            i += 3
+            continue
+        ch = line[i]
+        if ch == "#":
+            return None
+        if ch in "\"'":
+            j = line.find(ch, i + 1)
+            if j == -1:
+                return None
+            i = j + 1
+            continue
+        i += 1
+    return delim
+
+
+def _line_states(lines):
+    """[bool] telling, per line, whether it STARTS inside a multiline string."""
+    states = []
+    delim = None
+    for line in lines:
+        states.append(delim is not None)
+        delim = _scan_multiline(line, delim)
+    return states
+
+
 def _toml_header(line):
     """The table name on this line, or None.
 
@@ -2782,13 +2861,19 @@ def _toml_header(line):
     name = m.group(1).strip()
     if name.startswith("[") and name.endswith("]"):
         name = name[1:-1].strip()  # array of tables
-    return name
+    return _unquote_table_name(name)
 
 
 def _features_span(lines):
-    """(start, end) of the [features] table's body, or None."""
+    """(start, end) of the [features] table's body, or None.
+
+    R1: a header inside a multiline string is a string, not a table.
+    """
+    inside = _line_states(lines)
     start = None
     for i, line in enumerate(lines):
+        if inside[i]:
+            continue
         if _toml_header(line) == "features":
             start = i
             break
@@ -2796,6 +2881,8 @@ def _features_span(lines):
         return None
     end = len(lines)
     for i in range(start + 1, len(lines)):
+        if inside[i]:
+            continue
         if _toml_header(lines[i]) is not None:
             end = i
             break
@@ -2804,8 +2891,11 @@ def _features_span(lines):
 
 def _hooks_key_lines(lines, span):
     """Indexes of every `hooks = ...` line inside the [features] table."""
+    inside = _line_states(lines)
     found = []
     for i in range(span[0] + 1, span[1]):
+        if inside[i]:
+            continue
         stripped = lines[i].strip()
         if stripped.startswith("#") or "=" not in stripped:
             continue
@@ -2842,61 +2932,97 @@ def _set_features_hooks_lines(lines):
 
 
 def features_hooks_valid(text) -> bool:
-    """P1: prove the edit produced a file that still parses with one `hooks`.
-
-    tomllib settles it where it exists (3.11+); on 3.9 and 3.10 the lite reader
-    plus a duplicate-key count is the check, which is what the editor can break.
-    """
+    """True when a real parser reads this text as `[features] hooks = true`."""
+    tomllib = _load_tomllib()
+    if tomllib is None:
+        return False
     try:
-        import tomllib
-    except ImportError:
-        tomllib = None
-    if tomllib is not None:
-        try:
-            data = tomllib.loads(text)
-        except Exception:
-            return False
-        features = data.get("features")
-        return isinstance(features, dict) and features.get("hooks") is True
-    lines = text.splitlines()
-    span = _features_span(lines)
-    if span is None:
+        data = tomllib.loads(text)
+    except Exception:
         return False
-    keys = _hooks_key_lines(lines, span)
-    if len(keys) != 1:
+    features = data.get("features")
+    return isinstance(features, dict) and features.get("hooks") is True
+
+
+def _without_features_hooks(doc):
+    """A parsed document minus features.hooks, and minus a features table left
+    empty by that removal, so the R1 diff ignores a table we created."""
+    out = copy.deepcopy(doc)
+    features = out.get("features")
+    if isinstance(features, dict):
+        features.pop("hooks", None)
+        if not features:
+            out.pop("features", None)
+    return out
+
+
+def _only_features_hooks_changed(before, after) -> bool:
+    """R1a: the edit may change features.hooks and nothing else."""
+    features = after.get("features")
+    if not isinstance(features, dict) or features.get("hooks") is not True:
         return False
-    section = read_toml_lite_text(text).get("features", {})
-    return section.get("hooks") is True
+    return _without_features_hooks(before) == _without_features_hooks(after)
+
+
+def _manual_hooks_instruction(path):
+    return 'add "hooks = true" under [features] in %s' % path
 
 
 def _ensure_features_hooks():
-    """Set `[features] hooks = true`, rewriting an existing key in place."""
+    """Set `[features] hooks = true`, but only when a real parser agrees.
+
+    R1: a line editor cannot tell a table header from the same text inside a
+    multiline string, so an edit is written only when tomllib parses both
+    sides and confirms nothing but features.hooks moved. Without tomllib
+    (3.9, 3.10) the file is never edited and the user is told what to add.
+    """
     path = codex_config_path()
+    tomllib = _load_tomllib()
+    if tomllib is None:
+        log(
+            "this Python has no tomllib, so %s is left untouched" % path
+        )
+        print("Manual step: %s" % _manual_hooks_instruction(path))
+        return
     existed = os.path.exists(path)
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as fh:
-            lines = fh.read().splitlines()
+            original = fh.read()
     except FileNotFoundError:
-        lines = []
+        original = ""
     except OSError as exc:
         sys.stderr.write("error: could not read %s: %s\n" % (path, exc))
         return
-    out, changed = _set_features_hooks_lines(lines)
+
+    def refuse(why):
+        sys.stderr.write(
+            "error: %s, so %s was left untouched. %s\n"
+            % (why, path, _manual_hooks_instruction(path))
+        )
+
+    try:
+        before = tomllib.loads(original)
+    except Exception as exc:
+        refuse("%s does not parse as TOML (%s)" % (path, exc))
+        return
+    features = before.get("features")
+    if isinstance(features, dict) and features.get("hooks") is True:
+        return
+    out, changed = _set_features_hooks_lines(original.splitlines())
     if not changed:
         return
     candidate = "\n".join(out) + "\n"
-    if not features_hooks_valid(candidate):
-        # P1: never leave a config Codex cannot parse. The file is untouched.
-        sys.stderr.write(
-            "error: editing %s would not produce a valid [features] hooks = true; "
-            "add it by hand and re-run\n" % path
-        )
+    try:
+        after = tomllib.loads(candidate)
+    except Exception as exc:
+        refuse("the edit would not parse as TOML (%s)" % exc)
         return
-    backup = None
+    if not _only_features_hooks_changed(before, after):
+        refuse("the edit would change more than [features] hooks")
+        return
     if existed:
         try:
-            backup = backup_file(path)
-            print("backed up %s to %s" % (path, backup))
+            print("backed up %s to %s" % (path, backup_file(path)))
         except OSError as exc:
             sys.stderr.write("error: could not back up %s: %s\n" % (path, exc))
             return
@@ -2950,6 +3076,12 @@ def cmd_doctor(_args):
     rc, _out, _err = run_cmd(["lsof", "-v"], timeout=10)
     add("ok" if rc != 127 else "fail", "lsof on PATH (thread liveness needs it)")
 
+    if _load_tomllib() is None:
+        add(
+            "warn",
+            "this Python has no tomllib, so install-hook cannot edit "
+            "config.toml: %s" % _manual_hooks_instruction(codex_config_path()),
+        )
     add("ok", "CLAUDE_CONFIG_DIR: %s" % claude_config_dir())
     add("ok", "CODEX_HOME: %s" % codex_home())
     if codex_sqlite_home() != codex_home():

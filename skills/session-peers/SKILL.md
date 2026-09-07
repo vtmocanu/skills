@@ -134,8 +134,12 @@ if no shim is running.
 `SessionStart` entry to `$CODEX_HOME/hooks.json` (backing it up first) that runs
 `up` on every session start, so registered threads get their shims back without
 a manual step. Codex trusts a new hook only after the user reviews it in the TUI
-with `/hooks`; until then it is inert. `install-hook` prints that step. Nothing
-in delivery depends on the hook.
+with `/hooks`; until then it is inert. `install-hook` prints that step. It also
+sets `hooks = true` under `[features]` in `config.toml`, but only on Python 3.11
+or newer, where it can parse the file before and after and prove the edit
+touched nothing else; on 3.9 and 3.10, or when the file does not parse or the
+edit would reach beyond that one key, it leaves `config.toml` alone and prints
+the line to add by hand. Nothing in delivery depends on the hook.
 
 ## Diagnostics
 

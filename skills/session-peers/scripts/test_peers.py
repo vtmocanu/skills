@@ -46,6 +46,10 @@ spec.loader.exec_module(peers)
 
 PS_LSTART = "Mon Sep  7 12:00:00 2026"
 
+# R1: without tomllib the installer refuses to edit config.toml at all,
+# so the editing assertions only mean something where it exists (3.11+).
+HAS_TOMLLIB = peers._load_tomllib() is not None
+
 FAKE_PS = '''\
 import os, sys
 print(os.environ.get("FAKE_PS_LSTART", %r))
@@ -386,6 +390,16 @@ class Base(unittest.TestCase):
 
     def clear_holders(self):
         self.lsof_map.write_text("{}")
+
+    def hold_reconcile_lock(self):
+        """Hold the lock `up`, `down` and register/unregister serialise on."""
+        import fcntl
+
+        path = os.path.join(peers.state_dir(), "reconcile.lock")
+        fh = open(path, "a+")
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        self._held_pidfiles.append(fh)
+        return fh
 
     def hold_pidfile(self, thread_id, pid=None):
         """Stand in for a running shim: hold the ownership flock on its pidfile.
@@ -2166,6 +2180,7 @@ class TestInstallHook(Base):
         self.assertIn("hooks", data)
         self.assertEqual(len(data["hooks"]["SessionStart"]), 2)
 
+    @unittest.skipUnless(HAS_TOMLLIB, "needs tomllib")
     def test_features_hooks_is_appended_without_touching_other_lines(self):
         (self.codex_dir / "config.toml").write_text(
             'model = "gpt-5"\n\n[tui]\nstatus_line = ["thread-title"]\n'
@@ -2177,6 +2192,7 @@ class TestInstallHook(Base):
         self.assertIn("[features]", text)
         self.assertIn("hooks = true", text)
 
+    @unittest.skipUnless(HAS_TOMLLIB, "needs tomllib")
     def test_an_existing_features_table_gets_the_key_not_a_second_table(self):
         (self.codex_dir / "config.toml").write_text(
             '[features]\nweb_search = true\n\n[tui]\nx = 1\n'
@@ -2373,6 +2389,7 @@ class TestWrapperInjection(Base):
         self.assertEqual(body, "real body")
 
 
+@unittest.skipUnless(HAS_TOMLLIB, "install-hook only edits config.toml with tomllib")
 class TestFeaturesHooksKey(Base):
     """B3: a duplicate key makes config.toml invalid TOML."""
 
@@ -2925,6 +2942,7 @@ class TestBudgetResetPersistence(ShimBase):
 # ==========================================================================
 
 
+@unittest.skipUnless(HAS_TOMLLIB, "install-hook only edits config.toml with tomllib")
 class TestTomlHeaderHandling(Base):
     """P1: a header may carry a trailing comment; a comment is not a header."""
 
@@ -2969,20 +2987,35 @@ class TestTomlHeaderHandling(Base):
         self.assertNotIn("hooks", cfg[""])
 
     def test_a_config_that_would_not_parse_is_left_alone(self):
-        # P1: refuse rather than write a file Codex cannot read.
+        # R1: refuse rather than write a file Codex cannot read, and say what
+        # to add by hand.
         broken = "[features]\nhooks = false\nthis line is not toml\n"
         self.config().write_text(broken)
-        _rc, _out, err = self.cli("install-hook")
+        rc, _out, err = self.cli("install-hook")
+        self.assertEqual(rc, 0)
         self.assertEqual(self.config().read_text(), broken)
-        self.assertIn("add it by hand", err)
+        self.assertIn("does not parse as TOML", err)
+        self.assertIn('add "hooks = true" under [features]', err)
         self.assertEqual(list(self.codex_dir.glob("config.toml.*bak*")), [])
+        self.assertEqual(list(self.codex_dir.glob("config.toml.tmp.*")), [])
 
-    def test_a_pre_existing_duplicate_key_is_collapsed(self):
-        self.config().write_text("[features]\nhooks = false\nhooks = false\n")
+    def test_a_pre_existing_duplicate_key_is_not_valid_toml_so_nothing_is_written(self):
+        # A duplicate key is already invalid TOML, so the parser gate stops
+        # here rather than the line editor guessing which one to keep.
+        duplicated = "[features]\nhooks = false\nhooks = false\n"
+        self.config().write_text(duplicated)
         self.cli("install-hook")
-        text = self.config().read_text()
-        self.assertEqual(text.count("hooks ="), 1)
-        self.assertTrue(peers.features_hooks_valid(text))
+        self.assertEqual(self.config().read_text(), duplicated)
+
+    def test_the_line_editor_still_collapses_a_duplicate_it_is_handed(self):
+        # The editor keeps that branch for input the parser never saw; this
+        # pins it directly rather than through a file install-hook refuses.
+        lines = ["[features]", "hooks = false", "web_search = true", "hooks = false"]
+        out, changed = peers._set_features_hooks_lines(lines)
+        self.assertTrue(changed)
+        self.assertEqual([line for line in out if line.startswith("hooks")],
+                         ["hooks = true"])
+        self.assertIn("web_search = true", out)
 
 
 class TestShimOwnershipIsExclusive(Base):
@@ -3252,6 +3285,187 @@ class TestRegistrationIsLocked(Base):
         peers.write_registered({"a": {"name": "x"}, "b": {"name": "y"}})
         self.assertTrue(peers.unregister_thread("a"))
         self.assertEqual(sorted(peers.read_registered()), ["b"])
+
+
+@unittest.skipUnless(HAS_TOMLLIB, "install-hook only edits config.toml with tomllib")
+class TestTomlEditingIsParserGated(Base):
+    """R1: a line editor cannot tell a table header from a string that
+    contains one, so a parser decides whether the edit is allowed."""
+
+    def config(self):
+        return self.codex_dir / "config.toml"
+
+    def write_config(self, body):
+        self.config().write_text(body)
+
+    def test_a_features_example_inside_a_multiline_string_is_left_alone(self):
+        q = '"' * 3
+        body = (
+            "developer_instructions = %s\n"
+            "To turn hooks on, write this:\n"
+            "[features]\n"
+            "hooks = false\n"
+            "%s\n"
+            "\n"
+            "[features]\n"
+            "web_search = true\n"
+        ) % (q, q)
+        self.write_config(body)
+        self.cli("install-hook")
+        text = self.config().read_text()
+        # The example keeps its own text; the real table gains the key.
+        self.assertIn("hooks = false", text)
+        self.assertEqual(text.count("hooks = true"), 1)
+        parsed = peers._load_tomllib().loads(text)
+        self.assertIs(parsed["features"]["hooks"], True)
+        self.assertIn("hooks = false", parsed["developer_instructions"])
+        self.assertIs(parsed["features"]["web_search"], True)
+
+    def test_a_single_quoted_multiline_block_is_handled_too(self):
+        q = "'" * 3
+        body = "notes = %s\n[features]\nhooks = false\n%s\n" % (q, q)
+        self.write_config(body)
+        self.cli("install-hook")
+        parsed = peers._load_tomllib().loads(self.config().read_text())
+        self.assertIn("hooks = false", parsed["notes"])
+        self.assertIs(parsed["features"]["hooks"], True)
+
+    def test_a_quoted_table_header_is_the_same_table(self):
+        # R1c: never add a second [features] beside a ["features"].
+        self.write_config('["features"]\nhooks = false\nweb_search = true\n')
+        self.cli("install-hook")
+        text = self.config().read_text()
+        self.assertEqual(text.count("features"), 1)
+        self.assertEqual(text.count("hooks ="), 1)
+        parsed = peers._load_tomllib().loads(text)
+        self.assertIs(parsed["features"]["hooks"], True)
+        self.assertIs(parsed["features"]["web_search"], True)
+
+    def test_a_spaced_quoted_header_is_recognised(self):
+        self.assertEqual(peers._unquote_table_name('"features"'), "features")
+        self.assertEqual(peers._unquote_table_name(" 'features' "), "features")
+        self.assertEqual(peers._unquote_table_name("features"), "features")
+        # A dotted key with a quoted last part is left alone.
+        self.assertEqual(
+            peers._unquote_table_name('hooks.state."/x:session_start:0:0"'),
+            'hooks.state."/x:session_start:0:0"',
+        )
+
+    def test_an_edit_that_would_change_anything_else_is_refused(self):
+        body = '[features]\nhooks = false\nweb_search = true\n'
+        self.write_config(body)
+        original = peers._set_features_hooks_lines
+
+        def sabotage(lines):
+            out, _changed = original(lines)
+            return [line.replace("web_search = true", "web_search = false")
+                    for line in out], True
+
+        peers._set_features_hooks_lines = sabotage
+        try:
+            rc, _out, err = self.cli("install-hook")
+        finally:
+            peers._set_features_hooks_lines = original
+        self.assertEqual(rc, 0)
+        self.assertEqual(self.config().read_text(), body)
+        self.assertIn("more than [features] hooks", err)
+        self.assertIn('add "hooks = true" under [features]', err)
+
+    def test_the_diff_gate_accepts_only_the_hooks_key(self):
+        before = {"model": "gpt-5", "features": {"web_search": True}}
+        after = {"model": "gpt-5", "features": {"web_search": True, "hooks": True}}
+        self.assertTrue(peers._only_features_hooks_changed(before, after))
+        self.assertTrue(peers._only_features_hooks_changed({}, {"features": {"hooks": True}}))
+        self.assertFalse(peers._only_features_hooks_changed(before, {"features": {"hooks": True}}))
+        self.assertFalse(peers._only_features_hooks_changed(before, after | {"model": "x"}))
+        self.assertFalse(peers._only_features_hooks_changed(before, before))
+
+
+class TestNoTomllibRefusesToEdit(Base):
+    """R1b: on 3.9 and 3.10 the config is never edited, only explained."""
+
+    def setUp(self):
+        super().setUp()
+        self._real_loader = peers._load_tomllib
+        peers._load_tomllib = lambda: None
+
+    def tearDown(self):
+        peers._load_tomllib = self._real_loader
+        super().tearDown()
+
+    def test_install_hook_still_succeeds_and_prints_the_manual_step(self):
+        config = self.codex_dir / "config.toml"
+        config.write_text('model = "gpt-5"\n')
+        rc, out, err = self.cli("install-hook")
+        self.assertEqual(rc, 0)
+        self.assertEqual(config.read_text(), 'model = "gpt-5"\n')
+        self.assertIn('add "hooks = true" under [features]', out)
+        self.assertIn("no tomllib", err)
+        # The hook entry itself is still installed; only the flag is manual.
+        data = json.loads((self.codex_dir / "hooks.json").read_text())
+        self.assertEqual(len(data["hooks"]["SessionStart"]), 1)
+
+    def test_a_missing_config_is_not_created(self):
+        self.cli("install-hook")
+        self.assertFalse((self.codex_dir / "config.toml").exists())
+
+    def test_doctor_says_why_the_flag_is_manual(self):
+        _rc, out, _err = self.cli("doctor")
+        self.assertIn("no tomllib", out)
+        self.assertIn('add "hooks = true" under [features]', out)
+
+
+class TestDownIsSerialised(Base):
+    """R2: `down` must stop and unregister without a reconcile in between."""
+
+    def test_a_reconcile_cannot_restart_the_thread_down_is_removing(self):
+        tid, _rollout = self.one_thread(name="codex-uzi")
+        peers.register_thread({"id": tid, "name": "codex-uzi"})
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(peers.reconcile(), 1)
+        self.assertIsNotNone(peers.shim_ready(tid))
+
+        lock = self.hold_reconcile_lock()
+        proc = self.spawn("down", tid)
+        # With the fix, `down` blocks here and the shim is still alive; without
+        # it, `down` has already stopped the shim and this reconcile restarts
+        # it behind `down`'s back.
+        stopped_early = wait_for(lambda: peers.shim_pid(tid) is None, timeout=2.0)
+        with contextlib.redirect_stdout(io.StringIO()):
+            peers._reconcile(False)
+        lock.close()
+
+        out, _ = proc.communicate(timeout=30)
+        self.assertEqual(proc.returncode, 0, out)
+        self.assertIsNone(
+            stopped_early,
+            "`down` stopped the shim before taking the lock, so a reconcile "
+            "could restart it",
+        )
+        self.assertEqual(peers.read_registered(), {})
+        self.assertIsNone(peers.shim_pid(tid), "an unregistered shim is still running")
+
+    def test_down_still_works_with_no_contention(self):
+        tid, _rollout = self.one_thread(name="codex-uzi")
+        peers.register_thread({"id": tid, "name": "codex-uzi"})
+        with contextlib.redirect_stdout(io.StringIO()):
+            peers.reconcile()
+        rc, out, _err = self.cli("down", tid)
+        self.assertEqual(rc, 0)
+        self.assertIn("unregistered", out)
+        self.assertEqual(peers.read_registered(), {})
+        self.assertIsNone(peers.shim_pid(tid))
+
+    def test_bare_down_takes_the_lock_once_for_every_thread(self):
+        tid, _rollout = self.one_thread(name="codex-uzi")
+        peers.register_thread({"id": tid, "name": "codex-uzi"})
+        with contextlib.redirect_stdout(io.StringIO()):
+            peers.reconcile()
+        rc, out, _err = self.cli("down")
+        self.assertEqual(rc, 0)
+        self.assertIn("registrations kept", out)
+        self.assertIn(tid, peers.read_registered())
+        self.assertIsNone(peers.shim_pid(tid))
 
 
 class TestCliSurface(Base):
