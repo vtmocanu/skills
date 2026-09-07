@@ -102,8 +102,8 @@ into a Claude session from a host shell.
 
 ### Keeping shims alive
 
-Shims exit when their thread's process stops holding the rollout, on `down`, or
-on reboot (`/tmp` is cleared). No Claude-side hook is part of delivery. As a
+Shims exit when their thread's process holds neither the rollout nor the writer
+lock (i.e. the thread is gone), on `down`, or on reboot (`/tmp` is cleared). No Claude-side hook is part of delivery. As a
 convenience only, a Claude `SessionStart` hook in the effective settings file
 (`$CLAUDE_CONFIG_DIR/settings.json` when that variable is set, otherwise
 `~/.claude/settings.json`) that runs `<this skill's directory>/scripts/peers.py
