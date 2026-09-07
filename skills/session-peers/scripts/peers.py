@@ -1361,6 +1361,11 @@ def truncate_utf8(text, max_bytes):
     return encoded[:max_bytes].decode("utf-8", "ignore")
 
 
+def env_bytes():
+    """UTF-8 bytes the environment occupies in the exec budget."""
+    return sum(utf8_len(k) + utf8_len(v) + 2 for k, v in os.environ.items())
+
+
 def argv_text_budget():
     """BYTES that `codex queue --message <text>` can actually carry.
 
@@ -1373,8 +1378,7 @@ def argv_text_budget():
         arg_max = os.sysconf("SC_ARG_MAX")
     except (ValueError, OSError, AttributeError):
         return MAX_TEXT_CHARS
-    env_bytes = sum(utf8_len(k) + utf8_len(v) + 2 for k, v in os.environ.items())
-    budget = arg_max - env_bytes - 8192
+    budget = arg_max - env_bytes() - 8192
     if sys.platform.startswith("linux"):
         # Linux caps ONE argv element at MAX_ARG_STRLEN (32 pages), far below
         # ARG_MAX; macOS has no separate per-argument limit.

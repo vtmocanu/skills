@@ -3124,14 +3124,22 @@ class TestByteBudget(Base):
         self.assertEqual(self.queue_calls(), [])
 
     def test_the_environment_is_measured_in_bytes_too(self):
+        plain_env = peers.env_bytes()
         plain = peers.argv_text_budget()
         os.environ["SESSION_PEERS_PADDING"] = "\u4e2d" * 2000
         try:
+            padded_env = peers.env_bytes()
             padded = peers.argv_text_budget()
         finally:
             os.environ.pop("SESSION_PEERS_PADDING")
         # 2000 characters of three bytes each must cost about 6000, not 2000.
-        self.assertGreater(plain - padded, 5000)
+        self.assertGreater(padded_env - plain_env, 5000)
+        # The budget never grows with a bigger environment. On Linux the
+        # per-argument cap (32 pages) dominates, so the two budgets are equal
+        # there; on macOS ARG_MAX minus the environment is the binding limit.
+        self.assertLessEqual(padded, plain)
+        if sys.platform == "darwin":
+            self.assertGreater(plain - padded, 5000)
 
 
 class TestStatusAtStart(Base):
