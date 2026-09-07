@@ -3468,6 +3468,136 @@ class TestDownIsSerialised(Base):
         self.assertIsNone(peers.shim_pid(tid))
 
 
+class TestConfigReaderPaths(Base):
+    """R3: both readers must agree, and neither may read a string as config."""
+
+    MULTILINE = (
+        "developer_instructions = %s\n"
+        "Point the bridge at another database like this:\n"
+        'sqlite_home = "/tmp/not-a-real-home"\n'
+        "[features]\n"
+        "hooks = false\n"
+        "%s\n"
+        "\n"
+        'model = "gpt-5"\n'
+        "\n"
+        "[features]\n"
+        "hooks = true\n"
+    ) % ('"' * 3, '"' * 3)
+
+    QUOTED_HEADER = '["features"]\nhooks = true\nweb_search = false\n'
+
+    def config(self):
+        return self.codex_dir / "config.toml"
+
+    @contextlib.contextmanager
+    def lite_reader_only(self):
+        """Force the line-reader fallback, as on Python 3.9 and 3.10."""
+        real = peers._load_tomllib
+        peers._load_tomllib = lambda: None
+        try:
+            yield
+        finally:
+            peers._load_tomllib = real
+
+    # -- (a) a key inside a multiline string is not a key ------------------
+
+    def test_the_parser_path_ignores_a_sqlite_home_inside_a_string(self):
+        self.config().write_text(self.MULTILINE)
+        cfg = peers.read_toml_lite(str(self.config()))
+        self.assertNotIn("sqlite_home", cfg[""])
+        self.assertEqual(cfg[""]["model"], "gpt-5")
+        self.assertIs(cfg["features"]["hooks"], True)
+
+    def test_the_line_reader_ignores_a_sqlite_home_inside_a_string(self):
+        self.config().write_text(self.MULTILINE)
+        with self.lite_reader_only():
+            cfg = peers.read_toml_lite(str(self.config()))
+        self.assertNotIn("sqlite_home", cfg[""])
+        self.assertEqual(cfg[""]["model"], "gpt-5")
+        self.assertIs(cfg["features"]["hooks"], True)
+
+    def test_neither_reader_lets_a_string_redirect_the_database(self):
+        # The bug this pins: reading that example would send every query to a
+        # database Codex never writes.
+        self.config().write_text(self.MULTILINE)
+        self.assertEqual(peers.codex_sqlite_home(), str(self.codex_dir))
+        with self.lite_reader_only():
+            self.assertEqual(peers.codex_sqlite_home(), str(self.codex_dir))
+
+    # -- (b) a quoted header stores its values under the normalised name ---
+
+    def test_the_parser_path_stores_a_quoted_header_normalised(self):
+        self.config().write_text(self.QUOTED_HEADER)
+        cfg = peers.read_toml_lite(str(self.config()))
+        self.assertIn("features", cfg)
+        self.assertNotIn('"features"', cfg)
+        self.assertIs(cfg["features"]["hooks"], True)
+        self.assertIs(cfg["features"]["web_search"], False)
+
+    def test_the_line_reader_stores_a_quoted_header_normalised(self):
+        self.config().write_text(self.QUOTED_HEADER)
+        with self.lite_reader_only():
+            cfg = peers.read_toml_lite(str(self.config()))
+        self.assertIn("features", cfg)
+        self.assertNotIn('"features"', cfg)
+        self.assertIs(cfg["features"]["hooks"], True)
+        self.assertIs(cfg["features"]["web_search"], False)
+
+    def test_doctor_reads_the_flag_through_a_quoted_header(self):
+        self.cli("install-hook")
+        self.config().write_text(self.QUOTED_HEADER)
+        _rc, out, _err = self.cli("doctor")
+        self.assertIn("[features] hooks = true", out)
+
+    # -- the two readers agree, and the fallback is announced --------------
+
+    def test_both_readers_agree_on_a_realistic_config(self):
+        hooks_path = self.codex_dir / "hooks.json"
+        body = (
+            'model = "gpt-5"\n'
+            'sqlite_home = "/tmp/dbs"\n'
+            "\n"
+            "[features] # flags\n"
+            "hooks = true\n"
+            "count = 3\n"
+            "\n"
+            '[hooks.state."%s:session_start:0:0"]\n'
+            'trusted_hash = "abc"\n'
+            "enabled = false\n"
+        ) % hooks_path
+        self.config().write_text(body)
+        parsed = peers.read_toml_lite(str(self.config()))
+        with self.lite_reader_only():
+            lite = peers.read_toml_lite(str(self.config()))
+        key = 'hooks.state."%s:session_start:0:0"' % hooks_path
+        for cfg in (parsed, lite):
+            self.assertEqual(cfg[""]["sqlite_home"], "/tmp/dbs")
+            self.assertIs(cfg["features"]["hooks"], True)
+            self.assertEqual(cfg["features"]["count"], 3)
+            self.assertEqual(cfg[key]["trusted_hash"], "abc")
+            self.assertIs(cfg[key]["enabled"], False)
+
+    def test_a_file_that_does_not_parse_falls_back_with_a_warning(self):
+        self.config().write_text('model = "gpt-5"\nthis line is not toml\n')
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            cfg = peers.read_toml_lite(str(self.config()))
+        self.assertIn("reading it line by line", err.getvalue())
+        self.assertEqual(cfg[""]["model"], "gpt-5")
+
+    def test_a_missing_file_is_an_empty_table_on_both_paths(self):
+        missing = str(self.root / "nope.toml")
+        self.assertEqual(peers.read_toml_lite(missing), {"": {}})
+        with self.lite_reader_only():
+            self.assertEqual(peers.read_toml_lite(missing), {"": {}})
+
+    def test_a_header_segment_is_quoted_only_when_it_has_to_be(self):
+        self.assertEqual(peers._toml_key_text("features"), "features")
+        self.assertEqual(peers._toml_key_text("web_search"), "web_search")
+        self.assertEqual(peers._toml_key_text("a/b:c"), '"a/b:c"')
+
+
 class TestCliSurface(Base):
     def test_no_subcommand_prints_help(self):
         rc, out, _err = self.cli()

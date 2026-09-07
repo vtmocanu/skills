@@ -89,6 +89,9 @@ TAG_ABSENT = "-"
 TRIPLE_DQ = '"' * 3
 TRIPLE_SQ = "'" * 3
 
+# A TOML bare key needs no quoting in a table header.
+BARE_KEY_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
 # `[features] # flags` is a valid TOML header; `# [features]` is a comment.
 TOML_HEADER_RE = re.compile(r"^\s*\[([^\]]+)\]\s*(?:#.*)?$")
 
@@ -308,12 +311,40 @@ def _toml_scalar(raw):
         return raw
 
 
+def _toml_key_text(part):
+    """One dotted-path segment as TOML would write it in a table header."""
+    return part if BARE_KEY_RE.match(part) else '"%s"' % part
+
+
+def _flatten_toml(data):
+    """A parsed TOML document in the shape read_toml_lite returns.
+
+    {"": root scalars, "features": {...}, 'hooks.state."<k>"': {...}}, so the
+    two readers are interchangeable for every caller.
+    """
+    out = {}
+
+    def walk(prefix, table):
+        scalars = {}
+        for key, value in table.items():
+            if isinstance(value, dict):
+                walk(prefix + [key], value)
+            else:
+                scalars[key] = value
+        out[".".join(_toml_key_text(p) for p in prefix)] = scalars
+
+    walk([], data)
+    out.setdefault("", {})
+    return out
+
+
 def read_toml_lite(path):
     """Return {section_header: {key: value}} with "" for the root table.
 
-    Enough for the three things the bridge reads: a root `sqlite_home`, the
-    `[features] hooks` flag, and the `[hooks.state."..."]` blocks. Section keys
-    are the raw text between the brackets, so a quoted dotted key survives.
+    R3: a real parser reads the file where one exists, because a line reader
+    cannot tell a key from the same text inside a multiline string. The line
+    reader stays as the fallback for 3.9 and 3.10 and for a file that does not
+    parse, where reading something beats reading nothing.
     """
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as fh:
@@ -323,23 +354,41 @@ def read_toml_lite(path):
     except OSError as exc:
         log("ignoring unreadable %s: %s" % (path, exc))
         return {"": {}}
+    tomllib = _load_tomllib()
+    if tomllib is not None:
+        try:
+            return _flatten_toml(tomllib.loads(text))
+        except Exception as exc:
+            log(
+                "%s does not parse as TOML (%s); reading it line by line instead"
+                % (path, exc)
+            )
     return read_toml_lite_text(text)
 
 
 def read_toml_lite_text(text):
+    """The line-reader fallback.
+
+    R3: lines inside a multiline string are skipped, and the active table name
+    is normalised so `["features"]` stores its keys under `features`.
+    """
     out = {"": {}}
     lines = text.splitlines()
+    inside = _line_states(lines)
     section = ""
-    for line in lines:
+    for i, line in enumerate(lines):
+        if inside[i]:
+            continue
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
             continue
         header = TOML_HEADER_RE.match(line)
         if header:
-            section = header.group(1).strip()
-            if section.startswith("[") and section.endswith("]"):
-                section = section[1:-1].strip()  # array of tables
-            out.setdefault(_unquote_table_name(section), {})
+            name = header.group(1).strip()
+            if name.startswith("[") and name.endswith("]"):
+                name = name[1:-1].strip()  # array of tables
+            section = _unquote_table_name(name)
+            out.setdefault(section, {})
             continue
         if "=" not in stripped:
             continue
