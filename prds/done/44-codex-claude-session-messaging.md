@@ -2,7 +2,7 @@
 
 **Issue**: [#44](https://github.com/vtmocanu/skills/issues/44) | **Label**: PRD | **Priority**: Medium
 **Area**: new skill `skills/session-peers/` (`SKILL.md`, `scripts/peers.py`, `scripts/test_peers.py`, `references/spike-checklist.md`), one `test.yml` step, README rows, CHANGELOG. macOS and Linux only (Windows uses named pipes, which the stdlib cannot speak).
-**Status**: **Complete 2026-09-07**, M0 to M6 done (M0 hook-timing item deferred by decision, see checklist item 13). Kept in `prds/` like PRD #13; moves to `prds/done/` when the PR merges. Created 2026-09-07. Reviewed the same day by two Claude reviewers (27 findings) and by a Codex CLI session (13 findings in round 1, 7 in round 2), all folded in or answered below.
+**Status**: **Complete 2026-09-07**, M0 to M6 done (M0 hook-timing item deferred by decision, see checklist item 13). Merged as PR #45 (81280380) and moved to `prds/done/`. Created 2026-09-07. Reviewed the same day by two Claude reviewers (27 findings) and by a Codex CLI session (13 findings in round 1, 7 in round 2), all folded in or answered below.
 
 **Evidence basis**: every mechanism below was measured on this machine on
 2026-09-07 with Claude Code 2.1.263 (`~/.local/share/claude/versions/2.1.263`)
