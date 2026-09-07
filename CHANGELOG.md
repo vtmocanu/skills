@@ -6,6 +6,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `session-peers`: cross-session messaging between Claude Code sessions and Codex
+  CLI threads on one machine (PRD #44). A registered Codex thread gets a shim
+  process that appears in Claude's `ListAgents` and `@` typeahead under its
+  Codex name; a message to it is queued with `codex queue --thread <uuid>`, and
+  the thread's replies come back through the sender's inbox socket, with a
+  per-sender reply budget. Python 3 stdlib only; macOS and Linux.
+
 ### Changed
 
 - `agent-team`: trimmed the manifest template's dated illustrative examples in four

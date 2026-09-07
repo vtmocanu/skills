@@ -39,3 +39,8 @@ jobs:
 
       - name: Test skills/agent-kit/agent-team/scripts/sync.py
         run: python3 skills/agent-kit/agent-team/scripts/test_sync.py
+
+      # Stdlib only, and every root (CLAUDE_CONFIG_DIR, CODEX_HOME, the socket
+      # directory, PATH) is a temp dir, so this needs no agent installed.
+      - name: Test skills/session-peers/scripts/peers.py
+        run: python3 skills/session-peers/scripts/test_peers.py

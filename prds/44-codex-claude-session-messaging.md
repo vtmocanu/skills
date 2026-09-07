@@ -2,7 +2,7 @@
 
 **Issue**: [#44](https://github.com/vtmocanu/skills/issues/44) | **Label**: PRD | **Priority**: Medium
 **Area**: new skill `skills/session-peers/` (`SKILL.md`, `scripts/peers.py`, `scripts/test_peers.py`, `references/spike-checklist.md`), one `test.yml` step, README rows, CHANGELOG. macOS and Linux only (Windows uses named pipes, which the stdlib cannot speak).
-**Status**: Draft, created 2026-09-07. Reviewed the same day by two Claude reviewers (27 findings) and by a Codex CLI session (13 findings in round 1, 7 in round 2), all folded in or answered below.
+**Status**: **Complete 2026-09-07**, M0 to M6 done (M0 hook-timing item deferred by decision, see checklist item 13). Kept in `prds/` like PRD #13; moves to `prds/done/` when the PR merges. Created 2026-09-07. Reviewed the same day by two Claude reviewers (27 findings) and by a Codex CLI session (13 findings in round 1, 7 in round 2), all folded in or answered below.
 
 **Evidence basis**: every mechanism below was measured on this machine on
 2026-09-07 with Claude Code 2.1.263 (`~/.local/share/claude/versions/2.1.263`)
@@ -124,7 +124,11 @@ agents (D9). It contains:
   name. The socket writes nothing back; delivery receipts arrive as a separate
   connection to the `from` address carrying
   `{"type":"control","action":"peer_message_status",...}`. Other control frames
-  a listener sees: `rename`, `notify_when_idle`, `peer_idle_notice`.
+  a listener sees: `rename`, `notify_when_idle`, `peer_idle_notice`. Measured
+  `notify_when_idle` frame: `{"type":"control","action":"notify_when_idle",
+  "from":"uds:<path>","from_mode":"prompting","msgV":1,"msg_id":"<uuid>"}`; the
+  accepted answer: `{"type":"control","action":"peer_idle_notice",
+  "orig_msg_id":<that msg_id>,"state":"idle","finished_at":<ms>,"detail":<str>}`.
 - **Inbound gate**: `crossSessionInbound` unset means mode parity. A sender that
   asserts no permission class is delivered to a prompting-mode session and held
   for approval by a bypass-permissions session. Auth line optional on macOS and
@@ -210,13 +214,22 @@ agents (D9). It contains:
   disagreement never becomes write/delete churn. `up` starts one shim per
   registered live thread (idempotent: it deduplicates shims, never
   reconciliation, so it is safe to run on every hook invocation), `down` stops
-  them. **State and restart**: each shim persists
+  them. Measured 2026-09-07: a record with `peerFeatures: []` makes Claude
+  refuse `notify_when_idle` ("runs a version without idle notices"); with
+  `["notify_idle"]` the subscription is accepted and the shim's
+  `peer_idle_notice` rendered as a Claude idle notice. A shim killed with
+  SIGTERM left its record and socket behind (Python's default handler skips
+  `finally`), so the shim installs signal handlers. **State and restart**: each
+  shim persists
   `$CODEX_HOME/session-peers/<uuid>.json` (rollout byte cursor, pending
   turn-to-sender map, delivered turn ids, budgets, contact list). On start it
   resumes from the cursor when the file exists and starts at EOF otherwise; it
   never transmits a completion that happened before its cursor, so a restart
-  cannot resend history. Delivery across a shim crash is best-effort: a turn
-  that completed while no shim was running is not delivered. Sleep is a non-issue (`procStart` is
+  cannot resend history. A tagged turn that completed while no shim was running
+  is delivered on restart only if it completed within the last 15 minutes;
+  older ones are marked delivered without posting (measured in review: without
+  the gate a stale answer was replayed). Delivery across a shim crash is
+  therefore best-effort and bounded. Sleep is a non-issue (`procStart` is
   stable); reboot clears `/tmp` and the next `up` restarts the shims.
 - **D3. Python 3 stdlib only.** `sqlite3` reads Codex's databases, `socket`
   speaks the Unix socket without a `nc`/`socat` dependency, `subprocess` runs
@@ -237,6 +250,15 @@ agents (D9). It contains:
   own sender guards do not run here). Independently, when the first line of
   `last_agent_message` begins with `@<claude-name>`, it posts to that session by
   name (prior-contact rule, D8). Duplicates to one target collapse;
+  Measured 2026-09-07: a typed turn and a queued turn, and two queued items
+  back to back, each produced their own `task_started` / user item /
+  `task_complete` with matching `turn_id`, the next turn starting 5 to 30 ms
+  after the previous `task_complete`; a completed turn can carry a null
+  `last_agent_message` even with an assistant item present. After a Ctrl-C the
+  queue stays paused through a `codex resume` until the user types a new
+  prompt, and a dead process leaves its items queued, so the shim reports
+  "paused after interrupt" or "not live" to the sender through a
+  `peer_message_status` control frame instead of pretending delivery.
   `task_complete` fires once per turn, so a `Stop` hook that continues the turn
   changes nothing here; a `turn_aborted` or a null `last_agent_message` ends
   the turn with no deliverable reply and clears the pending entry. A `Stop`
@@ -274,12 +296,15 @@ agents (D9). It contains:
   `thread/name/set`), so a repo's `AGENTS.md` cannot opt a thread in. The
   SKILL.md tells users to `/rename` and to add `thread-title` to
   `[tui] status_line` so the name is visible.
-- **D7. Frame content: wrapped without a permission claim when the spike
-  proves it, bare otherwise.** M0 sends, from a shim socket as `from`, a wrapper
-  carrying `from`, `from-session` and `from-name` but **no `from-mode`**, and a
-  bare string prefixed `Message from Codex thread <name>:`. Use the wrapper if
-  the parser accepts it and it renders as a named peer; otherwise the bare form.
-  Never assert `from-mode`: Codex has no Claude permission class, and an
+- **D7. Frame content: the wrapper without a permission claim (measured).**
+  M0 posted, from a shim socket as `from`, a wrapper carrying `from`,
+  `from-session` and `from-name` but **no `from-mode`**, and a bare string
+  prefixed `Message from Codex thread <name>:`. The wrapper rendered as a named
+  peer preview (`› Message from @codex-uzi: … (ctrl+o to expand)`) and the model
+  saw it attributed; the bare form rendered like a typed prompt with no name.
+  The bridge sends the wrapper. Claude's own frames to the shim carried
+  `from`, `from-name` and `from-mode` only, so `from-session` and `hop-chain`
+  are optional on the receiving side. Never assert `from-mode`: Codex has no Claude permission class, and an
   unclassified sender is exactly what a bypass-mode session holds for approval.
   Either way `from` is the shim's socket, so Claude's reply reaches Codex.
 - **D8. Security: same-uid filesystem model, narrowed where the bridge would
@@ -319,55 +344,57 @@ agents (D9). It contains:
 ## Milestones
 
 **M0. Spike the undocumented seams (throwaway code; findings written into D2, D4, D7 and `references/spike-checklist.md`).**
-- [ ] A hand-written shim writing the exact record M2 ships (`entrypoint:
-  codex`, `kind: interactive`, `peerFeatures: []`, `peerProtocol: 1`) appears in a
-  real Claude session's `ListAgents` under a Codex name; `SendMessage` to it
-  passes the endpoint checks; the received frame is recorded. Also record
-  whether a record without a `.key` file is accepted, and that the registry
-  follows `CLAUDE_CONFIG_DIR`.
-- [ ] From the shim's socket as `from`, post D7's two forms into a Claude
-  session; record which renders as a named peer and whether the reply lands on
-  the shim. Fill D7.
-- [ ] Confirm `notify_when_idle` arrives at the shim as a `control` frame and
-  that `peer_idle_notice` is accepted.
-- [ ] Rollout tailing: confirm turn-boundary correlation on a thread with two
-  queued items landing back to back, and that `task_complete` for a queued
-  turn carries the reply (Q3).
-- [ ] Hook timing on 0.153.4: when `SessionStart` runs relative to the first
-  turn, and whether a child started with `start_new_session=True` and
-  redirected fds survives the hook's exit.
-- [ ] Write the steps as `references/spike-checklist.md` so R1 can be re-run
-  after an upgrade.
-Success: D2, D4 and D7 carry measured answers; the checklist exists; no spike
-code is committed.
+- [x] **2026-09-07 13:35** A hand-written shim writing the M2 record appeared in
+  `ListAgents` as `codex-uzi [a6a2b4] · interactive · idle` 4 s after start;
+  `SendMessage` passed the endpoint checks; the frame is quoted in the
+  checklist. No `.key` file was needed. `CLAUDE_CONFIG_DIR` not provable from
+  the binary; recorded as an assumption (checklist item 6).
+- [x] **2026-09-07 13:42** Both forms delivered; wrapper (no `from-mode`)
+  renders as a named peer, bare does not. D7 filled. A Claude reply to the
+  wrapped message reached the shim socket (the SHIM-OK and IDLE-OK round trips).
+- [x] **2026-09-07 14:01** `notify_when_idle` control frame received (shape in
+  the facts); `peer_idle_notice` accepted and rendered as
+  `[Cross-session idle notice] "codex-uzi" … is idle now — it finished a turn
+  at 14:01. Its harness reports: «turn task_complete»`. Needs
+  `peerFeatures: ["notify_idle"]` in the record.
+- [x] **2026-09-07 14:02** Two items queued 0.1 s apart ran as two sequential
+  turns (`task_started` 5.9 s after queueing, the second 30 ms after the first
+  `task_complete`), each `task_complete` carrying its reply (`BB-A`, `BB-B`).
+  Q3 resolved. Also measured: a queue paused by Ctrl-C stays paused across
+  `codex resume` until a typed prompt; a dead process leaves items queued.
+- [~] Hook timing on 0.153.4: **deferred**, the design no longer depends on it
+  (hooks are optional, `up` is the bootstrap); left as checklist item 13 for the
+  first user who installs the hook.
+- [x] **2026-09-07** `references/spike-checklist.md` written with the measured
+  values; spike shim lived in the session scratchpad only.
+Success met: D2, D4 and D7 carry measured answers; the checklist exists; no
+spike code is committed.
 
 **M1. `peers.py` core: roots, discovery, rollout reader, one-shot send.**
-- [ ] Roots from `CLAUDE_CONFIG_DIR` / `CODEX_HOME` / `sqlite_home`; every read
+- [x] Roots from `CLAUDE_CONFIG_DIR` / `CODEX_HOME` / `sqlite_home`; every read
   tolerates a missing file, DB or unknown schema (empty result plus a stderr
   warning, never a traceback).
-- [ ] `list --json`: Claude sessions with the exact liveness filter (pid alive,
+- [x] `list --json`: Claude sessions with the exact liveness filter (pid alive,
   `pidDomain`, `procStart` via `ps -o lstart=` under `LC_ALL=C TZ=UTC`); Codex
   threads from the recognised `state_*.sqlite` schema plus
   `session_index.jsonl`, filtered to rollouts held open per `lsof`, with the
   D6 registration flag and the holding pid.
-- [ ] Rollout reader: incremental tail from a byte cursor that yields turn
+- [x] Rollout reader: incremental tail from a byte cursor that yields turn
   records `(turn_id, user_text, tag, outcome, last_agent_message)` from the
   boundary events (`task_started`, `task_complete`, `turn_aborted`), with and
   without a tag line, null completion text, across a file that grows while
   read.
-- [ ] `send --to codex:<name|uuid>`: bridge-side name resolution (refuses
+- [x] `send --to codex:<name|uuid>`: bridge-side name resolution (refuses
   duplicates), liveness check first, tag line, `codex queue --thread <uuid>`;
   the D11 degraded mode when the schema is unknown.
-- [ ] `send --to cc:<name>`: registry lookup, optional auth line from the `.key`
+- [x] `send --to cc:<name>`: registry lookup, optional auth line from the `.key`
   file, frame per D7, `from` set when a shim socket exists for the calling Codex
   thread, otherwise omitted; refuses a socket outside the allowlisted dirs.
-- [ ] D11 version pin and warning.
-Success: `list --json`, the rollout reader and both `send` forms pass
-`test_peers.py` against M4's fixtures with a fake `codex`, `ps` and `lsof` on
-`PATH` and every root in a temp dir.
+- [x] D11 version pin and warning.
+Success met 2026-09-07: `peers.py` (2935 lines) with `list --json`, the rollout reader and both `send` forms, 215 tests green in `test_peers.py` against fake `codex`, `ps`, `lsof` and temp roots (run locally, 74 s).
 
 **M2. Shim, `up` / `down`.**
-- [ ] `shim --thread <uuid>`: D2 in full (record, socket, own-pid serving,
+- [x] `shim --thread <uuid>`: D2 in full (record, socket, own-pid serving,
   foreign-uid refusal, rewrite-at-most-twice, persisted state, resume-from-
   cursor, exit when the rollout is no longer held) plus D4 in full (tag,
   pending-turn map, rollout tail, reply-to-sender with `sid` verification,
@@ -375,42 +402,31 @@ Success: `list --json`, the rollout reader and both `send` forms pass
   handling), `notify_when_idle` answered with `peer_idle_notice` on
   `task_complete` or `turn_aborted`, unknown `control` actions ignored,
   `status` mirrored busy on `task_started` and idle on either end event.
-- [ ] `up [<name|uuid>]` / `down [<name|uuid>]` / `budget reset <thread>`:
+- [x] `up [<name|uuid>]` / `down [<name|uuid>]` / `budget reset <thread>`:
   registration per D6, reconcile of registered live threads, idempotent (one
   shim per thread, reconciliation on every call), daemonising with
   `start_new_session=True` and redirected fds so it is safe from a hook.
-Success: a shim started against a temp registry, a temp socket and a growing
-fixture rollout accepts a `user` frame from a test client, invokes the fake
-`codex queue` with the tagged body and the UUID, posts the fixture's
-`task_complete` reply to the test's listening socket exactly once (and nothing
-for a `turn_aborted` or a null text), does not resend a completion that lies
-before its persisted cursor after a restart, answers `notify_when_idle`,
-refuses a foreign-uid client, enforces the budget including an `@name` reply,
-and removes its record and socket on `SIGTERM` and when the fake `lsof` stops
-listing the rollout.
+Success met 2026-09-07: shim end-to-end tests on a temp socket and a growing fixture rollout (delivery once, no resend across restart, `notify_when_idle` answered, foreign uid refused, budget incl. `@name`, exit when the rollout is no longer held); live run in M6.
 
 **M3. `install-hook`, `session-hook`, `doctor`.**
-- [ ] `session-hook`: reads the `SessionStart` payload, runs the bare `up`
+- [x] `session-hook`: reads the `SessionStart` payload, runs the bare `up`
   reconcile detached, prints `{}`; runs on every invocation (`startup`,
   `resume`, `clear`, `compact`) and relies on `up`'s one-shim-per-thread
   dedupe.
-- [ ] `install-hook`: backs up `$CODEX_HOME/hooks.json`, appends one
+- [x] `install-hook`: backs up `$CODEX_HOME/hooks.json`, appends one
   `SessionStart` entry into the existing array (creating the file or the array
   if absent) keyed by the command string for idempotency, sets
   `features.hooks = true` in `config.toml` if unset, and prints the `/hooks`
   trust step. Optional: the skill works without it.
-- [ ] `doctor`: each bridge entry's trust state by comparing the current
-  definition's hash with `[hooks.state]`, installed versions against the pins,
+- [x] `doctor`: each bridge entry's presence and its `[hooks.state]` block
+  (reported as "trust unknown, open /hooks" since Codex's hash algorithm is not
+  documented), installed versions against the pins,
   the socket directory in use, live shims versus opted-in threads, and whether
   `codex` and `lsof` are on `PATH`.
-Success: `session-hook` on fixture payloads runs the fake `up` on each of the
-four `source` values and `up` starts at most one shim per thread across them;
-`install-hook` is idempotent on a fixture
-`hooks.json` and preserves every existing entry; `doctor` reads a fixture
-`config.toml`.
+Success met 2026-09-07: `session-hook`, `install-hook` (in-place `hooks =` rewrite with backup, unparseable file refused with backup) and `doctor` covered by `TestInstallHook*`, `TestFeaturesHooksKey` and doctor fixtures; live `doctor` output recorded in M6.
 
 **M4. Tests in `test.yml`, no live agents needed.**
-- [ ] `scripts/test_peers.py` (unittest, stdlib): registry parsing and
+- [x] `scripts/test_peers.py` (unittest, stdlib): registry parsing and
   liveness with a fake `ps`; Codex discovery against an in-test `state`
   schema, a fixture `session_index.jsonl` and a fake `lsof`; D6 registration (name resolved
   once, duplicate refused, unregistered thread ignored even when named);
@@ -423,45 +439,57 @@ four `source` values and `up` starts at most one shim per thread across them;
   (socket paths kept under the 104-byte macOS cap); `install-hook` merge, backup
   and idempotency; `doctor` on fixtures; version warning with injected version
   strings.
-- [ ] One `test.yml` step: `python3 skills/session-peers/scripts/test_peers.py`;
+- [x] One `test.yml` step: `python3 skills/session-peers/scripts/test_peers.py`;
   `scripts/validate_skills.py` green.
-Success: green on `ubuntu-latest`; macOS is covered by the local run recorded in
-M6.
+Success met 2026-09-07: `test.yml` step added; 215 tests (51 added in the review round: wrapper injection, pid ownership via flock, socket-dir ownership, chunked rollout reads, connection caps, restart window, real `peer_uid`, timestamps); green locally on macOS, CI on `ubuntu-latest` pending the PR.
 
 **M5. Documentation.**
-- [ ] `SKILL.md`: frontmatter per skill-maker (third person, single line, no
+- [x] `SKILL.md`: frontmatter per skill-maker (third person, single line, no
   unquoted colon-space, triggers such as "message the codex session", "tell
   codex", "list codex sessions", "reply to the claude session", "@codex"); body
   under 500 lines, branched by agent, with install (`npx skills add`, `up`,
   the optional `install-hook` and its `/hooks` trust step, `/rename`,
-  `thread-title` in `[tui] status_line`, the optional Claude `SessionStart`
-  snippet that runs `up`), the registration step after `/rename`, the reply
+  `thread-title` in `[tui] status_line`, and an optional convenience Claude
+  `SessionStart` snippet that only re-runs `up` for already registered threads,
+  consistent with D10: no Claude-side hook takes part in delivery), the
+  registration step after `/rename`, the reply
   policy and budget, and the limits (sizes, duplicate names, sandbox, macOS and
   Linux only, replies need a running shim, best-effort across a shim restart).
   `agnix --target claude-code skills/session-peers/SKILL.md` clean before
   commit (local step; agnix is not in CI).
-- [ ] README: one row in "All skills" and the count 19 to 20; CHANGELOG
+- [x] README: one row in "All skills" and the count 19 to 20; CHANGELOG
   `Unreleased` under `### Added` as "`session-peers`: ...".
-Success: M6 records that its first round trip was done by following `SKILL.md`
-verbatim.
+Success met 2026-09-07: `SKILL.md` (138 lines, agnix 0 errors 0 warnings, validate_skills 20/20), README row and count 20, CHANGELOG `Added` entry; M6's first round trip followed the SKILL.md steps (`/rename`, `up <name>`, `SendMessage`).
 
 **M6. End-to-end validation on this machine, recorded inline here.**
-- [ ] `up <renamed thread>` then Claude `@<name>` via `SendMessage` starts a
-  Codex turn (time it).
-- [ ] Auto reply-to-sender: the Claude-queued turn's answer lands in the sender
-  with no `@`, once, including when a third-party `Stop` hook is installed.
-- [ ] Codex first-line `@<claude-name>` reply arrives in that Claude session
-  after prior contact.
-- [ ] `notify_when_idle` from Claude on a Codex peer fires once when the Codex
-  turn ends.
-- [ ] Negatives: a message to a thread whose process has exited is refused with
-  the "no active session" text; a Claude-Codex ping-pong stops at the budget
-  with the stderr line; an unsolicited `@name` to a session with no prior
-  contact is dropped with a stderr line; a generated-title thread is not a
-  peer until `up`; an interrupted turn (Ctrl-C) leaves the peer idle and
-  delivers nothing; a shim restarted after a completed turn does not resend it.
-Success: all five boxes carry timestamps and measured figures; the header
-Status line is updated.
+- [x] **2026-09-07 11:34:46Z** `up codex-uzi` registered and started shim pid
+  29539 in 0.4 s; it appeared in `ListAgents` as `codex-uzi [7b2bfa]`;
+  `SendMessage` at ~11:35:00 started the Codex turn at 11:35:06, complete at
+  11:35:10 (RT1). Whole round trip about 10 s, of which Codex's poll was ~6 s.
+- [x] **11:35:30 to 11:35:35** RT2 and RT3 (sent back to back) each landed in
+  the sender exactly once with no `@`; this machine has two third-party `Stop`
+  hooks installed (Clawd on Desk, Orca), so re-fired stops did not duplicate.
+- [x] **11:35:10** RT1's reply began with `@uzi-30`; the explicit-address leg
+  and the reply-to-sender leg collapsed into one delivery (dedupe verified).
+- [x] **11:35** `notify_when_idle` on RT1 produced one
+  `[Cross-session idle notice] "codex-uzi" ... finished a turn at 14:35 ... «the
+  Codex thread is idle»` in the sender.
+- [x] Negatives, all 2026-09-07: `send --to codex:<uuid of an exited thread>`
+  refused with `no active session ... its process has exited (the queue would
+  sit undrained)`, queue untouched (11:36); RT4 dropped with `reply budget of 3
+  spent for session uzi-30` (11:36:21) and RT5 delivered after `budget reset`
+  (11:37:10); RT4's `@nobody-xx` first line dropped with `no live Claude session
+  named 'nobody-xx'` (the unknown-name path; the prior-contact path is covered
+  by unit tests, not exercised live to avoid messaging another real session);
+  the named, live, unregistered thread `review` listed `registered: false` and
+  never became a peer; Esc during `sleep 600` produced `turn_aborted` (11:47:23)
+  and the shim logged `aborted; nothing to deliver`; a message into the paused
+  thread was queued and logged `paused after an interrupt` (11:47:40), the
+  `held` status frame was posted but **no notice rendered in the sender's
+  terminal on 2.1.263** (recorded as unverified), and the item drained right
+  after the user's next prompt (`ok` at 11:49:02, RT6 delivered 11:49:13);
+  `down` then `up` restarted the shim (pid 44506) with no resend of RT1 to RT3.
+Success met: every box carries timestamps and measured figures.
 
 ## Success criteria
 
@@ -522,14 +550,15 @@ Criteria 2, 3 and 4 need a live agent and are measured in M6 only.
 
 ## Open questions (resolved during implementation)
 
-- Q1. Which wrapper attributes are mandatory for a wrapped frame to render as a
-  named peer, and is a wrapper without `from-mode` accepted? Resolved by M0,
-  written into D7.
-- Q2. Is a record without a `.key` file accepted by `SendMessage`? Resolved by
-  M0.
+- Q1. **Resolved 2026-09-07**: `from` and `from-name` suffice; `from-session`
+  and `from-mode` are optional; a wrapper without `from-mode` renders as a named
+  peer (D7).
+- Q2. **Resolved 2026-09-07**: yes, a record without a `.key` file is accepted
+  on macOS.
 - Q3. Does a queued turn produce the same `task_started` / `task_complete`
   pair as a typed one? Measured today for four queued turns: yes, with
   `last_agent_message` carrying the reply. M0 re-checks the two-items
   back-to-back case.
 - Q4. Where exactly does `SessionStart` fire on 0.153.4 (first turn vs launch),
-  and does a detached `up` survive the hook runner? Resolved by M0.
+  and does a detached `up` survive the hook runner? Deferred (checklist item
+  13); nothing in the delivery path depends on it.

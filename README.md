@@ -56,7 +56,7 @@ Anything later added under `skills/agent-kit/` joins the bundle automatically.
 
 ## 📦 All skills
 
-The whole catalog (19 skills), agent-kit included.
+The whole catalog (20 skills), agent-kit included.
 
 ```sh
 npx skills add https://github.com/vtmocanu/skills -a claude-code -g -y
@@ -88,6 +88,7 @@ npx skills add https://github.com/vtmocanu/skills -a claude-code -g -y
 | [claude-permissions](skills/claude-permissions/SKILL.md) | Manage Claude Code permissions via Dippy (Bash/MCP allow/ask/deny plus the auto-mode `[ASK]` fallback wrapper, bundled) and settings.json (Read/WebFetch/Skill). |
 | [done](skills/done/SKILL.md) | End-of-session wrap-up: check git state across the directories touched this session, review for loose ends, and give a plain verdict on whether the session can be closed. |
 | [generate-dockerfile](skills/generate-dockerfile/SKILL.md) | Generate a production-ready, secure, multi-stage Dockerfile and `.dockerignore` for the project. |
+| [session-peers](skills/session-peers/SKILL.md) | Make Claude Code sessions and Codex CLI threads on one machine message each other: each registered Codex thread appears as a real peer in Claude's `ListAgents` and `@` typeahead (delivered with `codex queue`), and Codex replies come back through the Claude session's inbox socket. |
 | [reflect](skills/reflect/SKILL.md) | Analyze the current session and propose improvements to the skill that was used, then edit and commit it. |
 | [skill-maker](skills/skill-maker/SKILL.md) | Author, lint, and publish Claude Code skills with the `npx skills` package manager: folder `SKILL.md` layout, frontmatter and description limits, design principles, agnix linting, and the add/update/remove scopes. |
 | [token-audit](skills/token-audit/SKILL.md) | Audit a Claude Code setup for token waste (report only, change nothing): measure in-scope CLAUDE.md sizes and @imports, MCP servers/tool counts and whether tool deferral is active, any proxy that silently disables it, model/effort and mid-session switches, output-reducing hooks, per-agent model inheritance, cron/loop intervals vs the measured cache TTL, and the newest session log's cache-read/creation/input/output token split; emit one severity-ranked table plus the single highest-leverage fix. |
