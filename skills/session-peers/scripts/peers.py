@@ -791,20 +791,24 @@ def lsof_holders(paths):
     return out
 
 
-def writer_lock_path(thread_id, sqlite_home=None):
+def writer_lock_path(thread_id, home=None):
     """The per-thread writer lock a live Codex process holds, under
-    `<home>/thread-writer-locks/<uuid>.lock`.
+    `<CODEX_HOME>/thread-writer-locks/<uuid>.lock`.
 
     It is a more reliable liveness signal than the rollout file: Codex writes
     the rollout lazily -- the `.jsonl` appears only once the thread's first turn
     completes (measured on codex-cli 0.153.4) -- so a just-created or renamed
     thread is live with the lock held and no rollout on disk yet. An older
     Codex that never creates the lock simply contributes no holder here, and
-    the rollout stays the signal. The home matches thread discovery
-    (`codex_sqlite_home`), where the state DB and thread records live.
+    the rollout stays the signal.
+
+    Rooted at CODEX_HOME, where Codex keeps both the lock and the session
+    rollouts, NOT at `sqlite_home`: the state DB can be relocated with
+    `sqlite_home` while the locks and rollouts stay under CODEX_HOME, so rooting
+    the lock at `sqlite_home` would probe the wrong directory when they differ.
     """
-    home = sqlite_home or codex_sqlite_home()
-    return os.path.join(home, "thread-writer-locks", "%s.lock" % thread_id)
+    root = home or codex_home()
+    return os.path.join(root, "thread-writer-locks", "%s.lock" % thread_id)
 
 
 def codex_threads(check_live=True):
@@ -852,8 +856,9 @@ def codex_threads(check_live=True):
             }
         )
     if check_live and threads:
-        home = os.path.dirname(db)
-        lock_of = {t["id"]: writer_lock_path(t["id"], home) for t in threads}
+        # The lock is rooted at CODEX_HOME, not at the state DB's home: the DB
+        # can live under a separate `sqlite_home` while the locks stay put.
+        lock_of = {t["id"]: writer_lock_path(t["id"]) for t in threads}
         probe = [t["rollout_path"] for t in threads if t["rollout_path"]]
         probe += list(lock_of.values())
         holders = lsof_holders(probe)
@@ -1993,6 +1998,14 @@ class Shim:
             log("queue failed: %s" % exc)
             self._status_back(frame, sender, "failed", str(exc))
             return
+        if not paused:
+            # We just queued a turn that will run, so advertise busy now. The
+            # tail would otherwise flip us busy only when it sees task_started
+            # in the rollout, and on a lock-only fresh thread that file may not
+            # exist yet -- leaving a notify_when_idle that arrives with (or just
+            # after) this message to fire against the shim's start-time idle
+            # instead of waiting for the turn to finish.
+            self._set_status("busy")
         if trimmed_from is not None:
             # S10: the sender used to learn nothing about a silent trim.
             self._status_back(

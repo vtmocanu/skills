@@ -41,11 +41,12 @@ the agent you are.
    A brand-new thread registers even before it has run a turn: liveness comes
    from the writer lock Codex holds from thread creation, not from the rollout
    `.jsonl`, which newer Codex writes lazily (the file appears only once the
-   first turn completes, measured on codex-cli 0.153.4). If an old build ever
-   refuses `up <name>` on a just-renamed thread with "no live Codex thread
-   named ... (N past thread(s) carried that name)", send the thread one turn
-   (any prompt, or `peers.py send --to codex:<uuid> --message ...`) so its
-   rollout is written, then retry.
+   first turn completes, measured on codex-cli 0.153.4). If a build without the
+   writer lock ever refuses `up <name>` on a just-renamed thread with "no live
+   Codex thread named ... (N past thread(s) carried that name)", have the user
+   type any prompt directly in that Codex TUI so its rollout is written, then
+   retry. `peers.py send` will not help there: it runs the same liveness check,
+   so without a rollout or a lock it refuses the send too.
 3. Confirm with `/list-agents` (or `ListAgents`): the thread appears under its
    Codex name as `interactive`, `idle` or `busy`.
 

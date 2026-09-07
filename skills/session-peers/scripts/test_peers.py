@@ -823,6 +823,34 @@ class TestCodexDiscovery(Base):
         self.set_holder(peers.writer_lock_path(tid), cmd="tail")
         self.assertFalse(peers.codex_threads()[0][0]["live"])
 
+    def test_liveness_roots_the_writer_lock_at_codex_home_not_sqlite_home(self):
+        # The state DB can live under a separate sqlite_home, but Codex keeps
+        # the writer lock under CODEX_HOME. Rooting the lock probe at sqlite_home
+        # would miss it, and the fresh-thread bug would return whenever the two
+        # homes differ.
+        alt = self.root / "sqlite-home"
+        alt.mkdir()
+        os.environ["CODEX_SQLITE_HOME"] = str(alt)
+        tid = "split-thread"
+        rollout = self.codex_dir / "never-written.jsonl"
+        conn = sqlite3.connect(str(alt / "state_2.sqlite"))
+        conn.execute(
+            "CREATE TABLE threads (id TEXT PRIMARY KEY, name TEXT, "
+            "rollout_path TEXT, cwd TEXT, updated_at TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO threads VALUES (?, ?, ?, ?, ?)",
+            (tid, "hi", str(rollout), "/tmp", "2026-09-07T12:00:00Z"),
+        )
+        conn.commit()
+        conn.close()
+        # writer_lock_path roots at CODEX_HOME, so the holder is set there.
+        self.assertTrue(peers.writer_lock_path(tid).startswith(str(self.codex_dir)))
+        self.set_holder(peers.writer_lock_path(tid))
+        t = peers.codex_threads()[0][0]
+        self.assertTrue(t["live"])
+        self.assertEqual(t["holder_pid"], os.getpid())
+
     def test_thread_is_held_via_the_writer_lock_alone(self):
         lock = peers.writer_lock_path("t")
         self.set_holder(lock, pid=4321)
@@ -1947,6 +1975,26 @@ class TestShimIdleNotice(ShimBase):
         shim._handle_turn_end(peers.Turn("t2", "ping", None, "complete", None))
         time.sleep(0.2)
         self.assertEqual(len(listener.of_type("control", "peer_idle_notice")), 1)
+
+    def test_a_queued_message_goes_busy_so_an_immediate_notify_waits(self):
+        # A lock-only fresh thread starts idle with no rollout. Queueing a turn
+        # must flip the shim busy, or a notify_when_idle arriving with the
+        # message fires against the start-time idle instead of the turn's end.
+        shim, _tid, _rollout = self.make_shim()
+        listener, _rec = self.add_listener()
+        self.assertEqual(shim.status, "idle")
+        shim._handle_line(json.dumps(self.inbound_frame("do it", listener.path)))
+        self.assertEqual(len(self.queue_calls()), 1)
+        self.assertEqual(shim.status, "busy")
+        shim._handle_line(
+            json.dumps({"type": "control", "action": "notify_when_idle",
+                        "msg_id": "sub-x", "from": "uds:%s" % listener.path})
+        )
+        time.sleep(0.2)
+        self.assertEqual(listener.of_type("control", "peer_idle_notice"), [])
+        shim._handle_turn_end(peers.Turn("t-x", "ping", None, "complete", None))
+        notices = wait_for(lambda: listener.of_type("control", "peer_idle_notice"))
+        self.assertEqual(len(notices), 1)
 
     def test_an_idle_subscription_to_a_bad_socket_is_dropped(self):
         shim, _tid, _rollout = self.make_shim()
