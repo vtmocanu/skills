@@ -58,8 +58,10 @@ versions tested. Last full run: 2026-09-07, Claude Code 2.1.263, Codex CLI 0.153
    reason}`.
 9. **Interrupt pauses the queue.** After Ctrl-C the queued items stay in
    `queued_items` until the user types a new prompt; a `codex resume` of the
-   thread alone does not drain them either (measured 2026-09-07). `peers.py` must
-   report "paused after interrupt" instead of pretending delivery.
+   thread alone does not drain them and appends no boundary event to the
+   rollout (measured 2026-09-07: nothing between the `turn_aborted` and the next
+   typed prompt's `task_started`). `peers.py` reports "paused after interrupt"
+   instead of pretending delivery.
 10. **Dead thread keeps its queue.** When the holding process exits, items stay
     in `queued_items` (measured 2026-09-07). Liveness must be checked before
     queueing, and the shim must exit when its thread's rollout is no longer held.
@@ -68,6 +70,8 @@ versions tested. Last full run: 2026-09-07, Claude Code 2.1.263, Codex CLI 0.153
     handler (measured 2026-09-07: orphan files left behind without one).
 12. **Names.** `threads.name` in `state_*.sqlite` is also written by the title
     suggester (one-word titles allowed); registration is explicit, never inferred.
+    `session_index.jsonl` lines are `{"id","thread_name","updated_at"}` (measured
+    2026-09-07); a rename appends a new line for the same id.
 13. **Hook timing (open).** Where `SessionStart` fires on this version (source
     for 0.153.2 defers it to the first turn) and whether a detached `up` survives
     the hook runner. Not measured yet; the bridge does not depend on it.
