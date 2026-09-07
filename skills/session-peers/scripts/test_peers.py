@@ -3035,6 +3035,7 @@ class TestShimOwnershipIsExclusive(Base):
              "messagingSocketPath": str(self.socks / "owner.sock")}
         ))
         state_before = pathlib.Path(state_path).read_text()
+        record_before = record.read_bytes()
 
         proc = self.spawn("shim", "--thread", tid)
         out, _ = proc.communicate(timeout=30)
@@ -3046,6 +3047,7 @@ class TestShimOwnershipIsExclusive(Base):
         )
         self.assertEqual(pathlib.Path(state_path).read_text(), state_before)
         self.assertTrue(record.exists())
+        self.assertEqual(record.read_bytes(), record_before)
 
     def test_the_owner_still_cleans_up_its_own_files(self):
         tid, _rollout = self.one_thread()
@@ -3148,6 +3150,13 @@ class TestByteBudget(Base):
         queued = self.queue_calls()[0][4]
         self.assertLessEqual(peers.utf8_len(queued), peers.argv_text_budget())
         queued.encode("utf-8").decode("utf-8")
+        _tag, trimmed = peers.parse_tag(queued)
+        self.assertTrue(trimmed, "the whole body was trimmed away")
+        self.assertTrue(
+            body.startswith(trimmed),
+            "the trimmed body is not a prefix of what was sent",
+        )
+        self.assertLess(len(trimmed), len(body))
 
     def test_the_queue_refuses_a_body_over_the_byte_budget(self):
         tid, _r = self.one_thread()
@@ -3579,12 +3588,34 @@ class TestConfigReaderPaths(Base):
             self.assertIs(cfg[key]["enabled"], False)
 
     @unittest.skipUnless(HAS_TOMLLIB, "the warning is the parser path handing over; 3.9/3.10 have no parser")
-    def test_a_file_that_does_not_parse_falls_back_with_a_warning(self):
+    def test_a_file_that_does_not_parse_yields_nothing_with_a_warning(self):
+        # Codex refuses the same file, so a partial read would act on settings
+        # that are not in force.
         self.config().write_text('model = "gpt-5"\nthis line is not toml\n')
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
             cfg = peers.read_toml_lite(str(self.config()))
-        self.assertIn("reading it line by line", err.getvalue())
+        self.assertEqual(cfg, {"": {}})
+        self.assertIn("does not parse as TOML", err.getvalue())
+        self.assertIn("environment and default paths", err.getvalue())
+
+    def test_an_invalid_file_cannot_route_the_database(self):
+        self.config().write_text(
+            'sqlite_home = "%s"\nthis line is not toml\n' % (self.root / "wrong")
+        )
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(peers.codex_sqlite_home(), str(self.codex_dir))
+            os.environ["CODEX_SQLITE_HOME"] = str(self.root / "from-env")
+            self.assertEqual(peers.codex_sqlite_home(), str(self.root / "from-env"))
+        self.assertIn("does not parse as TOML", err.getvalue())
+
+    def test_without_tomllib_an_invalid_file_still_reads_line_by_line(self):
+        # The line reader is the only reader on 3.9 and 3.10, so it keeps
+        # doing its best there rather than returning nothing.
+        self.config().write_text('model = "gpt-5"\nthis line is not toml\n')
+        with self.lite_reader_only():
+            cfg = peers.read_toml_lite(str(self.config()))
         self.assertEqual(cfg[""]["model"], "gpt-5")
 
     def test_a_missing_file_is_an_empty_table_on_both_paths(self):

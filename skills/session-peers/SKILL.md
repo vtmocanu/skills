@@ -94,10 +94,11 @@ into a Claude session from a host shell.
 
 Shims exit when their thread's process stops holding the rollout, on `down`, or
 on reboot (`/tmp` is cleared). No Claude-side hook is part of delivery. As a
-convenience only, a Claude `SessionStart` hook in `~/.claude/settings.json`
-that runs `<this skill's directory>/scripts/peers.py up` re-creates shims for
-already registered threads at Claude start; it registers nothing and is safe to
-omit. A bare `down` stops every shim
+convenience only, a Claude `SessionStart` hook in the effective settings file
+(`$CLAUDE_CONFIG_DIR/settings.json` when that variable is set, otherwise
+`~/.claude/settings.json`) that runs `<this skill's directory>/scripts/peers.py
+up` re-creates shims for already registered threads at Claude start; it
+registers nothing and is safe to omit. A bare `down` stops every shim
 and keeps the registrations (a bare `up` brings them back); `down <name|uuid>`
 also unregisters. A restarted shim delivers a reply that completed while it was
 down only if that turn finished within the last 15 minutes. An unnamed thread

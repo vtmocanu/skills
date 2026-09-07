@@ -359,10 +359,15 @@ def read_toml_lite(path):
         try:
             return _flatten_toml(tomllib.loads(text))
         except Exception as exc:
+            # A partial line-by-line read of an invalid file is worse than no
+            # read: it could route the database off a key Codex never honours,
+            # because Codex refuses the same file outright.
             log(
-                "%s does not parse as TOML (%s); reading it line by line instead"
-                % (path, exc)
+                "%s does not parse as TOML (%s); Codex would refuse it too, so "
+                "the bridge is using environment and default paths" % (path, exc)
             )
+            return {"": {}}
+    # No tomllib (3.9, 3.10): the line reader is the only reader there is.
     return read_toml_lite_text(text)
 
 
