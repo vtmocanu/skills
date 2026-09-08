@@ -13,7 +13,10 @@ from pathlib import Path
 
 DEFAULT_SOURCE = "https://github.com/vtmocanu/skills"
 CLI = ("npx", "-y", "skills@latest")
-ADD_ARGS = ("-a", "claude-code", "--skill", "*", "-g", "-y")
+# Pair Claude's private skill directory with one universal `.agents/skills`
+# consumer. The skills CLI then uses the canonical store plus a Claude symlink;
+# Codex and OpenCode both discover the canonical store.
+ADD_ARGS = ("-a", "claude-code", "codex", "--skill", "*", "-g", "-y")
 Runner = Callable[..., int]
 
 
