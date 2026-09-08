@@ -809,8 +809,8 @@ class TestCodexDiscovery(Base):
 
     def test_a_thread_live_only_by_its_writer_lock_is_live(self):
         # A just-created Codex thread: the row and the writer lock exist, but
-        # the rollout `.jsonl` is not written until the first turn completes
-        # (measured on codex-cli 0.153.4). Liveness must come from the held
+        # the rollout `.jsonl` has not been created yet (it can appear during
+        # the first turn). Liveness must come from the held
         # lock, not the absent rollout file.
         tid = "fresh-thread"
         rollout = self.codex_dir / "not-written-yet.jsonl"
@@ -1197,7 +1197,7 @@ class TestRolloutTail(Base):
         )
         self.assertEqual([t.turn_id for t in restarted.poll_turns()], ["t2"])
 
-    def test_a_fresh_tail_starts_at_eof_so_history_is_not_replayed(self):
+    def test_a_first_start_scan_suppresses_completed_turns(self):
         rollout = self.make_rollout(
             lines=[
                 ev("task_started", turn_id="old"),
@@ -1206,8 +1206,10 @@ class TestRolloutTail(Base):
             ]
         )
         tail = peers.RolloutTail(str(rollout))
-        tail.seek_end()
+        self.assertEqual(tail.poll(emit_events=False), [])
         self.assertEqual(tail.poll_turns(), [])
+        self.assertEqual(tail.pending, {})
+        self.assertIsNone(tail.open_turn)
 
     def test_a_turn_open_across_a_restart_keeps_its_sender(self):
         rollout = self.make_rollout()
@@ -2143,6 +2145,61 @@ class TestShimEndToEnd(Base):
         path = getattr(self, "_log_path", None)
         return pathlib.Path(path).read_text() if path and os.path.exists(path) else ""
 
+    def test_first_start_mid_turn_replies_once_without_replaying_history(self):
+        tid, rollout = self.one_thread()
+        listener, _rec = self.add_listener(name="cc-main", session_id="s1")
+        tagged = peers.build_tag("cc-main", "s1", listener.path) + "\nreview this"
+        # A recent, tagged completion must still be skipped on FIRST startup.
+        # Only the request that is already running belongs to the new shim.
+        append(
+            rollout,
+            ev("task_started", turn_id="t-finished"), user_item(tagged),
+            ev("task_complete", turn_id="t-finished", last_agent_message="old answer"),
+            ev("task_started", turn_id="t-live"),
+            user_item("repository instructions"), user_item(tagged),
+        )
+        proc, rec = self.start_shim(tid)
+        self.assertEqual(rec["status"], "busy")
+        append(rollout, ev("task_complete", turn_id="t-live",
+                           last_agent_message="the review verdict"))
+        self.assertTrue(wait_for(
+            lambda: "delivered turn t-live to cc-main" in self.shim_log(), timeout=5
+        ), "the running request lost its reply address: %s" % self.shim_log())
+        proc.terminate()
+        proc.wait(timeout=10)
+        frames = listener.of_type("user")
+        self.assertEqual(
+            [peers.unwrap_message(f["message"]["content"])[0] for f in frames],
+            ["the review verdict"],
+        )
+        self.assertNotIn("delivered turn t-finished", self.shim_log())
+
+    def test_recovered_sender_is_saved_before_a_crash_and_completion_while_down(self):
+        tid, rollout = self.one_thread()
+        listener, _rec = self.add_listener(name="cc-main", session_id="s1")
+        tagged = peers.build_tag("cc-main", "s1", listener.path) + "\nreview this"
+        append(rollout, ev("task_started", turn_id="t-live"), user_item(tagged))
+        proc, _rec = self.start_shim(tid)
+        # SIGKILL skips cleanup: startup must persist the recovered cursor and
+        # sender before advertising a ready peer, not only at graceful exit.
+        proc.kill()
+        proc.wait(timeout=10)
+        state = peers.read_json(peers.thread_state_path(tid), {})
+        self.assertEqual(state.get("tail", {}).get("open_turn"), "t-live")
+        append(rollout, ev("task_complete", turn_id="t-live",
+                           last_agent_message="finished while down"))
+        proc2, _rec2 = self.start_shim(tid)
+        self.assertTrue(wait_for(
+            lambda: "delivered turn t-live to cc-main" in self.shim_log(), timeout=5
+        ), "restart lost the recovered request: %s" % self.shim_log())
+        proc2.terminate()
+        proc2.wait(timeout=10)
+        self.assertEqual(
+            [peers.unwrap_message(f["message"]["content"])[0]
+             for f in listener.of_type("user")],
+            ["finished while down"],
+        )
+
     def test_a_shim_round_trips_a_message_and_its_reply(self):
         tid, rollout = self.one_thread(name="codex-uzi")
         listener, _rec = self.add_listener(name="cc-main", session_id="s1")
@@ -2866,7 +2923,7 @@ class TestRestartDeliveryWindow(ShimBase):
         time.sleep(0.2)
         self.assertEqual(listener.of_type("user"), [])
         self.assertIn("without posting", err.getvalue())
-        self.assertIn("t1", shim.delivered)
+        self.assertIn("t1", shim.processed_turns)
 
     def test_a_completion_with_no_timestamp_is_still_delivered(self):
         shim, _tid, _rollout = self.make_shim()
@@ -3403,6 +3460,69 @@ class TestStatusAtStart(Base):
     def test_an_idle_thread_still_starts_idle(self):
         tid, _rollout = self.one_thread()
         self.assertEqual(peers.Shim(peers.resolve_thread(tid)).status, "idle")
+
+
+class TestStartupReplyRecovery(Base):
+    """A first-start scan retains the active request, never completed replies."""
+
+    def test_the_active_sender_survives_later_untagged_context(self):
+        tid, rollout = self.one_thread()
+        tagged = peers.build_tag("cc-main", "s1", str(self.socks / "1.sock"))
+        append(rollout, ev("task_started", turn_id="t-live"),
+               user_item(tagged + "\nreview"), user_item("more context"))
+        shim = peers.Shim(peers.resolve_thread(tid))
+        append(rollout, ev("task_complete", turn_id="t-live", last_agent_message="verdict"))
+        turn = shim.tail.poll_turns()[0]
+        self.assertEqual(turn.tag, peers.parse_tag(tagged)[0])
+        self.assertEqual(turn.last_agent_message, "verdict")
+
+    def test_a_partial_request_at_startup_keeps_the_turn_boundary(self):
+        tid, rollout = self.one_thread()
+        append(rollout, ev("task_started", turn_id="t-live"))
+        tagged = peers.build_tag("cc-main", "s1", str(self.socks / "1.sock"))
+        line = user_item(tagged + "\nreview")
+        with rollout.open("a") as fh:
+            fh.write(line[:40])
+        shim = peers.Shim(peers.resolve_thread(tid))
+        with rollout.open("a") as fh:
+            fh.write(line[40:] + "\n")
+        append(rollout, ev("task_complete", turn_id="t-live", last_agent_message="verdict"))
+        turn = shim.tail.poll_turns()[0]
+        self.assertEqual(turn.tag, peers.parse_tag(tagged)[0])
+
+    def test_completed_and_aborted_senders_do_not_leak_into_a_typed_turn(self):
+        tid, rollout = self.one_thread()
+        for boundary in ("task_complete", "turn_aborted"):
+            with self.subTest(boundary=boundary):
+                tagged = peers.build_tag("cc-main", "s1", str(self.socks / "1.sock"))
+                append(rollout, ev("task_started", turn_id="t-tagged"), user_item(tagged),
+                       ev(boundary, turn_id="t-tagged", last_agent_message="old answer"),
+                       ev("task_started", turn_id="t-typed"), user_item("typed prompt"))
+                shim = peers.Shim(peers.resolve_thread(tid))
+                self.assertEqual(shim.tail.poll_turns(), [])
+                append(rollout, ev("task_complete", turn_id="t-typed", last_agent_message="typed answer"))
+                turns = shim.tail.poll_turns()
+                self.assertEqual([t.turn_id for t in turns], ["t-typed"])
+                self.assertIsNone(turns[0].tag)
+
+    def test_legacy_deduplication_state_is_migrated_without_claiming_delivery(self):
+        tid, rollout = self.one_thread()
+        tail = peers.RolloutTail(str(rollout))
+        tail.poll()
+        peers.write_json_atomic(peers.thread_state_path(tid), {
+            "tail": tail.state(), "delivered": ["t-processed"],
+        })
+        shim = peers.Shim(peers.resolve_thread(tid))
+        # A legacy processed turn remains deduplicated, even with no final
+        # message. Handling it again would log that missing final message.
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            shim._handle_turn_end(peers.Turn("t-processed", "", None, "complete", None))
+        self.assertEqual(err.getvalue(), "")
+        shim._save_state()
+        state = peers.read_json(peers.thread_state_path(tid))
+        self.assertEqual(state.get("processed_turns"), ["t-processed"])
+        self.assertNotIn("delivered", state)
 
 
 class TestHookCommandQuoting(Base):

@@ -111,7 +111,7 @@ POLL_INTERVAL_DEFAULT = 1.0
 LIVENESS_INTERVAL_DEFAULT = 5.0
 CONN_TIMEOUT = 30.0
 MAX_RECORD_REWRITES = 2
-DELIVERED_HISTORY = 200
+PROCESSED_TURN_HISTORY = 200
 CONTACT_HISTORY = 200
 MAX_CONCURRENT_CLIENTS = 8
 MAX_FRAMES_PER_CONNECTION = 16
@@ -820,9 +820,9 @@ def writer_lock_path(thread_id, home=None):
     `<CODEX_HOME>/thread-writer-locks/<uuid>.lock`.
 
     It is a more reliable liveness signal than the rollout file: Codex writes
-    the rollout lazily -- the `.jsonl` appears only once the thread's first turn
-    completes (measured on codex-cli 0.153.4) -- so a just-created or renamed
-    thread is live with the lock held and no rollout on disk yet. An older
+    the rollout lazily, so a just-created or renamed thread can be live with
+    the lock held and no rollout on disk yet. The file can appear DURING its
+    first turn (verified on codex-cli 0.153.4, 2026-09-08). An older
     Codex that never creates the lock simply contributes no holder here, and
     the rollout stays the signal.
 
@@ -1292,13 +1292,6 @@ class RolloutTail:
             last_boundary=state.get("last_boundary"),
         )
 
-    def seek_end(self):
-        try:
-            self.cursor = os.path.getsize(self.path)
-        except OSError:
-            self.cursor = 0
-        return self.cursor
-
     # -- reading -----------------------------------------------------------
 
     def _read_lines(self):
@@ -1311,15 +1304,14 @@ class RolloutTail:
         try:
             size = os.path.getsize(self.path)
         except OSError:
-            return []
+            return
         if size < self.cursor:
             # Truncated or rotated underneath us: resync rather than replay.
             log("%s shrank; resyncing the cursor to EOF" % self.path)
             self.cursor = size
-            return []
+            return
         if size == self.cursor:
-            return []
-        lines = []
+            return
         remaining = size - self.cursor
         pending = b""
         skipping = False
@@ -1339,7 +1331,7 @@ class RolloutTail:
                             skipping = False
                             continue
                         if part.strip():
-                            lines.append(part.decode("utf-8", "replace"))
+                            yield part.decode("utf-8", "replace")
                     if len(pending) > MAX_ROLLOUT_LINE:
                         # No Codex turn is this long; drop it rather than grow.
                         log(
@@ -1351,10 +1343,14 @@ class RolloutTail:
                         skipping = True
         except OSError as exc:
             log("cannot read %s: %s" % (self.path, exc))
-        return lines
 
-    def poll(self):
-        """Ordered events since the last call: start of a turn and its end."""
+    def poll(self, emit_events=True):
+        """Read turn state and, normally, emit its ordered start/end events.
+
+        First startup passes emit_events=False to recover the open request
+        without replaying completed replies. The cursor and pending sender
+        come from the same bounded read, including a partial trailing line.
+        """
         events = []
         for line in self._read_lines():
             try:
@@ -1374,7 +1370,8 @@ class RolloutTail:
                     self.open_turn = turn_id
                     self.last_boundary = "started"
                     self.pending.setdefault(turn_id, {"tag": None, "text": ""})
-                    events.append(Event("start", turn_id, None))
+                    if emit_events:
+                        events.append(Event("start", turn_id, None))
                 elif ptype in ("task_complete", "turn_aborted"):
                     turn_id = payload.get("turn_id")
                     info = self.pending.pop(turn_id, {"tag": None, "text": ""})
@@ -1382,6 +1379,8 @@ class RolloutTail:
                         self.open_turn = None
                     outcome = "complete" if ptype == "task_complete" else "aborted"
                     self.last_boundary = outcome
+                    if not emit_events:
+                        continue
                     last = payload.get("last_agent_message") if outcome == "complete" else None
                     finished = parse_time(payload.get("completed_at"))
                     if finished is None:
@@ -1616,24 +1615,28 @@ class Shim:
 
         state = read_json(thread_state_path(self.thread_id), {}) or {}
         self.tail = RolloutTail.from_state(self.rollout_path, state.get("tail"))
-        self.delivered = collections.deque(
-            state.get("delivered") or [], maxlen=DELIVERED_HISTORY
+        # This is an at-most-once processing ledger, including dropped replies,
+        # not evidence of delivery. Read the legacy name when upgrading.
+        self.processed_turns = collections.deque(
+            state.get("processed_turns", state.get("delivered")) or [],
+            maxlen=PROCESSED_TURN_HISTORY,
         )
         self.budgets = dict(state.get("budgets") or {})
         self.contacts = dict(state.get("contacts") or {})
         self.fresh = not state
         if self.fresh:
-            # No prior state: start at EOF so a restart cannot resend history.
-            self.tail.seek_end()
-        if self.tail.last_boundary is None and self.rollout_path:
+            # A SessionStart hook can launch us AFTER the tagged request was
+            # logged. Recover that open turn and sender, suppressing historical
+            # events so already-completed replies are never replayed.
+            self.tail.poll(emit_events=False)
+        elif self.tail.last_boundary is None and self.rollout_path:
             # N6: one full scan at start seeds the interrupt state; every later
             # answer comes from the tail, not from rescanning the whole file.
             self.tail.last_boundary = last_boundary(self.rollout_path)
 
         self.started_at = time.time()
-        # P7: the cursor starts at EOF, so a shim that starts DURING a turn
-        # never sees its task_started. The reconstructed boundary is the only
-        # thing that knows, and advertising idle mid-turn is a visible lie.
+        # First startup recovers the current boundary along with the sender;
+        # saved state carries the last boundary seen by the previous shim.
         self.status = "busy" if self.tail.last_boundary == "started" else "idle"
         self.poll_interval = _float_env(
             "SESSION_PEERS_POLL_INTERVAL", POLL_INTERVAL_DEFAULT
@@ -1687,6 +1690,10 @@ class Shim:
         signal.signal(signal.SIGINT, self._on_signal)
         try:
             self._consume_budget_marker(initial=True)
+            # Save recovered requests only after taking ownership, but before
+            # advertising readiness. A crash followed by completion while down
+            # must resume this cursor, not treat the answer as old history.
+            self._save_state()
             self._bind()
             self._write_record()
 
@@ -1829,7 +1836,7 @@ class Shim:
                 "name": self.name,
                 "shim_pid": os.getpid(),
                 "tail": self.tail.state(),
-                "delivered": list(self.delivered),
+                "processed_turns": list(self.processed_turns),
                 "budgets": self._bound(self.budgets),
                 "contacts": self._bound(self.contacts),
                 "updated_at": now_iso(),
@@ -2176,9 +2183,9 @@ class Shim:
             self._save_state()
 
     def _handle_turn_end(self, turn):
-        if turn.turn_id in self.delivered:
+        if turn.turn_id in self.processed_turns:
             return
-        self.delivered.append(turn.turn_id)
+        self.processed_turns.append(turn.turn_id)
 
         with self._lock:
             subs, self.idle_subs = self.idle_subs, []
@@ -2204,7 +2211,7 @@ class Shim:
         if age is not None and age > RESTART_DELIVERY_WINDOW:
             log(
                 "turn %s completed %.0fs before this shim started; recording it "
-                "as delivered without posting" % (turn.turn_id, age)
+                "as processed without posting" % (turn.turn_id, age)
             )
             return
 
