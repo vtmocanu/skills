@@ -73,11 +73,16 @@ else:
     targets = [a for a in args if not a.startswith("-")]
 out = []
 for target in targets:
-    entry = mapping.get(target)
+    # Real lsof reports the symlink-resolved (real) path in its `n` field, no
+    # matter how the target was spelled. Mirror that: look the holder up by the
+    # queried path OR its realpath, and emit the realpath, so a symlinked
+    # CODEX_HOME is exercised the way the real tool would.
+    real = os.path.realpath(target)
+    entry = mapping.get(target) or mapping.get(real)
     if not entry:
         continue
     pid, cmd = entry
-    out += ["p%d" % pid, "c%s" % cmd, "f7", "n%s" % target]
+    out += ["p%d" % pid, "c%s" % cmd, "f7", "n%s" % real]
 if out:
     sys.stdout.write("\\n".join(out) + "\\n")
     raise SystemExit(0)
@@ -851,6 +856,45 @@ class TestCodexDiscovery(Base):
         self.assertTrue(t["live"])
         self.assertEqual(t["holder_pid"], os.getpid())
 
+    def test_liveness_matches_a_holder_through_a_symlinked_codex_home(self):
+        # Regression: with a symlinked CODEX_HOME (e.g. mackup's ~/.codex -> a
+        # repo dir), real lsof reports the holder at the resolved path while
+        # peers probed the unresolved one, so EVERY thread read as dead and no
+        # shim could start. canon_path() resolves both sides. The fake lsof
+        # emits the realpath in `n`, exactly as the real tool does.
+        real = self.root / "cx-real"
+        (real / "sessions").mkdir(parents=True)
+        (real / "thread-writer-locks").mkdir(parents=True)
+        link = self.root / "cx-link"
+        os.symlink(str(real), str(link))
+        os.environ["CODEX_HOME"] = str(link)
+        os.environ.pop("CODEX_SQLITE_HOME", None)
+        tid = "01a07f92-882c-7953-9dfd-51e10f33184d"
+        rollout = link / "sessions" / ("rollout-%s.jsonl" % tid)
+        rollout.write_text("")
+        conn = sqlite3.connect(str(link / "state_2.sqlite"))
+        conn.execute(
+            "CREATE TABLE threads (id TEXT PRIMARY KEY, name TEXT, "
+            "rollout_path TEXT, cwd TEXT, updated_at TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO threads VALUES (?, ?, ?, ?, ?)",
+            (tid, "codex1", str(rollout), "/tmp", "2026-09-07T12:00:00Z"),
+        )
+        conn.commit()
+        conn.close()
+        # The holder lives at the resolved path, exactly as lsof reports it.
+        self.set_holder(os.path.realpath(str(rollout)))
+        threads, ok = peers.codex_threads()
+        self.assertTrue(ok)
+        t = next(x for x in threads if x["id"] == tid)
+        self.assertTrue(
+            t["live"],
+            "a holder lsof reports at the realpath must count through a "
+            "symlinked CODEX_HOME",
+        )
+        self.assertEqual(t["holder_pid"], os.getpid())
+
     def test_thread_is_held_via_the_writer_lock_alone(self):
         lock = peers.writer_lock_path("t")
         self.set_holder(lock, pid=4321)
@@ -975,6 +1019,22 @@ class TestResolveThread(Base):
         self.set_holder(peers.writer_lock_path(tid))
         self.assertFalse(rollout.exists())
         self.assertEqual(peers.resolve_thread("hi")["id"], tid)
+
+    def test_a_name_resolves_via_our_registration_when_the_db_name_is_stale(self):
+        # `up <uuid>` records name->uuid; a later /rename may not have reached
+        # the DB's `name` column yet (measured on codex-cli 0.153.4), so a live
+        # thread we already registered under this name must still resolve even
+        # though its DB row carries a different (stale) name.
+        tid = "01a07f92-882c-7953-9dfd-51e10f33184d"
+        rollout = self.make_rollout("r.jsonl")
+        self.make_state_db(
+            [{"id": tid, "name": "old-title", "rollout_path": str(rollout)}]
+        )
+        self.set_holder(rollout)
+        peers.write_registered(
+            {tid: {"name": "codex1", "registered_at": "2026-09-08T00:00:00Z"}}
+        )
+        self.assertEqual(peers.resolve_thread("codex1")["id"], tid)
 
     def test_a_name_whose_thread_has_exited_is_refused_not_guessed(self):
         # Codex's title suggester reuses names, so a dead match is not intent.

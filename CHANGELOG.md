@@ -35,6 +35,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   render sites" example). 360 to 344 lines; rule counts unchanged (12/12, 5/5,
   4/4, 3/3 across the four sections).
 
+### Fixed
+
+- `session-peers`: Codex thread liveness now works when `CODEX_HOME` is a symlink
+  (for example a mackup-managed `~/.codex`). `lsof` reports a holder at the
+  symlink-resolved path while the probe paths came from the state DB and
+  `CODEX_HOME` unresolved, so every thread read as dead and no shim could start;
+  both sides are now canonicalized with `realpath`. `resolve_thread` also honors
+  the local registration, so a thread registered by `up <uuid>` still resolves by
+  name when a later `/rename` has not yet reached the state DB's `name` column.
+  Documented that a continuously-driven Codex thread never idles to drain the
+  queue, so a queued message can sit undelivered until the thread goes idle.
+
 ## [0.36.0] - 2026-09-03
 
 ### Changed
