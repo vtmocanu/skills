@@ -46,6 +46,9 @@ def read_lock(path: Path, version: int) -> dict:
         raise ValueError(f"unsupported skills lockfile schema: {path}")
     if any(not isinstance(entry, dict) for entry in data["skills"].values()):
         raise ValueError(f"invalid skill records in lockfile: {path}")
+    pending = data.get("refreshPending", {})
+    if not isinstance(pending, dict) or any(not isinstance(value, str) for value in pending.values()):
+        raise ValueError(f"invalid pending refresh records in lockfile: {path}")
     return data
 
 
@@ -144,6 +147,7 @@ def install(
             raise ValueError(f"staging failed for {source}; live files were retained")
         entries = staged_entries(stage, project)
         lock = read_lock(lock_path, 3 if global_scope else 1)
+        pending = lock.get("refreshPending", {})
         plans = []
         # Validate the whole returned batch before publishing anything. The CLI
         # can exit zero after a partial install; every recorded skill must have
@@ -151,7 +155,10 @@ def install(
         for name in entries:
             canonical, projection = store / name, claude / name
             files = inventory(stage / ".agents" / "skills" / name)
-            if name not in lock["skills"] and (os.path.lexists(canonical) or os.path.lexists(projection)):
+            resumed = pending.get(name) == source_key(source_for(entries[name], project))
+            if name not in lock["skills"] and not resumed and (
+                os.path.lexists(canonical) or os.path.lexists(projection)
+            ):
                 raise ValueError(f"refusing to overwrite an untracked skill: {name}")
             preflight(canonical, files)
             copy_projection = projection.exists() and not projection.is_symlink() and (
@@ -160,6 +167,15 @@ def install(
             if copy_projection:
                 preflight(projection, files)
             plans.append((name, canonical, projection, copy_projection, files))
+        # Reserve ownership before publishing a fresh skill. If publication or
+        # lock commit is interrupted, retry can distinguish our partial install
+        # from an authored, untracked directory. Do not claim it is installed:
+        # Vercel still sees it absent from `skills` until publication succeeds.
+        fresh = {name: source_key(source_for(entries[name], project))
+                 for name in entries if name not in lock["skills"]}
+        if fresh:
+            lock["refreshPending"] = pending | fresh
+            write_lock(lock_path, lock)
         changed = 0
         for name, canonical, projection, copy_projection, files in plans:
             count = publish(canonical, files)
@@ -173,6 +189,9 @@ def install(
                 global_entry(entry, lock["skills"].get(name, {}), count > 0, project)
                 if global_scope else entry
             )
+            lock.get("refreshPending", {}).pop(name, None)
+        if lock.get("refreshPending") == {}:
+            lock.pop("refreshPending")
         # No pruning: an old session may still refer to removed skills or files.
         write_lock(lock_path, lock)
         print(f"skills refresh: {len(plans)} skills checked, {changed} files published")
@@ -216,9 +235,16 @@ def refresh(
         # run a global installer or update command against either live store.
         for data, scope, target_store, target_claude, target_lock in (
             (initial, True, store, claude, global_lock),
-            (read_lock(project / "skills-lock.json", 1), False, project / ".agents" / "skills",
+            (None, False, project / ".agents" / "skills",
              project / ".claude" / "skills", project / "skills-lock.json"),
         ):
+            if data is None:
+                try:
+                    data = read_lock(target_lock, 1)
+                except (OSError, ValueError) as error:
+                    print(f"skills refresh: {error}", file=sys.stderr)
+                    result = 1
+                    continue
             groups: dict[str, list[str]] = {}
             for name, entry in data["skills"].items():
                 try:

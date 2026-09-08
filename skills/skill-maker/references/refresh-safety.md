@@ -72,6 +72,15 @@ then publishes lock metadata after the files. Vercel's staged `computedHash`
 becomes global `skillFolderHash`, while source URLs, paths, and refs are retained.
 For unchanged files, an existing global hash is preserved.
 
+Before a first publication, `refreshPending` records a source-bound ownership
+reservation outside the lock's installed `skills` map. If publication is
+interrupted, the next attempt from that source can resume instead of treating
+its own new directory as an authored skill. Successful publication records the
+installation and clears its reservation. Other sources cannot claim it.
+Unfinished reservations remain until that source succeeds, even if its catalog
+is later removed from the hook. They do not authorize another source to reuse
+an existing path; cross-source name collisions require an explicit choice.
+
 GitHub global installs normally use a Git tree SHA; project installs use a
 SHA-256 content hash. After changed staged content publishes, a direct global
 Vercel check may offer one redundant update to restore its preferred Git SHA.

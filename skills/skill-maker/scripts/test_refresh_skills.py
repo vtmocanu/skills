@@ -301,6 +301,30 @@ class RefreshTests(unittest.TestCase):
         self.assertEqual(projection.readlink(), self.root / "missing")
         self.assertFalse((self.store / "untracked").exists())
 
+    def test_interrupted_first_install_resumes_without_claiming_authored_files(self):
+        def runner(*args, cwd):
+            stage_skill(cwd, "added", metadata=entry("org/catalog"))
+            return 0
+
+        with patch.object(refresh_skills, "project_claude", side_effect=OSError("interrupted")):
+            self.assertEqual(self.refresh(runner), 1)
+        pending = json.loads(self.lock.read_text())
+        self.assertNotIn("added", pending["skills"])
+        self.assertEqual(pending.get("refreshPending", {}).get("added"), "github.com/org/catalog")
+        self.assertEqual((self.store / "added" / "SKILL.md").read_bytes(), self.new)
+        self.assertEqual(self.refresh(runner), 0)
+        recovered = json.loads(self.lock.read_text())
+        self.assertIn("added", recovered["skills"])
+        self.assertNotIn("refreshPending", recovered)
+        self.assertEqual((self.claude / "added" / "SKILL.md").read_bytes(), self.new)
+
+    def test_pending_reservation_cannot_be_claimed_by_another_source(self):
+        self.initial["skills"] = {}
+        self.initial["refreshPending"] = {"example": "github.com/another/catalog"}
+        self.lock.write_text(json.dumps(self.initial))
+        self.assertEqual(self.refresh(), 1)
+        self.assertEqual((self.live / "SKILL.md").read_bytes(), self.old)
+
     def test_relative_catalog_is_resolved_from_launch_directory(self):
         def runner(*args, cwd):
             self.assertEqual(args[1], str(self.project / "catalog"))
@@ -393,6 +417,46 @@ class RefreshTests(unittest.TestCase):
         self.assertEqual(record["skillPath"], "skills/example/SKILL.md")
         self.assertEqual(record["sourceUrl"], "https://github.com/org/catalog.git")
         self.assertEqual(record["skillFolderHash"], "new" * 16)
+
+    def test_other_tracked_global_source_updates_by_name(self):
+        other = entry("org/other") | {"skillFolderHash": "old", "ref": "stable"}
+        self.initial["skills"]["other"] = other
+        self.lock.write_text(json.dumps(self.initial))
+        calls = []
+
+        def runner(*args, cwd):
+            calls.append(args)
+            if args[1] == "org/other#stable":
+                stage_skill(cwd, "other", metadata=other)
+            else:
+                stage_skill(cwd)
+            return 0
+
+        self.assertEqual(self.refresh(runner), 0)
+        self.assertEqual(calls[1][1], "org/other#stable")
+        self.assertIn("other", calls[1])
+        self.assertIn("--full-depth", calls[1])
+        self.assertNotIn("*", calls[1])
+        self.assertEqual((self.store / "other" / "SKILL.md").read_bytes(), self.new)
+        self.assertEqual(json.loads(self.lock.read_text())["skills"]["other"]["ref"], "stable")
+
+    def test_malformed_project_lock_does_not_block_other_global_sources(self):
+        other = entry("org/other") | {"skillFolderHash": "old"}
+        self.initial["skills"]["other"] = other
+        self.lock.write_text(json.dumps(self.initial))
+        project_lock = self.project / "skills-lock.json"
+        project_lock.write_text("invalid json")
+
+        def runner(*args, cwd):
+            if args[1] == "org/other":
+                stage_skill(cwd, "other", metadata=other)
+            else:
+                stage_skill(cwd)
+            return 0
+
+        self.assertEqual(self.refresh(runner), 1)
+        self.assertEqual((self.store / "other" / "SKILL.md").read_bytes(), self.new)
+        self.assertEqual(project_lock.read_text(), "invalid json")
 
     def test_unknown_lock_schema_is_rejected_without_installing(self):
         self.initial["version"] = 999
