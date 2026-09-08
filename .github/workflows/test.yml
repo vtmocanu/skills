@@ -44,3 +44,6 @@ jobs:
       # directory, PATH) is a temp dir, so this needs no agent installed.
       - name: Test skills/session-peers/scripts/peers.py
         run: python3 skills/session-peers/scripts/test_peers.py
+
+      - name: Test skills/skill-maker/scripts/refresh_skills.py
+        run: python3 skills/skill-maker/scripts/test_refresh_skills.py

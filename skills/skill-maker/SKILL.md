@@ -7,7 +7,7 @@ description: Creates, updates, lints, and publishes portable agent skills for Cl
 
 Author, lint, and publish skills for Claude Code and Codex. Skills distributed with the [`skills` package manager](https://github.com/vercel-labs/skills) keep their source in a separate git repo; repo-owned local skills can instead live directly in the consuming repo.
 
-**Package-manager policy: rolling `skills@latest`.** Use `npx -y skills@latest` for the interactive workstation commands and SessionStart hooks in this skill and its README examples. This deliberately trades reproducibility for automatic package-manager fixes and features; skill source URLs and refs remain controlled independently. Pin the package manager instead in CI, privileged automation, or another environment that requires reproducible executable code.
+**Package-manager policy: rolling `skills@latest`.** Use `npx -y skills@latest` for the interactive workstation commands and SessionStart hooks in this skill and its README examples. This deliberately lets newly published third-party installer code execute unattended at session start in exchange for automatic package-manager fixes and features; skill source URLs and refs remain controlled independently. Pin the package manager instead in CI, privileged automation, or another environment that requires reviewed, reproducible executable code.
 
 ## Classify the skill before editing
 
@@ -189,7 +189,9 @@ npx -y skills@latest add <source> -a claude-code -g        # global store + proj
 npx -y skills@latest add <source> -a claude-code --skill '*' -g -y && npx -y skills@latest update -g -p
 ```
 
-Claude Code and Codex share `~/.agents/.skill-lock.json` and the `~/.agents/skills` store. Their SessionStart hooks—and two Claude sessions starting together—can therefore run this read-modify-write sequence concurrently. When more than one session can start at once, put the complete source-add/update sequence in one user-owned wrapper that takes an exclusive cross-process lock, then point every agent hook at that wrapper. On macOS and Linux, a Python stdlib wrapper can hold `fcntl.flock` on `~/.agents/.skills-refresh.lock` for the entire sequence; keep the session working directory so `update -p` still targets the repository that started the hook.
+Claude Code and Codex share `~/.agents/.skill-lock.json` and the `~/.agents/skills` store. Their SessionStart hooks—and two Claude sessions starting together—can therefore run this read-modify-write sequence concurrently. This skill ships `scripts/refresh_skills.py`, a macOS/Linux Python-stdlib wrapper that creates `~/.agents`, holds `fcntl.flock` on `~/.agents/.skills-refresh.lock` for the entire source-add/update sequence, and preserves the session working directory so `update -p` refreshes the repository that started the hook. The default source is this public skills catalog; repeat `--source` for another required source or `--best-effort-source` for an optional one.
+
+After installing `skill-maker`, use its actual installed script path directly, or copy it to another stable executable path. Do not configure either hook until that path exists and is executable. Point every agent hook at the same wrapper invocation; this is the serialization boundary.
 
 Use these hook locations and matchers:
 
@@ -209,7 +211,7 @@ For Codex, add the wrapper as another `SessionStart` group without reordering ex
         "hooks": [
           {
             "type": "command",
-            "command": "~/.agents/refresh-skills.py",
+            "command": "~/.agents/skills/skill-maker/scripts/refresh_skills.py",
             "timeout": 300,
             "async": true
           }
@@ -220,7 +222,7 @@ For Codex, add the wrapper as another `SessionStart` group without reordering ex
 }
 ```
 
-Codex user hooks are loaded from `~/.codex/hooks.json`, and a new or changed hook stays skipped until trusted through `/hooks`; see the [official hooks documentation](https://learn.chatgpt.com/docs/hooks).
+Codex user hooks are loaded from `~/.codex/hooks.json`, and a new or changed hook stays skipped until trusted through `/hooks`; see the [official hooks documentation](https://learn.chatgpt.com/docs/hooks). The example is asynchronous and therefore best-effort: the session can begin with the previous skill inventory, Codex cancels an unfinished background hook when the session ends, and the next `startup` or `resume` retries. Remove `async` when refresh completion must gate session startup. When Claude and Codex call the same multi-source wrapper, give both a timeout sized for the whole source list; `300` seconds is the example baseline.
 
 - `add … --skill '*'` installs every skill currently in `<source>`, so new ones land automatically. `--skill '*'` keeps the `-a claude-code` agent scope; `--all` instead fans out to every detected agent.
 - **`update` reinstalls to every *detected* agent, and cannot be scoped.** `update` has no `-a` flag, and its internal `add` (run per changed skill) passes none — so it reinstalls each changed skill to **every** agent it detects. Detection is just "the agent's config dir exists" (e.g. `~/.config/crush`, `~/.codex`). Non-universal agents (claude, crush) each get their own copy; universal ones share `~/.agents/skills`. Consequence: even a hook whose every `add` is `-a claude-code` still leaks copies to other agents through the chained `update`. There is no per-`update` agent scope — the only way to keep installs to one agent is to make the others undetectable (remove/rename their config dir).
