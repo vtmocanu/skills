@@ -1704,10 +1704,11 @@ class Shim:
         return 0
 
     def _on_signal(self, signum, _frame):
-        # Python's default SIGTERM handler skips `finally`, so the record and
-        # socket are removed here rather than on the way out (measured).
+        # Keep cleanup in run()'s finally block. A signal can interrupt the
+        # poll loop after its stop check; cleaning here would let the rest of
+        # that iteration recreate the registry record after cleanup had marked
+        # itself complete.
         log("signal %d; shutting down" % signum)
-        self._cleanup()
         self.stop.set()
 
     def _cleanup(self):
