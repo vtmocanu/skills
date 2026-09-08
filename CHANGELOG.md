@@ -37,6 +37,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `session-peers`: SIGTERM now defers registry and socket cleanup until the
+  polling loop reaches `run()`'s `finally` block. Previously, a signal during an
+  in-flight poll iteration could remove the registry record and then let
+  `_ensure_record` recreate it after cleanup had marked itself complete,
+  leaving a stale Codex peer after the shim exited.
 - `session-peers`: Codex thread liveness now works when `CODEX_HOME` is a symlink
   (for example a mackup-managed `~/.codex`). `lsof` reports a holder at the
   symlink-resolved path while the probe paths came from the state DB and

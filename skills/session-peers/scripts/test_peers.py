@@ -2100,6 +2100,18 @@ class TestShimRecord(ShimBase):
         self.assertEqual(shim.record_rewrites, peers.MAX_RECORD_REWRITES)
         self.assertFalse(os.path.exists(shim.record_path))
 
+    def test_a_signal_during_polling_cannot_recreate_the_record_after_cleanup(self):
+        shim, _tid, _rollout = self.make_shim()
+        shim._write_record()
+
+        # A signal may arrive after _poll_loop's stop check. Model the rest of
+        # that in-flight iteration before run() reaches its finally block.
+        shim._on_signal(signal.SIGTERM, None)
+        shim._ensure_record()
+        shim._cleanup()
+
+        self.assertFalse(os.path.exists(shim.record_path))
+
     def test_the_socket_path_fits_the_af_unix_limit(self):
         shim, _tid, _rollout = self.make_shim()
         self.assertLess(len(shim.sock_path.encode("utf-8")), 100)
