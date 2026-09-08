@@ -1,27 +1,61 @@
 ---
 name: skill-maker
-description: Creates, updates, lints, and publishes Claude Code skills, and keeps them in sync with the npx skills package manager. Use when (1) writing a new skill, (2) editing an existing one, (3) linting a skill with agnix, (4) publishing a change so machines pick it up, (5) renaming or deleting a skill, or (6) deciding flat-vs-folder layout or frontmatter/description shape. Triggers include "new skill", "add a skill", "update skill", "skill not loading", "npx skills", "skills update", "lint skill", "agnix", "SKILL.md".
+description: Creates, updates, lints, and publishes portable agent skills for Claude Code and Codex, including repo-local .agents/skills sources, Claude compatibility symlinks, and npx distribution. Use when (1) writing a new skill, (2) editing an existing one, (3) linting a skill with agnix, (4) publishing a change so machines pick it up, (5) renaming or deleting a skill, or (6) deciding skill layout, scope, frontmatter, or discovery. Triggers include "new skill", "add a skill", "update skill", "repo skill", "skill not loading", "npx skills", "skills update", "lint skill", "agnix", "SKILL.md".
 ---
 
 # Skills authoring
 
-Author, lint, and publish Claude Code skills. Skills are distributed and refreshed with the `npx skills` package manager (github.com/vercel-labs/skills): each source repo holds the skill, and `npx skills add`/`update` installs and refreshes the installed copy on a machine.
+Author, lint, and publish skills for Claude Code and Codex. Skills distributed with the `npx skills` package manager (github.com/vercel-labs/skills) keep their source in a separate git repo; repo-owned local skills can instead live directly in the consuming repo.
 
-## Source of truth: edit the source repo, never the installed copy
+## Classify the skill before editing
 
-A skill exists in two places. Edit only the source.
+A skill path can be an authored source or a package-manager-owned installed copy. Edit only an authored source.
 
-| | Where | Edit it? |
+| Kind | Where | Edit it? |
 |---|---|---|
-| **Source** | the skill's git repo (`<name>/SKILL.md`) | **Yes** |
-| **Installed copy** | `~/.claude/skills/<name>/` (global) or a project's `.claude/skills/<name>/` | **No** — derived; `npx skills update` overwrites it |
+| **Published source** | the skill's source repo (`<name>/SKILL.md`) | **Yes** |
+| **Repo-local source** | `<repo>/.agents/skills/<name>/` for a cross-agent skill; `<repo>/.claude/skills/<name>/` only when intentionally Claude-only | **Yes** |
+| **npx-installed copy** | global or project `.agents/skills` store and its agent-specific projections | **No** — derived; `npx skills add`/`update` overwrites it |
 
-Publishing is pull-based, not live editing. **Change the source repo, then `npx skills update` re-pulls** and rewrites the installed copy. An edit made directly to the installed copy is discarded on the next update.
+For a published skill, publishing is pull-based, not live editing. **Change the source repo, then `npx skills update` re-pulls** and rewrites the installed copy. An edit made directly to the installed copy is discarded on the next update. For a repo-local source, commit the real directory and its compatibility symlink in the consuming repo; no npx install step applies.
 
 - **If you own the source repo**: edit `<name>/SKILL.md`, commit, push, then `npx skills update`.
 - **If you don't** (you only installed it): the installed copy is read-only in practice. To change it, fork the source repo and `npx skills add <your-fork>`, or open a PR/issue upstream. You cannot push to a repo you don't own.
 
-To find where an installed skill came from, its source is recorded in the lockfile: `~/.agents/.skill-lock.json` for global installs (or `$XDG_STATE_HOME/skills/.skill-lock.json` if set), and `<project-root>/skills-lock.json` for project installs. The installed copies under `~/.claude/skills/` have no lockfile of their own.
+To find where an installed skill came from, its source is recorded in the lockfile: `~/.agents/.skill-lock.json` for global installs (or `$XDG_STATE_HOME/skills/.skill-lock.json` if set), and `<project-root>/skills-lock.json` for project installs. If the name is present there, treat the on-disk skill as derived even when it sits under `.agents/skills` and looks like an ordinary directory.
+
+## Repo-local skills for Claude Code and Codex
+
+For a skill authored by and useful only in one repository, keep the canonical real directory at the repository root under `.agents/skills`. Codex [scans `.agents/skills` from the current directory through the repository root and supports symlinked skill folders](https://developers.openai.com/codex/skills#where-to-save-skills). Claude Code discovers project skills under `.claude/skills`, so expose the same bytes there with one tracked relative symlink per skill:
+
+```text
+<repo>/
+├── .agents/skills/<name>/
+│   ├── SKILL.md
+│   └── scripts/                  # optional
+└── .claude/skills/<name> -> ../../.agents/skills/<name>
+```
+
+Use `<repo>/.agents/skills`, not `~/.agents/skills`: the tilde path is user-global and would make a repository contract machine-local. Keep `.claude/skills` itself as a real directory so cross-agent symlinks, Claude-only skills, and npx-managed projections can coexist.
+
+For a new root-scoped cross-agent skill, create the real folder first, then the Claude projection:
+
+```bash
+mkdir -p .agents/skills/<name> .claude/skills
+ln -s ../../.agents/skills/<name> .claude/skills/<name>
+```
+
+For an existing repo-authored Claude skill, first confirm its name is absent from `skills-lock.json`, then preserve history while moving it:
+
+```bash
+mkdir -p .agents/skills
+git mv .claude/skills/<name> .agents/skills/<name>
+ln -s ../../.agents/skills/<name> .claude/skills/<name>
+```
+
+Track both the real directory and the symlink. Do not relocate a lockfile-owned dependency this way; change its upstream source or package selection and let npx regenerate the store and projections. Leave a genuinely Claude-only skill as a real `.claude/skills/<name>` directory.
+
+A shared path makes one body discoverable; it does not translate harness-specific behavior. Before declaring a skill cross-agent, inspect its frontmatter, tool names, slash commands, lifecycle assumptions, and literal `.claude/skills/...` paths. Keep `name`, `description`, and the body portable; retain host-specific metadata only when that host needs it, and never rely on another host ignoring a field as a security boundary. Reference supporting files through the runtime-provided skill base directory rather than hardcoding either discovery path.
 
 ## Layout: folder skills
 
@@ -119,6 +153,13 @@ Before committing any skill change, lint it — agnix catches token bloat, weak 
 agnix --target claude-code <name>/SKILL.md
 ```
 
+For a cross-agent skill, validate both consumers:
+
+```bash
+agnix --target claude-code <name>/SKILL.md
+agnix --target codex <name>/SKILL.md
+```
+
 `--target` still works and is listed in `agnix --help`, but recent agnix versions print `Field 'target' is deprecated` and steer toward a config-file `tools` array (there is no `--tools` CLI flag); the warning is benign. To silence it in a repo you lint often, add an `.agnix.toml` (`agnix init`) with `tools = ["claude-code"]`, then drop the flag: `agnix <name>/SKILL.md`.
 
 Add `--show-fixes` to preview rewrites, or `--fix-safe` for high-confidence ones (always re-read the diff — "fixable" ≠ "correct in context"). **Errors must be fixed before commit; warnings are advisory** — fix the real ones. **Pre-existing warnings count**: when a file is open for a real edit, surface warnings that predate your change and propose fixing them in the same commit, rather than re-committing a file with the same warning count forever.
@@ -178,9 +219,10 @@ npx -y skills@latest add <source> -a claude-code --skill '*' -g -y && npx -y ski
 
 ## Install scopes (npx skills)
 
-- **Scope**: global skills live in `~/.claude/skills/`; project skills in that repo's `.claude/skills/`. `add`/`update`/`remove` default to **project** scope; pass `-g` for global. `update -g -p` does both.
+- **Scope**: npx keeps the canonical installed store under `.agents/skills` and creates agent-specific projections such as `.claude/skills`. Global installs use `$HOME`; project installs use the repository. `add`/`update`/`remove` default to **project** scope; pass `-g` for global. `update -g -p` does both.
 - **Lockfiles**: global → `~/.agents/.skill-lock.json`; project → `<project-root>/skills-lock.json`. They record each installed skill's source; the installed copies under `~/.claude/skills/` carry no lockfile.
-- **Where files land (shared store + unstable per-agent copies)**: `npx` keeps each skill's real files once under the shared **`~/.agents/skills/<name>/`** and also installs a per-agent copy under each detected agent (e.g. `~/.claude/skills/<name>/`). The per-agent form is **unstable**: on each `update`, the skill being re-pulled is written as a **symlink** into the shared store (`~/.claude/skills/<name>` → `../../../../../../../.agents/skills/<name>`), while every other skill is reinstalled as a **real-dir copy**, so real-dir vs symlink reshuffles across the per-agent copies on every run; there is no stable committed form for them. **Dotfiles impact**: track the shared store `~/.agents/skills` as the source of truth (e.g. symlink `~/.agents` into the repo) and gitignore the machine-local `~/.agents/.skill-lock.json` (it rewrites on every add/update). Do **not** pin the per-agent `~/.claude/skills/<name>` copies to symlinks; npx flips them back to real dirs, so leave them as npx's native real dirs or gitignore them.
+- **Where files land (shared store + unstable per-agent copies)**: at global scope, the real files live under `~/.agents/skills/<name>/`; at project scope, under `<repo>/.agents/skills/<name>/`. npx also installs a per-agent projection such as the matching `.claude/skills/<name>/`. That projection is **unstable**: an update may rewrite it as a symlink into the shared store or as a real-directory copy, so do not hand-normalize lockfile-owned projections. **Dotfiles impact**: track the global shared store if desired (for example by symlinking `~/.agents` into a dotfiles repo) and gitignore the machine-local global lockfile, which rewrites on every add/update.
+- **Authored repo-local skills are different**: a repo-owned skill absent from `skills-lock.json` uses `<repo>/.agents/skills/<name>` as its editable source and a deliberately tracked `.claude/skills/<name>` symlink. npx does not own or rewrite that pair.
 
 ## Enable / disable an installed skill
 

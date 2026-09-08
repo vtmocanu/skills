@@ -90,7 +90,7 @@ npx skills add https://github.com/vtmocanu/skills -a claude-code -g -y
 | [generate-dockerfile](skills/generate-dockerfile/SKILL.md) | Generate a production-ready, secure, multi-stage Dockerfile and `.dockerignore` for the project. |
 | [session-peers](skills/session-peers/SKILL.md) | Make Claude Code sessions and Codex CLI threads on one machine message each other: each registered Codex thread appears as a real peer in Claude's `ListAgents` and `@` typeahead (delivered with `codex queue`), and Codex replies come back through the Claude session's inbox socket. |
 | [reflect](skills/reflect/SKILL.md) | Analyze the current session and propose improvements to the skill that was used, then edit and commit it. |
-| [skill-maker](skills/skill-maker/SKILL.md) | Author, lint, and publish Claude Code skills with the `npx skills` package manager: folder `SKILL.md` layout, frontmatter and description limits, design principles, agnix linting, and the add/update/remove scopes. |
+| [skill-maker](skills/skill-maker/SKILL.md) | Author, lint, and publish portable Claude Code and Codex skills: canonical `.agents/skills` repo layout, Claude compatibility symlinks, folder `SKILL.md` structure, agnix linting, and npx distribution scopes. |
 | [token-audit](skills/token-audit/SKILL.md) | Audit a Claude Code setup for token waste (report only, change nothing): measure in-scope CLAUDE.md sizes and @imports, MCP servers/tool counts and whether tool deferral is active, any proxy that silently disables it, model/effort and mid-session switches, output-reducing hooks, per-agent model inheritance, cron/loop intervals vs the measured cache TTL, and the newest session log's cache-read/creation/input/output token split; emit one severity-ranked table plus the single highest-leverage fix. |
 | [upgrade-advisor](skills/upgrade-advisor/SKILL.md) | Evaluate a tool, framework, or dependency upgrade: discover the pinned version, find the latest *installable* one, read the changelog across the whole delta, and report which breaking changes actually touch this codebase (by grepping usage), with a safe / blocked / needs-work verdict. |
 
@@ -100,8 +100,8 @@ Plus the 11 [agent-kit](skills/agent-kit/) skills from the table above.
 
 - The hook chains `add … --skill '*'` with `update` because `update` alone never discovers a **new** skill, it only refreshes ones already in the lockfile; the `add` step picks up anything the source has added. `&&` (not two hooks) keeps the two lockfile writers from racing.
 - Renames and removals are **not** auto-pruned in a non-TTY hook; drop an old name with `npx skills remove <old> -g -y`.
-- Drop `-g` to install into the current project only (`.claude/skills/`). Add `-l` to list without installing, or `-s a b` (space-separated) to pick a subset.
-- Edit the source repo, never the installed copy under `~/.claude/skills/`, which `update` overwrites.
+- Drop `-g` to install into the current project only (`.agents/skills` store plus agent-specific projections such as `.claude/skills`). Add `-l` to list without installing, or `-s a b` (space-separated) to pick a subset.
+- Edit the source repo, never an npx-installed `.agents/skills` store or `.claude/skills` projection, which `add`/`update` overwrite.
 
 ## Other files
 
