@@ -29,11 +29,12 @@ reviews:
   review_details: false
 
   # NOTE (deliberately different from uzi): this repo's CI is Python validation
-  # scripts plus one test (validate_skills.py, check_bundle_coverage.py,
-  # test_sync.py) and owns no linter or secret scanner, so there is nothing for
+  # scripts plus helper test suites (see .github/workflows/test.yml) and owns
+  # no CI linter or secret scanner, so there is nothing for
   # CodeRabbit's bundled tools (ruff, gitleaks, ...) to duplicate. Leaving them
   # at default gives this repo lint/secret coverage it otherwise has none of, so
   # unlike uzi we do NOT disable them.
+  # Verified 2026-09-08 against test.yml; the old one-test inventory was stale.
 
   # Skip generated, vendored, and build output
   path_filters:

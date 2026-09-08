@@ -209,7 +209,7 @@ Add `--show-fixes` to preview rewrites, or `--fix-safe` for high-confidence ones
 
 ## Workflow
 
-**First, check whether the source is already wired into a SessionStart hook.** Inspect both `~/.claude/settings.json` and `~/.codex/hooks.json`; a dual-agent setup may point them at a shared wrapper, so inspect that wrapper for `npx -y skills@latest add <source> --skill '*'` too. If it is wired, publishing a new or edited skill to that source is just **commit + push**: the hook's `add --skill '*'` installs new skills and overwrites existing ones on the next session start, so the manual `add` / `update` steps below are redundant for that source. Run them by hand only for immediate use in the **current** session, or for a source with no such hook. Two things the hook never does, so still do them by hand: prune a removed or renamed skill (`npx -y skills@latest remove`), and set any machine-local `skillOverrides` state such as `name-only` in `settings.json`.
+**First, check whether the source is already wired into a SessionStart hook.** Inspect both `~/.claude/settings.json` and `~/.codex/hooks.json`; a dual-agent setup may point them at a shared wrapper, so inspect its source arguments too. If it is wired, publishing a new or edited skill to that source is just **commit + push**: the refresher discovers new skills and publishes updated files on the next session start. For immediate use, invoke the installed refresher directly. Reserve direct modifying `npx skills` commands for times when consumers of that store are closed; they replace live files. Two things the hook never does: prune a removed or renamed skill (`npx -y skills@latest remove`), and set machine-local `skillOverrides` state such as `name-only` in `settings.json`.
 
 ### Install a source the first time
 `npx -y skills@latest update` only refreshes skills already recorded in the lockfile, so a brand-new skill (or a source never installed on this machine) must be **added** first:
@@ -224,15 +224,17 @@ npx -y skills@latest add <source> -a claude-code codex -g  # canonical store + C
 - **`--skill` is include-only; there is no exclude flag.** To install all-but-some, either pass a positive name list (`--skill a b c`) or install `--skill '*'` then `npx -y skills@latest remove <name> -g -y`. Reason to exclude: a skill whose `name:` duplicates a built-in (see the name-collision caveat under Enable / disable).
 
 ### Auto-install new + refresh on session start (hook)
-`update` never discovers a skill not yet in the lockfile, so a SessionStart hook that only runs `update` will not pick up a newly-pushed skill. To auto-install new skills **and** refresh existing ones, run `add` (with `--skill '*'`) then `update`, chained:
+Use the bundled refresher for automatic installs and updates:
 
 ```bash
-npx -y skills@latest add <source> -a claude-code codex --skill '*' -g -y && npx -y skills@latest update -g -p
+~/.agents/skills/skill-maker/scripts/refresh_skills.py --source <source>
 ```
 
 The explicit pair is load-bearing. In `skills` CLI 1.5.23, targeting only the non-universal `claude-code` directory selects copy mode and writes only `.claude/skills`; no canonical `.agents/skills` entry exists for Codex or OpenCode to discover. Targeting `claude-code codex` selects canonical-plus-symlink mode: Codex supplies the universal `.agents/skills` target, Claude gets a symlink, and OpenCode discovers the same canonical store without a redundant third target. This was reproduced in isolated global installs on 2026-09-08. Re-run that probe when changing the rolling package-manager version.
 
-Claude Code and Codex share `~/.agents/.skill-lock.json` and the `~/.agents/skills` store. Their SessionStart hooks—and two Claude sessions starting together—can therefore run this read-modify-write sequence concurrently. This skill ships `scripts/refresh_skills.py`, a macOS/Linux Python-stdlib wrapper that creates `~/.agents`, holds `fcntl.flock` on `~/.agents/.skills-refresh.lock` for the entire source-add/update sequence, and preserves the session working directory so `update -p` refreshes the repository that started the hook. The default source is this public skills catalog; repeat `--source` for another required source or `--best-effort-source` for an optional one.
+The macOS/Linux stdlib wrapper holds `fcntl.flock` on `~/.agents/.skills-refresh.lock` across staging and publication. It asks Vercel's CLI to install configured catalogs with `--skill '*'` into temporary projects, then installs other tracked global and current-project dependencies by their recorded names and refs. New catalog skills are discovered automatically; repo-authored skills absent from `skills-lock.json` stay untouched. The default catalog is this public repo; repeat `--source` for another required catalog or `--best-effort-source` for an optional one. Vercel handles fetching, discovery, and staged installation; the wrapper publishes complete files into the live canonical and Claude stores and adapts the staged lock metadata.
+
+**Readers do not take the wrapper lock.** Their protection is staging plus atomic file replacement, with supporting files published before `SKILL.md`. Existing paths and retired supporting files remain readable; unchanged files are not rewritten. This is atomic per file, not a snapshot of a whole skill. Read [refresh safety](references/refresh-safety.md) when changing the script, diagnosing missing-file warnings, or handling metadata and cleanup limits. It records the 2026-09-08 reproduction that disproved the old assumption that async refresh merely leaves an older inventory.
 
 After installing `skill-maker`, use its actual installed script path directly. If the hook command must keep a stable trust identity or supply machine-local source arguments, point it at a thin machine-local trampoline that `exec`s the installed script with those arguments. Never copy the refresher implementation to the stable path: npx updates the installed skill, not the detached copy, so the hook would keep running stale logic. Do not configure either hook until the installed script and any trampoline exist and are executable. Every entry path must ultimately execute the installed refresher; its shared `fcntl.flock` on `~/.agents/.skills-refresh.lock` is the serialization boundary.
 
@@ -265,15 +267,15 @@ For Codex, add the wrapper as another `SessionStart` group without reordering ex
 }
 ```
 
-Codex user hooks are loaded from `~/.codex/hooks.json`, and a new or changed hook stays skipped until trusted through `/hooks`; see the [official hooks documentation](https://learn.chatgpt.com/docs/hooks). The example is asynchronous and therefore best-effort: the session can begin with the previous skill inventory, Codex cancels an unfinished background hook when the session ends, and the next `startup` or `resume` retries. Remove `async` when refresh completion must gate session startup. When Claude and Codex call the same multi-source wrapper, give both a timeout sized for the whole source list; `300` seconds is the example baseline.
+Codex user hooks are loaded from `~/.codex/hooks.json`, and a new or changed hook stays skipped until trusted through `/hooks`; see the [official hooks documentation](https://learn.chatgpt.com/docs/hooks). The staged refresher permits asynchronous operation: a session may start with an older inventory, while replacement keeps individual files readable. Codex cancels unfinished background hooks when the session ends; the next `startup` or `resume` retries. Remove `async` when refresh completion must gate startup. Synchronous operation alone does not protect readers in other sessions, so keep staging either way. Give both agents a timeout sized for all configured and tracked sources; `300` seconds is the baseline.
 
 - `add … --skill '*'` installs every skill currently in `<source>`, so new ones land automatically. `--skill '*'` keeps the explicit `-a claude-code codex` scope; `--all` instead fans out to every supported agent.
-- **`update` reinstalls to every *detected* agent, and cannot be scoped.** `update` has no `-a` flag, and its internal `add` (run per changed skill) passes none — so it reinstalls each changed skill to **every** agent it detects. Detection is just "the agent's config dir exists" (e.g. `~/.config/crush`, `~/.codex`). Non-universal agents (claude, crush) each get their own copy; universal ones share `~/.agents/skills`. Consequence: even a hook whose every `add` is `-a claude-code` still leaks copies to other agents through the chained `update`. There is no per-`update` agent scope — the only way to keep installs to one agent is to make the others undetectable (remove/rename their config dir).
-- Keep `add` and `update` inside one serialized wrapper invocation. Separate async handlers, or matching Claude and Codex handlers without the shared lock, can race on the lockfile.
-- For multiple sources, chain the `add`s ahead of one `update`. Join reliable steps with `&&`, but decouple any source that can be unreachable (offline, VPN-gated) with `;` and `|| true` and put it **last** — an `&&` chain aborts on the first failure, so a down source would otherwise block every step after it:
+- **Direct `update` cannot be agent-scoped.** Its internal `add` targets every detected agent. The refresher instead uses staged, explicitly scoped `add` calls for recorded dependencies. It publishes only the canonical store and Claude projection; OpenCode reads the canonical store directly. It does not create or refresh other agents' private copies.
+- Keep staging and publication inside one serialized wrapper invocation. Direct `npx skills` commands do not cooperate with that lock.
+- Declare optional sources separately so an unreachable catalog leaves its installed files intact and does not fail the refresh:
 
   ```bash
-  npx -y skills@latest add <reliable-source> -a claude-code codex --skill '*' -g -y && npx -y skills@latest update -g -p; npx -y skills@latest add <vpn-only-source> -a claude-code codex --skill '*' -g -y || true
+  ~/.agents/skills/skill-maker/scripts/refresh_skills.py --source <reliable-source> --best-effort-source <vpn-only-source>
   ```
 
 - Removals and renames are still not auto-pruned in a non-TTY hook (see Rename / delete) — drop the old name with `npx -y skills@latest remove <old> -g -y`.
@@ -282,7 +284,7 @@ Codex user hooks are loaded from `~/.codex/hooks.json`, and a new or changed hoo
 1. Edit the source `<name>/SKILL.md` (and any supporting files) in its repo.
 2. **Lint** with agnix; fix errors, triage warnings.
 3. **Commit + push** to the source repo. Stage only the file(s) you touched (`git add <name>/`) — do **not** `git add -A`; the worktree may carry unrelated in-progress edits on other skills.
-4. **Publish** by pulling on each machine: `npx -y skills@latest update -g -p` (`-g` global, `-p` current project; together = both). Runs cleanly from a SessionStart hook too.
+4. **Publish** by invoking the installed refresher, or letting its next SessionStart invocation run. With all consumers closed, direct `npx -y skills@latest update -g -p` remains available (`-g` global, `-p` current project). Do not put that direct modifying command in an async hook.
 5. **Verify the canonical installed store and each target projection**, since the source file is not what the model reads:
    ```bash
    grep "<distinctive phrase from your edit>" ~/.agents/skills/<name>/SKILL.md
