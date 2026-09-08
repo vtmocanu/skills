@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import re
+import signal
 import subprocess
 import sys
 import tempfile
@@ -23,19 +24,32 @@ CLI = ("npx", "-y", "skills@latest")
 ADD_ARGS = ("-a", "claude-code", "codex", "-y")
 Runner = Callable[..., int]
 SUPPORTED_SOURCES = {"github", "git", "gitlab", "local"}
+INSTALL_TIMEOUT_SECONDS = 120
 
 
 def run(*args: str, cwd: Path) -> int:
     # Project-scoped add must not change the caller's global selection state.
     # HOME, credentials, and the package manager's cache remain unchanged.
     environment = dict(os.environ, XDG_STATE_HOME=str(cwd / ".state"), DO_NOT_TRACK="1")
-    completed = subprocess.run(
+    with subprocess.Popen(
         (*CLI, *args), cwd=cwd, env=environment, stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, check=False,
-    )
-    if completed.returncode:
-        print(completed.stdout[-3000:], file=sys.stderr)
-    return completed.returncode
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, start_new_session=True,
+    ) as process:
+        try:
+            output, _ = process.communicate(timeout=INSTALL_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:
+            # npx can spawn npm/node/git children. Kill the owned process group
+            # so a child cannot keep the output pipe open or outlive staging.
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.communicate()
+            print(f"skills refresh: installer timed out after {INSTALL_TIMEOUT_SECONDS}s", file=sys.stderr)
+            return 1
+        if process.returncode:
+            print(output[-3000:], file=sys.stderr)
+        return process.returncode
 
 
 def read_lock(path: Path, version: int) -> dict:

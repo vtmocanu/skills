@@ -25,6 +25,9 @@ would still leave readers in other running sessions exposed.
   global install nor a live project update is launched. The subprocess inherits
   credentials and the package cache; its selection-state lock uses a temporary
   `XDG_STATE_HOME`. The user's home directory is not redirected.
+- Each installer invocation has an internal 120-second timeout, including for
+  direct callers outside hooks. On timeout, its owned process group is killed
+  and staging fails. Hook timeouts still bound the overall multi-source run.
 - Each staged batch is validated before publication. Installer errors, empty or
   unsupported lock metadata, missing entrypoints, and file/directory conflicts
   leave that batch unpublished. Unrelated successful sources can still publish.
@@ -89,6 +92,11 @@ current. Project metadata keeps Vercel's original hash. Local project source
 paths are rebased out of staging before its temporary directory is removed.
 Staging uses its physical path so macOS `/var` and `/private/var` aliases cannot
 corrupt relative source paths (covered by the local-dependency regression).
+
+Hashes track content changes; they are not publisher signatures. Catalog trust
+comes from the user's configured sources and refs, as with direct Vercel installs.
+This wrapper preserves the documented rolling workstation policy. Use reviewed,
+immutable refs in environments that require that stronger supply-chain policy.
 
 ## Validation
 

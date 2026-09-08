@@ -24,7 +24,7 @@ For automatic updates, first install the refresh helper with consumers of the sk
 npx -y skills@latest add vtmocanu/skills --skill skill-maker -a claude-code codex -g -y
 ```
 
-**Claude Code auto-update hook** (add to `~/.claude/settings.json`):
+**Claude Code auto-update hook, macOS/Linux only** (requires Python 3 with `fcntl`; add to `~/.claude/settings.json`):
 
 ```json
 "hooks": {
@@ -68,7 +68,7 @@ The whole catalog (20 skills), agent-kit included.
 npx -y skills@latest add https://github.com/vtmocanu/skills -a claude-code codex -g -y
 ```
 
-**Claude Code auto-update hook** (add to `~/.claude/settings.json`):
+**Claude Code auto-update hook, macOS/Linux only** (requires Python 3 with `fcntl`; add to `~/.claude/settings.json`):
 
 ```json
 "hooks": {

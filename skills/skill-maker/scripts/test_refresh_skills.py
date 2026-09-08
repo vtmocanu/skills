@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import shutil
 import stat
+import sys
 import tempfile
 import threading
 import time
@@ -274,14 +275,40 @@ class RefreshTests(unittest.TestCase):
             return 0
 
         original_replace = os.replace
+        checked = []
 
         def replace(source, target):
             if Path(target) == self.live / "SKILL.md":
                 self.assertEqual((self.live / "helper.txt").read_text(), "new helper")
+                checked.append(Path(target))
             original_replace(source, target)
 
         with patch.object(publish_skills.os, "replace", side_effect=replace):
             self.assertEqual(self.refresh(runner), 0)
+        self.assertEqual(checked, [self.live / "SKILL.md"])
+        self.assertEqual((self.live / "SKILL.md").read_bytes(), self.new)
+
+    def test_direct_installer_timeout_returns_failure(self):
+        script = self.root / "slow-installer.py"
+        script.write_text("import time\ntime.sleep(2)\n")
+        error = io.StringIO()
+        with patch.object(refresh_skills, "CLI", (sys.executable, str(script))), \
+                patch.object(refresh_skills, "INSTALL_TIMEOUT_SECONDS", 0.05, create=True), \
+                redirect_stderr(error):
+            started = time.monotonic()
+            result = refresh_skills.run("add", "example", cwd=self.project)
+        self.assertEqual(result, 1)
+        self.assertIn("installer timed out", error.getvalue())
+        self.assertLess(time.monotonic() - started, 1.5)
+
+    def test_installer_exit_status_and_failure_output_are_preserved(self):
+        script = self.root / "failing-installer.py"
+        script.write_text("print('installation failed')\nraise SystemExit(7)\n")
+        error = io.StringIO()
+        with patch.object(refresh_skills, "CLI", (sys.executable, str(script))), redirect_stderr(error):
+            result = refresh_skills.run("add", "example", cwd=self.project)
+        self.assertEqual(result, 7)
+        self.assertIn("installation failed", error.getvalue())
 
     def test_untracked_skill_is_never_overwritten(self):
         self.initial["skills"] = {}
