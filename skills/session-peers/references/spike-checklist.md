@@ -73,12 +73,22 @@ versions tested. Last full run: 2026-09-07, Claude Code 2.1.263, Codex CLI 0.153
     suggester (one-word titles allowed); registration is explicit, never inferred.
     `session_index.jsonl` lines are `{"id","thread_name","updated_at"}` (measured
     2026-09-07); a rename appends a new line for the same id.
-13. **Hook timing (open).** Where `SessionStart` fires on this version (source
-    for 0.153.2 defers it to the first turn) and whether a detached `up` survives
-    the hook runner. Not measured yet; the bridge does not depend on it.
+13. **Startup during an active request.** Write a tagged request to the rollout
+    before starting its shim, then finish the turn. Verify the final reply
+    reaches the original session exactly once, and earlier completed turns
+    are not replayed. Repeat with a partial request line and with a crash after
+    shim startup followed by completion while it is down.
+    - 2026-09-08, Codex CLI 0.153.4: the tagged request was logged 16 seconds
+      before the shim started. First startup skipped to EOF and recovered only
+      the busy status, losing the reply address. Reproduced with the shipped
+      script; the fix reads historical events without emitting them, retaining
+      the active turn and sender, then persists that state before readiness.
+      Regression tests cover actual socket delivery and crash/restart recovery.
+    - Exact `SessionStart` hook timing remains unverified. The bridge handles
+      startup after the request regardless of what launched it.
 14. **Rollout is lazy; the writer lock is not.** A brand-new thread (`/rename`d
     but not yet run a turn) has a `threads.rollout_path` in the DB but NO file at
-    that path: Codex writes the rollout only once the first turn completes.
+    that path: Codex can defer creating the rollout until the first turn.
     Meanwhile a live Codex process holds `<CODEX_HOME>/thread-writer-locks/<thread
     uuid>.lock` open from thread creation. So liveness (`codex_threads`,
     `thread_is_held`) checks whichever handle is held; a fresh thread reads as
@@ -89,3 +99,7 @@ versions tested. Last full run: 2026-09-07, Claude Code 2.1.263, Codex CLI 0.153
     - 2026-09-07, Codex CLI 0.153.4: measured exactly this. `up hi` refused a
       just-renamed thread until it had run one turn (rollout absent); the lock
       was held throughout. The lock-aware liveness landed in this same change.
+    - Correction verified 2026-09-08 on 0.153.4: a rollout contained the tagged
+      request and intermediate output before the first turn completed. The old
+      claim that the file appears only after completion was too strong;
+      liveness must tolerate an absent file without assuming when it appears.

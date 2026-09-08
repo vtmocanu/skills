@@ -40,8 +40,8 @@ the agent you are.
 
    A brand-new thread registers even before it has run a turn: liveness comes
    from the writer lock Codex holds from thread creation, not from the rollout
-   `.jsonl`, which newer Codex writes lazily (the file appears only once the
-   first turn completes, measured on codex-cli 0.153.4). If a build without the
+   `.jsonl`, which Codex may create later (it can appear during the first turn,
+   verified on codex-cli 0.153.4 on 2026-09-08). If a build without the
    writer lock ever refuses `up <name>` on a just-renamed thread with "no live
    Codex thread named ... (N past thread(s) carried that name)", have the user
    type any prompt directly in that Codex TUI so its rollout is written, then
@@ -56,9 +56,11 @@ Use `SendMessage` (or `@<name>` in the prompt) exactly as for another Claude
 session. The shim tags the message with your name and reply address and queues
 it; Codex runs it as its next user turn under the thread's own approval mode.
 
-- **Replies come back on their own**: when that turn completes, the shim posts
-  Codex's final message into this session as `Message from @<name>`. You do not
-  poll. `notify_when_idle: true` also works and fires once per turn end.
+- **Replies normally come back on their own**: when that turn completes, the
+  shim posts Codex's final message into this session as `Message from @<name>`,
+  subject to the live-session and reply-budget checks below. If it is missing,
+  check the delivery log (Diagnostics); completion and idle notices do not
+  prove delivery. `notify_when_idle: true` fires once per turn end.
 - **Reply budget**: the shim delivers at most 3 replies in a row to
   bridge-originated turns per (thread, session); past that it drops replies with
   a stderr line until the user runs `peers.py budget reset <name>` or a fresh
@@ -117,19 +119,22 @@ convenience only, a Claude `SessionStart` hook in the effective settings file
 up` re-creates shims for already registered threads at Claude start; it
 registers nothing and is safe to omit. A bare `down` stops every shim
 and keeps the registrations (a bare `up` brings them back); `down <name|uuid>`
-also unregisters. A restarted shim delivers a reply that completed while it was
-down only if that turn finished within the last 15 minutes. An unnamed thread
+also unregisters. On first startup, the shim recovers an already-running turn's
+request and reply address, without replaying completed turns. A restart from
+saved state delivers a reply that completed while it was down only if that
+turn finished within the last 15 minutes. An unnamed thread
 registered by UUID appears as `codex-<first 8 hex of the uuid>`.
 
 ## If you are Codex
 
-You cannot reach the Claude socket from `exec` (the default sandbox blocks Unix
-sockets); the shim delivers for you. Two ways a message reaches a Claude session:
+The default sandbox blocks Unix sockets; the shim normally delivers for you.
+Two ways a message reaches a Claude session:
 
 1. **Reply to the sender**: when your turn was started by a Claude session (the
    user message starts with a `[session-peers from=@<name> ...]` line), your
-   final message goes back to that session automatically. Write the answer as
-   your last message; keep it self-contained.
+   final message is forwarded after the turn completes, subject to the checks
+   above. Write the answer as your last message; keep it self-contained. Do
+   not claim it was sent before the delivery log confirms the send.
 2. **Address a session**: put `@<claude-session-name>` as the very first line of
    your final message. Delivery is allowed only to a session that has messaged
    this thread before (prior contact), unless the user set
@@ -142,9 +147,11 @@ user in your TUI. To see live Claude sessions and their names:
 <this skill's directory>/scripts/peers.py list --json
 ```
 
-Do not try to post to the socket yourself from a sandboxed command; ask the
-user to run `peers.py send --to cc:<name> --message "<text>"` from a host shell
-if no shim is running.
+If automatic forwarding failed and sending is authorized, use
+`peers.py send --to cc:<name> --message "<text>"` from an execution context that
+permits local sockets, requesting tool escalation when required. Otherwise ask
+the user to run it from a host shell. Confirm the command's successful
+`sent to <name>` result before reporting delivery.
 
 ## Optional Codex hook
 
@@ -170,6 +177,16 @@ trust state, `codex` and `lsof` on `PATH`, and a warning when the installed
 Claude Code or Codex version is newer than the one this skill was validated on
 (then re-run `<this skill's directory>/references/spike-checklist.md`).
 
+Before claiming a reply was sent, check
+`$CODEX_HOME/session-peers/<thread uuid>.log` (default home: `~/.codex`) for
+`delivered turn <turn id> to <session name>`, or confirm receipt in the target
+session. A successful socket write is transport evidence, not proof the target
+agent has read or acted on it. The state JSON's `processed_turns` list includes
+skipped replies and is only a deduplication ledger; older state files called
+it `delivered`, which also did not prove a send. The script reads that legacy
+key on upgrade. The startup failure and misleading field were reproduced and
+corrected on 2026-09-08; see the startup checks in the spike checklist.
+
 ## Limits
 
 - macOS and Linux only (Windows uses named pipes).
@@ -178,8 +195,9 @@ Claude Code or Codex version is newer than the one this skill was validated on
 - One reply per turn: a `Stop`-hook continuation or an interrupted turn
   (`turn_aborted`) delivers nothing; a completed turn with no final text
   delivers nothing.
-- Delivery across a shim restart is bounded: a tagged turn that completed
-  while no shim ran is delivered on restart only if it finished within 15
+- First startup retains the active request and skips completed history.
+  Delivery across a restart from saved state is bounded: a tagged turn that
+  completed while no shim ran is delivered only if it finished within 15
   minutes of the shim starting; older ones are skipped.
 - Registry, socket allowlist and rollout event names are undocumented vendor
   internals; `doctor` warns on version drift and `send --to codex:` keeps working
