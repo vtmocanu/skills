@@ -28,7 +28,38 @@ To find where an installed skill came from, its source is recorded in the lockfi
 
 ## Repo-local skills for Claude Code, Codex, and OpenCode
 
-For a skill authored by and useful only in one repository, keep the canonical real directory at the repository root under `.agents/skills`. Codex [scans `.agents/skills` from the current directory through the repository root and supports symlinked skill folders](https://learn.chatgpt.com/docs/build-skills), and [OpenCode scans the same project and global paths](https://opencode.ai/docs/skills). Claude Code discovers project skills under `.claude/skills`, so expose the same bytes there with one tracked relative symlink per skill:
+For a skill authored by and useful only in one repository, keep the canonical real directory at the repository root under `.agents/skills`. Codex [scans `.agents/skills` from the current directory through the repository root and supports symlinked skill folders](https://learn.chatgpt.com/docs/build-skills), and [OpenCode scans the same project and global paths](https://opencode.ai/docs/skills). Claude Code discovers project skills under `.claude/skills`, so expose the same bytes through one of these two tracked layouts.
+
+### One directory symlink
+
+Prefer this simpler form when every repo skill is cross-agent and the repository never uses project-scope `npx skills add`. Confirm that no `skills-lock.json` exists:
+
+```text
+<repo>/
+├── .agents/skills/
+│   └── <name>/
+│       ├── SKILL.md
+│       └── scripts/                  # optional
+└── .claude/skills -> ../.agents/skills
+```
+
+When all existing skills are in a real `.claude/skills` directory and `.agents/skills` does not yet exist, preserve their history while moving the whole tree:
+
+```bash
+mkdir -p .agents
+git mv .claude/skills .agents/skills
+ln -s ../.agents/skills .claude/skills
+```
+
+If `.agents/skills` already contains a skill, move the remaining skill directories by name with `git mv`, then replace the empty `.claude/skills` directory with the relative symlink.
+
+This form has two costs. First, every skill becomes visible to Codex and OpenCode, so it cannot keep a Claude-only skill private to Claude. Second, do not use it with project-scope npx installs: the package manager's `.claude/skills/<name>` projection resolves on top of the canonical `.agents/skills/<name>` store instead of remaining a distinct projection. Use the per-skill form below when either cost applies.
+
+The directory form was verified on 2026-09-08 in [vtmocanu/uzi#1204](https://github.com/vtmocanu/uzi/pull/1204): a Claude Code session launched in that checkout discovered the skills through the directory symlink, while Codex read the real `.agents/skills` tree.
+
+### Per-skill symlinks
+
+Use this form when the repository mixes cross-agent and Claude-only skills, or when project-scope npx installs exist. Keep `.claude/skills` itself as a real directory so cross-agent symlinks, Claude-only skills, and npx-managed projections can coexist:
 
 ```text
 <repo>/
@@ -37,8 +68,6 @@ For a skill authored by and useful only in one repository, keep the canonical re
 │   └── scripts/                  # optional
 └── .claude/skills/<name> -> ../../.agents/skills/<name>
 ```
-
-Use `<repo>/.agents/skills`, not `~/.agents/skills`: the tilde path is user-global and would make a repository contract machine-local. Keep `.claude/skills` itself as a real directory so cross-agent symlinks, Claude-only skills, and npx-managed projections can coexist.
 
 For a new root-scoped cross-agent skill, create the real folder first, then the Claude projection:
 
@@ -57,7 +86,9 @@ ln -s ../../.agents/skills/<name> .claude/skills/<name>
 
 Track both the real directory and the symlink. Do not relocate a lockfile-owned dependency this way; change its upstream source or package selection and let npx regenerate the store and projections. Leave a genuinely Claude-only skill as a real `.claude/skills/<name>` directory.
 
-A shared path makes one body discoverable; it does not translate harness-specific behavior. Before declaring a skill cross-agent, inspect its frontmatter, tool names, slash commands, lifecycle assumptions, and literal `.claude/skills/...` paths. Keep `name`, `description`, and the body portable; retain host-specific metadata only when that host needs it, and never rely on another host ignoring a field as a security boundary. Reference supporting files through the runtime-provided skill base directory rather than hardcoding either discovery path.
+Under either layout, use `<repo>/.agents/skills`, not `~/.agents/skills`: the tilde path is user-global and would make a repository contract machine-local. A shared path makes one body discoverable; it does not translate harness-specific behavior. Before declaring a skill cross-agent, inspect its frontmatter, tool names, slash commands, lifecycle assumptions, and literal `.claude/skills/...` paths. Keep `name`, `description`, and the body portable; retain host-specific metadata only when that host needs it, and never rely on another host ignoring a field as a security boundary. Reference supporting files through the runtime-provided skill base directory rather than hardcoding either discovery path.
+
+Product caveat: uzi's worker currently enumerates repo skills only from a real `.claude/skills` directory and skips both symlink forms under its ADR-0246 containment guard. A repository with `repo_skills_enabled` therefore loses those skills in worker runs until [vtmocanu/uzi#1205](https://github.com/vtmocanu/uzi/issues/1205) adds `.agents/skills` as a second real-directory root.
 
 ### Agent definitions are not portable skill directories
 
