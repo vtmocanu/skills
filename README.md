@@ -1,12 +1,12 @@
 # skills
 
-A public collection of agent skills for [Claude Code](https://claude.com/claude-code) (and other agents), delivered with [vercel's `npx skills`](https://github.com/vercel-labs/skills).
+A public collection of agent skills for [Claude Code](https://claude.com/claude-code) and [Codex](https://learn.chatgpt.com/docs/build-skills), delivered with [Vercel's `skills` CLI](https://github.com/vercel-labs/skills).
 
 [![test](https://github.com/vtmocanu/skills/actions/workflows/test.yml/badge.svg)](https://github.com/vtmocanu/skills/actions/workflows/test.yml)
 [![Release](https://img.shields.io/github/v/release/vtmocanu/skills)](https://github.com/vtmocanu/skills/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-Each skill is a folder `skills/<name>/SKILL.md` with YAML frontmatter (`name` + `description`). `npx skills` installs them to `~/.claude/skills/<name>/`, where each becomes a `/<name>` slash-command skill. Restart Claude Code after installing.
+Each skill is a folder `skills/<name>/SKILL.md` with YAML frontmatter (`name` + `description`). The pinned CLI installs the canonical store under `~/.agents/skills/<name>/`, which Codex reads directly, plus target projections such as `~/.claude/skills/<name>/` for Claude Code. Restart the target agent if a newly installed skill does not appear.
 
 ## Two options, pick one
 
@@ -15,7 +15,7 @@ Each skill is a folder `skills/<name>/SKILL.md` with YAML frontmatter (`name` + 
 The agent team plus the full PRD lifecycle (11 skills).
 
 ```sh
-npx skills add vtmocanu/skills/skills/agent-kit -a claude-code -g -y
+npx -y skills@1.5.24 add vtmocanu/skills/skills/agent-kit -a claude-code -g -y
 ```
 
 **Auto-update hook** (add to `~/.claude/settings.json`):
@@ -28,7 +28,7 @@ npx skills add vtmocanu/skills/skills/agent-kit -a claude-code -g -y
       "hooks": [
         {
           "type": "command",
-          "command": "npx -y skills@latest add vtmocanu/skills/skills/agent-kit -a claude-code --skill '*' -g -y && npx -y skills@latest update -g -p",
+          "command": "npx -y skills@1.5.24 add vtmocanu/skills/skills/agent-kit -a claude-code --skill '*' -g -y && npx -y skills@1.5.24 update -g -p",
           "async": true,
           "timeout": 180
         }
@@ -59,7 +59,7 @@ Anything later added under `skills/agent-kit/` joins the bundle automatically.
 The whole catalog (20 skills), agent-kit included.
 
 ```sh
-npx skills add https://github.com/vtmocanu/skills -a claude-code -g -y
+npx -y skills@1.5.24 add https://github.com/vtmocanu/skills -a claude-code -g -y
 ```
 
 **Auto-update hook** (add to `~/.claude/settings.json`):
@@ -72,7 +72,7 @@ npx skills add https://github.com/vtmocanu/skills -a claude-code -g -y
       "hooks": [
         {
           "type": "command",
-          "command": "npx -y skills@latest add https://github.com/vtmocanu/skills -a claude-code --skill '*' -g -y && npx -y skills@latest update -g -p",
+          "command": "npx -y skills@1.5.24 add https://github.com/vtmocanu/skills -a claude-code --skill '*' -g -y && npx -y skills@1.5.24 update -g -p",
           "async": true,
           "timeout": 180
         }
@@ -99,7 +99,7 @@ Plus the 11 [agent-kit](skills/agent-kit/) skills from the table above.
 ## Notes for both paths
 
 - The hook chains `add … --skill '*'` with `update` because `update` alone never discovers a **new** skill, it only refreshes ones already in the lockfile; the `add` step picks up anything the source has added. `&&` (not two hooks) keeps the two lockfile writers from racing.
-- Renames and removals are **not** auto-pruned in a non-TTY hook; drop an old name with `npx skills remove <old> -g -y`.
+- Renames and removals are **not** auto-pruned in a non-TTY hook; drop an old name with `npx -y skills@1.5.24 remove <old> -g -y`.
 - Drop `-g` to install into the current project only (`.agents/skills` store plus agent-specific projections such as `.claude/skills`). Add `-l` to list without installing, or `-s a b` (space-separated) to pick a subset.
 - Edit the source repo, never an npx-installed `.agents/skills` store or `.claude/skills` projection, which `add`/`update` overwrite.
 
@@ -114,7 +114,7 @@ Issues and PRs welcome. See [CONTRIBUTING](.github/CONTRIBUTING.md), the [Code o
 
 ## Legacy: dot-ai
 
-Before `npx skills`, these were served by the [dot-ai](https://github.com/vfarcic/dot-ai) generator, which cloned the repo server-side and prefixed every skill as `/dot-ai-<name>`. It still works, but `npx skills` above is the recommended path.
+Before the `skills` CLI, these were served by the [dot-ai](https://github.com/vfarcic/dot-ai) generator, which cloned the repo server-side and prefixed every skill as `/dot-ai-<name>`. It still works, but the pinned CLI above is the recommended path.
 
 <details>
 <summary>dot-ai install</summary>
