@@ -1,13 +1,13 @@
 ---
 name: skill-maker
-description: Creates, updates, lints, and publishes portable agent skills for Claude Code and Codex, including repo-local .agents/skills sources, Claude compatibility symlinks, and npx distribution. Use when (1) writing a new skill, (2) editing an existing one, (3) linting a skill with agnix, (4) publishing a change so machines pick it up, (5) renaming or deleting a skill, or (6) deciding skill layout, scope, frontmatter, or discovery. Triggers include "new skill", "add a skill", "update skill", "repo skill", "skill not loading", "npx skills", "skills update", "lint skill", "agnix", "SKILL.md".
+description: Creates, updates, lints, and publishes portable agent skills for Claude Code and Codex, including repo-local .agents/skills sources, Claude compatibility symlinks, dual-agent SessionStart refresh hooks, and npx distribution. Use when (1) writing or editing a skill, (2) linting with agnix, (3) publishing changes, (4) renaming or deleting a skill, or (5) deciding skill layout, scope, frontmatter, discovery, or refresh automation. Triggers include "new skill", "update skill", "repo skill", "skill not loading", "npx skills", "skills update", "Codex skill hook", "lint skill", "agnix", "SKILL.md".
 ---
 
 # Skills authoring
 
 Author, lint, and publish skills for Claude Code and Codex. Skills distributed with the [`skills` package manager](https://github.com/vercel-labs/skills) keep their source in a separate git repo; repo-owned local skills can instead live directly in the consuming repo.
 
-**Approved package-manager pin: `skills@1.5.24`.** Use `npx -y skills@1.5.24` for every executable example in this skill and its README examples. This pins the third-party installer code, not the source revision of any skill it installs; `add` and `update` still fetch the source ref supplied to them. Update every occurrence together after reviewing a new package-manager release.
+**Package-manager policy: rolling `skills@latest`.** Use `npx -y skills@latest` for the interactive workstation commands and SessionStart hooks in this skill and its README examples. This deliberately trades reproducibility for automatic package-manager fixes and features; skill source URLs and refs remain controlled independently. Pin the package manager instead in CI, privileged automation, or another environment that requires reproducible executable code.
 
 ## Classify the skill before editing
 
@@ -17,12 +17,12 @@ A skill path can be an authored source or a package-manager-owned installed copy
 |---|---|---|
 | **Published source** | the skill's source repo (`<name>/SKILL.md`) | **Yes** |
 | **Repo-local source** | `<repo>/.agents/skills/<name>/` for a cross-agent skill; `<repo>/.claude/skills/<name>/` only when intentionally Claude-only | **Yes** |
-| **npx-installed copy** | global or project `.agents/skills` store and its agent-specific projections | **No** — derived; `npx -y skills@1.5.24 add`/`update` overwrites it |
+| **npx-installed copy** | global or project `.agents/skills` store and its agent-specific projections | **No** — derived; `npx -y skills@latest add`/`update` overwrites it |
 
-For a published skill, publishing is pull-based, not live editing. **Change the source repo, then `npx -y skills@1.5.24 update` re-pulls** and rewrites the installed copy. An edit made directly to the installed copy is discarded on the next update. For a repo-local source, commit the real directory and its compatibility symlink in the consuming repo; no package-manager install step applies.
+For a published skill, publishing is pull-based, not live editing. **Change the source repo, then `npx -y skills@latest update` re-pulls** and rewrites the installed copy. An edit made directly to the installed copy is discarded on the next update. For a repo-local source, commit the real directory and its compatibility symlink in the consuming repo; no package-manager install step applies.
 
-- **If you own the source repo**: edit `<name>/SKILL.md`, commit, push, then `npx -y skills@1.5.24 update`.
-- **If you don't** (you only installed it): the installed copy is read-only in practice. To change it, fork the source repo and `npx -y skills@1.5.24 add <your-fork>`, or open a PR/issue upstream. You cannot push to a repo you don't own.
+- **If you own the source repo**: edit `<name>/SKILL.md`, commit, push, then `npx -y skills@latest update`.
+- **If you don't** (you only installed it): the installed copy is read-only in practice. To change it, fork the source repo and `npx -y skills@latest add <your-fork>`, or open a PR/issue upstream. You cannot push to a repo you don't own.
 
 To find where an installed skill came from, its source is recorded in the lockfile: `~/.agents/.skill-lock.json` for global installs (or `$XDG_STATE_HOME/skills/.skill-lock.json` if set), and `<project-root>/skills-lock.json` for project installs. If the name is present there, treat the on-disk skill as derived even when it sits under `.agents/skills` and looks like an ordinary directory.
 
@@ -76,7 +76,7 @@ Supporting files are the reason to use a folder. A folder containing only `SKILL
 
 ### Nesting under a subpath needs a `.claude-plugin/plugin.json` manifest
 
-A whole-repo install (container `skills/`) discovers catalog nesting up to 3 levels deep (`skills/<cat>/<name>/SKILL.md`, `skills/<cat>/<cat>/<name>/SKILL.md`) with nothing extra. A **subpath** install (`npx -y skills@1.5.24 add owner/repo/skills/<sub>`) does not: the CLI walks the subpath dir only **one level deep**, so a skill at `<sub>/<group>/<name>/SKILL.md` is **silently dropped** (no error; the bundle just omits it). This depth cap is independent of the fetch engine — the CLI uses its fast GitHub tree-API only for a hardcoded owner allowlist (`vercel`, `vercel-labs`, `heygen-com`, plus a couple of self-hosted repos) and **clones every other owner** and walks the filesystem, and both paths cap the subpath at one level.
+A whole-repo install (container `skills/`) discovers catalog nesting up to 3 levels deep (`skills/<cat>/<name>/SKILL.md`, `skills/<cat>/<cat>/<name>/SKILL.md`) with nothing extra. A **subpath** install (`npx -y skills@latest add owner/repo/skills/<sub>`) does not: the CLI walks the subpath dir only **one level deep**, so a skill at `<sub>/<group>/<name>/SKILL.md` is **silently dropped** (no error; the bundle just omits it). This depth cap is independent of the fetch engine — the CLI uses its fast GitHub tree-API only for a hardcoded owner allowlist (`vercel`, `vercel-labs`, `heygen-com`, plus a couple of self-hosted repos) and **clones every other owner** and walks the filesystem, and both paths cap the subpath at one level.
 
 Fix: a **`<sub>/.claude-plugin/plugin.json`** manifest. Manifest-declared skill paths bypass the depth walk (npx: *"searched at their declared depth, not subject to the bounded depth-3 catalog walk"*).
 
@@ -168,43 +168,76 @@ Add `--show-fixes` to preview rewrites, or `--fix-safe` for high-confidence ones
 
 ## Workflow
 
-**First, check whether the source is already wired into a SessionStart hook** that runs `npx -y skills@1.5.24 add <source> --skill '*'` (grep `~/.claude/settings.json` for `skills@1.5.24 add`). If it is, publishing a new or edited skill to that source is just **commit + push**: the hook's `add --skill '*'` installs new skills and overwrites existing ones on the next session start, so the manual `add` / `update` steps below are redundant for that source. Run them by hand only for immediate use in the **current** session, or for a source with no such hook. Two things the hook never does, so still do them by hand: prune a removed or renamed skill (`npx -y skills@1.5.24 remove`), and set any machine-local `skillOverrides` state such as `name-only` in `settings.json`.
+**First, check whether the source is already wired into a SessionStart hook.** Inspect both `~/.claude/settings.json` and `~/.codex/hooks.json`; a dual-agent setup may point them at a shared wrapper, so inspect that wrapper for `npx -y skills@latest add <source> --skill '*'` too. If it is wired, publishing a new or edited skill to that source is just **commit + push**: the hook's `add --skill '*'` installs new skills and overwrites existing ones on the next session start, so the manual `add` / `update` steps below are redundant for that source. Run them by hand only for immediate use in the **current** session, or for a source with no such hook. Two things the hook never does, so still do them by hand: prune a removed or renamed skill (`npx -y skills@latest remove`), and set any machine-local `skillOverrides` state such as `name-only` in `settings.json`.
 
 ### Install a source the first time
-`npx -y skills@1.5.24 update` only refreshes skills already recorded in the lockfile, so a brand-new skill (or a source never installed on this machine) must be **added** first:
+`npx -y skills@latest update` only refreshes skills already recorded in the lockfile, so a brand-new skill (or a source never installed on this machine) must be **added** first:
 
 ```bash
-npx -y skills@1.5.24 add <source> -a claude-code -g        # global store + projections; omit -g for project scope
+npx -y skills@latest add <source> -a claude-code -g        # global store + projections; omit -g for project scope
 ```
 
 `<source>` accepts GitHub `owner/repo` shorthand or a full URL. For a **private** repo, use the SSH form `git@host:owner/repo.git` so the clone uses your existing git credentials (SSH agent / credential helper).
 
-- **Audit a source without installing**: `npx -y skills@1.5.24 add <source> -l` lists every skill the repo offers (name + description). Use it to survey a source, or to spot skills added upstream — `update` never discovers new skills, so this is how you learn one exists.
-- **`--skill` is include-only; there is no exclude flag.** To install all-but-some, either pass a positive name list (`--skill a b c`) or install `--skill '*'` then `npx -y skills@1.5.24 remove <name> -g -y`. Reason to exclude: a skill whose `name:` duplicates a built-in (see the name-collision caveat under Enable / disable).
+- **Audit a source without installing**: `npx -y skills@latest add <source> -l` lists every skill the repo offers (name + description). Use it to survey a source, or to spot skills added upstream — `update` never discovers new skills, so this is how you learn one exists.
+- **`--skill` is include-only; there is no exclude flag.** To install all-but-some, either pass a positive name list (`--skill a b c`) or install `--skill '*'` then `npx -y skills@latest remove <name> -g -y`. Reason to exclude: a skill whose `name:` duplicates a built-in (see the name-collision caveat under Enable / disable).
 
 ### Auto-install new + refresh on session start (hook)
 `update` never discovers a skill not yet in the lockfile, so a SessionStart hook that only runs `update` will not pick up a newly-pushed skill. To auto-install new skills **and** refresh existing ones, run `add` (with `--skill '*'`) then `update`, chained:
 
 ```bash
-npx -y skills@1.5.24 add <source> -a claude-code --skill '*' -g -y && npx -y skills@1.5.24 update -g -p
+npx -y skills@latest add <source> -a claude-code --skill '*' -g -y && npx -y skills@latest update -g -p
 ```
+
+Claude Code and Codex share `~/.agents/.skill-lock.json` and the `~/.agents/skills` store. Their SessionStart hooks—and two Claude sessions starting together—can therefore run this read-modify-write sequence concurrently. When more than one session can start at once, put the complete source-add/update sequence in one user-owned wrapper that takes an exclusive cross-process lock, then point every agent hook at that wrapper. On macOS and Linux, a Python stdlib wrapper can hold `fcntl.flock` on `~/.agents/.skills-refresh.lock` for the entire sequence; keep the session working directory so `update -p` still targets the repository that started the hook.
+
+Use these hook locations and matchers:
+
+| Agent | Hook file | `SessionStart` matcher | Extra step |
+|---|---|---|---|
+| Claude Code | `~/.claude/settings.json` | `startup` | none |
+| Codex | `~/.codex/hooks.json` | `startup\|resume` | review and trust the handler once with `/hooks` |
+
+For Codex, add the wrapper as another `SessionStart` group without reordering existing groups, so their saved trust identities stay stable:
+
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.agents/refresh-skills.py",
+            "timeout": 300,
+            "async": true
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+Codex user hooks are loaded from `~/.codex/hooks.json`, and a new or changed hook stays skipped until trusted through `/hooks`; see the [official hooks documentation](https://learn.chatgpt.com/docs/hooks).
 
 - `add … --skill '*'` installs every skill currently in `<source>`, so new ones land automatically. `--skill '*'` keeps the `-a claude-code` agent scope; `--all` instead fans out to every detected agent.
 - **`update` reinstalls to every *detected* agent, and cannot be scoped.** `update` has no `-a` flag, and its internal `add` (run per changed skill) passes none — so it reinstalls each changed skill to **every** agent it detects. Detection is just "the agent's config dir exists" (e.g. `~/.config/crush`, `~/.codex`). Non-universal agents (claude, crush) each get their own copy; universal ones share `~/.agents/skills`. Consequence: even a hook whose every `add` is `-a claude-code` still leaks copies to other agents through the chained `update`. There is no per-`update` agent scope — the only way to keep installs to one agent is to make the others undetectable (remove/rename their config dir).
-- Keep it a **single shell command**, not two async hooks: `add` and `update` both write the lockfile, so two concurrent hooks race and corrupt it.
+- Keep `add` and `update` inside one serialized wrapper invocation. Separate async handlers, or matching Claude and Codex handlers without the shared lock, can race on the lockfile.
 - For multiple sources, chain the `add`s ahead of one `update`. Join reliable steps with `&&`, but decouple any source that can be unreachable (offline, VPN-gated) with `;` and `|| true` and put it **last** — an `&&` chain aborts on the first failure, so a down source would otherwise block every step after it:
 
   ```bash
-  npx -y skills@1.5.24 add <reliable-source> -a claude-code --skill '*' -g -y && npx -y skills@1.5.24 update -g -p; npx -y skills@1.5.24 add <vpn-only-source> -a claude-code --skill '*' -g -y || true
+  npx -y skills@latest add <reliable-source> -a claude-code --skill '*' -g -y && npx -y skills@latest update -g -p; npx -y skills@latest add <vpn-only-source> -a claude-code --skill '*' -g -y || true
   ```
 
-- Removals and renames are still not auto-pruned in a non-TTY hook (see Rename / delete) — drop the old name with `npx -y skills@1.5.24 remove <old> -g -y`.
+- Removals and renames are still not auto-pruned in a non-TTY hook (see Rename / delete) — drop the old name with `npx -y skills@latest remove <old> -g -y`.
 
 ### Edit and publish an existing skill
 1. Edit the source `<name>/SKILL.md` (and any supporting files) in its repo.
 2. **Lint** with agnix; fix errors, triage warnings.
 3. **Commit + push** to the source repo. Stage only the file(s) you touched (`git add <name>/`) — do **not** `git add -A`; the worktree may carry unrelated in-progress edits on other skills.
-4. **Publish** by pulling on each machine: `npx -y skills@1.5.24 update -g -p` (`-g` global, `-p` current project; together = both). Runs cleanly from a SessionStart hook too.
+4. **Publish** by pulling on each machine: `npx -y skills@latest update -g -p` (`-g` global, `-p` current project; together = both). Runs cleanly from a SessionStart hook too.
 5. **Verify the canonical installed store and each target projection**, since the source file is not what the model reads:
    ```bash
    grep "<distinctive phrase from your edit>" ~/.agents/skills/<name>/SKILL.md
@@ -213,10 +246,10 @@ npx -y skills@1.5.24 add <source> -a claude-code --skill '*' -g -y && npx -y ski
 
 ## Rename / delete
 
-`npx -y skills@1.5.24 update` reconciles only skills already tracked in the lockfile — it does **not** install a newly-named skill, and it **never prunes automatically**. On a deletion a non-interactive run (a hook, or no TTY) prints `Skipping deletion in non-interactive mode` and leaves the skill on disk and in the lockfile; `-y` does not change this, and there is no `--prune` flag. So removal is always an explicit `npx -y skills@1.5.24 remove`:
+`npx -y skills@latest update` reconciles only skills already tracked in the lockfile — it does **not** install a newly-named skill, and it **never prunes automatically**. On a deletion a non-interactive run (a hook, or no TTY) prints `Skipping deletion in non-interactive mode` and leaves the skill on disk and in the lockfile; `-y` does not change this, and there is no `--prune` flag. So removal is always an explicit `npx -y skills@latest remove`:
 
-- **Rename**: `git mv <old>/ <new>/`, update the `name:` field, grep the repo for inbound references (`rg "<old>" .`), commit + push. Then on each machine `npx -y skills@1.5.24 add <source>` to install the new name and `npx -y skills@1.5.24 remove <old> -g -y` to drop the old one.
-- **Delete**: `git rm -r <name>/`, grep for references, commit + push. Then `npx -y skills@1.5.24 remove <name> -g -y` on each machine (an interactive `npx -y skills@1.5.24 update` will also offer to remove it; a non-interactive one will not).
+- **Rename**: `git mv <old>/ <new>/`, update the `name:` field, grep the repo for inbound references (`rg "<old>" .`), commit + push. Then on each machine `npx -y skills@latest add <source>` to install the new name and `npx -y skills@latest remove <old> -g -y` to drop the old one.
+- **Delete**: `git rm -r <name>/`, grep for references, commit + push. Then `npx -y skills@latest remove <name> -g -y` on each machine (an interactive `npx -y skills@latest update` will also offer to remove it; a non-interactive one will not).
 
 `remove` takes skill **names** (space-separated) or `--all`; there is no `--source <repo>` filter, so name each skill to drop. Flags mirror the others: `-g` global, `-a <agent>` to scope to one agent, `-y` to skip the confirm.
 
