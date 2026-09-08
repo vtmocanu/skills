@@ -65,6 +65,13 @@ it; Codex runs it as its next user turn under the thread's own approval mode.
   `up <name>`. This stops two agents from ping-ponging unattended.
 - **Idle thread latency**: up to 10 s (Codex polls its queue), then the turn.
 - **Busy thread**: the message queues and runs after the current turn.
+- **Continuously-driven thread**: a thread another driver keeps feeding
+  back-to-back turns (an autonomous loop, or another session in a tight drive)
+  never goes idle to poll the queue, so your message can sit undelivered for a
+  long time -- it is not busy for one turn but busy on a stream of them. If no
+  reply arrives, check the thread's rollout for your message text; if it is
+  absent, the queue has not drained. Ask the user to let the thread idle, or
+  deliver out of band.
 - **Paused thread**: after the user's Ctrl-C in Codex the queue stays paused,
   even across `codex resume`, until they type any prompt there. Your message is
   still queued; the shim posts a status `held` with the detail "queued, but the

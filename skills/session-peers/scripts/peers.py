@@ -752,8 +752,32 @@ def read_session_index():
     return out
 
 
+def canon_path(path):
+    """Canonicalize a path so holder keys and lookup keys agree.
+
+    `lsof` reports the symlink-resolved (real) path in its `n` field, while the
+    paths we probe come from the state DB and from CODEX_HOME unresolved. When
+    CODEX_HOME is a symlink (e.g. a mackup-managed `~/.codex` -> a repo dir), the
+    two never match and EVERY thread reads as dead -- `up`/`send` refuse and no
+    shim starts. Resolving both sides with realpath makes them agree; a
+    missing/None path (or one realpath cannot resolve) is returned unchanged.
+    The socket-dir matching already relies on realpath (see
+    `claude_record_by_socket`, `dir_is_allowlisted`); this applies the same rule
+    to Codex holder matching.
+    """
+    if not path:
+        return path
+    try:
+        return os.path.realpath(path)
+    except OSError:
+        return path
+
+
 def lsof_holders(paths):
     """{path: [(pid, command)]} for paths a `codex` process holds open.
+
+    Keyed by the canonical (realpath) form so a lookup by an unresolved probe
+    path still matches a holder `lsof` reported at its symlink-resolved path.
 
     One `lsof -F pcn` call for the whole set. A missing lsof, a non-zero exit
     (lsof exits 1 when nothing matches) and unparseable output all mean "no
@@ -787,7 +811,7 @@ def lsof_holders(paths):
             base = os.path.basename(cmd or "")
             if "codex" not in base.lower():
                 continue
-            out.setdefault(value, []).append((pid, cmd))
+            out.setdefault(canon_path(value), []).append((pid, cmd))
     return out
 
 
@@ -866,8 +890,8 @@ def codex_threads(check_live=True):
             # Either handle a live Codex process keeps proves the thread is
             # live; the lock covers a fresh thread whose rollout is not written
             # yet, the rollout covers an older Codex with no writer lock.
-            found = (holders.get(t["rollout_path"]) or []) or (
-                holders.get(lock_of[t["id"]]) or []
+            found = (holders.get(canon_path(t["rollout_path"])) or []) or (
+                holders.get(canon_path(lock_of[t["id"]])) or []
             )
             if found:
                 t["live"] = True
@@ -890,7 +914,7 @@ def thread_is_held(rollout_path, holder_pid=None, lock_path=None):
     holders = lsof_holders(paths)
     found = []
     for p in paths:
-        found += holders.get(p) or []
+        found += holders.get(canon_path(p)) or []
     if holder_pid is None:
         return bool(found), (found[0][0] if found else None)
     for pid, _cmd in found:
@@ -934,7 +958,18 @@ def resolve_thread(target, require_live=True):
             if t["id"] == target:
                 return t
         raise ResolveError("no Codex thread with id %s" % target)
-    matches = [t for t in threads if t.get("name") == target]
+    # Match the name from the state DB / session index, OR from our own
+    # registration: `up <uuid>` records name->uuid, and a later `/rename` may
+    # not have propagated to the DB's `name` column yet (measured on
+    # codex-cli 0.153.4), so a thread we already registered under this name
+    # must still resolve. Union by id, so a thread matched both ways counts once.
+    reg = read_registered()
+    reg_ids = {
+        tid
+        for tid, meta in reg.items()
+        if isinstance(meta, dict) and meta.get("name") == target
+    }
+    matches = [t for t in threads if t.get("name") == target or t["id"] in reg_ids]
     if not matches:
         raise ResolveError(
             "no Codex thread named %r; /rename it in the TUI, or pass its UUID"
