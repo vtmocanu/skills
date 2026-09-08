@@ -1,11 +1,11 @@
 ---
 name: skill-maker
-description: Creates, updates, lints, and publishes portable agent skills for Claude Code and Codex, including repo-local .agents/skills sources, Claude compatibility symlinks, dual-agent SessionStart refresh hooks, and npx distribution. Use when (1) writing or editing a skill, (2) linting with agnix, (3) publishing changes, (4) renaming or deleting a skill, or (5) deciding skill layout, scope, frontmatter, discovery, or refresh automation. Triggers include "new skill", "update skill", "repo skill", "skill not loading", "npx skills", "skills update", "Codex skill hook", "lint skill", "agnix", "SKILL.md".
+description: Creates, updates, lints, and publishes portable agent skills for Claude Code, Codex, and OpenCode, including repo-local .agents/skills sources, Claude compatibility symlinks, cross-agent SessionStart refresh hooks, and npx distribution. Use when (1) writing or editing a skill, (2) linting with agnix, (3) publishing changes, (4) renaming or deleting a skill, or (5) deciding skill layout, scope, frontmatter, discovery, or refresh automation. Triggers include "new skill", "update skill", "repo skill", "skill not loading", "npx skills", "skills update", "Codex skill hook", "lint skill", "agnix", "SKILL.md".
 ---
 
 # Skills authoring
 
-Author, lint, and publish skills for Claude Code and Codex. Skills distributed with the [`skills` package manager](https://github.com/vercel-labs/skills) keep their source in a separate git repo; repo-owned local skills can instead live directly in the consuming repo.
+Author, lint, and publish skills for Claude Code, Codex, and OpenCode. Skills distributed with the [`skills` package manager](https://github.com/vercel-labs/skills) keep their source in a separate git repo; repo-owned local skills can instead live directly in the consuming repo.
 
 **Package-manager policy: rolling `skills@latest`.** Use `npx -y skills@latest` for the interactive workstation commands and SessionStart hooks in this skill and its README examples. This deliberately lets newly published third-party installer code execute unattended at session start in exchange for automatic package-manager fixes and features; skill source URLs and refs remain controlled independently. Pin the package manager instead in CI, privileged automation, or another environment that requires reviewed, reproducible executable code.
 
@@ -17,7 +17,7 @@ A skill path can be an authored source or a package-manager-owned installed copy
 |---|---|---|
 | **Published source** | the skill's source repo (`<name>/SKILL.md`) | **Yes** |
 | **Repo-local source** | `<repo>/.agents/skills/<name>/` for a cross-agent skill; `<repo>/.claude/skills/<name>/` only when intentionally Claude-only | **Yes** |
-| **npx-installed copy** | global or project `.agents/skills` store and its agent-specific projections | **No** — derived; `npx -y skills@latest add`/`update` overwrites it |
+| **npx-installed copy** | a global or project target directory, or the canonical `.agents/skills` store plus projections | **No** — derived; `npx -y skills@latest add`/`update` overwrites it |
 
 For a published skill, publishing is pull-based, not live editing. **Change the source repo, then `npx -y skills@latest update` re-pulls** and rewrites the installed copy. An edit made directly to the installed copy is discarded on the next update. For a repo-local source, commit the real directory and its compatibility symlink in the consuming repo; no package-manager install step applies.
 
@@ -26,9 +26,9 @@ For a published skill, publishing is pull-based, not live editing. **Change the 
 
 To find where an installed skill came from, its source is recorded in the lockfile: `~/.agents/.skill-lock.json` for global installs (or `$XDG_STATE_HOME/skills/.skill-lock.json` if set), and `<project-root>/skills-lock.json` for project installs. If the name is present there, treat the on-disk skill as derived even when it sits under `.agents/skills` and looks like an ordinary directory.
 
-## Repo-local skills for Claude Code and Codex
+## Repo-local skills for Claude Code, Codex, and OpenCode
 
-For a skill authored by and useful only in one repository, keep the canonical real directory at the repository root under `.agents/skills`. Codex [scans `.agents/skills` from the current directory through the repository root and supports symlinked skill folders](https://learn.chatgpt.com/docs/build-skills). Claude Code discovers project skills under `.claude/skills`, so expose the same bytes there with one tracked relative symlink per skill:
+For a skill authored by and useful only in one repository, keep the canonical real directory at the repository root under `.agents/skills`. Codex [scans `.agents/skills` from the current directory through the repository root and supports symlinked skill folders](https://learn.chatgpt.com/docs/build-skills), and [OpenCode scans the same project and global paths](https://opencode.ai/docs/skills). Claude Code discovers project skills under `.claude/skills`, so expose the same bytes there with one tracked relative symlink per skill:
 
 ```text
 <repo>/
@@ -58,6 +58,16 @@ ln -s ../../.agents/skills/<name> .claude/skills/<name>
 Track both the real directory and the symlink. Do not relocate a lockfile-owned dependency this way; change its upstream source or package selection and let npx regenerate the store and projections. Leave a genuinely Claude-only skill as a real `.claude/skills/<name>` directory.
 
 A shared path makes one body discoverable; it does not translate harness-specific behavior. Before declaring a skill cross-agent, inspect its frontmatter, tool names, slash commands, lifecycle assumptions, and literal `.claude/skills/...` paths. Keep `name`, `description`, and the body portable; retain host-specific metadata only when that host needs it, and never rely on another host ignoring a field as a security boundary. Reference supporting files through the runtime-provided skill base directory rather than hardcoding either discovery path.
+
+### Agent definitions are not portable skill directories
+
+Do not generalize the `.agents/skills` layout to `.agents/agents`. There is no shared agent-definition discovery path or file schema across these runtimes:
+
+- Claude Code reads Markdown agent definitions from `.claude/agents/`.
+- Codex reads TOML custom-agent definitions from [`.codex/agents/`](https://learn.chatgpt.com/docs/agent-configuration/subagents); each file requires `name`, `description`, and `developer_instructions`.
+- OpenCode reads Markdown agent definitions from [`.opencode/agents/`](https://opencode.ai/docs/agents) with OpenCode-specific frontmatter.
+
+Do not symlink one agent-definition file across those directories. For a cross-agent role catalog, keep neutral source data such as `roles.yaml`, then generate and validate one native projection per runtime. The `agent-team` skill is intentionally Claude Code-native until it has those adapters.
 
 ## Layout: folder skills
 
@@ -174,7 +184,7 @@ Add `--show-fixes` to preview rewrites, or `--fix-safe` for high-confidence ones
 `npx -y skills@latest update` only refreshes skills already recorded in the lockfile, so a brand-new skill (or a source never installed on this machine) must be **added** first:
 
 ```bash
-npx -y skills@latest add <source> -a claude-code -g        # global store + projections; omit -g for project scope
+npx -y skills@latest add <source> -a claude-code codex -g  # canonical store + Claude projection; omit -g for project scope
 ```
 
 `<source>` accepts GitHub `owner/repo` shorthand or a full URL. For a **private** repo, use the SSH form `git@host:owner/repo.git` so the clone uses your existing git credentials (SSH agent / credential helper).
@@ -186,8 +196,10 @@ npx -y skills@latest add <source> -a claude-code -g        # global store + proj
 `update` never discovers a skill not yet in the lockfile, so a SessionStart hook that only runs `update` will not pick up a newly-pushed skill. To auto-install new skills **and** refresh existing ones, run `add` (with `--skill '*'`) then `update`, chained:
 
 ```bash
-npx -y skills@latest add <source> -a claude-code --skill '*' -g -y && npx -y skills@latest update -g -p
+npx -y skills@latest add <source> -a claude-code codex --skill '*' -g -y && npx -y skills@latest update -g -p
 ```
+
+The explicit pair is load-bearing. In `skills` CLI 1.5.23, targeting only the non-universal `claude-code` directory selects copy mode and writes only `.claude/skills`; no canonical `.agents/skills` entry exists for Codex or OpenCode to discover. Targeting `claude-code codex` selects canonical-plus-symlink mode: Codex supplies the universal `.agents/skills` target, Claude gets a symlink, and OpenCode discovers the same canonical store without a redundant third target. This was reproduced in isolated global installs on 2026-09-08. Re-run that probe when changing the rolling package-manager version.
 
 Claude Code and Codex share `~/.agents/.skill-lock.json` and the `~/.agents/skills` store. Their SessionStart hooks—and two Claude sessions starting together—can therefore run this read-modify-write sequence concurrently. This skill ships `scripts/refresh_skills.py`, a macOS/Linux Python-stdlib wrapper that creates `~/.agents`, holds `fcntl.flock` on `~/.agents/.skills-refresh.lock` for the entire source-add/update sequence, and preserves the session working directory so `update -p` refreshes the repository that started the hook. The default source is this public skills catalog; repeat `--source` for another required source or `--best-effort-source` for an optional one.
 
@@ -224,13 +236,13 @@ For Codex, add the wrapper as another `SessionStart` group without reordering ex
 
 Codex user hooks are loaded from `~/.codex/hooks.json`, and a new or changed hook stays skipped until trusted through `/hooks`; see the [official hooks documentation](https://learn.chatgpt.com/docs/hooks). The example is asynchronous and therefore best-effort: the session can begin with the previous skill inventory, Codex cancels an unfinished background hook when the session ends, and the next `startup` or `resume` retries. Remove `async` when refresh completion must gate session startup. When Claude and Codex call the same multi-source wrapper, give both a timeout sized for the whole source list; `300` seconds is the example baseline.
 
-- `add … --skill '*'` installs every skill currently in `<source>`, so new ones land automatically. `--skill '*'` keeps the `-a claude-code` agent scope; `--all` instead fans out to every detected agent.
+- `add … --skill '*'` installs every skill currently in `<source>`, so new ones land automatically. `--skill '*'` keeps the explicit `-a claude-code codex` scope; `--all` instead fans out to every supported agent.
 - **`update` reinstalls to every *detected* agent, and cannot be scoped.** `update` has no `-a` flag, and its internal `add` (run per changed skill) passes none — so it reinstalls each changed skill to **every** agent it detects. Detection is just "the agent's config dir exists" (e.g. `~/.config/crush`, `~/.codex`). Non-universal agents (claude, crush) each get their own copy; universal ones share `~/.agents/skills`. Consequence: even a hook whose every `add` is `-a claude-code` still leaks copies to other agents through the chained `update`. There is no per-`update` agent scope — the only way to keep installs to one agent is to make the others undetectable (remove/rename their config dir).
 - Keep `add` and `update` inside one serialized wrapper invocation. Separate async handlers, or matching Claude and Codex handlers without the shared lock, can race on the lockfile.
 - For multiple sources, chain the `add`s ahead of one `update`. Join reliable steps with `&&`, but decouple any source that can be unreachable (offline, VPN-gated) with `;` and `|| true` and put it **last** — an `&&` chain aborts on the first failure, so a down source would otherwise block every step after it:
 
   ```bash
-  npx -y skills@latest add <reliable-source> -a claude-code --skill '*' -g -y && npx -y skills@latest update -g -p; npx -y skills@latest add <vpn-only-source> -a claude-code --skill '*' -g -y || true
+  npx -y skills@latest add <reliable-source> -a claude-code codex --skill '*' -g -y && npx -y skills@latest update -g -p; npx -y skills@latest add <vpn-only-source> -a claude-code codex --skill '*' -g -y || true
   ```
 
 - Removals and renames are still not auto-pruned in a non-TTY hook (see Rename / delete) — drop the old name with `npx -y skills@latest remove <old> -g -y`.
@@ -257,9 +269,9 @@ Codex user hooks are loaded from `~/.codex/hooks.json`, and a new or changed hoo
 
 ## Install scopes (`skills` CLI)
 
-- **Scope**: npx keeps the canonical installed store under `.agents/skills` and creates agent-specific projections such as `.claude/skills`. Global installs use `$HOME`; project installs use the repository. `add`/`update`/`remove` default to **project** scope; pass `-g` for global. `update -g -p` does both.
+- **Scope**: when the target set includes a universal agent such as Codex, npx keeps the canonical installed store under `.agents/skills` and creates agent-specific projections such as `.claude/skills`. A single non-universal target can use copy mode and skip the canonical store entirely. Global installs use `$HOME`; project installs use the repository. `add`/`update`/`remove` default to **project** scope; pass `-g` for global. `update -g -p` does both.
 - **Lockfiles**: global → `~/.agents/.skill-lock.json`; project → `<project-root>/skills-lock.json`. They record each installed skill's source; the installed copies under `~/.claude/skills/` carry no lockfile.
-- **Where files land (shared store + unstable per-agent copies)**: at global scope, the real files live under `~/.agents/skills/<name>/`; at project scope, under `<repo>/.agents/skills/<name>/`. npx also installs a per-agent projection such as the matching `.claude/skills/<name>/`. That projection is **unstable**: an update may rewrite it as a symlink into the shared store or as a real-directory copy, so do not hand-normalize lockfile-owned projections. **Dotfiles impact**: track the global shared store if desired (for example by symlinking `~/.agents` into a dotfiles repo) and gitignore the machine-local global lockfile, which rewrites on every add/update.
+- **Where files land (shared store + target projections)**: with `-a claude-code codex`, global real files live under `~/.agents/skills/<name>/`, project real files live under `<repo>/.agents/skills/<name>/`, and Claude receives the matching `.claude/skills/<name>` symlink. OpenCode reads the canonical store directly. Other target combinations may choose copy mode instead, so verify the exact paths after changing the target list. **Dotfiles impact**: track the global shared store if desired (for example by symlinking `~/.agents` into a dotfiles repo) and gitignore the machine-local global lockfile, which rewrites on every add/update.
 - **Authored repo-local skills are different**: a repo-owned skill absent from `skills-lock.json` uses `<repo>/.agents/skills/<name>` as its editable source and a deliberately tracked `.claude/skills/<name>` symlink. npx does not own or rewrite that pair.
 
 ## Enable / disable an installed skill
