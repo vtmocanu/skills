@@ -26,7 +26,7 @@ To find where an installed skill came from, its source is recorded in the lockfi
 
 ## Repo-local skills for Claude Code and Codex
 
-For a skill authored by and useful only in one repository, keep the canonical real directory at the repository root under `.agents/skills`. Codex [scans `.agents/skills` from the current directory through the repository root and supports symlinked skill folders](https://developers.openai.com/codex/skills#where-to-save-skills). Claude Code discovers project skills under `.claude/skills`, so expose the same bytes there with one tracked relative symlink per skill:
+For a skill authored by and useful only in one repository, keep the canonical real directory at the repository root under `.agents/skills`. Codex [scans `.agents/skills` from the current directory through the repository root and supports symlinked skill folders](https://learn.chatgpt.com/docs/build-skills). Claude Code discovers project skills under `.claude/skills`, so expose the same bytes there with one tracked relative symlink per skill:
 
 ```text
 <repo>/
@@ -172,7 +172,7 @@ Add `--show-fixes` to preview rewrites, or `--fix-safe` for high-confidence ones
 `npx skills update` only refreshes skills already recorded in the lockfile, so a brand-new skill (or a source never installed on this machine) must be **added** first:
 
 ```bash
-npx skills add <source> -a claude-code -g        # -g = global (~/.claude/skills); omit for project scope
+npx skills add <source> -a claude-code -g        # -g = global (~/.agents/skills store + agent projections); omit for project scope
 ```
 
 `<source>` accepts GitHub `owner/repo` shorthand or a full URL. For a **private** repo, use the SSH form `git@host:owner/repo.git` so the clone uses your existing git credentials (SSH agent / credential helper).
@@ -203,8 +203,9 @@ npx -y skills@latest add <source> -a claude-code --skill '*' -g -y && npx -y ski
 2. **Lint** with agnix; fix errors, triage warnings.
 3. **Commit + push** to the source repo. Stage only the file(s) you touched (`git add <name>/`) — do **not** `git add -A`; the worktree may carry unrelated in-progress edits on other skills.
 4. **Publish** by pulling on each machine: `npx skills update -g -p` (`-g` global, `-p` current project; together = both). Runs cleanly from a SessionStart hook too.
-5. **Verify the installed copy**, since that is what the model reads — the source file is not:
+5. **Verify the canonical installed store and each target projection**, since the source file is not what the model reads:
    ```bash
+   grep "<distinctive phrase from your edit>" ~/.agents/skills/<name>/SKILL.md
    grep "<distinctive phrase from your edit>" ~/.claude/skills/<name>/SKILL.md
    ```
 
