@@ -145,6 +145,10 @@ registered by UUID appears as `codex-<first 8 hex of the uuid>`.
 The default sandbox can block Unix sockets, the Claude-side `ps` probe, and the
 Codex-side `lsof` probe. A failed `lsof` probe keeps a running shim alive but
 refuses new queueing and GC until liveness can be verified.
+Paths proven absent are omitted before a batched `lsof` call, so a lazy rollout
+or stale database row does not hide holders returned for other paths. Any
+failure to inspect a path still makes liveness unverified. An `lsof` exit 1
+with no diagnostic is treated as a verified partial or empty result.
 Run `list`, `doctor`, and direct `send --to cc:...` with host permission from
 the outset. If permission is unavailable, an `unverified` result is not
 evidence that no session exists. A Claude record missing `procStart` is also

@@ -883,20 +883,36 @@ def lsof_holders_checked(paths):
     Keyed by the canonical (realpath) form so a lookup by an unresolved probe
     path still matches a holder `lsof` reported at its symlink-resolved path.
 
-    `lsof` exits 1 both for a verified no-match and for some failures. Empty
-    stdout and stderr is therefore a verified no-match; another non-zero
-    result is unverified, never evidence that a thread is dead.
+    `lsof` exits 1 both for a verified no-match and for some failures. It can
+    also exit 1 with valid holder data on stdout when another requested path is
+    absent or has no holder. Remove paths proven absent before the batch, then
+    accept exit 1 only when stderr is empty. A path whose existence cannot be
+    checked remains unverified, never evidence that a thread is dead.
     """
     out = {}
-    paths = [p for p in paths if p]
+    existing = []
+    seen = set()
+    for path in paths:
+        if not path:
+            continue
+        canonical = canon_path(path)
+        if canonical in seen:
+            continue
+        try:
+            os.stat(path)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            return out, False, "cannot inspect %s: %s" % (path, exc)
+        existing.append(path)
+        seen.add(canonical)
+    paths = existing
     if not paths:
         return out, True, None
     rc, stdout, stderr = run_cmd(
         ["lsof", "-F", "pcn", "--"] + list(paths), timeout=20
     )
-    if rc != 0:
-        if rc == 1 and not stdout.strip() and not stderr.strip():
-            return out, True, None
+    if rc != 0 and not (rc == 1 and not stderr.strip()):
         detail = stderr.strip() or stdout.strip() or "lsof exited %d" % rc
         return out, False, detail
     pid = None

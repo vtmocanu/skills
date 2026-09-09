@@ -162,3 +162,12 @@ Partial live check: 2026-09-09, Claude Code 2.1.266, Codex CLI 0.153.4.
     poll. Restore `lsof` and verify the shim reports recovery. Separately, a
     Claude registry record without `procStart` must be unverified rather than
     trusted across PID reuse.
+22. **Mixed `lsof` results.** Keep a fresh Codex thread live through its writer
+    lock while its lazy rollout is absent, and include stale database rows whose
+    rollout and lock paths are also absent. Real `lsof` exits 1, warns about the
+    missing paths, and still prints the live lock holder. After absent paths are
+    removed, it can still exit 1 with structured stdout and empty stderr when
+    another existing path has no holder. Verify both forms leave the live
+    thread live and stale rows inactive rather than making every thread
+    unverified. Make the preflight path check fail with a permission error and
+    verify liveness remains unverified rather than dead.
