@@ -75,6 +75,7 @@ REPLY_BUDGET_WINDOW_DEFAULT = 30 * 60.0
 REQUEST_TIMEOUT_DEFAULT = 10 * 60.0
 REQUEST_TIMEOUT_MAX = 60 * 60.0
 REQUEST_POLL_INTERVAL = 0.1
+REQUEST_ORPHAN_TTL = 60.0
 VERSION_WARNING_WINDOW = 24 * 60 * 60.0
 
 # Columns the `threads` table must have for the schema to count as recognised.
@@ -261,9 +262,9 @@ def message_from_args(args):
     path = getattr(args, "message_file", None)
     if path:
         try:
-            with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            with open(path, "r", encoding="utf-8") as fh:
                 value = fh.read()
-        except OSError as exc:
+        except (OSError, UnicodeError) as exc:
             raise ValueError("cannot read message file %s: %s" % (path, exc))
     if value is None:
         raise ValueError("one of --message or --message-file is required")
@@ -3065,7 +3066,7 @@ def _resolve_claude_record(target):
     return rec
 
 
-def _deliver_claude(rec, message, thread_id=None):
+def _deliver_claude(rec, message, thread_id=None, reply_route=True):
     thread_name = None
     shim_socket = None
     if thread_id:
@@ -3076,15 +3077,16 @@ def _deliver_claude(rec, message, thread_id=None):
             rec_path = os.path.join(claude_sessions_dir(), "%d.json" % pid)
             shim_rec = read_json(rec_path, {}) or {}
             shim_socket = shim_rec.get("messagingSocketPath")
-    body = build_cc_body(message, thread_id or "", thread_name, shim_socket)
+    route = shim_socket if reply_route else None
+    body = build_cc_body(message, thread_id or "", thread_name, route)
     if len(body) > MAX_TEXT_CHARS or utf8_len(body) > MAX_TEXT_CHARS:
         raise ValueError(
             "wrapped message exceeds the %d-character/UTF-8-byte peer cap"
             % MAX_TEXT_CHARS
         )
-    frame = build_user_frame(body, shim_socket)
+    frame = build_user_frame(body, route)
     send_frame(rec["messagingSocketPath"], frame, auth_token=peer_token_for(rec))
-    return frame["msg_id"], bool(shim_socket)
+    return frame["msg_id"], bool(route)
 
 
 def _print_send_result(args, payload, human):
@@ -3274,7 +3276,7 @@ def cleanup_expired_requests(now=None, dry_run=False):
             continue
         path = request_reply_path(request_id)
         try:
-            stale = os.stat(path).st_mtime <= now - REQUEST_TIMEOUT_MAX
+            stale = os.stat(path).st_mtime <= now - REQUEST_ORPHAN_TTL
         except OSError:
             stale = False
         if stale:
@@ -3325,6 +3327,12 @@ def cmd_ask(args):
     except ResolveError as exc:
         sys.stderr.write("error: %s\n" % exc)
         return 1
+    if not rec.get("sessionId"):
+        sys.stderr.write(
+            "error: Claude target %r has no session id, so its reply cannot be verified\n"
+            % (rec.get("name") or args.to)
+        )
+        return 1
 
     cleanup_expired_requests()
     request_id = str(uuidlib.uuid4())
@@ -3346,7 +3354,10 @@ def cmd_ask(args):
     try:
         try:
             message_id, _reply_capable = _deliver_claude(
-                rec, _request_envelope(request_id, message, timeout), thread_id
+                rec,
+                _request_envelope(request_id, message, timeout),
+                thread_id,
+                reply_route=False,
             )
         except (OSError, ValueError) as exc:
             sys.stderr.write("error: could not send request to %s: %s\n" % (args.to, exc))
@@ -3402,6 +3413,16 @@ def _current_claude_session_id():
     return None
 
 
+def _read_completed_reply(path, attempts=20):
+    """Read a competing reply after its exclusive writer finishes."""
+    for _index in range(attempts):
+        value = read_json(path, None)
+        if isinstance(value, dict):
+            return value
+        time.sleep(0.01)
+    return {}
+
+
 def cmd_reply(args):
     """Complete one pending ask mailbox from its intended Claude session."""
     try:
@@ -3449,7 +3470,7 @@ def cmd_reply(args):
         sys.stderr.write("error: could not write reply: %s\n" % exc)
         return 1
     if not created:
-        existing = read_json(reply_path, {}) or {}
+        existing = _read_completed_reply(reply_path)
         if existing.get("session_id") != sid or existing.get("message") != message:
             sys.stderr.write("error: request %s already has a different reply\n" % args.request)
             return 1

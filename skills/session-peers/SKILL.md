@@ -206,7 +206,9 @@ a single-use request mailbox to that exact Claude session, waits up to 3600
 seconds, and prints the reply without placing it in `codex queue`. Timeout exits
 124 and deletes the mailbox, so a late response cannot appear as a stale user
 turn. Request/reply files are mode 0600 inside the mode-0700 bridge directory;
-only the intended Claude session may answer.
+only the intended Claude session may answer. The request deliberately omits the
+shim/native reply route, so even a mistaken ordinary peer reply has no route
+back to the Codex queue; the included `reply` command is the only response path.
 
 Use asynchronous `send` for notifications, handoffs, or a final response that
 may safely become a later turn:
@@ -220,7 +222,8 @@ may safely become a later turn:
 reply route available; without one the command warns that replies cannot route.
 Every send returns a message id. Use `--message` for short text and
 `--message-file` for substantial content to avoid shell quoting and command
-substitution.
+substitution. Message files must be valid UTF-8; invalid bytes fail instead of
+being silently rewritten.
 
 Wait for an asynchronously working Claude peer without polling `list`:
 

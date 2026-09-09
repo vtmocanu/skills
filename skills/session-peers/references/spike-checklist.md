@@ -175,8 +175,9 @@ Partial live check: 2026-09-09, Claude Code 2.1.266, Codex CLI 0.153.4.
     session. The request must carry its UUID and exact reply command; `reply`
     from that session must return the body to the still-running `ask` process,
     remove both mailbox files, and append nothing to `codex queue`. Repeat with
-    a wrong Claude session, identical duplicate reply, conflicting duplicate,
-    timeout and caller interrupt. Wrong/late/conflicting replies must fail;
+    a missing target session id, wrong Claude session, two concurrent identical
+    replies, conflicting duplicate, timeout and caller interrupt. The request
+    frame must omit the native shim reply route. Wrong/late/conflicting replies must fail;
     timeout/interrupt must leave no mailbox that can surface as a stale turn.
 24. **Automatic Codex attribution and message identity.** Run `send --to cc:`
     from a Codex tool shell without `--from-thread`; verify `CODEX_THREAD_ID`
@@ -187,7 +188,8 @@ Partial live check: 2026-09-09, Claude Code 2.1.266, Codex CLI 0.153.4.
     that a native reply cannot route.
 25. **File input, peer wait and warning rate.** Send and ask with
     `--message-file` containing quotes, newlines and multibyte text; the peer
-    must receive identical content without shell interpolation. Change a live
+    must receive identical content without shell interpolation. Invalid UTF-8
+    must fail instead of being replaced. Change a live
     Claude record from busy to idle and verify `wait --state idle` returns;
     timeout exits 124. With a newer installed CLI, the first ordinary command
     warns, an immediate second command is silent, and `doctor` still reports

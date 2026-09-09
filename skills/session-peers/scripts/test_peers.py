@@ -1461,6 +1461,17 @@ class TestSendToCodex(Base):
         self.assertIn("UTF-8 bytes", err)
         self.assertEqual(self.queue_calls(), [])
 
+    def test_message_file_rejects_invalid_utf8_instead_of_rewriting_it(self):
+        tid, _rollout = self.one_thread()
+        path = self.root / "invalid.txt"
+        path.write_bytes(b"\xff")
+        rc, _out, err = self.cli(
+            "send", "--to", "codex:%s" % tid, "--message-file", str(path)
+        )
+        self.assertEqual(rc, 1)
+        self.assertIn("cannot read message file", err)
+        self.assertEqual(self.queue_calls(), [])
+
     def test_send_infers_the_claude_sender_from_its_exported_socket(self):
         tid, _rollout = self.one_thread()
         listener, rec = self.add_listener(name="cc-main", session_id="s1")
@@ -1679,6 +1690,8 @@ class TestSendToClaude(Base):
 class TestCorrelatedAskReply(Base):
     def _request_id(self, listener):
         frame = wait_for(lambda: listener.of_type("user"))[0]
+        self.assertNotIn("from", frame)
+        self.assertIn("Message from Codex thread", frame["message"]["content"])
         match = re.search(
             r'<session-peers-request id="([0-9a-f-]+)"',
             frame["message"]["content"],
@@ -1705,6 +1718,19 @@ class TestCorrelatedAskReply(Base):
         self.assertFalse(pathlib.Path(peers.request_path(request_id)).exists())
         self.assertFalse(pathlib.Path(peers.request_reply_path(request_id)).exists())
         self.assertEqual(self.queue_calls(), [])
+
+    def test_ask_refuses_a_target_without_a_session_id_before_sending(self):
+        listener = Listener(str(self.socks / "missing-id.sock"))
+        self._listeners.append(listener)
+        self.write_record(os.getpid(), "cc-main", None, listener.path)
+        tid, _rollout = self.one_thread()
+        rc, _out, err = self.cli(
+            "ask", "--to", "cc:cc-main", "--from-thread", tid,
+            "--message", "cannot answer", "--timeout", "1",
+        )
+        self.assertEqual(rc, 1)
+        self.assertIn("has no session id", err)
+        self.assertEqual(listener.of_type("user"), [])
 
     def test_reply_refuses_the_wrong_claude_session(self):
         request_id = str(uuidlib.uuid4())
@@ -1749,6 +1775,41 @@ class TestCorrelatedAskReply(Base):
         self.assertEqual(rc, 1)
         self.assertIn("different reply", err)
 
+    def test_identical_concurrent_reply_waits_for_the_winner_to_finish(self):
+        request_id = str(uuidlib.uuid4())
+        peers.write_json_atomic(
+            peers.request_path(request_id),
+            {
+                "request_id": request_id,
+                "target_session_id": "s1",
+                "expires_at": time.time() + 30,
+            },
+        )
+        reply_path = pathlib.Path(peers.request_reply_path(request_id))
+        reply_path.write_text("")
+        os.environ["CLAUDE_CODE_SESSION_ID"] = "s1"
+
+        def finish_winner():
+            time.sleep(0.03)
+            peers.write_json_atomic(
+                str(reply_path),
+                {"request_id": request_id, "session_id": "s1", "message": "same"},
+            )
+
+        thread = threading.Thread(target=finish_winner)
+        thread.start()
+        original = peers.write_json_exclusive
+        peers.write_json_exclusive = lambda _path, _data: False
+        try:
+            rc, out, err = self.cli(
+                "reply", "--request", request_id, "--message", "same"
+            )
+        finally:
+            peers.write_json_exclusive = original
+            thread.join(timeout=1)
+        self.assertEqual(rc, 0, err)
+        self.assertIn("already replied", out)
+
     def test_ask_timeout_removes_the_request_and_queues_no_late_turn(self):
         self.add_listener(name="cc-main", session_id="s1")
         tid, _rollout = self.one_thread()
@@ -1785,7 +1846,7 @@ class TestCorrelatedAskReply(Base):
         orphan = str(uuidlib.uuid4())
         orphan_path = pathlib.Path(peers.request_reply_path(orphan))
         peers.write_json_atomic(str(orphan_path), {"x": 1})
-        old = time.time() - peers.REQUEST_TIMEOUT_MAX - 10
+        old = time.time() - peers.REQUEST_ORPHAN_TTL - 10
         os.utime(orphan_path, (old, old))
         removed = peers.cleanup_expired_requests()
         self.assertEqual(set(removed), {expired, orphan})
