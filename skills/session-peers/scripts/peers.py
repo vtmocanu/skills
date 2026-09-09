@@ -112,6 +112,7 @@ C0_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 # picked up in milliseconds rather than seconds.
 POLL_INTERVAL_DEFAULT = 1.0
 LIVENESS_INTERVAL_DEFAULT = 5.0
+ALIAS_REFRESH_INTERVAL_DEFAULT = 30.0
 CONN_TIMEOUT = 30.0
 MAX_RECORD_REWRITES = 2
 PROCESSED_TURN_HISTORY = 200
@@ -1975,6 +1976,12 @@ class Shim:
         self.liveness_interval = _float_env(
             "SESSION_PEERS_LIVENESS_INTERVAL", LIVENESS_INTERVAL_DEFAULT
         )
+        self.alias_refresh_interval = _float_env(
+            "SESSION_PEERS_ALIAS_REFRESH_INTERVAL",
+            ALIAS_REFRESH_INTERVAL_DEFAULT,
+        )
+        if self.alias_refresh_interval <= 0:
+            self.alias_refresh_interval = ALIAS_REFRESH_INTERVAL_DEFAULT
         self.reply_budget_window = _float_env(
             "SESSION_PEERS_REPLY_BUDGET_WINDOW",
             REPLY_BUDGET_WINDOW_DEFAULT,
@@ -2498,6 +2505,7 @@ class Shim:
 
     def _poll_loop(self):
         last_live = time.time()
+        last_alias = last_live
         while not self.stop.wait(self.poll_interval):
             self._consume_budget_marker()
             try:
@@ -2514,10 +2522,20 @@ class Shim:
             if events:
                 self._save_state()
             self._ensure_record()
-            if time.time() - last_live >= self.liveness_interval:
-                last_live = time.time()
-                self._refresh_name()
-                self._check_liveness()
+            last_live, last_alias = self._poll_maintenance(
+                time.time(), last_live, last_alias
+            )
+
+    def _poll_maintenance(self, now, last_live, last_alias):
+        if now - last_live >= self.liveness_interval:
+            last_live = now
+            self._check_liveness()
+            if self.stop.is_set():
+                return last_live, last_alias
+        if now - last_alias >= self.alias_refresh_interval:
+            last_alias = now
+            self._refresh_name()
+        return last_live, last_alias
 
     def _check_liveness(self):
         held, _pid = thread_is_held(

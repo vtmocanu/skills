@@ -117,7 +117,9 @@ Partial live check: 2026-09-09, Claude Code 2.1.266, Codex CLI 0.153.4.
     to an unsafe or conflicting title and verify it falls back without exposing
     wrapper markup or creating an ambiguous name. Start two live threads with
     the same valid title and verify the lower UUID keeps it while the other uses
-    its fallback across repeated refreshes.
+    its fallback across repeated refreshes. Verify liveness remains on its
+    5-second cadence while alias discovery defaults to 30 seconds, and that
+    `SESSION_PEERS_ALIAS_REFRESH_INTERVAL` overrides the latter.
 17. **Sandbox diagnostics.** Run `list` and `doctor` once where `ps` or AF_UNIX
     is denied. The record must appear under `claude_unverified`, and direct send
     must instruct the caller to retry with host permission. It must not say

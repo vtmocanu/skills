@@ -37,12 +37,14 @@ explicit opt-in: every root Codex thread attaches on `startup` or `resume`,
 using the `session_id` from hook input. The attachment is session-scoped and
 does not add an entry to the persistent manual-registration list.
 
-Codex exposes no rename hook. The shim therefore re-reads the thread title while
-it polls. A valid `/rename` value (letters, digits, dot, underscore and hyphen,
-up to 64 characters) becomes the peer alias without restarting the shim. An
-absent, unsafe or conflicting title uses `codex-<uuid prefix>` instead. Confirm
-with `/list-agents` (or `ListAgents`); the peer appears as `interactive` with
-`idle` or `busy` status.
+Codex exposes no rename hook. The shim therefore re-reads the thread title every
+30 seconds while retaining its 5-second liveness check. Set
+`SESSION_PEERS_ALIAS_REFRESH_INTERVAL` to change the rename cadence. A valid
+`/rename` value (letters, digits, dot, underscore and hyphen, up to 64
+characters) becomes the peer alias without restarting the shim. An absent,
+unsafe or conflicting title uses `codex-<uuid prefix>` instead. Confirm with
+`/list-agents` (or `ListAgents`); the peer appears as `interactive` with `idle`
+or `busy` status.
 
 ### Manual persistent attachment
 

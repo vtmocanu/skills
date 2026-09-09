@@ -292,6 +292,7 @@ class Base(unittest.TestCase):
         os.environ["SESSION_PEERS_SOCKET_DIR"] = str(self.socks)
         os.environ["SESSION_PEERS_POLL_INTERVAL"] = "0.05"
         os.environ["SESSION_PEERS_LIVENESS_INTERVAL"] = "0.3"
+        os.environ["SESSION_PEERS_ALIAS_REFRESH_INTERVAL"] = "0.6"
         os.environ["PATH"] = str(self.bin)
         os.environ["FAKE_LSOF_MAP"] = str(self.lsof_map)
         os.environ.pop("FAKE_LSOF_RC", None)
@@ -1723,6 +1724,17 @@ class TestGarbageCollection(Base):
 
     def test_gc_prunes_only_stale_bridge_metadata(self):
         tid, rollout = self.make_stale_bridge_thread()
+        old = time.time() - 8 * 86400
+        shared_paths = (
+            peers.registered_path(),
+            os.path.join(peers.state_dir(), "reconcile.lock"),
+            os.path.join(peers.state_dir(), "session-hook.log"),
+        )
+        pathlib.Path(shared_paths[1]).write_text("shared lock sentinel")
+        pathlib.Path(shared_paths[2]).write_text("shared log sentinel")
+        for path in shared_paths:
+            os.utime(path, (old, old))
+
         removed = peers.gc_bridge_state(days=7, verbose=False)
         self.assertEqual(removed, [tid])
         self.assertNotIn(tid, peers.read_registered())
@@ -1734,6 +1746,14 @@ class TestGarbageCollection(Base):
         ):
             self.assertFalse(os.path.exists(path), path)
         self.assertTrue(rollout.exists(), "GC touched a Codex rollout")
+        for path in shared_paths:
+            self.assertTrue(os.path.exists(path), path)
+        self.assertEqual(
+            pathlib.Path(shared_paths[1]).read_text(), "shared lock sentinel"
+        )
+        self.assertEqual(
+            pathlib.Path(shared_paths[2]).read_text(), "shared log sentinel"
+        )
 
     def test_gc_dry_run_changes_nothing(self):
         tid, _rollout = self.make_stale_bridge_thread()
@@ -2544,6 +2564,34 @@ class TestShimRecord(ShimBase):
         self.assertEqual(state["name"], "codex-new")
         self.assertEqual(state["thread_name"], "codex-new")
         self.assertEqual(peers.read_registered()[tid]["name"], "codex-new")
+
+    def test_alias_refresh_runs_less_often_than_liveness(self):
+        shim, _tid, _rollout = self.make_shim()
+        shim.liveness_interval = 5.0
+        shim.alias_refresh_interval = 30.0
+        calls = []
+        shim._check_liveness = lambda: calls.append("liveness")
+        shim._refresh_name = lambda: calls.append("alias")
+
+        last_live, last_alias = shim._poll_maintenance(5.0, 0.0, 0.0)
+        self.assertEqual(calls, ["liveness"])
+        self.assertEqual((last_live, last_alias), (5.0, 0.0))
+
+        last_live, last_alias = shim._poll_maintenance(
+            30.0, last_live, last_alias
+        )
+        self.assertEqual(calls, ["liveness", "liveness", "alias"])
+        self.assertEqual((last_live, last_alias), (30.0, 30.0))
+
+    def test_alias_refresh_interval_is_configurable_and_positive(self):
+        shim, tid, _rollout = self.make_shim()
+        self.assertEqual(shim.alias_refresh_interval, 0.6)
+        os.environ.pop("SESSION_PEERS_ALIAS_REFRESH_INTERVAL")
+        default = peers.Shim(peers.resolve_thread(tid))
+        self.assertEqual(default.alias_refresh_interval, 30.0)
+        os.environ["SESSION_PEERS_ALIAS_REFRESH_INTERVAL"] = "0"
+        fallback = peers.Shim(peers.resolve_thread(tid))
+        self.assertEqual(fallback.alias_refresh_interval, 30.0)
 
     def test_a_blocked_lsof_probe_does_not_terminate_a_running_shim(self):
         shim, _tid, _rollout = self.make_shim()
