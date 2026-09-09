@@ -8,7 +8,7 @@ the comments point at that PRD's decision log.
 Subcommands::
 
     peers.py list [--json]
-    peers.py send --to codex:<name|uuid>|cc:<name> --message <text>
+    peers.py send --to codex:<name|uuid>|cc:<name|uuid> --message <text>
                   [--from-thread <uuid>] [--from-name N] [--from-sid S]
                   [--from-socket P]
     peers.py shim --thread <uuid>
@@ -16,7 +16,8 @@ Subcommands::
     peers.py down [<name|uuid>]
     peers.py budget reset <name|uuid>
     peers.py session-hook
-    peers.py install-hook
+    peers.py install-hook [--auto-attach]
+    peers.py gc [--days 7] [--dry-run]
     peers.py doctor
 
 Python 3.9+, stdlib only (D3).  macOS and Linux only.
@@ -27,7 +28,6 @@ from __future__ import annotations
 import argparse
 import collections
 import contextlib
-import copy
 import errno
 import fcntl
 import glob
@@ -121,6 +121,7 @@ READ_CHUNK = 1024 * 1024
 MAX_ROLLOUT_LINE = 8 * 1024 * 1024
 # S7: a completion older than this at shim start is recorded, never posted.
 RESTART_DELIVERY_WINDOW = 900.0
+GC_DAYS_DEFAULT = 7.0
 
 def parse_time(value):
     """Epoch seconds from an ISO-8601 string or a numeric epoch. None if unclear.
@@ -137,7 +138,14 @@ def parse_time(value):
         return seconds / 1000.0 if seconds > 1e11 else seconds
     if not isinstance(value, str) or not value.strip():
         return None
-    text = value.strip().replace("Z", "+00:00")
+    text = value.strip()
+    try:
+        numeric = float(text)
+    except ValueError:
+        pass
+    else:
+        return numeric / 1000.0 if numeric > 1e11 else numeric
+    text = text.replace("Z", "+00:00")
     try:
         parsed = datetime.fromisoformat(text)
     except ValueError:
@@ -253,6 +261,58 @@ def run_cmd(argv, timeout=10, env=None):
         proc.stdout.decode("utf-8", "replace"),
         proc.stderr.decode("utf-8", "replace"),
     )
+
+
+def spawn_detached(argv, log_path):
+    """Double-fork and exec, returning the daemon pid with no Popen handle.
+
+    The intermediate child is reaped immediately; the daemon is adopted by the
+    OS. This is the standard detach pattern for the supported macOS/Linux
+    platforms and avoids Python 3.14 ResourceWarnings from abandoning a live
+    ``Popen`` object.
+    """
+    read_fd, write_fd = os.pipe()
+    try:
+        child = os.fork()
+    except OSError:
+        os.close(read_fd)
+        os.close(write_fd)
+        raise
+    if child == 0:
+        os.close(read_fd)
+        try:
+            os.setsid()
+            daemon = os.fork()
+            if daemon > 0:
+                os.write(write_fd, ("%d\n" % daemon).encode("ascii"))
+                os._exit(0)
+            os.close(write_fd)
+            null_in = os.open(os.devnull, os.O_RDONLY)
+            log_fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+            os.dup2(null_in, 0)
+            os.dup2(log_fd, 1)
+            os.dup2(log_fd, 2)
+            try:
+                max_fd = os.sysconf("SC_OPEN_MAX")
+            except (OSError, ValueError):
+                max_fd = 256
+            os.closerange(3, int(max_fd))
+            os.execv(argv[0], argv)
+        except BaseException as exc:
+            try:
+                os.write(2, ("detached exec failed: %s\n" % exc).encode("utf-8"))
+            except OSError:
+                pass
+            os._exit(127)
+    os.close(write_fd)
+    try:
+        raw = os.read(read_fd, 64).strip()
+    finally:
+        os.close(read_fd)
+        os.waitpid(child, 0)
+    if not raw:
+        raise OSError("detached child did not report its pid")
+    return int(raw)
 
 
 def tool_version(binary):
@@ -493,15 +553,27 @@ def pid_alive(pid) -> bool:
     return True
 
 
-def proc_start(pid):
-    """`ps -o lstart= -p <pid>` under LC_ALL=C TZ=UTC, trimmed. None on failure."""
+def proc_start_checked(pid):
+    """(`ps` start time, error), distinguishing denial from a dead record."""
     env = dict(os.environ)
     env["LC_ALL"] = "C"
     env["TZ"] = "UTC"
-    rc, out, _err = run_cmd(["ps", "-o", "lstart=", "-p", str(pid)], timeout=10, env=env)
+    rc, out, err = run_cmd(
+        ["ps", "-o", "lstart=", "-p", str(pid)], timeout=10, env=env
+    )
     if rc != 0:
-        return None
-    return out.strip() or None
+        detail = err.strip() or "ps exited %d" % rc
+        return None, detail
+    value = out.strip()
+    if not value:
+        return None, "ps returned no process start time"
+    return value, None
+
+
+def proc_start(pid):
+    """`ps -o lstart= -p <pid>` under LC_ALL=C TZ=UTC, trimmed."""
+    value, _error = proc_start_checked(pid)
+    return value
 
 
 def read_claude_records():
@@ -526,28 +598,41 @@ def read_claude_records():
     return out
 
 
-def record_is_live(rec) -> bool:
+def record_liveness(rec) -> str:
     """Pid alive, pidDomain equal, procStart equal to `ps -o lstart=`.
 
-    Parsing is lenient (PRD Facts): a field the record omits is not checked, a
-    field it carries must match.
+    Returns ``live``, ``dead`` or ``unverified``. A sandbox can deny ``ps``
+    while the process and socket are healthy; collapsing that denial into
+    ``dead`` made ``list`` and ``send`` falsely claim no Claude session existed.
+    Parsing stays lenient: an omitted field is not checked, a present field
+    must match when the probe is available.
     """
     pid = rec.get("pid")
     if not isinstance(pid, int) or not pid_alive(pid):
-        return False
+        return "dead"
     domain = rec.get("pidDomain")
     if domain is not None and domain != pid_domain():
-        return False
+        return "dead"
     recorded = rec.get("procStart")
     if recorded:
-        actual = proc_start(pid)
-        if actual is None or actual.strip() != str(recorded).strip():
-            return False
-    return True
+        actual, error = proc_start_checked(pid)
+        if error is not None:
+            return "unverified"
+        if actual.strip() != str(recorded).strip():
+            return "dead"
+    return "live"
+
+
+def record_is_live(rec) -> bool:
+    return record_liveness(rec) == "live"
 
 
 def live_claude_records():
     return [r for r in read_claude_records() if record_is_live(r)]
+
+
+def unverified_claude_records():
+    return [r for r in read_claude_records() if record_liveness(r) == "unverified"]
 
 
 def claude_record_by_name(name, records=None):
@@ -555,6 +640,15 @@ def claude_record_by_name(name, records=None):
     if records is None:
         records = live_claude_records()
     return [r for r in records if r.get("name") == name]
+
+
+def claude_record_by_target(target, records=None):
+    """Every record addressed by mutable name or stable session UUID."""
+    if records is None:
+        records = live_claude_records()
+    if is_uuid(target):
+        return [r for r in records if r.get("sessionId") == target]
+    return [r for r in records if r.get("name") == target]
 
 
 def claude_record_by_socket(sock_path, records=None):
@@ -870,7 +964,9 @@ def codex_threads(check_live=True):
         threads.append(
             {
                 "id": tid,
-                "name": row[1] or index.get(tid),
+                # session_index.jsonl is title-specific and appends on every
+                # /rename. Prefer it over the threads row, whose name can lag.
+                "name": index.get(tid) or row[1],
                 "rollout_path": row[2],
                 "cwd": row[3],
                 "updated_at": row[4],
@@ -897,6 +993,14 @@ def codex_threads(check_live=True):
                 t["live"] = True
                 t["holder_pid"] = found[0][0]
     return threads, True
+
+
+def codex_thread_by_id(thread_id, check_live=False):
+    """The current state record for one Codex UUID, or None."""
+    threads, schema_ok = codex_threads(check_live=check_live)
+    if not schema_ok:
+        return None
+    return next((thread for thread in threads if thread["id"] == thread_id), None)
 
 
 def thread_is_held(rollout_path, holder_pid=None, lock_path=None):
@@ -1028,6 +1132,23 @@ def register_thread(thread):
         write_registered(threads)
 
 
+def refresh_registered_name(thread_id, name):
+    """Refresh the cached alias for a persistently registered UUID."""
+    require_peer_name(name, "peer alias")
+    with reconcile_lock(blocking=False) as acquired:
+        if not acquired:
+            return False
+        threads = read_registered()
+        meta = threads.get(thread_id)
+        if not isinstance(meta, dict) or meta.get("name") == name:
+            return False
+        meta = dict(meta)
+        meta["name"] = name
+        threads[thread_id] = meta
+        write_registered(threads)
+    return True
+
+
 def _unregister_thread_unlocked(thread_id) -> bool:
     threads = read_registered()
     if thread_id in threads:
@@ -1040,6 +1161,121 @@ def _unregister_thread_unlocked(thread_id) -> bool:
 def unregister_thread(thread_id) -> bool:
     with reconcile_lock():
         return _unregister_thread_unlocked(thread_id)
+
+
+def _bridge_thread_ids():
+    """UUIDs represented by registrations or per-thread bridge artifacts."""
+    out = {thread_id for thread_id in read_registered() if is_uuid(thread_id)}
+    try:
+        names = os.listdir(state_dir())
+    except OSError:
+        return out
+    suffixes = (".json", ".log", ".pid", ".budget-reset")
+    for name in names:
+        for suffix in suffixes:
+            if not name.endswith(suffix):
+                continue
+            candidate = name[: -len(suffix)]
+            if is_uuid(candidate):
+                out.add(candidate)
+            break
+    return out
+
+
+def _thread_last_seen(thread_id, registered, threads):
+    """Latest trustworthy activity timestamp for one bridge thread."""
+    seen = []
+    meta = registered.get(thread_id)
+    if isinstance(meta, dict):
+        for key in ("last_seen_at", "registered_at"):
+            value = parse_time(meta.get(key))
+            if value is not None:
+                seen.append(value)
+    state = read_json(thread_state_path(thread_id), {}) or {}
+    value = parse_time(state.get("updated_at")) if isinstance(state, dict) else None
+    if value is not None:
+        seen.append(value)
+    thread = threads.get(thread_id)
+    if thread is not None:
+        value = parse_time(thread.get("updated_at"))
+        if value is not None:
+            seen.append(value)
+    for suffix in (".json", ".log", ".pid", ".budget-reset"):
+        path = os.path.join(state_dir(), thread_id + suffix)
+        try:
+            seen.append(os.stat(path).st_mtime)
+        except OSError:
+            pass
+    return max(seen) if seen else None
+
+
+def gc_bridge_state(days=GC_DAYS_DEFAULT, dry_run=False, verbose=True):
+    """Prune exact bridge-owned artifacts for inactive threads older than days.
+
+    Codex rollouts, writer locks and queued messages are outside ``state_dir``
+    and are never touched. Unknown discovery fails closed because a thread must
+    be proven inactive before any metadata is removed.
+    """
+    if days < 0:
+        raise ValueError("retention days must be zero or greater")
+    threads, schema_ok = codex_threads()
+    if not schema_ok:
+        if verbose:
+            print("GC skipped: Codex thread discovery is unavailable")
+        return []
+    by_id = {thread["id"]: thread for thread in threads}
+    registered = read_registered()
+    cutoff = time.time() - days * 86400.0
+    candidates = []
+    for thread_id in sorted(_bridge_thread_ids()):
+        thread = by_id.get(thread_id)
+        if thread is not None and thread.get("live"):
+            continue
+        if shim_pid(thread_id):
+            continue
+        last_seen = _thread_last_seen(thread_id, registered, by_id)
+        if last_seen is None or last_seen > cutoff:
+            continue
+        candidates.append(thread_id)
+    if dry_run:
+        if verbose:
+            for thread_id in candidates:
+                print("would prune %s" % thread_id)
+        return candidates
+    if not candidates:
+        return []
+
+    removed = []
+    with reconcile_lock():
+        # Recheck after taking the same lock used by attach/up/down. A session
+        # that resumed while the first scan ran must win over GC.
+        current, current_ok = codex_threads()
+        if not current_ok:
+            return []
+        live_ids = {thread["id"] for thread in current if thread.get("live")}
+        registrations = read_registered()
+        for thread_id in candidates:
+            if thread_id in live_ids or shim_pid(thread_id):
+                continue
+            failed = False
+            for suffix in (".json", ".log", ".pid", ".budget-reset"):
+                path = os.path.join(state_dir(), thread_id + suffix)
+                try:
+                    os.unlink(path)
+                except FileNotFoundError:
+                    pass
+                except OSError as exc:
+                    failed = True
+                    log("could not prune %s: %s" % (path, exc))
+            if failed:
+                continue
+            registrations.pop(thread_id, None)
+            removed.append(thread_id)
+        write_registered(registrations)
+    if verbose:
+        for thread_id in removed:
+            print("pruned %s" % thread_id)
+    return removed
 
 
 # --------------------------------------------------------------------------
@@ -1110,6 +1346,32 @@ class NameError_(ValueError):
 
 def valid_peer_name(name) -> bool:
     return bool(name) and bool(PEER_NAME_RE.match(str(name)))
+
+
+def peer_name_for_thread(thread_name, thread_id, records=None):
+    """Choose a safe, unique peer alias for a mutable Codex title.
+
+    A valid title is used verbatim. Unnamed, unsafe or conflicting titles fall
+    back to a UUID-derived alias rather than preventing the SessionStart hook
+    from attaching the thread. The full UUID fallback makes a collision
+    deterministic and vanishingly unlikely without silently slugifying a title.
+    """
+    records = live_claude_records() if records is None else records
+    occupied = {
+        rec.get("name")
+        for rec in records
+        if rec.get("sessionId") != thread_id and rec.get("name")
+    }
+    candidates = []
+    if valid_peer_name(thread_name):
+        candidates.append(str(thread_name))
+    candidates.extend(
+        ["codex-%s" % thread_id[:8], "codex-%s" % thread_id]
+    )
+    for candidate in candidates:
+        if valid_peer_name(candidate) and candidate not in occupied:
+            return candidate
+    raise NameError_("no unique peer alias is available for thread %s" % thread_id)
 
 
 def require_peer_name(name, what="thread name"):
@@ -1600,11 +1862,11 @@ class Shim:
         self.rollout_path = thread.get("rollout_path")
         self.lock_path = writer_lock_path(self.thread_id)
         self.holder_pid = thread.get("holder_pid")
-        # B1: the name reaches Claude inside a wrapper attribute. Refuse a
-        # name that could break out of it rather than escaping it downstream.
-        self.name = require_peer_name(
-            thread.get("name") or "codex-%s" % self.thread_id[:8]
-        )
+        self.thread_name = thread.get("name")
+        # B1: only a validated alias reaches Claude's wrapper. SessionStart can
+        # attach before a title exists, and Codex-generated titles often carry
+        # spaces, so an unusable title gets a UUID-derived alias.
+        self.name = peer_name_for_thread(self.thread_name, self.thread_id)
         self.cwd = thread.get("cwd") or os.getcwd()
 
         self.sock_dir = default_socket_dir()
@@ -1635,6 +1897,10 @@ class Shim:
             self.tail.last_boundary = last_boundary(self.rollout_path)
 
         self.started_at = time.time()
+        # A registry record describes this shim process. Its initial nameSince
+        # cannot predate startedAt merely because an older shim saved the same
+        # alias in state.
+        self.name_since = self.started_at
         # First startup recovers the current boundary along with the sender;
         # saved state carries the last boundary seen by the previous shim.
         self.status = "busy" if self.tail.last_boundary == "started" else "idle"
@@ -1799,7 +2065,7 @@ class Shim:
             "messagingSocketPath": self.sock_path,
             "name": self.name,
             "nameSource": "user",
-            "nameSince": int(self.started_at * 1000),
+            "nameSince": int(self.name_since * 1000),
             "status": self.status,
             "updatedAt": stamp,
             "statusUpdatedAt": stamp,
@@ -1834,6 +2100,8 @@ class Shim:
             {
                 "thread_id": self.thread_id,
                 "name": self.name,
+                "thread_name": self.thread_name,
+                "name_since": int(self.name_since * 1000),
                 "shim_pid": os.getpid(),
                 "tail": self.tail.state(),
                 "processed_turns": list(self.processed_turns),
@@ -2147,6 +2415,7 @@ class Shim:
             self._ensure_record()
             if time.time() - last_live >= self.liveness_interval:
                 last_live = time.time()
+                self._refresh_name()
                 held, _pid = thread_is_held(
                     self.rollout_path, self.holder_pid, self.lock_path
                 )
@@ -2156,6 +2425,30 @@ class Shim:
                         "exiting" % (self.holder_pid, self.rollout_path)
                     )
                     self.stop.set()
+
+    def _refresh_name(self):
+        """Converge the advertised alias after a Codex `/rename`."""
+        thread = codex_thread_by_id(self.thread_id)
+        if thread is None:
+            return
+        title = thread.get("name")
+        try:
+            desired = peer_name_for_thread(title, self.thread_id)
+        except NameError_ as exc:
+            log("cannot refresh the peer alias: %s" % exc)
+            return
+        self.thread_name = title
+        if desired == self.name:
+            refresh_registered_name(self.thread_id, desired)
+            return
+        previous = self.name
+        self.name = desired
+        self.name_since = time.time()
+        refresh_registered_name(self.thread_id, desired)
+        if os.path.exists(self.record_path):
+            self._write_record()
+        self._save_state()
+        log("peer alias changed from %s to %s" % (previous, desired))
 
     def _ensure_record(self):
         if os.path.exists(self.record_path):
@@ -2300,38 +2593,56 @@ class Shim:
 
 def cmd_list(args):
     warn_versions()
-    records = live_claude_records()
+    all_records = read_claude_records()
+    classified = [(record, record_liveness(record)) for record in all_records]
+    records = [record for record, status in classified if status == "live"]
+    unverified = [
+        record for record, status in classified if status == "unverified"
+    ]
     threads, schema_ok = codex_threads()
     registered = read_registered()
-    claude = [
-        {
-            "pid": r.get("pid"),
-            "sessionId": r.get("sessionId"),
-            "name": r.get("name"),
-            "cwd": r.get("cwd"),
-            "status": r.get("status"),
-            "version": r.get("version"),
-            "kind": r.get("kind"),
-            "entrypoint": r.get("entrypoint"),
-            "socket": r.get("messagingSocketPath"),
+
+    def claude_view(record):
+        return {
+            "pid": record.get("pid"),
+            "sessionId": record.get("sessionId"),
+            "name": record.get("name"),
+            "cwd": record.get("cwd"),
+            "status": record.get("status"),
+            "version": record.get("version"),
+            "kind": record.get("kind"),
+            "entrypoint": record.get("entrypoint"),
+            "socket": record.get("messagingSocketPath"),
         }
-        for r in records
-    ]
-    codex = [
-        {
-            "id": t["id"],
-            "name": t.get("name"),
-            "cwd": t.get("cwd"),
-            "updated_at": t.get("updated_at"),
-            "registered": t["id"] in registered,
-            "holder_pid": t.get("holder_pid"),
-            "shim_pid": shim_pid(t["id"]),
+
+    claude = [claude_view(record) for record in records]
+    claude_unverified = [claude_view(record) for record in unverified]
+    def codex_view(thread):
+        pid = shim_pid(thread["id"])
+        state = read_json(thread_state_path(thread["id"]), {}) if pid else {}
+        alias = state.get("name") if isinstance(state, dict) else None
+        if not alias:
+            try:
+                alias = peer_name_for_thread(
+                    thread.get("name"), thread["id"], records=records
+                )
+            except NameError_:
+                alias = None
+        return {
+            "id": thread["id"],
+            "name": thread.get("name"),
+            "peer_name": alias,
+            "cwd": thread.get("cwd"),
+            "updated_at": thread.get("updated_at"),
+            "registered": thread["id"] in registered,
+            "holder_pid": thread.get("holder_pid"),
+            "shim_pid": pid,
         }
-        for t in threads
-        if t.get("live")
-    ]
+
+    codex = [codex_view(thread) for thread in threads if thread.get("live")]
     payload = {
         "claude": claude,
+        "claude_unverified": claude_unverified,
         "codex": codex,
         "codex_schema_recognised": schema_ok,
         "socket_dir": default_socket_dir(),
@@ -2345,12 +2656,22 @@ def cmd_list(args):
             "  %-24s pid %-7s %-6s %s"
             % (c["name"] or "(unnamed)", c["pid"], c["status"] or "?", c["cwd"] or "")
         )
+    if claude_unverified:
+        print(
+            "Claude sessions (%d unverified; process probe unavailable):"
+            % len(claude_unverified)
+        )
+        for c in claude_unverified:
+            print("  %-24s pid %-7s %s" % (c["name"] or "(unnamed)", c["pid"], c["cwd"] or ""))
     print("Codex threads (%d live):" % len(codex))
     for t in codex:
+        display = t["name"] or "(unnamed)"
+        if t["peer_name"] and t["peer_name"] != t["name"]:
+            display = "%s [peer %s]" % (display, t["peer_name"])
         print(
             "  %-24s %s  %s  codex pid %s%s"
             % (
-                t["name"] or "(unnamed)",
+                display,
                 t["id"],
                 "registered" if t["registered"] else "not registered",
                 t["holder_pid"],
@@ -2421,22 +2742,36 @@ def _send_codex(target, args):
     return 0
 
 
-def _send_claude(name, args):
-    matches = claude_record_by_name(name)
+def _send_claude(target, args):
+    records = read_claude_records()
+    candidates = claude_record_by_target(target, records)
+    classified = [(record, record_liveness(record)) for record in candidates]
+    matches = [record for record, status in classified if status == "live"]
+    unverified = [
+        record for record, status in classified if status == "unverified"
+    ]
+    if unverified:
+        sys.stderr.write(
+            "error: cannot verify Claude target %r because the process-start "
+            "probe is unavailable; retry outside the sandbox or with host "
+            "permission\n" % target
+        )
+        return 1
     if not matches:
-        sys.stderr.write("error: no live Claude session named %r\n" % name)
+        noun = "id" if is_uuid(target) else "name"
+        sys.stderr.write("error: no live Claude session with %s %r\n" % (noun, target))
         return 1
     if len(matches) > 1:
         sys.stderr.write(
             "error: %r names %d live sessions (%s); rename one\n"
-            % (name, len(matches), ", ".join(str(m.get("pid")) for m in matches))
+            % (target, len(matches), ", ".join(str(m.get("pid")) for m in matches))
         )
         return 1
     rec = matches[0]
     if not socket_path_ok(rec.get("messagingSocketPath")):
         sys.stderr.write(
             "error: %s listens on %r, outside the allowlisted socket directories\n"
-            % (name, rec.get("messagingSocketPath"))
+            % (target, rec.get("messagingSocketPath"))
         )
         return 1
 
@@ -2460,9 +2795,9 @@ def _send_claude(name, args):
     try:
         send_frame(rec["messagingSocketPath"], frame, auth_token=peer_token_for(rec))
     except OSError as exc:
-        sys.stderr.write("error: could not reach %s: %s\n" % (name, exc))
+        sys.stderr.write("error: could not reach %s: %s\n" % (target, exc))
         return 1
-    print("sent to %s (pid %s)" % (name, rec.get("pid")))
+    print("sent to %s (pid %s)" % (target, rec.get("pid")))
     return 0
 
 
@@ -2554,24 +2889,13 @@ def spawn_shim(thread):
     script = os.path.realpath(__file__)
     log_path = thread_log_path(thread["id"])
     try:
-        logfh = open(log_path, "a", encoding="utf-8")
-    except OSError:
-        logfh = subprocess.DEVNULL
-    try:
-        proc = subprocess.Popen(
+        daemon_pid = spawn_detached(
             [sys.executable, script, "shim", "--thread", thread["id"]],
-            stdin=subprocess.DEVNULL,
-            stdout=logfh if logfh is not subprocess.DEVNULL else subprocess.DEVNULL,
-            stderr=logfh if logfh is not subprocess.DEVNULL else subprocess.DEVNULL,
-            start_new_session=True,
-            close_fds=True,
+            log_path,
         )
-    finally:
-        if logfh is not subprocess.DEVNULL:
-            try:
-                logfh.close()
-            except OSError:
-                pass
+    except OSError as exc:
+        log("could not start the shim for %s: %s" % (thread["id"], exc))
+        return None
     # The SHIM writes and locks the pidfile once it is serving, so the file is
     # never a claim without a holder. Wait for it so a following reconcile
     # inside the same lock sees the shim rather than starting a second one.
@@ -2580,11 +2904,8 @@ def spawn_shim(thread):
         pid = shim_ready(thread["id"])
         if pid:
             return pid
-        if proc.poll() is not None:
-            log(
-                "the shim for %s exited immediately (rc %s); see %s"
-                % (thread["id"], proc.returncode, log_path)
-            )
+        if not pid_alive(daemon_pid):
+            log("the shim for %s exited; see %s" % (thread["id"], log_path))
             return None
         time.sleep(0.05)
     log("the shim for %s did not report ready in 10s; see %s" % (thread["id"], log_path))
@@ -2592,22 +2913,31 @@ def spawn_shim(thread):
 
 
 @contextlib.contextmanager
-def reconcile_lock():
+def reconcile_lock(blocking=True):
     """Serialise concurrent reconciles.
 
-    The optional SessionStart hook fires on `startup`, `resume`, `clear` and
-    `compact`, so several `up` processes can race. Without the lock each would
-    see no pidfile and spawn its own shim for the same thread, and two shims
-    on one thread means two registry records and a doubled reply.
+    SessionStart hooks and manual commands can race. Without the lock each
+    would see no pidfile and spawn its own shim for the same thread, and two
+    shims on one thread means two registry records and a doubled reply.
     """
     path = os.path.join(state_dir(), "reconcile.lock")
     fh = open(path, "a+")
+    acquired = False
     try:
-        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
-        yield
+        flags = fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB)
+        try:
+            fcntl.flock(fh.fileno(), flags)
+        except BlockingIOError:
+            if blocking:
+                raise
+            yield False
+            return
+        acquired = True
+        yield True
     finally:
         try:
-            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+            if acquired:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
         finally:
             fh.close()
 
@@ -2616,6 +2946,29 @@ def reconcile(verbose=True):
     """Start one shim per registered, live thread. Idempotent by design."""
     with reconcile_lock():
         return _reconcile(verbose)
+
+
+def attach_thread(thread_id, verbose=True):
+    """Start a shim for one live UUID without making it a persistent opt-in."""
+    with reconcile_lock():
+        try:
+            thread = resolve_thread(thread_id)
+        except ResolveError as exc:
+            if verbose:
+                print("  %s: not attachable (%s)" % (thread_id, exc))
+            return None
+        pid = shim_pid(thread_id)
+        if pid:
+            if verbose:
+                print("  %s: shim already running (pid %s)" % (thread_id, pid))
+            return pid
+        pid = spawn_shim(thread)
+        if verbose:
+            if pid is None:
+                print("  %s: shim failed to start (see its log)" % thread_id)
+            else:
+                print("  %s: shim started (pid %d)" % (thread_id, pid))
+        return pid
 
 
 def _reconcile(verbose):
@@ -2755,6 +3108,22 @@ def cmd_budget(args):
     return 0
 
 
+def cmd_gc(args):
+    days = (
+        args.days
+        if args.days is not None
+        else _float_env("SESSION_PEERS_GC_DAYS", GC_DAYS_DEFAULT)
+    )
+    try:
+        removed = gc_bridge_state(days=days, dry_run=args.dry_run)
+    except ValueError as exc:
+        sys.stderr.write("error: %s\n" % exc)
+        return 2
+    if not removed:
+        print("no stale bridge metadata")
+    return 0
+
+
 def cmd_session_hook(_args):
     """Codex SessionStart: reconcile detached, answer `{}`, never block."""
     payload = {}
@@ -2767,33 +3136,46 @@ def cmd_session_hook(_args):
     except (ValueError, OSError):
         payload = {}
     source = payload.get("source", "unknown")
+    session_id = payload.get("session_id")
     script = os.path.realpath(__file__)
     log_path = os.path.join(state_dir(), "session-hook.log")
     try:
-        logfh = open(log_path, "a", encoding="utf-8")
-        out = logfh
-    except OSError:
-        logfh = None
-        out = subprocess.DEVNULL
-    try:
-        subprocess.Popen(
-            [sys.executable, script, "up"],
-            stdin=subprocess.DEVNULL,
-            stdout=out,
-            stderr=out,
-            start_new_session=True,
-            close_fds=True,
-        )
+        command = [sys.executable, script, "hook-reconcile"]
+        if (
+            _args.auto_attach
+            and source in ("startup", "resume")
+            and is_uuid(session_id)
+        ):
+            command.extend(["--thread", session_id])
+        spawn_detached(command, log_path)
     except OSError as exc:
         log("could not start the reconcile: %s" % exc)
-    finally:
-        if logfh is not None:
-            try:
-                logfh.write("session-hook: source=%s\n" % source)
-                logfh.close()
-            except OSError:
-                pass
+    try:
+        with open(log_path, "a", encoding="utf-8") as logfh:
+            logfh.write(
+                "session-hook: source=%s session=%s auto_attach=%s\n"
+                % (source, session_id or "-", bool(_args.auto_attach))
+            )
+    except OSError:
+        pass
     print("{}")
+    return 0
+
+
+def cmd_hook_reconcile(args):
+    """Detached SessionStart worker: GC, reconcile, then attach this UUID."""
+    days = _float_env("SESSION_PEERS_GC_DAYS", GC_DAYS_DEFAULT)
+    try:
+        gc_bridge_state(days=days, verbose=False)
+    except ValueError as exc:
+        log("GC skipped: %s" % exc)
+    reconcile(verbose=False)
+    if args.thread:
+        deadline = time.time() + 10.0
+        while time.time() < deadline:
+            if attach_thread(args.thread, verbose=False):
+                break
+            time.sleep(0.25)
     return 0
 
 
@@ -2802,20 +3184,26 @@ def cmd_session_hook(_args):
 # --------------------------------------------------------------------------
 
 
-def hook_command(script=None):
+def hook_command(script=None, auto_attach=False):
     """The exact command string the SessionStart entry runs.
 
     The path is quoted: a checkout under a directory with a space would
     otherwise split into two arguments and the hook would fail (P8).
     """
     script = script or os.path.realpath(__file__)
-    return "python3 %s session-hook" % shlex.quote(script)
+    command = "python3 %s session-hook" % shlex.quote(script)
+    return command + (" --auto-attach" if auto_attach else "")
 
 
-def hook_entry():
+def hook_entry(auto_attach=False):
     return {
+        "matcher": "startup|resume",
         "hooks": [
-            {"type": "command", "command": hook_command(), "timeout": 10}
+            {
+                "type": "command",
+                "command": hook_command(auto_attach=auto_attach),
+                "timeout": 10,
+            }
         ]
     }
 
@@ -2844,7 +3232,7 @@ def read_json_strict(path):
         return "unreadable", exc
 
 
-def cmd_install_hook(_args):
+def cmd_install_hook(args):
     path = os.path.join(codex_home(), "hooks.json")
     os.makedirs(codex_home(), exist_ok=True)
     status, data = read_json_strict(path)
@@ -2859,7 +3247,8 @@ def cmd_install_hook(_args):
         sys.stderr.write(
             "error: %s is not valid JSON (%s). It was copied to %s and left "
             "alone; fix it and re-run, or add this SessionStart entry by hand:\n"
-            "  %s\n" % (path, data, backup, json.dumps(hook_entry()))
+            "  %s\n"
+            % (path, data, backup, json.dumps(hook_entry(args.auto_attach)))
         )
         return 1
     created = status == "absent"
@@ -2873,23 +3262,43 @@ def cmd_install_hook(_args):
     entries = events.get("SessionStart")
     if not isinstance(entries, list):
         entries = []
-    command = hook_command()
-    for entry in entries:
+    desired = hook_entry(args.auto_attach)
+    commands = {hook_command(), hook_command(auto_attach=True)}
+    matched = None
+    for index, entry in enumerate(entries):
         if not isinstance(entry, dict):
             continue
-        for hook in entry.get("hooks") or []:
-            if isinstance(hook, dict) and hook.get("command") == command:
-                print("SessionStart entry already installed in %s" % path)
-                _ensure_features_hooks()
-                _print_trust_step()
-                return 0
+        for hook_index, hook in enumerate(entry.get("hooks") or []):
+            if isinstance(hook, dict) and hook.get("command") in commands:
+                matched = (index, hook_index)
+                break
+        if matched is not None:
+            break
+    if matched is not None and entries[matched[0]] == desired:
+        print("SessionStart entry already installed in %s" % path)
+        _print_trust_step()
+        return 0
     if not created:
         try:
             print("backed up %s to %s" % (path, backup_file(path)))
         except OSError as exc:
             sys.stderr.write("error: could not back up %s: %s\n" % (path, exc))
             return 1
-    entries.append(hook_entry())
+    if matched is None:
+        entries.append(desired)
+        action = "added"
+    else:
+        entry_index, hook_index = matched
+        existing = dict(entries[entry_index])
+        sibling_hooks = list(existing.get("hooks") or [])
+        del sibling_hooks[hook_index]
+        if sibling_hooks:
+            existing["hooks"] = sibling_hooks
+            entries[entry_index] = existing
+            entries.append(desired)
+        else:
+            entries[entry_index] = desired
+        action = "updated"
     events["SessionStart"] = entries
     # S6: keep the file's own mode; only a file we create gets 0600.
     try:
@@ -2897,8 +3306,7 @@ def cmd_install_hook(_args):
     except OSError:
         mode = 0o600
     write_json_atomic(path, root, mode=mode)
-    print("added one SessionStart entry to %s" % path)
-    _ensure_features_hooks()
+    print("%s one SessionStart entry in %s" % (action, path))
     _print_trust_step()
     return 0
 
@@ -2913,23 +3321,6 @@ def backup_file(path, tag="session-peers"):
     with open(path, "rb") as src, open(backup, "wb") as dst:
         dst.write(src.read())
     return backup
-
-
-def write_text_preserving_mode(path, text):
-    """Replace a file's contents through a temp file, keeping its mode."""
-    try:
-        mode = stat.S_IMODE(os.stat(path).st_mode)
-    except OSError:
-        mode = 0o600
-    d = os.path.dirname(path)
-    if d:
-        os.makedirs(d, exist_ok=True)
-    tmp = "%s.tmp.%d" % (path, os.getpid())
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        fh.write(text)
-    os.chmod(tmp, mode)
-    os.replace(tmp, path)
 
 
 def _load_tomllib():
@@ -2996,189 +3387,6 @@ def _line_states(lines):
     return states
 
 
-def _toml_header(line):
-    """The table name on this line, or None.
-
-    P1: `[features] # flags` is a header and `# [features]` is not, so neither
-    a bare-string comparison nor a startswith("[") test is enough.
-    """
-    if line.lstrip().startswith("#"):
-        return None
-    m = TOML_HEADER_RE.match(line)
-    if not m:
-        return None
-    name = m.group(1).strip()
-    if name.startswith("[") and name.endswith("]"):
-        name = name[1:-1].strip()  # array of tables
-    return _unquote_table_name(name)
-
-
-def _features_span(lines):
-    """(start, end) of the [features] table's body, or None.
-
-    R1: a header inside a multiline string is a string, not a table.
-    """
-    inside = _line_states(lines)
-    start = None
-    for i, line in enumerate(lines):
-        if inside[i]:
-            continue
-        if _toml_header(line) == "features":
-            start = i
-            break
-    if start is None:
-        return None
-    end = len(lines)
-    for i in range(start + 1, len(lines)):
-        if inside[i]:
-            continue
-        if _toml_header(lines[i]) is not None:
-            end = i
-            break
-    return start, end
-
-
-def _hooks_key_lines(lines, span):
-    """Indexes of every `hooks = ...` line inside the [features] table."""
-    inside = _line_states(lines)
-    found = []
-    for i in range(span[0] + 1, span[1]):
-        if inside[i]:
-            continue
-        stripped = lines[i].strip()
-        if stripped.startswith("#") or "=" not in stripped:
-            continue
-        if stripped.split("=", 1)[0].strip().strip("\"'") == "hooks":
-            found.append(i)
-    return found
-
-
-def _set_features_hooks_lines(lines):
-    """(new_lines, changed): set `hooks = true` inside [features], once.
-
-    An existing `hooks = false` is REWRITTEN, never shadowed by a second key:
-    a duplicate key makes the file invalid TOML and Codex rejects it, and the
-    first version appended one on every run (B3).
-    """
-    out = list(lines)
-    span = _features_span(out)
-    if span is None:
-        if out and out[-1].strip():
-            out.append("")
-        out.append("[features]")
-        out.append("hooks = true")
-        return out, True
-    existing = _hooks_key_lines(out, span)
-    if not existing:
-        out.insert(span[0] + 1, "hooks = true")
-        return out, True
-    if len(existing) == 1 and out[existing[0]].strip() == "hooks = true":
-        return out, False
-    for i in existing[1:][::-1]:
-        del out[i]  # a pre-existing duplicate is removed, not preserved
-    out[existing[0]] = "hooks = true"
-    return out, True
-
-
-def features_hooks_valid(text) -> bool:
-    """True when a real parser reads this text as `[features] hooks = true`."""
-    tomllib = _load_tomllib()
-    if tomllib is None:
-        return False
-    try:
-        data = tomllib.loads(text)
-    except Exception:
-        return False
-    features = data.get("features")
-    return isinstance(features, dict) and features.get("hooks") is True
-
-
-def _without_features_hooks(doc):
-    """A parsed document minus features.hooks, and minus a features table left
-    empty by that removal, so the R1 diff ignores a table we created."""
-    out = copy.deepcopy(doc)
-    features = out.get("features")
-    if isinstance(features, dict):
-        features.pop("hooks", None)
-        if not features:
-            out.pop("features", None)
-    return out
-
-
-def _only_features_hooks_changed(before, after) -> bool:
-    """R1a: the edit may change features.hooks and nothing else."""
-    features = after.get("features")
-    if not isinstance(features, dict) or features.get("hooks") is not True:
-        return False
-    return _without_features_hooks(before) == _without_features_hooks(after)
-
-
-def _manual_hooks_instruction(path):
-    return 'add "hooks = true" under [features] in %s' % path
-
-
-def _ensure_features_hooks():
-    """Set `[features] hooks = true`, but only when a real parser agrees.
-
-    R1: a line editor cannot tell a table header from the same text inside a
-    multiline string, so an edit is written only when tomllib parses both
-    sides and confirms nothing but features.hooks moved. Without tomllib
-    (3.9, 3.10) the file is never edited and the user is told what to add.
-    """
-    path = codex_config_path()
-    tomllib = _load_tomllib()
-    if tomllib is None:
-        log(
-            "this Python has no tomllib, so %s is left untouched" % path
-        )
-        print("Manual step: %s" % _manual_hooks_instruction(path))
-        return
-    existed = os.path.exists(path)
-    try:
-        with open(path, "r", encoding="utf-8", errors="replace") as fh:
-            original = fh.read()
-    except FileNotFoundError:
-        original = ""
-    except OSError as exc:
-        sys.stderr.write("error: could not read %s: %s\n" % (path, exc))
-        return
-
-    def refuse(why):
-        sys.stderr.write(
-            "error: %s, so %s was left untouched. %s\n"
-            % (why, path, _manual_hooks_instruction(path))
-        )
-
-    try:
-        before = tomllib.loads(original)
-    except Exception as exc:
-        refuse("%s does not parse as TOML (%s)" % (path, exc))
-        return
-    features = before.get("features")
-    if isinstance(features, dict) and features.get("hooks") is True:
-        return
-    out, changed = _set_features_hooks_lines(original.splitlines())
-    if not changed:
-        return
-    candidate = "\n".join(out) + "\n"
-    try:
-        after = tomllib.loads(candidate)
-    except Exception as exc:
-        refuse("the edit would not parse as TOML (%s)" % exc)
-        return
-    if not _only_features_hooks_changed(before, after):
-        refuse("the edit would change more than [features] hooks")
-        return
-    if existed:
-        try:
-            print("backed up %s to %s" % (path, backup_file(path)))
-        except OSError as exc:
-            sys.stderr.write("error: could not back up %s: %s\n" % (path, exc))
-            return
-    write_text_preserving_mode(path, candidate)
-    print("set [features] hooks = true in %s" % path)
-
-
 def _print_trust_step():
     print(
         "Next: open Codex and run /hooks to trust the new entry. Until you do, "
@@ -3200,6 +3408,26 @@ def entry_hash(entry):
     """
     blob = json.dumps(entry, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def unix_socket_probe(sock_dir):
+    """Return None when AF_UNIX bind works, otherwise the exact error."""
+    path = os.path.join(sock_dir, ".session-peers-doctor-%d.sock" % os.getpid())
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        srv.bind(path)
+    except OSError as exc:
+        return str(exc)
+    finally:
+        try:
+            srv.close()
+        except OSError:
+            pass
+        try:
+            os.unlink(path)
+        except (FileNotFoundError, OSError):
+            pass
+    return None
 
 
 def cmd_doctor(_args):
@@ -3224,13 +3452,12 @@ def cmd_doctor(_args):
     add("ok" if codex_v else "fail", "codex on PATH")
     rc, _out, _err = run_cmd(["lsof", "-v"], timeout=10)
     add("ok" if rc != 127 else "fail", "lsof on PATH (thread liveness needs it)")
-
-    if _load_tomllib() is None:
-        add(
-            "warn",
-            "this Python has no tomllib, so install-hook cannot edit "
-            "config.toml: %s" % _manual_hooks_instruction(codex_config_path()),
-        )
+    _started, ps_error = proc_start_checked(os.getpid())
+    add(
+        "fail" if ps_error else "ok",
+        "process-start probe%s"
+        % (": unavailable (%s)" % ps_error if ps_error else ""),
+    )
     add("ok", "CLAUDE_CONFIG_DIR: %s" % claude_config_dir())
     add("ok", "CODEX_HOME: %s" % codex_home())
     if codex_sqlite_home() != codex_home():
@@ -3242,6 +3469,15 @@ def cmd_doctor(_args):
         "socket directory: %s%s"
         % (sock_dir, "" if os.path.isdir(sock_dir) else " (does not exist yet)"),
     )
+    if os.path.isdir(sock_dir):
+        socket_error = unix_socket_probe(sock_dir)
+        add(
+            "fail" if socket_error else "ok",
+            "Unix-socket bind%s"
+            % (": unavailable (%s)" % socket_error if socket_error else ""),
+        )
+    else:
+        add("warn", "Unix-socket bind not tested; socket directory is absent")
 
     db = find_state_db()
     add(
@@ -3249,6 +3485,17 @@ def cmd_doctor(_args):
         "Codex state database: %s"
         % (db or "none with a recognised `threads` schema (send by UUID only)"),
     )
+    if db:
+        stale = gc_bridge_state(
+            days=_float_env("SESSION_PEERS_GC_DAYS", GC_DAYS_DEFAULT),
+            dry_run=True,
+            verbose=False,
+        )
+        add(
+            "warn" if stale else "ok",
+            "bridge GC: %d stale thread%s"
+            % (len(stale), "" if len(stale) == 1 else "s"),
+        )
 
     registered = read_registered()
     threads, _ok = codex_threads()
@@ -3278,9 +3525,18 @@ def cmd_doctor(_args):
             if not isinstance(entry, dict):
                 continue
             for j, hook in enumerate(entry.get("hooks") or []):
-                if not isinstance(hook, dict) or hook.get("command") != hook_command():
+                if (
+                    not isinstance(hook, dict)
+                    or hook.get("command")
+                    not in {hook_command(), hook_command(auto_attach=True)}
+                ):
                     continue
                 found = True
+                mode = (
+                    "auto-attach"
+                    if hook.get("command") == hook_command(auto_attach=True)
+                    else "reconcile-only"
+                )
                 key = '%s:session_start:%d:%d' % (hooks_path, i, j)
                 block = None
                 for section, values in cfg.items():
@@ -3290,26 +3546,28 @@ def cmd_doctor(_args):
                 if block is None:
                     add(
                         "warn",
-                        "SessionStart entry present but no trust block; open "
-                        "/hooks in Codex to trust it",
+                        "SessionStart %s entry present but no trust block; open "
+                        "/hooks in Codex to trust it" % mode,
                     )
                 elif block.get("enabled") is False:
                     add("warn", "SessionStart entry is disabled in config.toml")
                 else:
                     add(
                         "ok",
-                        "SessionStart entry present with a trust block "
+                        "SessionStart %s entry present with a trust block "
                         "(entry sha256 %s; Codex's trusted_hash algorithm is "
                         "undocumented, so trust is unknown here, open /hooks)"
-                        % entry_hash(entry)[:12],
+                        % (mode, entry_hash(entry)[:12]),
                     )
         if not found:
             add("ok", "no session-peers SessionStart entry (optional)")
-        features_on = cfg.get("features", {}).get("hooks") is True
-        add(
-            "ok" if features_on else "warn",
-            "[features] hooks = %s in config.toml" % ("true" if features_on else "unset"),
-        )
+        feature_value = cfg.get("features", {}).get("hooks")
+        if feature_value is False:
+            add("warn", "[features] hooks = false explicitly disables the entry")
+        elif feature_value is True:
+            add("ok", "[features] hooks = true in config.toml")
+        else:
+            add("ok", "[features] hooks is unset (enabled by default)")
 
     print("\n".join(lines))
     return 0
@@ -3333,7 +3591,10 @@ def build_parser():
 
     p_send = sub.add_parser("send", help="send one message in either direction")
     p_send.add_argument(
-        "--to", required=True, metavar="codex:<name|uuid>|cc:<name>", help="the peer"
+        "--to",
+        required=True,
+        metavar="codex:<name|uuid>|cc:<name|uuid>",
+        help="the peer",
     )
     p_send.add_argument("--message", required=True, help="the message body")
     p_send.add_argument(
@@ -3366,10 +3627,27 @@ def build_parser():
     p_budget.set_defaults(func=cmd_budget, budget_cmd=None, thread=None)
 
     p_hook = sub.add_parser("session-hook", help="Codex SessionStart entry point")
+    p_hook.add_argument(
+        "--auto-attach", action="store_true", help="attach the triggering session UUID"
+    )
     p_hook.set_defaults(func=cmd_session_hook)
 
+    p_hook_reconcile = sub.add_parser("hook-reconcile", help=argparse.SUPPRESS)
+    p_hook_reconcile.add_argument("--thread", metavar="UUID")
+    p_hook_reconcile.set_defaults(func=cmd_hook_reconcile)
+
     p_install = sub.add_parser("install-hook", help="add the SessionStart entry")
+    p_install.add_argument(
+        "--auto-attach",
+        action="store_true",
+        help="automatically expose each starting or resumed Codex thread",
+    )
     p_install.set_defaults(func=cmd_install_hook)
+
+    p_gc = sub.add_parser("gc", help="prune inactive bridge metadata")
+    p_gc.add_argument("--days", type=float, help="retention in days (default: 7)")
+    p_gc.add_argument("--dry-run", action="store_true", help="print without deleting")
+    p_gc.set_defaults(func=cmd_gc)
 
     p_doctor = sub.add_parser("doctor", help="check the bridge end to end")
     p_doctor.set_defaults(func=cmd_doctor)

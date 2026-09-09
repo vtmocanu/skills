@@ -4,6 +4,7 @@ Run this after a Claude Code or Codex CLI upgrade, or whenever `peers.py doctor`
 prints a version warning. Every step is read-only except starting one throwaway
 shim and sending a few messages. Record the result next to each item with the
 versions tested. Last full run: 2026-09-07, Claude Code 2.1.263, Codex CLI 0.153.4.
+Partial live check: 2026-09-09, Claude Code 2.1.266, Codex CLI 0.153.4.
 
 ## Claude side
 
@@ -45,35 +46,41 @@ versions tested. Last full run: 2026-09-07, Claude Code 2.1.263, Codex CLI 0.153
 6. **`CLAUDE_CONFIG_DIR`.** Assumed: the registry is `$CLAUDE_CONFIG_DIR/sessions`.
    Not proven on 2.1.263 (binary strings are fragmented); `peers.py` reads the
    variable with default `~/.claude`, which is correct for a default install.
+7. **Native registration and rename.** A Claude session must create its own
+   registry record without a session-peers hook. Run `/rename`, then verify the
+   same `sessionId` record changes `name` and advances `nameSince`.
+   - 2026-09-09, Claude Code 2.1.266: a session started unnamed, `/rename
+     claude1` updated its existing record, `send --to cc:claude1` succeeded,
+     and the session replied through the bridge.
 
 ## Codex side
 
-7. **`codex queue` reaches a live thread.** `codex queue --thread <uuid> --message
+8. **`codex queue` reaches a live thread.** `codex queue --thread <uuid> --message
    ping` into a live, idle, un-interrupted thread must start a turn within 10 s.
    - 2026-09-07: three trials under 1 s on a thread that had just completed a
      turn; 5.9 s on an idle thread (the poll interval).
-8. **Turn boundary events.** In the rollout, one queued message produces
+9. **Turn boundary events.** In the rollout, one queued message produces
    `task_started {turn_id}` then the `role: user` item then `task_complete
    {turn_id, last_agent_message}`; an interrupt produces `turn_aborted {turn_id,
    reason}`.
-9. **Interrupt pauses the queue.** After Ctrl-C the queued items stay in
+10. **Interrupt pauses the queue.** After Ctrl-C the queued items stay in
    `queued_items` until the user types a new prompt; a `codex resume` of the
    thread alone does not drain them and appends no boundary event to the
    rollout (measured 2026-09-07: nothing between the `turn_aborted` and the next
    typed prompt's `task_started`). `peers.py` reports "paused after interrupt"
    instead of pretending delivery.
-10. **Dead thread keeps its queue.** When the holding process exits, items stay
+11. **Dead thread keeps its queue.** When the holding process exits, items stay
     in `queued_items` (measured 2026-09-07). Liveness must be checked before
     queueing, and the shim must exit when its thread is no longer held (neither
-    its rollout nor its writer lock, see item 14).
-11. **Signal cleanup.** A shim killed with SIGTERM must remove its record and
+    its rollout nor its writer lock, see item 15).
+12. **Signal cleanup.** A shim killed with SIGTERM must remove its record and
     socket. Python's default handler skips `finally`, so the shim installs a
     handler (measured 2026-09-07: orphan files left behind without one).
-12. **Names.** `threads.name` in `state_*.sqlite` is also written by the title
+13. **Names.** `threads.name` in `state_*.sqlite` is also written by the title
     suggester (one-word titles allowed); registration is explicit, never inferred.
     `session_index.jsonl` lines are `{"id","thread_name","updated_at"}` (measured
     2026-09-07); a rename appends a new line for the same id.
-13. **Startup during an active request.** Write a tagged request to the rollout
+14. **Startup during an active request.** Write a tagged request to the rollout
     before starting its shim, then finish the turn. Verify the final reply
     reaches the original session exactly once, and earlier completed turns
     are not replayed. Repeat with a partial request line and with a crash after
@@ -86,7 +93,7 @@ versions tested. Last full run: 2026-09-07, Claude Code 2.1.263, Codex CLI 0.153
       Regression tests cover actual socket delivery and crash/restart recovery.
     - Exact `SessionStart` hook timing remains unverified. The bridge handles
       startup after the request regardless of what launched it.
-14. **Rollout is lazy; the writer lock is not.** A brand-new thread (`/rename`d
+15. **Rollout is lazy; the writer lock is not.** A brand-new thread (`/rename`d
     but not yet run a turn) has a `threads.rollout_path` in the DB but NO file at
     that path: Codex can defer creating the rollout until the first turn.
     Meanwhile a live Codex process holds `<CODEX_HOME>/thread-writer-locks/<thread
@@ -102,4 +109,25 @@ versions tested. Last full run: 2026-09-07, Claude Code 2.1.263, Codex CLI 0.153
     - Correction verified 2026-09-08 on 0.153.4: a rollout contained the tagged
       request and intermediate output before the first turn completed. The old
       claim that the file appears only after completion was too strong;
-      liveness must tolerate an absent file without assuming when it appears.
+    liveness must tolerate an absent file without assuming when it appears.
+16. **SessionStart identity.** Install the auto-attach hook, start a new unnamed
+    root thread, and verify the hook attaches the exact `session_id` under its
+    `codex-<uuid prefix>` fallback. Rename it to a valid peer name and verify the
+    same shim record changes `name` and `nameSince` without a restart. Rename it
+    to an unsafe or conflicting title and verify it falls back without exposing
+    wrapper markup or creating an ambiguous name.
+17. **Sandbox diagnostics.** Run `list` and `doctor` once where `ps` or AF_UNIX
+    is denied. The record must appear under `claude_unverified`, and direct send
+    must instruct the caller to retry with host permission. It must not say
+    there are no live Claude sessions. Repeat with host permission and confirm
+    the same record becomes live.
+    - 2026-09-09: reproduced on a Codex workspace sandbox. Sandboxed `list`
+      returned zero Claude sessions even though the `claude1` record and socket
+      existed; the same command with host permission listed it and direct send
+      succeeded. This is the regression case for tri-state liveness.
+18. **Garbage collection.** Create bridge state, log, PID and budget-marker files
+    older than the retention window for a dead UUID. `gc --dry-run` must list
+    them without changing anything; live GC must remove only those exact files
+    and the registration. The Codex rollout, writer lock and queued items must
+    remain. Repeat with a live thread older than the cutoff and verify nothing
+    is removed.
