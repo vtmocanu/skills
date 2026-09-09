@@ -80,21 +80,28 @@ if "--" in args:
 else:
     targets = [a for a in args if not a.startswith("-")]
 out = []
+missing = []
+unmatched = False
 for target in targets:
     # Real lsof reports the symlink-resolved (real) path in its `n` field, no
     # matter how the target was spelled. Mirror that: look the holder up by the
     # queried path OR its realpath, and emit the realpath, so a symlinked
     # CODEX_HOME is exercised the way the real tool would.
     real = os.path.realpath(target)
+    if not os.path.exists(target):
+        missing.append(real)
+        continue
     entry = mapping.get(target) or mapping.get(real)
     if not entry:
+        unmatched = True
         continue
     pid, cmd = entry
     out += ["p%d" % pid, "c%s" % cmd, "f7", "n%s" % real]
 if out:
     sys.stdout.write("\\n".join(out) + "\\n")
-    raise SystemExit(0)
-raise SystemExit(1)
+for target in missing:
+    sys.stderr.write("lsof: status error on %s: No such file or directory\\n" % target)
+raise SystemExit(1 if missing or unmatched or not out else 0)
 '''
 
 FAKE_CODEX = '''\
@@ -408,6 +415,9 @@ class Base(unittest.TestCase):
 
     def set_holder(self, rollout_path, pid=None, cmd="codex"):
         pid = os.getpid() if pid is None else pid
+        holder_path = pathlib.Path(rollout_path)
+        holder_path.parent.mkdir(parents=True, exist_ok=True)
+        holder_path.touch(exist_ok=True)
         mapping = json.loads(self.lsof_map.read_text())
         mapping[str(rollout_path)] = [pid, cmd]
         self.lsof_map.write_text(json.dumps(mapping))
@@ -874,6 +884,38 @@ class TestCodexDiscovery(Base):
         self.assertTrue(t["live"])
         self.assertEqual(t["holder_pid"], os.getpid())
 
+    def test_missing_stale_paths_do_not_poison_a_live_writer_lock(self):
+        live_id = "11111111-1111-4111-8111-111111111111"
+        stale_id = "22222222-2222-4222-8222-222222222222"
+        live_rollout = self.codex_dir / "live-not-written-yet.jsonl"
+        stale_rollout = self.codex_dir / "stale-missing.jsonl"
+        self.make_state_db(
+            [
+                {
+                    "id": live_id,
+                    "name": "codex-test",
+                    "rollout_path": str(live_rollout),
+                },
+                {
+                    "id": stale_id,
+                    "name": "old-thread",
+                    "rollout_path": str(stale_rollout),
+                },
+            ]
+        )
+        self.set_holder(peers.writer_lock_path(live_id))
+        pathlib.Path(peers.writer_lock_path(stale_id)).touch()
+
+        threads, ok = peers.codex_threads()
+        by_id = {thread["id"]: thread for thread in threads}
+
+        self.assertTrue(ok)
+        self.assertTrue(by_id[live_id]["live"])
+        self.assertEqual(by_id[live_id]["holder_pid"], os.getpid())
+        self.assertIsNone(by_id[live_id]["liveness_error"])
+        self.assertFalse(by_id[stale_id]["live"])
+        self.assertIsNone(by_id[stale_id]["liveness_error"])
+
     def test_a_non_codex_lock_holder_does_not_count_as_live(self):
         tid = "fresh-thread"
         rollout = self.codex_dir / "not-written-yet.jsonl"
@@ -1037,10 +1079,11 @@ class TestCodexDiscovery(Base):
         self.assertEqual(peers.codex_sqlite_home(), str(self.codex_dir))
 
     def test_lsof_missing_from_path_is_reported_not_fatal(self):
+        rollout = self.make_rollout()
         os.environ["PATH"] = str(self.root / "empty")
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
-            self.assertEqual(peers.lsof_holders(["/x"]), {})
+            self.assertEqual(peers.lsof_holders([str(rollout)]), {})
         self.assertIn("lsof", err.getvalue())
 
     def test_a_blocked_lsof_probe_is_unverified_not_dead(self):
@@ -1057,6 +1100,25 @@ class TestCodexDiscovery(Base):
         self.assertIn("operation not permitted", thread["liveness_error"])
         self.assertEqual(held, (None, None))
         self.assertIn("liveness is unavailable", str(ctx.exception))
+
+    def test_a_blocked_path_probe_is_unverified_not_dead(self):
+        rollout = self.make_rollout()
+        original = peers.os.stat
+
+        def denied(path, *args, **kwargs):
+            if str(path) == str(rollout):
+                raise PermissionError("operation not permitted")
+            return original(path, *args, **kwargs)
+
+        peers.os.stat = denied
+        try:
+            holders, verified, error = peers.lsof_holders_checked([str(rollout)])
+        finally:
+            peers.os.stat = original
+
+        self.assertEqual(holders, {})
+        self.assertFalse(verified)
+        self.assertIn("operation not permitted", error)
 
 
 class TestResolveThread(Base):
