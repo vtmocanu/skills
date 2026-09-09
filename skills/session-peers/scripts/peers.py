@@ -64,13 +64,15 @@ MAX_TEXT_CHARS = 1048576
 
 # D4: replies per (thread, Claude session) before the shim goes quiet.
 REPLY_BUDGET = 3
+REPLY_BUDGET_WINDOW_DEFAULT = 30 * 60.0
 
 # Columns the `threads` table must have for the schema to count as recognised.
 THREADS_COLUMNS = frozenset({"id", "rollout_path", "cwd", "name", "updated_at"})
 
 TAG_PREFIX = "[session-peers"
 TAG_RE = re.compile(
-    r"^\[session-peers from=@(?P<from>\S*) sid=(?P<sid>\S*) reply=(?P<reply>.*)\]$"
+    r"^\[session-peers from=@(?P<from>\S*) sid=(?P<sid>\S*)"
+    r"(?: mid=(?P<mid>\S*))? reply=(?P<reply>.*)\]$"
 )
 WRAPPER_RE = re.compile(
     r"^\s*<cross-session-message\s+(?P<attrs>[^>]*)>\n?(?P<body>.*?)\n?</cross-session-message>\s*$",
@@ -83,6 +85,7 @@ AT_NAME_RE = re.compile(r"^@([A-Za-z0-9][A-Za-z0-9_.\-]*)")
 
 # Sentinel for a tag field the sender could not fill in. Parses back to None.
 TAG_ABSENT = "-"
+MAX_TAG_FIELD_CHARS = 256
 
 # Built rather than written literally so this file has no stray triple
 # quotes; _scan_multiline compares against them.
@@ -1283,7 +1286,7 @@ def gc_bridge_state(days=GC_DAYS_DEFAULT, dry_run=False, verbose=True):
 # --------------------------------------------------------------------------
 
 
-def build_tag(from_name=None, sid=None, reply_socket=None) -> str:
+def build_tag(from_name=None, sid=None, reply_socket=None, msg_id=None) -> str:
     """The one line every bridged message carries into a Codex thread.
 
     A field the sender could not fill in renders as `-` and parses back to
@@ -1299,12 +1302,13 @@ def build_tag(from_name=None, sid=None, reply_socket=None) -> str:
             return TAG_ABSENT
         for ch in (" ", "\r", "\n", "\t"):
             value = value.replace(ch, "_")
-        return C0_RE.sub("", value) or TAG_ABSENT
+        return C0_RE.sub("", value)[:MAX_TAG_FIELD_CHARS] or TAG_ABSENT
 
     reply = (reply_socket or "").strip()
-    return "[session-peers from=@%s sid=%s reply=%s]" % (
+    return "[session-peers from=@%s sid=%s mid=%s reply=%s]" % (
         field(from_name),
         field(sid),
+        field(msg_id),
         ("uds:%s" % reply) if reply else TAG_ABSENT,
     )
 
@@ -1320,7 +1324,7 @@ def parse_tag(text):
     if not m:
         return None, text
     tag = {}
-    for key in ("from", "sid", "reply"):
+    for key in ("from", "sid", "mid", "reply"):
         value = m.group(key)
         if value == TAG_ABSENT or value == "":
             tag[key] = None
@@ -1884,6 +1888,8 @@ class Shim:
             maxlen=PROCESSED_TURN_HISTORY,
         )
         self.budgets = dict(state.get("budgets") or {})
+        self.budget_sender_sid = state.get("budget_sender_sid")
+        self.budget_last_at = parse_time(state.get("budget_last_at"))
         self.contacts = dict(state.get("contacts") or {})
         self.fresh = not state
         if self.fresh:
@@ -1910,6 +1916,12 @@ class Shim:
         self.liveness_interval = _float_env(
             "SESSION_PEERS_LIVENESS_INTERVAL", LIVENESS_INTERVAL_DEFAULT
         )
+        self.reply_budget_window = _float_env(
+            "SESSION_PEERS_REPLY_BUDGET_WINDOW",
+            REPLY_BUDGET_WINDOW_DEFAULT,
+        )
+        if self.reply_budget_window <= 0:
+            self.reply_budget_window = REPLY_BUDGET_WINDOW_DEFAULT
         self._proc_start = None
         self.idle_subs = []
         self.record_rewrites = 0
@@ -2106,6 +2118,8 @@ class Shim:
                 "tail": self.tail.state(),
                 "processed_turns": list(self.processed_turns),
                 "budgets": self._bound(self.budgets),
+                "budget_sender_sid": self.budget_sender_sid,
+                "budget_last_at": self.budget_last_at,
                 "contacts": self._bound(self.contacts),
                 "updated_at": now_iso(),
             },
@@ -2278,7 +2292,12 @@ class Shim:
             }
             self._bound(self.contacts)
 
-        tag = build_tag(sender_name, sender_sid, sock_path if sender else None)
+        tag = build_tag(
+            sender_name,
+            sender_sid,
+            sock_path if sender else None,
+            frame.get("msg_id"),
+        )
         # The tag rides inside the same text Codex caps, so the body is trimmed
         # to leave room for it rather than pushing the whole message over.
         # P5: the argv budget is bytes; the Codex cap is characters. Both.
@@ -2344,14 +2363,20 @@ class Shim:
         notice rendered in the sending session on 2.1.263, which is exactly
         what an uncorrelatable status frame would look like.
         """
-        if not sender:
-            return
-        deliver_to_record(
+        return self._status_to_record(
+            sender, frame.get("msg_id"), status, detail
+        )
+
+    def _status_to_record(self, sender, msg_id, status, detail):
+        """Send one correlated status when the original peer message is known."""
+        if not sender or not msg_id:
+            return False
+        return deliver_to_record(
             sender,
             {
                 "type": "control",
                 "action": "peer_message_status",
-                "orig_msg_id": frame.get("msg_id"),
+                "orig_msg_id": msg_id,
                 "status": status,
                 "detail": detail,
                 "from": "uds:%s" % self.sock_path,
@@ -2471,9 +2496,33 @@ class Shim:
         except OSError:
             return
         self.budgets = {}
+        self.budget_sender_sid = None
+        self.budget_last_at = None
         if not initial:
             log("reply budget reset for thread %s" % self.thread_id)
             self._save_state()
+
+    def _advance_budget_sequence(self, tag):
+        """Reset the loop guard when the peer sequence is genuinely broken."""
+        sender_sid = tag.get("sid") if isinstance(tag, dict) else None
+        now = time.time()
+        expired = (
+            self.budget_last_at is not None
+            and now - self.budget_last_at > self.reply_budget_window
+        )
+        changed_peer = sender_sid != self.budget_sender_sid
+        if sender_sid is None or expired or changed_peer:
+            if self.budgets:
+                if sender_sid is None:
+                    reason = "a direct Codex turn"
+                elif expired:
+                    reason = "the %.0fs idle window elapsed" % self.reply_budget_window
+                else:
+                    reason = "the requesting peer changed"
+                log("reply budget sequence reset: %s" % reason)
+            self.budgets = {}
+        self.budget_sender_sid = sender_sid
+        self.budget_last_at = now if sender_sid else None
 
     def _handle_turn_end(self, turn):
         if turn.turn_id in self.processed_turns:
@@ -2493,10 +2542,6 @@ class Shim:
         if turn.outcome != "complete":
             log("turn %s aborted; nothing to deliver" % turn.turn_id)
             return
-        text = strip_tag(turn.last_agent_message or "").strip()
-        if not text:
-            log("turn %s finished with no agent message" % turn.turn_id)
-            return
         # S7: a turn that completed while no shim ran IS picked up from the
         # cursor on restart. Recent is useful; hours old is a surprise reply to
         # a conversation that moved on, so it is recorded and not posted.
@@ -2508,10 +2553,16 @@ class Shim:
             )
             return
 
+        tag = turn.tag or {}
+        self._advance_budget_sequence(tag)
+        text = strip_tag(turn.last_agent_message or "").strip()
+        if not text:
+            log("turn %s finished with no agent message" % turn.turn_id)
+            return
+
         records = live_claude_records()
         targets = []
 
-        tag = turn.tag or {}
         reply_socket = tag.get("reply")
         if reply_socket:
             if not socket_path_ok(reply_socket):
@@ -2564,10 +2615,27 @@ class Shim:
             seen.add(sid)
             spent = self.budgets.get(sid, 0)
             if spent >= REPLY_BUDGET:
+                detail = (
+                    "reply not delivered: the loop guard reached %d consecutive "
+                    "replies for this peer. It resets after another peer, a "
+                    "direct Codex turn, or %.0f seconds idle; run `peers.py "
+                    "budget reset %s` to clear it now"
+                    % (
+                        REPLY_BUDGET,
+                        self.reply_budget_window,
+                        self.thread_id,
+                    )
+                )
                 log(
                     "reply budget of %d spent for session %s; dropping the reply "
                     "(peers.py budget reset %s to clear)"
                     % (REPLY_BUDGET, rec.get("name") or sid, self.thread_id)
+                )
+                self._status_to_record(
+                    rec,
+                    tag.get("mid") if sid == tag.get("sid") else None,
+                    "failed",
+                    detail,
                 )
                 continue
             try:
@@ -2719,19 +2787,33 @@ def _send_codex(target, args):
                 "but drains only when its user types the next prompt" % thread["id"]
             )
     from_name, from_sid = args.from_name, args.from_sid
-    if args.from_socket:
+    from_socket = args.from_socket or os.environ.get(
+        "CLAUDE_CODE_MESSAGING_SOCKET"
+    )
+    env_sid = os.environ.get("CLAUDE_CODE_SESSION_ID")
+    if not from_socket and not args.from_sid and is_uuid(env_sid):
+        matches = claude_record_by_target(env_sid)
+        if len(matches) == 1:
+            from_socket = matches[0].get("messagingSocketPath")
+    if from_socket:
         # P3: a reply address without a session id can be delivered to whoever
         # holds that socket next, so the id is resolved here, from the registry.
-        rec = claude_record_by_socket(args.from_socket)
+        rec = claude_record_by_socket(from_socket)
         if rec is None:
             sys.stderr.write(
                 "error: no live Claude session listens on %s, so --from-socket "
-                "would name a reply address nothing answers\n" % args.from_socket
+                "would name a reply address nothing answers\n" % from_socket
             )
             return 1
         from_sid = from_sid or rec.get("sessionId")
         from_name = from_name or rec.get("name")
-    tag = build_tag(from_name, from_sid, args.from_socket)
+    elif not from_name and not from_sid:
+        log(
+            "sender identity absent: replies stay in the Codex TUI; when "
+            "sending from Claude Code, use its Bash tool so "
+            "CLAUDE_CODE_MESSAGING_SOCKET is available"
+        )
+    tag = build_tag(from_name, from_sid, from_socket)
     text = "%s\n%s" % (tag, args.message)
     try:
         codex_queue(thread["id"], text)

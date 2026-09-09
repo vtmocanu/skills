@@ -131,3 +131,21 @@ Partial live check: 2026-09-09, Claude Code 2.1.266, Codex CLI 0.153.4.
     and the registration. The Codex rollout, writer lock and queued items must
     remain. Repeat with a live thread older than the cutoff and verify nothing
     is removed.
+19. **Reply-budget observability and sequence resets.** Send four rapid requests
+    from one Claude session. The first three replies must arrive; the fourth
+    must remain visible in Codex, be absent from Claude, and produce a
+    correlated `peer_message_status` with `status: failed` for the fourth
+    request's `orig_msg_id`. Then verify that each of these breaks the sequence:
+    a direct Codex turn, an intervening request from another Claude session,
+    and the configured idle window.
+    - 2026-09-09: a real review session delivered three replies over more than
+      an hour, handled another peer between the third and fourth, then silently
+      dropped the fourth because the old counter reset only manually. The
+      requesting agent believed its visible final had been delivered. This
+      disproved the old “in a row” documentation and motivated the sequence
+      state plus failure status.
+20. **Shell sender identity.** From a Claude Code Bash tool, run one-shot `send`
+    to an unregistered Codex thread without any `--from-*` flags. Verify the tag
+    carries the current registry name, `CLAUDE_CODE_SESSION_ID`, and
+    `CLAUDE_CODE_MESSAGING_SOCKET`. From a normal host shell, verify the send is
+    still allowed but prints a warning that replies cannot be routed.

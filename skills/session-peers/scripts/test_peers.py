@@ -283,6 +283,8 @@ class Base(unittest.TestCase):
         os.environ["CODEX_HOME"] = str(self.codex_dir)
         os.environ.pop("CODEX_SQLITE_HOME", None)
         os.environ.pop("SESSION_PEERS_ALLOW_UNSOLICITED", None)
+        os.environ.pop("CLAUDE_CODE_MESSAGING_SOCKET", None)
+        os.environ.pop("CLAUDE_CODE_SESSION_ID", None)
         os.environ["SESSION_PEERS_SOCKET_DIR"] = str(self.socks)
         os.environ["SESSION_PEERS_POLL_INTERVAL"] = "0.05"
         os.environ["SESSION_PEERS_LIVENESS_INTERVAL"] = "0.3"
@@ -554,21 +556,36 @@ class TestVersionPin(Base):
 
 class TestTag(Base):
     def test_tag_round_trips_every_field(self):
-        line = peers.build_tag("cc-main", "sess-1", "/tmp/cc-socks/9.sock")
+        line = peers.build_tag(
+            "cc-main", "sess-1", "/tmp/cc-socks/9.sock", "msg-1"
+        )
         self.assertEqual(
-            line, "[session-peers from=@cc-main sid=sess-1 reply=uds:/tmp/cc-socks/9.sock]"
+            line,
+            "[session-peers from=@cc-main sid=sess-1 mid=msg-1 "
+            "reply=uds:/tmp/cc-socks/9.sock]",
         )
         tag, body = peers.parse_tag(line + "\nhello there")
         self.assertEqual(tag["from"], "cc-main")
         self.assertEqual(tag["sid"], "sess-1")
+        self.assertEqual(tag["mid"], "msg-1")
         self.assertEqual(tag["reply"], "/tmp/cc-socks/9.sock")
         self.assertEqual(body, "hello there")
 
     def test_tag_absent_fields_render_and_parse_as_none(self):
         line = peers.build_tag(None, None, None)
-        self.assertEqual(line, "[session-peers from=@- sid=- reply=-]")
+        self.assertEqual(line, "[session-peers from=@- sid=- mid=- reply=-]")
         tag, body = peers.parse_tag(line + "\nbody")
-        self.assertEqual(tag, {"from": None, "sid": None, "reply": None})
+        self.assertEqual(
+            tag, {"from": None, "sid": None, "mid": None, "reply": None}
+        )
+        self.assertEqual(body, "body")
+
+    def test_tag_parser_accepts_the_pre_message_id_shape(self):
+        old = "[session-peers from=@cc-main sid=s1 reply=uds:/tmp/cc-socks/1.sock]"
+        tag, body = peers.parse_tag(old + "\nbody")
+        self.assertEqual(tag["from"], "cc-main")
+        self.assertEqual(tag["sid"], "s1")
+        self.assertIsNone(tag["mid"])
         self.assertEqual(body, "body")
 
     def test_untagged_text_is_returned_untouched(self):
@@ -590,6 +607,11 @@ class TestTag(Base):
         tag, _body = peers.parse_tag(line + "\nx")
         self.assertEqual(tag["from"], "two_words")
         self.assertEqual(tag["sid"], "sess_2")
+
+    def test_a_correlation_id_cannot_consume_the_message_budget(self):
+        line = peers.build_tag("cc", "s1", "/tmp/cc-socks/1.sock", "x" * 1000)
+        tag, _body = peers.parse_tag(line + "\nbody")
+        self.assertEqual(len(tag["mid"]), peers.MAX_TAG_FIELD_CHARS)
 
 
 class TestFrames(Base):
@@ -1315,6 +1337,31 @@ class TestSendToCodex(Base):
         self.assertEqual(body, "hello")
         self.assertIn("queued to", out)
 
+    def test_send_infers_the_claude_sender_from_its_exported_socket(self):
+        tid, _rollout = self.one_thread()
+        listener, rec = self.add_listener(name="cc-main", session_id="s1")
+        os.environ["CLAUDE_CODE_MESSAGING_SOCKET"] = listener.path
+        os.environ["CLAUDE_CODE_SESSION_ID"] = "possibly-stale-id"
+
+        rc, _out, _err = self.cli(
+            "send", "--to", "codex:%s" % tid, "--message", "hello"
+        )
+
+        self.assertEqual(rc, 0)
+        tag, body = peers.parse_tag(self.queue_calls()[0][4])
+        self.assertEqual(tag["from"], "cc-main")
+        self.assertEqual(tag["sid"], rec["sessionId"])
+        self.assertEqual(tag["reply"], listener.path)
+        self.assertEqual(body, "hello")
+
+    def test_send_warns_when_no_sender_identity_is_available(self):
+        tid, _rollout = self.one_thread()
+        rc, _out, err = self.cli(
+            "send", "--to", "codex:%s" % tid, "--message", "hello"
+        )
+        self.assertEqual(rc, 0)
+        self.assertIn("sender identity absent", err)
+
     def test_send_resolves_a_name_to_its_uuid(self):
         tid, _r = self.one_thread(name="codex-uzi")
         rc, _out, _err = self.cli("send", "--to", "codex:codex-uzi", "--message", "hi")
@@ -1776,6 +1823,7 @@ class TestShimInbound(ShimBase):
         tag, body = peers.parse_tag(calls[0][4])
         self.assertEqual(tag["from"], "cc-main")
         self.assertEqual(tag["sid"], "s1")
+        self.assertEqual(tag["mid"], "m-1")
         self.assertEqual(tag["reply"], listener.path)
         self.assertEqual(body, "do the thing")
         self.assertIn("s1", shim.contacts)
@@ -1927,8 +1975,13 @@ class TestShimInbound(ShimBase):
 
 class TestShimReplies(ShimBase):
     def _turn(self, tid_socket, text="the answer", sid="s1", outcome="complete",
-              turn_id="t1"):
-        tag = {"from": "cc-main", "sid": sid, "reply": tid_socket}
+              turn_id="t1", msg_id="m-1"):
+        tag = {
+            "from": "cc-main",
+            "sid": sid,
+            "mid": msg_id,
+            "reply": tid_socket,
+        }
         return peers.Turn(turn_id, "ping", tag, outcome,
                           text if outcome == "complete" else None)
 
@@ -2042,6 +2095,25 @@ class TestShimReplies(ShimBase):
         self.assertEqual(len(listener.of_type("user")), peers.REPLY_BUDGET)
         self.assertIn("reply budget", err.getvalue())
 
+    def test_the_fourth_reply_notifies_the_requesting_peer(self):
+        shim, _tid, _rollout = self.make_shim()
+        listener, _rec = self.add_listener(name="cc-main", session_id="s1")
+        for i in range(peers.REPLY_BUDGET + 1):
+            shim._handle_turn_end(
+                self._turn(
+                    listener.path,
+                    turn_id="t%d" % i,
+                    msg_id="m%d" % i,
+                )
+            )
+        statuses = wait_for(
+            lambda: listener.of_type("control", "peer_message_status")
+        )
+        self.assertEqual(len(listener.of_type("user")), peers.REPLY_BUDGET)
+        self.assertEqual(statuses[-1]["status"], "failed")
+        self.assertEqual(statuses[-1]["orig_msg_id"], "m3")
+        self.assertIn("loop guard", statuses[-1]["detail"])
+
     def test_the_budget_counts_an_at_name_reply_too(self):
         shim, _tid, _rollout = self.make_shim()
         listener, _rec = self.add_listener(name="cc-other", session_id="s2")
@@ -2049,8 +2121,20 @@ class TestShimReplies(ShimBase):
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
             for i in range(peers.REPLY_BUDGET + 1):
+                tag = {
+                    "from": "cc-other",
+                    "sid": "s2",
+                    "mid": "m%d" % i,
+                    "reply": listener.path,
+                }
                 shim._handle_turn_end(
-                    peers.Turn("t%d" % i, "p", None, "complete", "@cc-other again")
+                    peers.Turn(
+                        "t%d" % i,
+                        "p",
+                        tag,
+                        "complete",
+                        "@cc-other again",
+                    )
                 )
                 time.sleep(0.05)
         time.sleep(0.2)
@@ -2061,6 +2145,8 @@ class TestShimReplies(ShimBase):
         shim, tid, _rollout = self.make_shim()
         listener, _rec = self.add_listener(name="cc-main", session_id="s1")
         shim.budgets["s1"] = peers.REPLY_BUDGET
+        shim.budget_sender_sid = "s1"
+        shim.budget_last_at = time.time()
         with contextlib.redirect_stderr(io.StringIO()):
             shim._handle_turn_end(self._turn(listener.path, turn_id="t-blocked"))
         time.sleep(0.2)
@@ -2069,6 +2155,57 @@ class TestShimReplies(ShimBase):
         shim._consume_budget_marker()
         shim._handle_turn_end(self._turn(listener.path, turn_id="t-after"))
         self.assertIsNotNone(wait_for(lambda: listener.of_type("user")))
+
+    def test_a_legacy_lifetime_counter_starts_a_fresh_sequence(self):
+        shim, _tid, _rollout = self.make_shim()
+        listener, _ = self.add_listener(name="cc-main", session_id="s1")
+        shim.budgets["s1"] = peers.REPLY_BUDGET
+        self.assertIsNone(shim.budget_sender_sid)
+        shim._handle_turn_end(self._turn(listener.path, turn_id="new-sequence"))
+        self.assertIsNotNone(wait_for(lambda: listener.of_type("user")))
+        self.assertEqual(shim.budgets["s1"], 1)
+
+    def test_an_intervening_peer_resets_the_consecutive_budget(self):
+        shim, _tid, _rollout = self.make_shim()
+        first, _ = self.add_listener(name="cc-first", session_id="s1")
+        second, _ = self.add_listener(
+            name="cc-second", session_id="s2", pid=os.getppid()
+        )
+        for i in range(peers.REPLY_BUDGET):
+            shim._handle_turn_end(
+                self._turn(first.path, sid="s1", turn_id="a%d" % i)
+            )
+        shim._handle_turn_end(
+            self._turn(second.path, sid="s2", turn_id="other")
+        )
+        shim._handle_turn_end(
+            self._turn(first.path, sid="s1", turn_id="after")
+        )
+        self.assertTrue(wait_for(lambda: len(first.of_type("user")) == 4))
+
+    def test_a_direct_codex_turn_resets_the_consecutive_budget(self):
+        shim, _tid, _rollout = self.make_shim()
+        listener, _ = self.add_listener(name="cc-main", session_id="s1")
+        for i in range(peers.REPLY_BUDGET):
+            shim._handle_turn_end(
+                self._turn(listener.path, turn_id="a%d" % i)
+            )
+        shim._handle_turn_end(
+            peers.Turn("direct", "typed", None, "complete", "local answer")
+        )
+        shim._handle_turn_end(self._turn(listener.path, turn_id="after"))
+        self.assertTrue(wait_for(lambda: len(listener.of_type("user")) == 4))
+
+    def test_the_budget_resets_after_the_idle_window(self):
+        shim, _tid, _rollout = self.make_shim()
+        listener, _ = self.add_listener(name="cc-main", session_id="s1")
+        for i in range(peers.REPLY_BUDGET):
+            shim._handle_turn_end(
+                self._turn(listener.path, turn_id="a%d" % i)
+            )
+        shim.budget_last_at = time.time() - shim.reply_budget_window - 1
+        shim._handle_turn_end(self._turn(listener.path, turn_id="after"))
+        self.assertTrue(wait_for(lambda: len(listener.of_type("user")) == 4))
 
     def test_a_reply_carrying_a_tag_line_has_it_stripped(self):
         shim, _tid, _rollout = self.make_shim()
@@ -2141,9 +2278,16 @@ class TestDeliveryLog(ShimBase):
         shim, _tid, _rollout = self.make_shim()
         listener, _rec = self.add_listener(name="cc-main", session_id="s1")
         shim.budgets["s1"] = peers.REPLY_BUDGET
+        shim.budget_sender_sid = "s1"
+        shim.budget_last_at = time.time()
         turn = peers.Turn(
             "t-43", "ping",
-            {"from": "cc-main", "sid": "s1", "reply": listener.path},
+            {
+                "from": "cc-main",
+                "sid": "s1",
+                "mid": "m-43",
+                "reply": listener.path,
+            },
             "complete", "answer", None,
         )
         err = io.StringIO()
@@ -3384,13 +3528,19 @@ class TestBudgetResetPersistence(ShimBase):
     def test_the_reset_is_written_to_the_state_file(self):
         shim, tid, _rollout = self.make_shim()
         shim.budgets["s1"] = peers.REPLY_BUDGET
+        shim.budget_sender_sid = "s1"
+        shim.budget_last_at = time.time()
         shim._save_state()
         self.cli("budget", "reset", tid)
         with contextlib.redirect_stderr(io.StringIO()):
             shim._consume_budget_marker()
         self.assertEqual(shim.budgets, {})
+        self.assertIsNone(shim.budget_sender_sid)
+        self.assertIsNone(shim.budget_last_at)
         state = peers.read_json(peers.thread_state_path(tid))
         self.assertEqual(state["budgets"], {})
+        self.assertIsNone(state["budget_sender_sid"])
+        self.assertIsNone(state["budget_last_at"])
 
 
 # ==========================================================================

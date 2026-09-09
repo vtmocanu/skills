@@ -67,10 +67,13 @@ it; Codex runs it as its next user turn under the thread's own approval mode.
   subject to the live-session and reply-budget checks below. If it is missing,
   check the delivery log (Diagnostics); completion and idle notices do not
   prove delivery. `notify_when_idle: true` fires once per turn end.
-- **Reply budget**: the shim delivers at most 3 replies in a row to
-  bridge-originated turns per (thread, session); past that it drops replies with
-  a stderr line until the user runs `peers.py budget reset <name>` or a fresh
-  `up <name>`. This stops two agents from ping-ponging unattended.
+- **Reply budget**: the shim delivers at most 3 consecutive replies to one peer
+  inside a 30-minute idle window. A direct Codex turn, a request from another
+  peer, the idle window, `peers.py budget reset <name|uuid>`, or a fresh `up`
+  resets the sequence. A blocked fourth reply stays visible in Codex, and the
+  requesting Claude session receives a correlated `failed` status instead of
+  waiting silently. This stops tight unattended ping-pong without turning the
+  budget into a lifetime counter.
 - **Idle thread latency**: up to 10 s (Codex polls its queue), then the turn.
 - **Busy thread**: the message queues and runs after the current turn.
 - **Continuously-driven thread**: a thread another driver keeps feeding
@@ -96,8 +99,8 @@ it; Codex runs it as its next user turn under the thread's own approval mode.
   on macOS); `send` refuses an oversized text, the shim trims it on a UTF-8
   boundary and reports status `truncated` with the trimmed length.
 - **Status frames** you may receive about a message: `held` (queued, thread
-  paused), `failed` (queue error or thread died), `truncated` (delivered, but
-  cut to the argv budget).
+  paused), `failed` (queue error, dead thread, or exhausted loop guard), and
+  `truncated` (delivered, but cut to the argv budget).
 
 ### One-shot from a shell, no shim
 
@@ -115,6 +118,12 @@ routes the reply to the Claude session listening on that socket:
 refuses when nothing listens there. A tag without a session id is never
 auto-delivered. `send --to cc:<name|uuid>` posts a wrapped message directly
 into a Claude session from a host shell; UUID is stable across renames.
+
+When `send --to codex:...` runs from a Claude Code Bash tool, it automatically
+uses `CLAUDE_CODE_MESSAGING_SOCKET` to resolve the sender's current name, UUID,
+and reply route. Do not hand-build `--from-name`, `--from-sid`, or
+`--from-socket` there. Outside Claude Code, an identity-free send is still
+allowed but prints a warning and cannot route an automatic reply.
 
 ### Keeping shims alive
 
