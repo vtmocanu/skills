@@ -179,6 +179,12 @@ Partial live check: 2026-09-09, Claude Code 2.1.266, Codex CLI 0.153.4.
     replies, conflicting duplicate, timeout and caller interrupt. The request
     frame must omit the native shim reply route. Wrong/late/conflicting replies must fail;
     timeout/interrupt must leave no mailbox that can surface as a stale turn.
+    - 2026-09-09, PR #57 at `5f69488`: a Codex `ask` delivered a second-round
+      review to Claude Code 2.1.266, whose request frame carried no native reply
+      route. Claude returned the complete review through the included `reply`
+      command; `ask --json` emitted matching request, message and session IDs in
+      the same active Codex turn, both mailbox files disappeared, and no Codex
+      queue turn was created. The reviewer independently ran all 324 tests.
 24. **Automatic Codex attribution and message identity.** Run `send --to cc:`
     from a Codex tool shell without `--from-thread`; verify `CODEX_THREAD_ID`
     supplies the wrapper's exact thread identity and live shim reply route.
