@@ -66,6 +66,10 @@ args = sys.argv[1:]
 if args and args[0] == "-v":
     print("lsof fake")
     raise SystemExit(0)
+forced = int(os.environ.get("FAKE_LSOF_RC", "0"))
+if forced:
+    sys.stderr.write(os.environ.get("FAKE_LSOF_STDERR", "operation not permitted") + "\\n")
+    raise SystemExit(forced)
 mapping = {}
 path = os.environ.get("FAKE_LSOF_MAP")
 if path and os.path.exists(path):
@@ -290,6 +294,8 @@ class Base(unittest.TestCase):
         os.environ["SESSION_PEERS_LIVENESS_INTERVAL"] = "0.3"
         os.environ["PATH"] = str(self.bin)
         os.environ["FAKE_LSOF_MAP"] = str(self.lsof_map)
+        os.environ.pop("FAKE_LSOF_RC", None)
+        os.environ.pop("FAKE_LSOF_STDERR", None)
         os.environ["FAKE_CODEX_LOG"] = str(self.codex_log)
         os.environ["FAKE_PS_LSTART"] = PS_LSTART
         os.environ.pop("FAKE_PS_RC", None)
@@ -762,12 +768,15 @@ class TestRegistry(Base):
         self.write_record(dead, "cc-dead", "s1", str(self.socks / "2.sock"))
         self.assertEqual(peers.live_claude_records(), [])
 
-    def test_a_record_without_procstart_is_still_read(self):
+    def test_a_record_without_procstart_is_unverified(self):
         rec = self.write_record(os.getpid(), "cc-lenient", "s1", str(self.socks / "1.sock"))
         path = self.sessions / ("%d.json" % os.getpid())
         rec.pop("procStart")
         path.write_text(json.dumps(rec))
-        self.assertEqual([r["name"] for r in peers.live_claude_records()], ["cc-lenient"])
+        self.assertEqual(peers.live_claude_records(), [])
+        self.assertEqual(
+            [r["name"] for r in peers.unverified_claude_records()], ["cc-lenient"]
+        )
 
     def test_a_blocked_process_probe_is_unverified_not_dead(self):
         self.write_record(os.getpid(), "cc-main", "s1", str(self.socks / "1.sock"))
@@ -1032,6 +1041,21 @@ class TestCodexDiscovery(Base):
         with contextlib.redirect_stderr(err):
             self.assertEqual(peers.lsof_holders(["/x"]), {})
         self.assertIn("lsof", err.getvalue())
+
+    def test_a_blocked_lsof_probe_is_unverified_not_dead(self):
+        tid, rollout = self.one_thread(name="codex-uzi")
+        os.environ["FAKE_LSOF_RC"] = "1"
+        os.environ["FAKE_LSOF_STDERR"] = "operation not permitted"
+        with contextlib.redirect_stderr(io.StringIO()):
+            thread = peers.codex_threads()[0][0]
+            held = peers.thread_is_held(str(rollout))
+            with self.assertRaises(peers.ResolveError) as ctx:
+                peers.resolve_thread("codex-uzi")
+        self.assertEqual(thread["id"], tid)
+        self.assertIsNone(thread["live"])
+        self.assertIn("operation not permitted", thread["liveness_error"])
+        self.assertEqual(held, (None, None))
+        self.assertIn("liveness is unavailable", str(ctx.exception))
 
 
 class TestResolveThread(Base):
@@ -1729,6 +1753,24 @@ class TestGarbageCollection(Base):
         self.assertEqual(peers.gc_bridge_state(days=7, verbose=False), [])
         self.assertIn(tid, peers.read_registered())
 
+    def test_gc_rechecks_recency_after_taking_the_lock(self):
+        tid, _rollout = self.make_stale_bridge_thread()
+        original = peers.reconcile_lock
+
+        @contextlib.contextmanager
+        def activity_during_lock(*args, **kwargs):
+            with original(*args, **kwargs) as acquired:
+                pathlib.Path(peers.thread_log_path(tid)).touch()
+                yield acquired
+
+        peers.reconcile_lock = activity_during_lock
+        try:
+            removed = peers.gc_bridge_state(days=7, verbose=False)
+        finally:
+            peers.reconcile_lock = original
+        self.assertEqual(removed, [])
+        self.assertIn(tid, peers.read_registered())
+
     def test_gc_fails_closed_when_thread_discovery_is_unknown(self):
         tid = str(uuidlib.uuid4())
         peers.write_registered(
@@ -1737,6 +1779,15 @@ class TestGarbageCollection(Base):
         self.make_state_db([], filename="state_1.sqlite", good=False)
         self.assertEqual(peers.gc_bridge_state(days=7, verbose=False), [])
         self.assertIn(tid, peers.read_registered())
+
+    def test_gc_fails_closed_when_lsof_is_blocked(self):
+        tid, _rollout = self.make_stale_bridge_thread()
+        os.environ["FAKE_LSOF_RC"] = "126"
+        with contextlib.redirect_stderr(io.StringIO()):
+            removed = peers.gc_bridge_state(days=7, verbose=False)
+        self.assertEqual(removed, [])
+        self.assertIn(tid, peers.read_registered())
+        self.assertTrue(os.path.exists(peers.thread_state_path(tid)))
 
     def test_gc_rejects_a_negative_retention(self):
         self.make_state_db([])
@@ -1768,6 +1819,19 @@ class TestList(Base):
         self.assertEqual(
             [record["name"] for record in payload["claude_unverified"]],
             ["cc-main"],
+        )
+
+    def test_list_reports_lsof_blocked_codex_threads_separately(self):
+        tid, _rollout = self.one_thread(name="codex-uzi")
+        os.environ["FAKE_LSOF_RC"] = "126"
+        with contextlib.redirect_stderr(io.StringIO()):
+            _rc, out, _err = self.cli("list", "--json")
+        payload = json.loads(out)
+        self.assertEqual(payload["codex"], [])
+        self.assertEqual(payload["codex_unverified"][0]["id"], tid)
+        self.assertIn(
+            "operation not permitted",
+            payload["codex_unverified"][0]["liveness_error"],
         )
 
     def test_list_hides_a_thread_no_process_holds(self):
@@ -1927,6 +1991,20 @@ class TestShimInbound(ShimBase):
         self.assertTrue(shim.stop.is_set())
         status = wait_for(lambda: listener.of_type("control", "peer_message_status"))
         self.assertEqual(status[0]["status"], "failed")
+
+    def test_an_unverified_thread_refuses_to_queue_but_keeps_the_shim(self):
+        shim, _tid, _rollout = self.make_shim()
+        listener, _rec = self.add_listener()
+        os.environ["FAKE_LSOF_RC"] = "126"
+        with contextlib.redirect_stderr(io.StringIO()):
+            shim._handle_line(
+                json.dumps(self.inbound_frame("hi", listener.path))
+            )
+        self.assertEqual(self.queue_calls(), [])
+        self.assertFalse(shim.stop.is_set())
+        status = wait_for(lambda: listener.of_type("control", "peer_message_status"))
+        self.assertEqual(status[0]["status"], "failed")
+        self.assertIn("liveness probe", status[0]["detail"])
 
     def test_a_client_with_a_foreign_uid_is_refused(self):
         shim, _tid, _rollout = self.make_shim()
@@ -2415,6 +2493,36 @@ class TestShimRecord(ShimBase):
         shim, tid, _rollout = self.make_shim(name="codex-uzi")
         self.assertEqual(shim.name, "codex-%s" % tid[:8])
 
+    def test_duplicate_codex_titles_use_a_deterministic_uuid_tiebreak(self):
+        lower = "11111111-1111-4111-8111-111111111111"
+        higher = "22222222-2222-4222-8222-222222222222"
+        first = self.make_rollout("first.jsonl")
+        second = self.make_rollout("second.jsonl")
+        self.make_state_db(
+            [
+                {
+                    "id": higher,
+                    "name": "shared",
+                    "rollout_path": str(second),
+                },
+                {
+                    "id": lower,
+                    "name": "shared",
+                    "rollout_path": str(first),
+                },
+            ]
+        )
+        self.set_holder(first)
+        self.set_holder(second)
+        lower_shim = peers.Shim(peers.resolve_thread(lower))
+        higher_shim = peers.Shim(peers.resolve_thread(higher))
+        self.assertEqual(lower_shim.name, "shared")
+        self.assertEqual(higher_shim.name, "codex-%s" % higher[:8])
+        lower_shim._refresh_name()
+        higher_shim._refresh_name()
+        self.assertEqual(lower_shim.name, "shared")
+        self.assertEqual(higher_shim.name, "codex-%s" % higher[:8])
+
     def test_a_rename_refreshes_the_record_state_and_registration(self):
         shim, tid, _rollout = self.make_shim(name="codex-old")
         peers.register_thread({"id": tid, "name": "codex-old"})
@@ -2436,6 +2544,19 @@ class TestShimRecord(ShimBase):
         self.assertEqual(state["name"], "codex-new")
         self.assertEqual(state["thread_name"], "codex-new")
         self.assertEqual(peers.read_registered()[tid]["name"], "codex-new")
+
+    def test_a_blocked_lsof_probe_does_not_terminate_a_running_shim(self):
+        shim, _tid, _rollout = self.make_shim()
+        os.environ["FAKE_LSOF_RC"] = "126"
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            shim._check_liveness()
+            shim._check_liveness()
+            os.environ.pop("FAKE_LSOF_RC")
+            shim._check_liveness()
+        self.assertFalse(shim.stop.is_set())
+        self.assertEqual(err.getvalue().count("liveness is unverified"), 1)
+        self.assertIn("liveness probe recovered", err.getvalue())
 
     def test_the_record_is_rewritten_at_most_twice(self):
         shim, _tid, _rollout = self.make_shim()
@@ -2819,6 +2940,41 @@ class TestInstallHook(Base):
         self.assertEqual(commands.count("third-party"), 1)
         self.assertEqual(commands.count(peers.hook_command(auto_attach=True)), 1)
 
+    def test_same_mode_shared_group_is_already_installed(self):
+        grouped = {
+            "hooks": {
+                "SessionStart": [
+                    {
+                        "matcher": "startup|resume",
+                        "hooks": [
+                            peers.hook_entry()["hooks"][0],
+                            {"type": "command", "command": "third-party"},
+                        ],
+                    }
+                ]
+            }
+        }
+        original = json.dumps(grouped)
+        self.hooks_path().write_text(original)
+        rc, out, _err = self.cli("install-hook")
+        self.assertEqual(rc, 0)
+        self.assertIn("already installed", out)
+        self.assertEqual(self.hooks_path().read_text(), original)
+        self.assertEqual(list(self.codex_dir.glob("hooks.json.*bak*")), [])
+
+    def test_mode_upgrade_preserves_extra_entry_and_handler_keys(self):
+        entry = peers.hook_entry()
+        entry["description"] = "keep-entry"
+        entry["hooks"][0]["statusMessage"] = "keep-handler"
+        self.hooks_path().write_text(
+            json.dumps({"hooks": {"SessionStart": [entry]}})
+        )
+        self.cli("install-hook", "--auto-attach")
+        updated = json.loads(self.hooks_path().read_text())["hooks"]["SessionStart"][0]
+        self.assertEqual(updated["description"], "keep-entry")
+        self.assertEqual(updated["hooks"][0]["statusMessage"], "keep-handler")
+        self.assertTrue(updated["hooks"][0]["command"].endswith("--auto-attach"))
+
     def test_the_nested_hooks_shape_is_handled_too(self):
         self.hooks_path().write_text(json.dumps({"hooks": self.EXISTING}))
         self.cli("install-hook")
@@ -2936,6 +3092,16 @@ class TestDoctor(Base):
         _rc, out, _err = self.cli("doctor")
         self.assertIn("fail  process-start probe", out)
         self.assertIn("operation not permitted", out)
+
+    def test_doctor_names_a_blocked_lsof_probe(self):
+        self.one_thread(name="codex-uzi")
+        os.environ["FAKE_LSOF_RC"] = "126"
+        os.environ["FAKE_LSOF_STDERR"] = "operation not permitted"
+        with contextlib.redirect_stderr(io.StringIO()):
+            _rc, out, _err = self.cli("doctor")
+        self.assertIn("fail  Codex liveness probe unavailable", out)
+        self.assertIn("operation not permitted", out)
+        self.assertIn("bridge GC skipped", out)
 
     def test_doctor_survives_an_unknown_codex_schema(self):
         self.make_state_db([], filename="state_1.sqlite", good=False)
@@ -3498,6 +3664,16 @@ class TestAtomicWriteMode(Base):
         peers.write_json_atomic(path, {"a": 2}, mode=0o644)
         self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o644)
         self.assertEqual(peers.read_json(path), {"a": 2})
+
+
+class TestDetachedProcessBounds(Base):
+    def test_a_negative_open_max_uses_a_real_fd_ceiling(self):
+        original = peers.os.sysconf
+        peers.os.sysconf = lambda _name: -1
+        try:
+            self.assertEqual(peers.safe_open_max(), 256)
+        finally:
+            peers.os.sysconf = original
 
 
 class TestCachedBoundary(ShimBase):

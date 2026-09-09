@@ -295,11 +295,7 @@ def spawn_detached(argv, log_path):
             os.dup2(null_in, 0)
             os.dup2(log_fd, 1)
             os.dup2(log_fd, 2)
-            try:
-                max_fd = os.sysconf("SC_OPEN_MAX")
-            except (OSError, ValueError):
-                max_fd = 256
-            os.closerange(3, int(max_fd))
+            os.closerange(3, safe_open_max())
             os.execv(argv[0], argv)
         except BaseException as exc:
             try:
@@ -316,6 +312,15 @@ def spawn_detached(argv, log_path):
     if not raw:
         raise OSError("detached child did not report its pid")
     return int(raw)
+
+
+def safe_open_max():
+    """A usable exclusive closerange ceiling even when sysconf returns -1."""
+    try:
+        value = int(os.sysconf("SC_OPEN_MAX"))
+    except (OSError, TypeError, ValueError):
+        return 256
+    return value if value >= 3 else 256
 
 
 def tool_version(binary):
@@ -607,8 +612,8 @@ def record_liveness(rec) -> str:
     Returns ``live``, ``dead`` or ``unverified``. A sandbox can deny ``ps``
     while the process and socket are healthy; collapsing that denial into
     ``dead`` made ``list`` and ``send`` falsely claim no Claude session existed.
-    Parsing stays lenient: an omitted field is not checked, a present field
-    must match when the probe is available.
+    A missing process-start value is unverified because it cannot rule out PID
+    reuse; a present value must match when the probe is available.
     """
     pid = rec.get("pid")
     if not isinstance(pid, int) or not pid_alive(pid):
@@ -617,12 +622,13 @@ def record_liveness(rec) -> str:
     if domain is not None and domain != pid_domain():
         return "dead"
     recorded = rec.get("procStart")
-    if recorded:
-        actual, error = proc_start_checked(pid)
-        if error is not None:
-            return "unverified"
-        if actual.strip() != str(recorded).strip():
-            return "dead"
+    if not recorded:
+        return "unverified"
+    actual, error = proc_start_checked(pid)
+    if error is not None:
+        return "unverified"
+    if actual.strip() != str(recorded).strip():
+        return "dead"
     return "live"
 
 
@@ -870,24 +876,28 @@ def canon_path(path):
         return path
 
 
-def lsof_holders(paths):
-    """{path: [(pid, command)]} for paths a `codex` process holds open.
+def lsof_holders_checked(paths):
+    """(holders, verified, error) for paths a Codex process may hold.
 
     Keyed by the canonical (realpath) form so a lookup by an unresolved probe
     path still matches a holder `lsof` reported at its symlink-resolved path.
 
-    One `lsof -F pcn` call for the whole set. A missing lsof, a non-zero exit
-    (lsof exits 1 when nothing matches) and unparseable output all mean "no
-    holder", never a traceback.
+    `lsof` exits 1 both for a verified no-match and for some failures. Empty
+    stdout and stderr is therefore a verified no-match; another non-zero
+    result is unverified, never evidence that a thread is dead.
     """
     out = {}
     paths = [p for p in paths if p]
     if not paths:
-        return out
-    rc, stdout, _err = run_cmd(["lsof", "-F", "pcn", "--"] + list(paths), timeout=20)
-    if rc == 127:
-        log("lsof is not on PATH; Codex thread liveness is unavailable")
-        return out
+        return out, True, None
+    rc, stdout, stderr = run_cmd(
+        ["lsof", "-F", "pcn", "--"] + list(paths), timeout=20
+    )
+    if rc != 0:
+        if rc == 1 and not stdout.strip() and not stderr.strip():
+            return out, True, None
+        detail = stderr.strip() or stdout.strip() or "lsof exited %d" % rc
+        return out, False, detail
     pid = None
     cmd = ""
     for line in stdout.splitlines():
@@ -909,7 +919,15 @@ def lsof_holders(paths):
             if "codex" not in base.lower():
                 continue
             out.setdefault(canon_path(value), []).append((pid, cmd))
-    return out
+    return out, True, None
+
+
+def lsof_holders(paths):
+    """Compatibility wrapper returning only verified holder data."""
+    holders, verified, error = lsof_holders_checked(paths)
+    if not verified:
+        log("Codex thread liveness is unavailable: %s" % error)
+    return holders
 
 
 def writer_lock_path(thread_id, home=None):
@@ -976,6 +994,7 @@ def codex_threads(check_live=True):
                 "registered": tid in registered,
                 "holder_pid": None,
                 "live": False,
+                "liveness_error": None,
             }
         )
     if check_live and threads:
@@ -984,8 +1003,12 @@ def codex_threads(check_live=True):
         lock_of = {t["id"]: writer_lock_path(t["id"]) for t in threads}
         probe = [t["rollout_path"] for t in threads if t["rollout_path"]]
         probe += list(lock_of.values())
-        holders = lsof_holders(probe)
+        holders, verified, liveness_error = lsof_holders_checked(probe)
         for t in threads:
+            if not verified:
+                t["live"] = None
+                t["liveness_error"] = liveness_error
+                continue
             # Either handle a live Codex process keeps proves the thread is
             # live; the lock covers a fresh thread whose rollout is not written
             # yet, the rollout covers an older Codex with no writer lock.
@@ -998,16 +1021,8 @@ def codex_threads(check_live=True):
     return threads, True
 
 
-def codex_thread_by_id(thread_id, check_live=False):
-    """The current state record for one Codex UUID, or None."""
-    threads, schema_ok = codex_threads(check_live=check_live)
-    if not schema_ok:
-        return None
-    return next((thread for thread in threads if thread["id"] == thread_id), None)
-
-
 def thread_is_held(rollout_path, holder_pid=None, lock_path=None):
-    """True when a codex process still holds this thread open.
+    """(True/False/None, pid); None means the lsof probe was unavailable.
 
     Liveness comes from either handle a live Codex process keeps: the rollout
     file, or the writer lock (`lock_path`). The lock is held from thread
@@ -1018,7 +1033,9 @@ def thread_is_held(rollout_path, holder_pid=None, lock_path=None):
     alive).
     """
     paths = [p for p in (rollout_path, lock_path) if p]
-    holders = lsof_holders(paths)
+    holders, verified, _error = lsof_holders_checked(paths)
+    if not verified:
+        return None, None
     found = []
     for p in paths:
         found += holders.get(canon_path(p)) or []
@@ -1083,8 +1100,15 @@ def resolve_thread(target, require_live=True):
             % target
         )
     if require_live:
-        live = [t for t in matches if t["live"]]
+        live = [t for t in matches if t["live"] is True]
         if not live:
+            unverified = [t for t in matches if t["live"] is None]
+            if unverified:
+                detail = unverified[0].get("liveness_error") or "lsof failed"
+                raise ResolveError(
+                    "Codex thread liveness is unavailable (%s); retry where "
+                    "lsof is permitted" % detail
+                )
             # Never silently pick a thread whose process is gone: Codex's title
             # suggester reuses names, so a dead match is not evidence of intent.
             raise ResolveError(
@@ -1216,8 +1240,9 @@ def gc_bridge_state(days=GC_DAYS_DEFAULT, dry_run=False, verbose=True):
     """Prune exact bridge-owned artifacts for inactive threads older than days.
 
     Codex rollouts, writer locks and queued messages are outside ``state_dir``
-    and are never touched. Unknown discovery fails closed because a thread must
-    be proven inactive before any metadata is removed.
+    and are never touched. Persistent manual registrations are bridge metadata
+    and intentionally expire too. Unknown discovery fails closed because a
+    thread must be proven inactive before any metadata is removed.
     """
     if days < 0:
         raise ValueError("retention days must be zero or greater")
@@ -1225,6 +1250,10 @@ def gc_bridge_state(days=GC_DAYS_DEFAULT, dry_run=False, verbose=True):
     if not schema_ok:
         if verbose:
             print("GC skipped: Codex thread discovery is unavailable")
+        return []
+    if any(thread.get("live") is None for thread in threads):
+        if verbose:
+            print("GC skipped: Codex liveness is unverified")
         return []
     by_id = {thread["id"]: thread for thread in threads}
     registered = read_registered()
@@ -1255,10 +1284,18 @@ def gc_bridge_state(days=GC_DAYS_DEFAULT, dry_run=False, verbose=True):
         current, current_ok = codex_threads()
         if not current_ok:
             return []
+        if any(thread.get("live") is None for thread in current):
+            return []
+        current_by_id = {thread["id"]: thread for thread in current}
         live_ids = {thread["id"] for thread in current if thread.get("live")}
         registrations = read_registered()
         for thread_id in candidates:
             if thread_id in live_ids or shim_pid(thread_id):
+                continue
+            last_seen = _thread_last_seen(
+                thread_id, registrations, current_by_id
+            )
+            if last_seen is None or last_seen > cutoff:
                 continue
             failed = False
             for suffix in (".json", ".log", ".pid", ".budget-reset"):
@@ -1352,7 +1389,25 @@ def valid_peer_name(name) -> bool:
     return bool(name) and bool(PEER_NAME_RE.match(str(name)))
 
 
-def peer_name_for_thread(thread_name, thread_id, records=None):
+def codex_title_owner(thread_name, threads=None):
+    """Lowest live UUID for a title, providing a stable duplicate tiebreak."""
+    if not valid_peer_name(thread_name):
+        return None
+    if threads is None:
+        threads, schema_ok = codex_threads()
+        if not schema_ok:
+            return None
+    owners = sorted(
+        thread["id"]
+        for thread in threads
+        if thread.get("live") and thread.get("name") == thread_name
+    )
+    return owners[0] if owners else None
+
+
+def peer_name_for_thread(
+    thread_name, thread_id, records=None, title_owner=None
+):
     """Choose a safe, unique peer alias for a mutable Codex title.
 
     A valid title is used verbatim. Unnamed, unsafe or conflicting titles fall
@@ -1367,7 +1422,7 @@ def peer_name_for_thread(thread_name, thread_id, records=None):
         if rec.get("sessionId") != thread_id and rec.get("name")
     }
     candidates = []
-    if valid_peer_name(thread_name):
+    if valid_peer_name(thread_name) and title_owner in (None, thread_id):
         candidates.append(str(thread_name))
     candidates.extend(
         ["codex-%s" % thread_id[:8], "codex-%s" % thread_id]
@@ -1870,7 +1925,11 @@ class Shim:
         # B1: only a validated alias reaches Claude's wrapper. SessionStart can
         # attach before a title exists, and Codex-generated titles often carry
         # spaces, so an unusable title gets a UUID-derived alias.
-        self.name = peer_name_for_thread(self.thread_name, self.thread_id)
+        self.name = peer_name_for_thread(
+            self.thread_name,
+            self.thread_id,
+            title_owner=codex_title_owner(self.thread_name),
+        )
         self.cwd = thread.get("cwd") or os.getcwd()
 
         self.sock_dir = default_socket_dir()
@@ -1932,6 +1991,7 @@ class Shim:
         self._pidfile_fd = None
         self._clients = threading.Semaphore(MAX_CONCURRENT_CLIENTS)
         self.codex_version = None
+        self.liveness_unverified = False
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -1940,6 +2000,12 @@ class Shim:
             log("thread %s has no rollout path; nothing to tail" % self.thread_id)
             return 2
         held, pid = thread_is_held(self.rollout_path, self.holder_pid, self.lock_path)
+        if held is None:
+            log(
+                "thread %s liveness is unverified; not starting a shim"
+                % self.thread_id
+            )
+            return 3
         if not held:
             log(
                 "thread %s is not held by a live codex process; not starting"
@@ -2311,6 +2377,16 @@ class Shim:
         text = "%s\n%s" % (tag, body)
 
         held, _pid = thread_is_held(self.rollout_path, self.holder_pid, self.lock_path)
+        if held is None:
+            log("thread %s liveness is unverified; not queueing" % self.thread_id)
+            self._status_back(
+                frame,
+                sender,
+                "failed",
+                "the Codex thread liveness probe is unavailable; retry where "
+                "lsof is permitted",
+            )
+            return
         if not held:
             log("thread %s is no longer live; refusing to queue" % self.thread_id)
             self._status_back(
@@ -2441,24 +2517,48 @@ class Shim:
             if time.time() - last_live >= self.liveness_interval:
                 last_live = time.time()
                 self._refresh_name()
-                held, _pid = thread_is_held(
-                    self.rollout_path, self.holder_pid, self.lock_path
+                self._check_liveness()
+
+    def _check_liveness(self):
+        held, _pid = thread_is_held(
+            self.rollout_path, self.holder_pid, self.lock_path
+        )
+        if held is None:
+            if not self.liveness_unverified:
+                log(
+                    "codex pid %s liveness is unverified; keeping the shim"
+                    % self.holder_pid
                 )
-                if not held:
-                    log(
-                        "codex pid %s no longer holds %s or its writer lock; "
-                        "exiting" % (self.holder_pid, self.rollout_path)
-                    )
-                    self.stop.set()
+            self.liveness_unverified = True
+        elif held:
+            if self.liveness_unverified:
+                log("codex pid %s liveness probe recovered" % self.holder_pid)
+            self.liveness_unverified = False
+        elif not held:
+            log(
+                "codex pid %s no longer holds %s or its writer lock; exiting"
+                % (self.holder_pid, self.rollout_path)
+            )
+            self.stop.set()
 
     def _refresh_name(self):
         """Converge the advertised alias after a Codex `/rename`."""
-        thread = codex_thread_by_id(self.thread_id)
-        if thread is None:
+        threads, schema_ok = codex_threads()
+        if not schema_ok:
+            return
+        thread = next(
+            (candidate for candidate in threads if candidate["id"] == self.thread_id),
+            None,
+        )
+        if thread is None or thread.get("live") is None:
             return
         title = thread.get("name")
         try:
-            desired = peer_name_for_thread(title, self.thread_id)
+            desired = peer_name_for_thread(
+                title,
+                self.thread_id,
+                title_owner=codex_title_owner(title, threads),
+            )
         except NameError_ as exc:
             log("cannot refresh the peer alias: %s" % exc)
             return
@@ -2692,7 +2792,10 @@ def cmd_list(args):
         if not alias:
             try:
                 alias = peer_name_for_thread(
-                    thread.get("name"), thread["id"], records=records
+                    thread.get("name"),
+                    thread["id"],
+                    records=records,
+                    title_owner=codex_title_owner(thread.get("name"), threads),
                 )
             except NameError_:
                 alias = None
@@ -2705,13 +2808,20 @@ def cmd_list(args):
             "registered": thread["id"] in registered,
             "holder_pid": thread.get("holder_pid"),
             "shim_pid": pid,
+            "liveness_error": thread.get("liveness_error"),
         }
 
-    codex = [codex_view(thread) for thread in threads if thread.get("live")]
+    codex = [
+        codex_view(thread) for thread in threads if thread.get("live") is True
+    ]
+    codex_unverified = [
+        codex_view(thread) for thread in threads if thread.get("live") is None
+    ]
     payload = {
         "claude": claude,
         "claude_unverified": claude_unverified,
         "codex": codex,
+        "codex_unverified": codex_unverified,
         "codex_schema_recognised": schema_ok,
         "socket_dir": default_socket_dir(),
     }
@@ -2746,6 +2856,17 @@ def cmd_list(args):
                 ", shim %s" % t["shim_pid"] if t["shim_pid"] else "",
             )
         )
+    if codex_unverified:
+        print("Codex threads (%d unverified; lsof unavailable):" % len(codex_unverified))
+        for thread in codex_unverified:
+            print(
+                "  %-24s %s  %s"
+                % (
+                    thread["name"] or "(unnamed)",
+                    thread["id"],
+                    thread.get("cwd") or "",
+                )
+            )
     if not schema_ok:
         print("  (thread discovery degraded: unknown state_*.sqlite schema)")
     return 0
@@ -2775,6 +2896,12 @@ def _send_codex(target, args):
         held, _pid = thread_is_held(
             thread["rollout_path"], lock_path=writer_lock_path(thread["id"])
         )
+        if held is None:
+            sys.stderr.write(
+                "error: Codex thread liveness is unavailable; retry where lsof "
+                "is permitted\n"
+            )
+            return 1
         if not held:
             sys.stderr.write(
                 "error: no active session for thread %s; its process has exited "
@@ -3039,6 +3166,11 @@ def attach_thread(thread_id, verbose=True):
             if verbose:
                 print("  %s: not attachable (%s)" % (thread_id, exc))
             return None
+        if thread.get("live") is not True:
+            if verbose:
+                state = "unverified" if thread.get("live") is None else "not live"
+                print("  %s: %s, skipped" % (thread_id, state))
+            return None
         pid = shim_pid(thread_id)
         if pid:
             if verbose:
@@ -3068,7 +3200,11 @@ def _reconcile(verbose):
     started = 0
     for tid in sorted(registered):
         thread = by_id.get(tid)
-        if thread is None or not thread.get("live"):
+        if thread is not None and thread.get("live") is None:
+            if verbose:
+                print("  %s: liveness unverified, skipped" % tid)
+            continue
+        if thread is None or thread.get("live") is not True:
             if verbose:
                 print("  %s: not live, skipped" % tid)
             continue
@@ -3360,6 +3496,18 @@ def cmd_install_hook(args):
         print("SessionStart entry already installed in %s" % path)
         _print_trust_step()
         return 0
+    if matched is not None:
+        entry_index, hook_index = matched
+        current_entry = entries[entry_index]
+        current_hook = current_entry["hooks"][hook_index]
+        desired_hook = desired["hooks"][0]
+        if (
+            current_entry.get("matcher") == desired["matcher"]
+            and all(current_hook.get(key) == value for key, value in desired_hook.items())
+        ):
+            print("SessionStart entry already installed in %s" % path)
+            _print_trust_step()
+            return 0
     if not created:
         try:
             print("backed up %s to %s" % (path, backup_file(path)))
@@ -3373,13 +3521,20 @@ def cmd_install_hook(args):
         entry_index, hook_index = matched
         existing = dict(entries[entry_index])
         sibling_hooks = list(existing.get("hooks") or [])
+        updated_hook = dict(sibling_hooks[hook_index])
+        updated_hook.update(desired["hooks"][0])
         del sibling_hooks[hook_index]
         if sibling_hooks:
             existing["hooks"] = sibling_hooks
             entries[entry_index] = existing
-            entries.append(desired)
+            moved = dict(existing)
+            moved["matcher"] = desired["matcher"]
+            moved["hooks"] = [updated_hook]
+            entries.append(moved)
         else:
-            entries[entry_index] = desired
+            existing["matcher"] = desired["matcher"]
+            existing["hooks"] = [updated_hook]
+            entries[entry_index] = existing
         action = "updated"
     events["SessionStart"] = entries
     # S6: keep the file's own mode; only a file we create gets 0600.
@@ -3567,7 +3722,15 @@ def cmd_doctor(_args):
         "Codex state database: %s"
         % (db or "none with a recognised `threads` schema (send by UUID only)"),
     )
-    if db:
+    threads, _ok = codex_threads()
+    unverified_threads = [
+        thread for thread in threads if thread.get("live") is None
+    ]
+    if unverified_threads:
+        detail = unverified_threads[0].get("liveness_error") or "lsof failed"
+        add("fail", "Codex liveness probe unavailable: %s" % detail)
+        add("warn", "bridge GC skipped while Codex liveness is unverified")
+    elif db:
         stale = gc_bridge_state(
             days=_float_env("SESSION_PEERS_GC_DAYS", GC_DAYS_DEFAULT),
             dry_run=True,
@@ -3580,8 +3743,8 @@ def cmd_doctor(_args):
         )
 
     registered = read_registered()
-    threads, _ok = codex_threads()
-    live_ids = {t["id"] for t in threads if t.get("live")}
+    live_ids = {t["id"] for t in threads if t.get("live") is True}
+    unknown_ids = {t["id"] for t in threads if t.get("live") is None}
     for tid in sorted(registered):
         name = registered[tid].get("name") or tid
         pid = shim_pid(tid)
@@ -3589,6 +3752,8 @@ def cmd_doctor(_args):
             add("ok", "%s: shim running (pid %d)" % (name, pid))
         elif tid in live_ids:
             add("warn", "%s: thread is live but no shim (run `peers.py up`)" % name)
+        elif tid in unknown_ids:
+            add("warn", "%s: thread liveness unverified" % name)
         else:
             add("ok", "%s: registered, thread not running" % name)
     if not registered:

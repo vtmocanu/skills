@@ -140,10 +140,14 @@ registered by UUID appears as `codex-<first 8 hex of the uuid>`.
 
 ## If you are Codex
 
-The default sandbox can block Unix sockets and the `ps` process-start probe.
+The default sandbox can block Unix sockets, the Claude-side `ps` probe, and the
+Codex-side `lsof` probe. A failed `lsof` probe keeps a running shim alive but
+refuses new queueing and GC until liveness can be verified.
 Run `list`, `doctor`, and direct `send --to cc:...` with host permission from
 the outset. If permission is unavailable, an `unverified` result is not
-evidence that no Claude session exists. Two ways a message reaches Claude:
+evidence that no session exists. A Claude record missing `procStart` is also
+unverified rather than trusted across possible PID reuse. Two ways a message
+reaches Claude:
 
 1. **Reply to the sender**: when your turn was started by a Claude session (the
    user message starts with a `[session-peers from=@<name> ...]` line), your
@@ -186,6 +190,10 @@ for seven days. It rechecks that the Codex thread is not live and that no shim
 owns the PID file before deleting anything. Only files under
 `$CODEX_HOME/session-peers/` are eligible; Codex rollouts, writer locks, and
 queued messages are never touched.
+
+Persistent manual registrations are bridge metadata and expire too. Resuming a
+thread with the auto-attach hook exposes it again; without that hook, run `up`
+again after a seven-day inactive period.
 
 ```bash
 <this skill's directory>/scripts/peers.py gc --dry-run

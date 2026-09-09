@@ -115,7 +115,9 @@ Partial live check: 2026-09-09, Claude Code 2.1.266, Codex CLI 0.153.4.
     `codex-<uuid prefix>` fallback. Rename it to a valid peer name and verify the
     same shim record changes `name` and `nameSince` without a restart. Rename it
     to an unsafe or conflicting title and verify it falls back without exposing
-    wrapper markup or creating an ambiguous name.
+    wrapper markup or creating an ambiguous name. Start two live threads with
+    the same valid title and verify the lower UUID keeps it while the other uses
+    its fallback across repeated refreshes.
 17. **Sandbox diagnostics.** Run `list` and `doctor` once where `ps` or AF_UNIX
     is denied. The record must appear under `claude_unverified`, and direct send
     must instruct the caller to retry with host permission. It must not say
@@ -130,7 +132,9 @@ Partial live check: 2026-09-09, Claude Code 2.1.266, Codex CLI 0.153.4.
     them without changing anything; live GC must remove only those exact files
     and the registration. The Codex rollout, writer lock and queued items must
     remain. Repeat with a live thread older than the cutoff and verify nothing
-    is removed.
+    is removed. Touch an old candidate after the initial scan but before the
+    locked recheck and verify it survives. Confirm that persistent manual
+    registrations count as expiring bridge metadata.
 19. **Reply-budget observability and sequence resets.** Send four rapid requests
     from one Claude session. The first three replies must arrive; the fourth
     must remain visible in Codex, be absent from Claude, and produce a
@@ -149,3 +153,10 @@ Partial live check: 2026-09-09, Claude Code 2.1.266, Codex CLI 0.153.4.
     carries the current registry name, `CLAUDE_CODE_SESSION_ID`, and
     `CLAUDE_CODE_MESSAGING_SOCKET`. From a normal host shell, verify the send is
     still allowed but prints a warning that replies cannot be routed.
+21. **Codex liveness denial.** Make `lsof` fail with stderr rather than return a
+    clean no-match. `list` must report the thread under `codex_unverified`; send
+    and inbound queueing must fail with a liveness diagnostic; GC must skip;
+    and a running shim must stay alive without repeating the warning on every
+    poll. Restore `lsof` and verify the shim reports recovery. Separately, a
+    Claude registry record without `procStart` must be unverified rather than
+    trusted across PID reuse.
