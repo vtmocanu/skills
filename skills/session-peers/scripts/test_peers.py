@@ -52,6 +52,10 @@ HAS_TOMLLIB = peers._load_tomllib() is not None
 
 FAKE_PS = '''\
 import os, sys
+rc = int(os.environ.get("FAKE_PS_RC", "0"))
+if rc:
+    sys.stderr.write(os.environ.get("FAKE_PS_STDERR", "operation not permitted") + "\\n")
+    raise SystemExit(rc)
 print(os.environ.get("FAKE_PS_LSTART", %r))
 ''' % PS_LSTART
 
@@ -62,6 +66,10 @@ args = sys.argv[1:]
 if args and args[0] == "-v":
     print("lsof fake")
     raise SystemExit(0)
+forced = int(os.environ.get("FAKE_LSOF_RC", "0"))
+if forced:
+    sys.stderr.write(os.environ.get("FAKE_LSOF_STDERR", "operation not permitted") + "\\n")
+    raise SystemExit(forced)
 mapping = {}
 path = os.environ.get("FAKE_LSOF_MAP")
 if path and os.path.exists(path):
@@ -279,13 +287,20 @@ class Base(unittest.TestCase):
         os.environ["CODEX_HOME"] = str(self.codex_dir)
         os.environ.pop("CODEX_SQLITE_HOME", None)
         os.environ.pop("SESSION_PEERS_ALLOW_UNSOLICITED", None)
+        os.environ.pop("CLAUDE_CODE_MESSAGING_SOCKET", None)
+        os.environ.pop("CLAUDE_CODE_SESSION_ID", None)
         os.environ["SESSION_PEERS_SOCKET_DIR"] = str(self.socks)
         os.environ["SESSION_PEERS_POLL_INTERVAL"] = "0.05"
         os.environ["SESSION_PEERS_LIVENESS_INTERVAL"] = "0.3"
+        os.environ["SESSION_PEERS_ALIAS_REFRESH_INTERVAL"] = "0.6"
         os.environ["PATH"] = str(self.bin)
         os.environ["FAKE_LSOF_MAP"] = str(self.lsof_map)
+        os.environ.pop("FAKE_LSOF_RC", None)
+        os.environ.pop("FAKE_LSOF_STDERR", None)
         os.environ["FAKE_CODEX_LOG"] = str(self.codex_log)
         os.environ["FAKE_PS_LSTART"] = PS_LSTART
+        os.environ.pop("FAKE_PS_RC", None)
+        os.environ.pop("FAKE_PS_STDERR", None)
 
         self._children = []
         self._listeners = []
@@ -297,6 +312,10 @@ class Base(unittest.TestCase):
                 proc.terminate()
             with contextlib.suppress(Exception):
                 proc.wait(timeout=5)
+            for stream in (proc.stdin, proc.stdout, proc.stderr):
+                if stream is not None:
+                    with contextlib.suppress(Exception):
+                        stream.close()
         # Never signal this process or its parent: a test may park its own pid
         # in a pidfile as a stand-in for a running shim.
         mine = {os.getpid(), os.getppid()}
@@ -544,21 +563,36 @@ class TestVersionPin(Base):
 
 class TestTag(Base):
     def test_tag_round_trips_every_field(self):
-        line = peers.build_tag("cc-main", "sess-1", "/tmp/cc-socks/9.sock")
+        line = peers.build_tag(
+            "cc-main", "sess-1", "/tmp/cc-socks/9.sock", "msg-1"
+        )
         self.assertEqual(
-            line, "[session-peers from=@cc-main sid=sess-1 reply=uds:/tmp/cc-socks/9.sock]"
+            line,
+            "[session-peers from=@cc-main sid=sess-1 mid=msg-1 "
+            "reply=uds:/tmp/cc-socks/9.sock]",
         )
         tag, body = peers.parse_tag(line + "\nhello there")
         self.assertEqual(tag["from"], "cc-main")
         self.assertEqual(tag["sid"], "sess-1")
+        self.assertEqual(tag["mid"], "msg-1")
         self.assertEqual(tag["reply"], "/tmp/cc-socks/9.sock")
         self.assertEqual(body, "hello there")
 
     def test_tag_absent_fields_render_and_parse_as_none(self):
         line = peers.build_tag(None, None, None)
-        self.assertEqual(line, "[session-peers from=@- sid=- reply=-]")
+        self.assertEqual(line, "[session-peers from=@- sid=- mid=- reply=-]")
         tag, body = peers.parse_tag(line + "\nbody")
-        self.assertEqual(tag, {"from": None, "sid": None, "reply": None})
+        self.assertEqual(
+            tag, {"from": None, "sid": None, "mid": None, "reply": None}
+        )
+        self.assertEqual(body, "body")
+
+    def test_tag_parser_accepts_the_pre_message_id_shape(self):
+        old = "[session-peers from=@cc-main sid=s1 reply=uds:/tmp/cc-socks/1.sock]"
+        tag, body = peers.parse_tag(old + "\nbody")
+        self.assertEqual(tag["from"], "cc-main")
+        self.assertEqual(tag["sid"], "s1")
+        self.assertIsNone(tag["mid"])
         self.assertEqual(body, "body")
 
     def test_untagged_text_is_returned_untouched(self):
@@ -580,6 +614,11 @@ class TestTag(Base):
         tag, _body = peers.parse_tag(line + "\nx")
         self.assertEqual(tag["from"], "two_words")
         self.assertEqual(tag["sid"], "sess_2")
+
+    def test_a_correlation_id_cannot_consume_the_message_budget(self):
+        line = peers.build_tag("cc", "s1", "/tmp/cc-socks/1.sock", "x" * 1000)
+        tag, _body = peers.parse_tag(line + "\nbody")
+        self.assertEqual(len(tag["mid"]), peers.MAX_TAG_FIELD_CHARS)
 
 
 class TestFrames(Base):
@@ -730,12 +769,26 @@ class TestRegistry(Base):
         self.write_record(dead, "cc-dead", "s1", str(self.socks / "2.sock"))
         self.assertEqual(peers.live_claude_records(), [])
 
-    def test_a_record_without_procstart_is_still_read(self):
+    def test_a_record_without_procstart_is_unverified(self):
         rec = self.write_record(os.getpid(), "cc-lenient", "s1", str(self.socks / "1.sock"))
         path = self.sessions / ("%d.json" % os.getpid())
         rec.pop("procStart")
         path.write_text(json.dumps(rec))
-        self.assertEqual([r["name"] for r in peers.live_claude_records()], ["cc-lenient"])
+        self.assertEqual(peers.live_claude_records(), [])
+        self.assertEqual(
+            [r["name"] for r in peers.unverified_claude_records()], ["cc-lenient"]
+        )
+
+    def test_a_blocked_process_probe_is_unverified_not_dead(self):
+        self.write_record(os.getpid(), "cc-main", "s1", str(self.socks / "1.sock"))
+        os.environ["FAKE_PS_RC"] = "126"
+        self.assertEqual(peers.live_claude_records(), [])
+        self.assertEqual(
+            [r["name"] for r in peers.unverified_claude_records()], ["cc-main"]
+        )
+        self.assertEqual(
+            peers.record_liveness(peers.read_claude_records()[0]), "unverified"
+        )
 
     def test_a_corrupt_record_is_skipped_not_fatal(self):
         (self.sessions / "999999.json").write_text("{not json")
@@ -924,6 +977,24 @@ class TestCodexDiscovery(Base):
         threads, _ok = peers.codex_threads(check_live=False)
         self.assertEqual(threads[0]["name"], "from-index")
 
+    def test_the_session_index_overrides_a_stale_database_name(self):
+        rollout = self.make_rollout("index-wins.jsonl")
+        tid = "t-index-wins"
+        self.make_state_db(
+            [{"id": tid, "name": "old-name", "rollout_path": str(rollout)}]
+        )
+        (self.codex_dir / "session_index.jsonl").write_text(
+            json.dumps(
+                {
+                    "id": tid,
+                    "thread_name": "new-name",
+                    "updated_at": "2026-09-09T12:00:00Z",
+                }
+            )
+            + "\n"
+        )
+        self.assertEqual(peers.codex_threads(check_live=False)[0][0]["name"], "new-name")
+
     def test_an_unknown_schema_degrades_with_a_warning_not_a_traceback(self):
         self.make_state_db([], filename="state_1.sqlite", good=False)
         err = io.StringIO()
@@ -971,6 +1042,21 @@ class TestCodexDiscovery(Base):
         with contextlib.redirect_stderr(err):
             self.assertEqual(peers.lsof_holders(["/x"]), {})
         self.assertIn("lsof", err.getvalue())
+
+    def test_a_blocked_lsof_probe_is_unverified_not_dead(self):
+        tid, rollout = self.one_thread(name="codex-uzi")
+        os.environ["FAKE_LSOF_RC"] = "1"
+        os.environ["FAKE_LSOF_STDERR"] = "operation not permitted"
+        with contextlib.redirect_stderr(io.StringIO()):
+            thread = peers.codex_threads()[0][0]
+            held = peers.thread_is_held(str(rollout))
+            with self.assertRaises(peers.ResolveError) as ctx:
+                peers.resolve_thread("codex-uzi")
+        self.assertEqual(thread["id"], tid)
+        self.assertIsNone(thread["live"])
+        self.assertIn("operation not permitted", thread["liveness_error"])
+        self.assertEqual(held, (None, None))
+        self.assertIn("liveness is unavailable", str(ctx.exception))
 
 
 class TestResolveThread(Base):
@@ -1276,6 +1362,31 @@ class TestSendToCodex(Base):
         self.assertEqual(body, "hello")
         self.assertIn("queued to", out)
 
+    def test_send_infers_the_claude_sender_from_its_exported_socket(self):
+        tid, _rollout = self.one_thread()
+        listener, rec = self.add_listener(name="cc-main", session_id="s1")
+        os.environ["CLAUDE_CODE_MESSAGING_SOCKET"] = listener.path
+        os.environ["CLAUDE_CODE_SESSION_ID"] = "possibly-stale-id"
+
+        rc, _out, _err = self.cli(
+            "send", "--to", "codex:%s" % tid, "--message", "hello"
+        )
+
+        self.assertEqual(rc, 0)
+        tag, body = peers.parse_tag(self.queue_calls()[0][4])
+        self.assertEqual(tag["from"], "cc-main")
+        self.assertEqual(tag["sid"], rec["sessionId"])
+        self.assertEqual(tag["reply"], listener.path)
+        self.assertEqual(body, "hello")
+
+    def test_send_warns_when_no_sender_identity_is_available(self):
+        tid, _rollout = self.one_thread()
+        rc, _out, err = self.cli(
+            "send", "--to", "codex:%s" % tid, "--message", "hello"
+        )
+        self.assertEqual(rc, 0)
+        self.assertIn("sender identity absent", err)
+
     def test_send_resolves_a_name_to_its_uuid(self):
         tid, _r = self.one_thread(name="codex-uzi")
         rc, _out, _err = self.cli("send", "--to", "codex:codex-uzi", "--message", "hi")
@@ -1373,6 +1484,27 @@ class TestSendToClaude(Base):
         self.assertIn("Message from Codex thread", frame["message"]["content"])
         self.assertNotIn("from", frame)
         self.assertIn("sent to cc-main", out)
+
+    def test_send_reaches_a_session_by_stable_uuid(self):
+        listener, rec = self.add_listener(
+            name="cc-main", session_id=str(uuidlib.uuid4())
+        )
+        rc, out, _err = self.cli(
+            "send", "--to", "cc:%s" % rec["sessionId"], "--message", "hello"
+        )
+        self.assertEqual(rc, 0)
+        self.assertIsNotNone(wait_for(lambda: listener.of_type("user")))
+        self.assertIn(rec["sessionId"], out)
+
+    def test_send_names_an_unavailable_liveness_probe(self):
+        self.add_listener(name="cc-main")
+        os.environ["FAKE_PS_RC"] = "126"
+        rc, _out, err = self.cli(
+            "send", "--to", "cc:cc-main", "--message", "hello"
+        )
+        self.assertEqual(rc, 1)
+        self.assertIn("process-start probe is unavailable", err)
+        self.assertIn("host permission", err)
 
     def test_send_uses_the_wrapper_when_the_thread_has_a_shim(self):
         listener, _rec = self.add_listener(name="cc-main")
@@ -1545,6 +1677,145 @@ class TestRegistration(Base):
         self.assertEqual(state["budgets"], {})
 
 
+class TestGarbageCollection(Base):
+    def make_stale_bridge_thread(self, live=False):
+        tid = str(uuidlib.uuid4())
+        rollout = self.make_rollout("%s-rollout.jsonl" % tid)
+        old = time.time() - 8 * 86400
+        self.make_state_db(
+            [
+                {
+                    "id": tid,
+                    "name": "old-peer",
+                    "rollout_path": str(rollout),
+                    "updated_at": old,
+                }
+            ]
+        )
+        if live:
+            self.set_holder(rollout)
+        peers.write_registered(
+            {
+                tid: {
+                    "name": "old-peer",
+                    "registered_at": datetime.fromtimestamp(
+                        old, timezone.utc
+                    ).isoformat(),
+                }
+            }
+        )
+        peers.write_json_atomic(
+            peers.thread_state_path(tid),
+            {
+                "thread_id": tid,
+                "name": "old-peer",
+                "updated_at": datetime.fromtimestamp(old, timezone.utc).isoformat(),
+            },
+        )
+        for path in (
+            peers.thread_state_path(tid),
+            peers.thread_log_path(tid),
+            peers.thread_pid_path(tid),
+            peers.budget_reset_path(tid),
+        ):
+            pathlib.Path(path).touch()
+            os.utime(path, (old, old))
+        return tid, rollout
+
+    def test_gc_prunes_only_stale_bridge_metadata(self):
+        tid, rollout = self.make_stale_bridge_thread()
+        old = time.time() - 8 * 86400
+        shared_paths = (
+            peers.registered_path(),
+            os.path.join(peers.state_dir(), "reconcile.lock"),
+            os.path.join(peers.state_dir(), "session-hook.log"),
+        )
+        pathlib.Path(shared_paths[1]).write_text("shared lock sentinel")
+        pathlib.Path(shared_paths[2]).write_text("shared log sentinel")
+        for path in shared_paths:
+            os.utime(path, (old, old))
+
+        removed = peers.gc_bridge_state(days=7, verbose=False)
+        self.assertEqual(removed, [tid])
+        self.assertNotIn(tid, peers.read_registered())
+        for path in (
+            peers.thread_state_path(tid),
+            peers.thread_log_path(tid),
+            peers.thread_pid_path(tid),
+            peers.budget_reset_path(tid),
+        ):
+            self.assertFalse(os.path.exists(path), path)
+        self.assertTrue(rollout.exists(), "GC touched a Codex rollout")
+        for path in shared_paths:
+            self.assertTrue(os.path.exists(path), path)
+        self.assertEqual(
+            pathlib.Path(shared_paths[1]).read_text(), "shared lock sentinel"
+        )
+        self.assertEqual(
+            pathlib.Path(shared_paths[2]).read_text(), "shared log sentinel"
+        )
+
+    def test_gc_dry_run_changes_nothing(self):
+        tid, _rollout = self.make_stale_bridge_thread()
+        removed = peers.gc_bridge_state(days=7, dry_run=True, verbose=False)
+        self.assertEqual(removed, [tid])
+        self.assertIn(tid, peers.read_registered())
+        self.assertTrue(os.path.exists(peers.thread_state_path(tid)))
+
+    def test_gc_never_prunes_a_live_thread(self):
+        tid, _rollout = self.make_stale_bridge_thread(live=True)
+        self.assertEqual(peers.gc_bridge_state(days=7, verbose=False), [])
+        self.assertIn(tid, peers.read_registered())
+
+    def test_gc_uses_latest_activity_not_registration_age(self):
+        tid, _rollout = self.make_stale_bridge_thread()
+        pathlib.Path(peers.thread_log_path(tid)).touch()
+        self.assertEqual(peers.gc_bridge_state(days=7, verbose=False), [])
+        self.assertIn(tid, peers.read_registered())
+
+    def test_gc_rechecks_recency_after_taking_the_lock(self):
+        tid, _rollout = self.make_stale_bridge_thread()
+        original = peers.reconcile_lock
+
+        @contextlib.contextmanager
+        def activity_during_lock(*args, **kwargs):
+            with original(*args, **kwargs) as acquired:
+                pathlib.Path(peers.thread_log_path(tid)).touch()
+                yield acquired
+
+        peers.reconcile_lock = activity_during_lock
+        try:
+            removed = peers.gc_bridge_state(days=7, verbose=False)
+        finally:
+            peers.reconcile_lock = original
+        self.assertEqual(removed, [])
+        self.assertIn(tid, peers.read_registered())
+
+    def test_gc_fails_closed_when_thread_discovery_is_unknown(self):
+        tid = str(uuidlib.uuid4())
+        peers.write_registered(
+            {tid: {"name": "old", "registered_at": "2020-01-01T00:00:00Z"}}
+        )
+        self.make_state_db([], filename="state_1.sqlite", good=False)
+        self.assertEqual(peers.gc_bridge_state(days=7, verbose=False), [])
+        self.assertIn(tid, peers.read_registered())
+
+    def test_gc_fails_closed_when_lsof_is_blocked(self):
+        tid, _rollout = self.make_stale_bridge_thread()
+        os.environ["FAKE_LSOF_RC"] = "126"
+        with contextlib.redirect_stderr(io.StringIO()):
+            removed = peers.gc_bridge_state(days=7, verbose=False)
+        self.assertEqual(removed, [])
+        self.assertIn(tid, peers.read_registered())
+        self.assertTrue(os.path.exists(peers.thread_state_path(tid)))
+
+    def test_gc_rejects_a_negative_retention(self):
+        self.make_state_db([])
+        rc, _out, err = self.cli("gc", "--days", "-1")
+        self.assertEqual(rc, 2)
+        self.assertIn("zero or greater", err)
+
+
 class TestList(Base):
     def test_list_json_reports_both_sides(self):
         self.write_record(os.getpid(), "cc-main", "s1", str(self.socks / "1.sock"))
@@ -1559,11 +1830,43 @@ class TestList(Base):
         self.assertTrue(payload["codex_schema_recognised"])
         self.assertEqual(payload["socket_dir"], str(self.socks))
 
+    def test_list_reports_unverified_records_separately(self):
+        self.write_record(os.getpid(), "cc-main", "s1", str(self.socks / "1.sock"))
+        os.environ["FAKE_PS_RC"] = "126"
+        _rc, out, _err = self.cli("list", "--json")
+        payload = json.loads(out)
+        self.assertEqual(payload["claude"], [])
+        self.assertEqual(
+            [record["name"] for record in payload["claude_unverified"]],
+            ["cc-main"],
+        )
+
+    def test_list_reports_lsof_blocked_codex_threads_separately(self):
+        tid, _rollout = self.one_thread(name="codex-uzi")
+        os.environ["FAKE_LSOF_RC"] = "126"
+        with contextlib.redirect_stderr(io.StringIO()):
+            _rc, out, _err = self.cli("list", "--json")
+        payload = json.loads(out)
+        self.assertEqual(payload["codex"], [])
+        self.assertEqual(payload["codex_unverified"][0]["id"], tid)
+        self.assertIn(
+            "operation not permitted",
+            payload["codex_unverified"][0]["liveness_error"],
+        )
+
     def test_list_hides_a_thread_no_process_holds(self):
         self.one_thread()
         self.clear_holders()
         _rc, out, _err = self.cli("list", "--json")
         self.assertEqual(json.loads(out)["codex"], [])
+
+    def test_list_reports_the_safe_alias_for_an_unusable_title(self):
+        tid, _rollout = self.one_thread(name="Review PR 12")
+        _rc, out, _err = self.cli("list", "--json")
+        thread = json.loads(out)["codex"][0]
+        self.assertEqual(thread["id"], tid)
+        self.assertEqual(thread["name"], "Review PR 12")
+        self.assertEqual(thread["peer_name"], "codex-%s" % tid[:8])
 
     def test_list_human_output_names_the_degraded_mode(self):
         self.make_state_db([], filename="state_1.sqlite", good=False)
@@ -1604,6 +1907,7 @@ class TestShimInbound(ShimBase):
         tag, body = peers.parse_tag(calls[0][4])
         self.assertEqual(tag["from"], "cc-main")
         self.assertEqual(tag["sid"], "s1")
+        self.assertEqual(tag["mid"], "m-1")
         self.assertEqual(tag["reply"], listener.path)
         self.assertEqual(body, "do the thing")
         self.assertIn("s1", shim.contacts)
@@ -1708,6 +2012,20 @@ class TestShimInbound(ShimBase):
         status = wait_for(lambda: listener.of_type("control", "peer_message_status"))
         self.assertEqual(status[0]["status"], "failed")
 
+    def test_an_unverified_thread_refuses_to_queue_but_keeps_the_shim(self):
+        shim, _tid, _rollout = self.make_shim()
+        listener, _rec = self.add_listener()
+        os.environ["FAKE_LSOF_RC"] = "126"
+        with contextlib.redirect_stderr(io.StringIO()):
+            shim._handle_line(
+                json.dumps(self.inbound_frame("hi", listener.path))
+            )
+        self.assertEqual(self.queue_calls(), [])
+        self.assertFalse(shim.stop.is_set())
+        status = wait_for(lambda: listener.of_type("control", "peer_message_status"))
+        self.assertEqual(status[0]["status"], "failed")
+        self.assertIn("liveness probe", status[0]["detail"])
+
     def test_a_client_with_a_foreign_uid_is_refused(self):
         shim, _tid, _rollout = self.make_shim()
         listener, _rec = self.add_listener()
@@ -1755,8 +2073,13 @@ class TestShimInbound(ShimBase):
 
 class TestShimReplies(ShimBase):
     def _turn(self, tid_socket, text="the answer", sid="s1", outcome="complete",
-              turn_id="t1"):
-        tag = {"from": "cc-main", "sid": sid, "reply": tid_socket}
+              turn_id="t1", msg_id="m-1"):
+        tag = {
+            "from": "cc-main",
+            "sid": sid,
+            "mid": msg_id,
+            "reply": tid_socket,
+        }
         return peers.Turn(turn_id, "ping", tag, outcome,
                           text if outcome == "complete" else None)
 
@@ -1870,6 +2193,25 @@ class TestShimReplies(ShimBase):
         self.assertEqual(len(listener.of_type("user")), peers.REPLY_BUDGET)
         self.assertIn("reply budget", err.getvalue())
 
+    def test_the_fourth_reply_notifies_the_requesting_peer(self):
+        shim, _tid, _rollout = self.make_shim()
+        listener, _rec = self.add_listener(name="cc-main", session_id="s1")
+        for i in range(peers.REPLY_BUDGET + 1):
+            shim._handle_turn_end(
+                self._turn(
+                    listener.path,
+                    turn_id="t%d" % i,
+                    msg_id="m%d" % i,
+                )
+            )
+        statuses = wait_for(
+            lambda: listener.of_type("control", "peer_message_status")
+        )
+        self.assertEqual(len(listener.of_type("user")), peers.REPLY_BUDGET)
+        self.assertEqual(statuses[-1]["status"], "failed")
+        self.assertEqual(statuses[-1]["orig_msg_id"], "m3")
+        self.assertIn("loop guard", statuses[-1]["detail"])
+
     def test_the_budget_counts_an_at_name_reply_too(self):
         shim, _tid, _rollout = self.make_shim()
         listener, _rec = self.add_listener(name="cc-other", session_id="s2")
@@ -1877,8 +2219,20 @@ class TestShimReplies(ShimBase):
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
             for i in range(peers.REPLY_BUDGET + 1):
+                tag = {
+                    "from": "cc-other",
+                    "sid": "s2",
+                    "mid": "m%d" % i,
+                    "reply": listener.path,
+                }
                 shim._handle_turn_end(
-                    peers.Turn("t%d" % i, "p", None, "complete", "@cc-other again")
+                    peers.Turn(
+                        "t%d" % i,
+                        "p",
+                        tag,
+                        "complete",
+                        "@cc-other again",
+                    )
                 )
                 time.sleep(0.05)
         time.sleep(0.2)
@@ -1889,6 +2243,8 @@ class TestShimReplies(ShimBase):
         shim, tid, _rollout = self.make_shim()
         listener, _rec = self.add_listener(name="cc-main", session_id="s1")
         shim.budgets["s1"] = peers.REPLY_BUDGET
+        shim.budget_sender_sid = "s1"
+        shim.budget_last_at = time.time()
         with contextlib.redirect_stderr(io.StringIO()):
             shim._handle_turn_end(self._turn(listener.path, turn_id="t-blocked"))
         time.sleep(0.2)
@@ -1897,6 +2253,57 @@ class TestShimReplies(ShimBase):
         shim._consume_budget_marker()
         shim._handle_turn_end(self._turn(listener.path, turn_id="t-after"))
         self.assertIsNotNone(wait_for(lambda: listener.of_type("user")))
+
+    def test_a_legacy_lifetime_counter_starts_a_fresh_sequence(self):
+        shim, _tid, _rollout = self.make_shim()
+        listener, _ = self.add_listener(name="cc-main", session_id="s1")
+        shim.budgets["s1"] = peers.REPLY_BUDGET
+        self.assertIsNone(shim.budget_sender_sid)
+        shim._handle_turn_end(self._turn(listener.path, turn_id="new-sequence"))
+        self.assertIsNotNone(wait_for(lambda: listener.of_type("user")))
+        self.assertEqual(shim.budgets["s1"], 1)
+
+    def test_an_intervening_peer_resets_the_consecutive_budget(self):
+        shim, _tid, _rollout = self.make_shim()
+        first, _ = self.add_listener(name="cc-first", session_id="s1")
+        second, _ = self.add_listener(
+            name="cc-second", session_id="s2", pid=os.getppid()
+        )
+        for i in range(peers.REPLY_BUDGET):
+            shim._handle_turn_end(
+                self._turn(first.path, sid="s1", turn_id="a%d" % i)
+            )
+        shim._handle_turn_end(
+            self._turn(second.path, sid="s2", turn_id="other")
+        )
+        shim._handle_turn_end(
+            self._turn(first.path, sid="s1", turn_id="after")
+        )
+        self.assertTrue(wait_for(lambda: len(first.of_type("user")) == 4))
+
+    def test_a_direct_codex_turn_resets_the_consecutive_budget(self):
+        shim, _tid, _rollout = self.make_shim()
+        listener, _ = self.add_listener(name="cc-main", session_id="s1")
+        for i in range(peers.REPLY_BUDGET):
+            shim._handle_turn_end(
+                self._turn(listener.path, turn_id="a%d" % i)
+            )
+        shim._handle_turn_end(
+            peers.Turn("direct", "typed", None, "complete", "local answer")
+        )
+        shim._handle_turn_end(self._turn(listener.path, turn_id="after"))
+        self.assertTrue(wait_for(lambda: len(listener.of_type("user")) == 4))
+
+    def test_the_budget_resets_after_the_idle_window(self):
+        shim, _tid, _rollout = self.make_shim()
+        listener, _ = self.add_listener(name="cc-main", session_id="s1")
+        for i in range(peers.REPLY_BUDGET):
+            shim._handle_turn_end(
+                self._turn(listener.path, turn_id="a%d" % i)
+            )
+        shim.budget_last_at = time.time() - shim.reply_budget_window - 1
+        shim._handle_turn_end(self._turn(listener.path, turn_id="after"))
+        self.assertTrue(wait_for(lambda: len(listener.of_type("user")) == 4))
 
     def test_a_reply_carrying_a_tag_line_has_it_stripped(self):
         shim, _tid, _rollout = self.make_shim()
@@ -1969,9 +2376,16 @@ class TestDeliveryLog(ShimBase):
         shim, _tid, _rollout = self.make_shim()
         listener, _rec = self.add_listener(name="cc-main", session_id="s1")
         shim.budgets["s1"] = peers.REPLY_BUDGET
+        shim.budget_sender_sid = "s1"
+        shim.budget_last_at = time.time()
         turn = peers.Turn(
             "t-43", "ping",
-            {"from": "cc-main", "sid": "s1", "reply": listener.path},
+            {
+                "from": "cc-main",
+                "sid": "s1",
+                "mid": "m-43",
+                "reply": listener.path,
+            },
             "complete", "answer", None,
         )
         err = io.StringIO()
@@ -2090,6 +2504,108 @@ class TestShimRecord(ShimBase):
         shim = peers.Shim(peers.resolve_thread(tid))
         self.assertEqual(shim.name, "codex-%s" % tid[:8])
 
+    def test_an_unusable_thread_title_gets_a_stable_fallback(self):
+        shim, tid, _rollout = self.make_shim(name="Review PR 12")
+        self.assertEqual(shim.name, "codex-%s" % tid[:8])
+
+    def test_a_conflicting_thread_title_gets_a_stable_fallback(self):
+        self.add_listener(name="codex-uzi", pid=os.getppid())
+        shim, tid, _rollout = self.make_shim(name="codex-uzi")
+        self.assertEqual(shim.name, "codex-%s" % tid[:8])
+
+    def test_duplicate_codex_titles_use_a_deterministic_uuid_tiebreak(self):
+        lower = "11111111-1111-4111-8111-111111111111"
+        higher = "22222222-2222-4222-8222-222222222222"
+        first = self.make_rollout("first.jsonl")
+        second = self.make_rollout("second.jsonl")
+        self.make_state_db(
+            [
+                {
+                    "id": higher,
+                    "name": "shared",
+                    "rollout_path": str(second),
+                },
+                {
+                    "id": lower,
+                    "name": "shared",
+                    "rollout_path": str(first),
+                },
+            ]
+        )
+        self.set_holder(first)
+        self.set_holder(second)
+        lower_shim = peers.Shim(peers.resolve_thread(lower))
+        higher_shim = peers.Shim(peers.resolve_thread(higher))
+        self.assertEqual(lower_shim.name, "shared")
+        self.assertEqual(higher_shim.name, "codex-%s" % higher[:8])
+        lower_shim._refresh_name()
+        higher_shim._refresh_name()
+        self.assertEqual(lower_shim.name, "shared")
+        self.assertEqual(higher_shim.name, "codex-%s" % higher[:8])
+
+    def test_a_rename_refreshes_the_record_state_and_registration(self):
+        shim, tid, _rollout = self.make_shim(name="codex-old")
+        peers.register_thread({"id": tid, "name": "codex-old"})
+        shim._write_record()
+        before = shim.record()["nameSince"]
+        conn = sqlite3.connect(peers.find_state_db())
+        conn.execute("UPDATE threads SET name = ? WHERE id = ?", ("codex-new", tid))
+        conn.commit()
+        conn.close()
+        time.sleep(0.01)
+
+        shim._refresh_name()
+
+        rec = peers.read_json(shim.record_path)
+        state = peers.read_json(peers.thread_state_path(tid))
+        self.assertEqual(shim.name, "codex-new")
+        self.assertEqual(rec["name"], "codex-new")
+        self.assertGreater(rec["nameSince"], before)
+        self.assertEqual(state["name"], "codex-new")
+        self.assertEqual(state["thread_name"], "codex-new")
+        self.assertEqual(peers.read_registered()[tid]["name"], "codex-new")
+
+    def test_alias_refresh_runs_less_often_than_liveness(self):
+        shim, _tid, _rollout = self.make_shim()
+        shim.liveness_interval = 5.0
+        shim.alias_refresh_interval = 30.0
+        calls = []
+        shim._check_liveness = lambda: calls.append("liveness")
+        shim._refresh_name = lambda: calls.append("alias")
+
+        last_live, last_alias = shim._poll_maintenance(5.0, 0.0, 0.0)
+        self.assertEqual(calls, ["liveness"])
+        self.assertEqual((last_live, last_alias), (5.0, 0.0))
+
+        last_live, last_alias = shim._poll_maintenance(
+            30.0, last_live, last_alias
+        )
+        self.assertEqual(calls, ["liveness", "liveness", "alias"])
+        self.assertEqual((last_live, last_alias), (30.0, 30.0))
+
+    def test_alias_refresh_interval_is_configurable_and_positive(self):
+        shim, tid, _rollout = self.make_shim()
+        self.assertEqual(shim.alias_refresh_interval, 0.6)
+        os.environ.pop("SESSION_PEERS_ALIAS_REFRESH_INTERVAL")
+        default = peers.Shim(peers.resolve_thread(tid))
+        self.assertEqual(default.alias_refresh_interval, 30.0)
+        os.environ["SESSION_PEERS_ALIAS_REFRESH_INTERVAL"] = "0"
+        fallback = peers.Shim(peers.resolve_thread(tid))
+        self.assertEqual(fallback.alias_refresh_interval, 30.0)
+
+    def test_a_blocked_lsof_probe_does_not_terminate_a_running_shim(self):
+        shim, _tid, _rollout = self.make_shim()
+        os.environ["FAKE_LSOF_RC"] = "126"
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            shim._check_liveness()
+            shim._check_liveness()
+            os.environ.pop("FAKE_LSOF_RC")
+            shim._check_liveness()
+        self.assertFalse(shim.stop.is_set())
+        self.assertEqual(err.getvalue().count("liveness is unverified"), 1)
+        self.assertIn("liveness probe recovered", err.getvalue())
+
     def test_the_record_is_rewritten_at_most_twice(self):
         shim, _tid, _rollout = self.make_shim()
         shim._write_record()
@@ -2128,13 +2644,17 @@ class TestShimEndToEnd(Base):
     def start_shim(self, tid):
         log_path = self.root / "shim.log"
         self._log_path = log_path
-        proc = subprocess.Popen(
-            [sys.executable, str(PEERS), "shim", "--thread", tid],
-            stdin=subprocess.DEVNULL,
-            stdout=open(str(log_path), "a"),
-            stderr=subprocess.STDOUT,
-            env=dict(os.environ),
-        )
+        logfh = open(str(log_path), "a")
+        try:
+            proc = subprocess.Popen(
+                [sys.executable, str(PEERS), "shim", "--thread", tid],
+                stdin=subprocess.DEVNULL,
+                stdout=logfh,
+                stderr=subprocess.STDOUT,
+                env=dict(os.environ),
+            )
+        finally:
+            logfh.close()
         self._children.append(proc)
         rec = wait_for(lambda: (self.shim_records() or [None])[0])
         self.assertIsNotNone(rec, "the shim never wrote its record: %s" % self.shim_log())
@@ -2345,6 +2865,26 @@ class TestSessionHook(Base):
         self.assertEqual(len(self.shim_records()), 1, self.shim_records())
         self.assertEqual(peers.shim_pid(tid), pid)
 
+    def test_auto_attach_exposes_the_triggering_uuid_without_persisting_it(self):
+        tid, _rollout = self.one_thread(name="codex-hook")
+        proc = self.spawn("session-hook", "--auto-attach")
+        out, _ = proc.communicate(
+            json.dumps({"source": "startup", "session_id": tid}), timeout=20
+        )
+        self.assertEqual(out.strip(), "{}")
+        self.assertIsNotNone(wait_for(lambda: peers.shim_pid(tid)))
+        self.assertNotIn(tid, peers.read_registered())
+
+    def test_auto_attach_ignores_compaction(self):
+        tid, _rollout = self.one_thread(name="codex-hook")
+        proc = self.spawn("session-hook", "--auto-attach")
+        out, _ = proc.communicate(
+            json.dumps({"source": "compact", "session_id": tid}), timeout=20
+        )
+        self.assertEqual(out.strip(), "{}")
+        time.sleep(0.5)
+        self.assertIsNone(peers.shim_pid(tid))
+
 
 class TestInstallHook(Base):
     EXISTING = {
@@ -2371,6 +2911,7 @@ class TestInstallHook(Base):
         self.assertEqual(len(commands), 2)
         self.assertTrue(commands[1].endswith("peers.py session-hook"))
         self.assertTrue(commands[1].startswith("python3 "))
+        self.assertEqual(data["SessionStart"][1]["matcher"], "startup|resume")
         self.assertEqual(
             [h["command"] for e in data["Stop"] for h in e["hooks"]],
             ["third-party-stop"],
@@ -2399,7 +2940,88 @@ class TestInstallHook(Base):
         self.assertIn("hooks", data)
         self.assertEqual(len(data["hooks"]["SessionStart"]), 1)
         self.assertEqual(data["hooks"]["SessionStart"][0]["hooks"][0]["timeout"], 10)
+        self.assertEqual(
+            data["hooks"]["SessionStart"][0]["matcher"], "startup|resume"
+        )
         self.assertNotIn("SessionStart", set(data) - {"hooks"})
+
+    def test_auto_attach_installs_the_uuid_aware_hook(self):
+        rc, _out, _err = self.cli("install-hook", "--auto-attach")
+        self.assertEqual(rc, 0)
+        data = json.loads(self.hooks_path().read_text())
+        command = data["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+        self.assertTrue(command.endswith("peers.py session-hook --auto-attach"))
+
+    def test_reinstall_can_upgrade_manual_reconcile_to_auto_attach(self):
+        self.cli("install-hook")
+        rc, out, _err = self.cli("install-hook", "--auto-attach")
+        self.assertEqual(rc, 0)
+        self.assertIn("updated", out)
+        data = json.loads(self.hooks_path().read_text())
+        self.assertEqual(len(data["hooks"]["SessionStart"]), 1)
+        command = data["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+        self.assertTrue(command.endswith("--auto-attach"))
+
+    def test_upgrade_preserves_a_sibling_handler_in_the_same_group(self):
+        grouped = {
+            "hooks": {
+                "SessionStart": [
+                    {
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": peers.hook_command(),
+                                "timeout": 10,
+                            },
+                            {"type": "command", "command": "third-party"},
+                        ]
+                    }
+                ]
+            }
+        }
+        self.hooks_path().write_text(json.dumps(grouped))
+        self.cli("install-hook", "--auto-attach")
+        entries = json.loads(self.hooks_path().read_text())["hooks"]["SessionStart"]
+        commands = [
+            hook["command"] for entry in entries for hook in entry["hooks"]
+        ]
+        self.assertEqual(commands.count("third-party"), 1)
+        self.assertEqual(commands.count(peers.hook_command(auto_attach=True)), 1)
+
+    def test_same_mode_shared_group_is_already_installed(self):
+        grouped = {
+            "hooks": {
+                "SessionStart": [
+                    {
+                        "matcher": "startup|resume",
+                        "hooks": [
+                            peers.hook_entry()["hooks"][0],
+                            {"type": "command", "command": "third-party"},
+                        ],
+                    }
+                ]
+            }
+        }
+        original = json.dumps(grouped)
+        self.hooks_path().write_text(original)
+        rc, out, _err = self.cli("install-hook")
+        self.assertEqual(rc, 0)
+        self.assertIn("already installed", out)
+        self.assertEqual(self.hooks_path().read_text(), original)
+        self.assertEqual(list(self.codex_dir.glob("hooks.json.*bak*")), [])
+
+    def test_mode_upgrade_preserves_extra_entry_and_handler_keys(self):
+        entry = peers.hook_entry()
+        entry["description"] = "keep-entry"
+        entry["hooks"][0]["statusMessage"] = "keep-handler"
+        self.hooks_path().write_text(
+            json.dumps({"hooks": {"SessionStart": [entry]}})
+        )
+        self.cli("install-hook", "--auto-attach")
+        updated = json.loads(self.hooks_path().read_text())["hooks"]["SessionStart"][0]
+        self.assertEqual(updated["description"], "keep-entry")
+        self.assertEqual(updated["hooks"][0]["statusMessage"], "keep-handler")
+        self.assertTrue(updated["hooks"][0]["command"].endswith("--auto-attach"))
 
     def test_the_nested_hooks_shape_is_handled_too(self):
         self.hooks_path().write_text(json.dumps({"hooks": self.EXISTING}))
@@ -2408,35 +3030,12 @@ class TestInstallHook(Base):
         self.assertIn("hooks", data)
         self.assertEqual(len(data["hooks"]["SessionStart"]), 2)
 
-    @unittest.skipUnless(HAS_TOMLLIB, "needs tomllib")
-    def test_features_hooks_is_appended_without_touching_other_lines(self):
-        (self.codex_dir / "config.toml").write_text(
-            'model = "gpt-5"\n\n[tui]\nstatus_line = ["thread-title"]\n'
-        )
-        self.cli("install-hook")
-        text = (self.codex_dir / "config.toml").read_text()
-        self.assertIn('model = "gpt-5"', text)
-        self.assertIn('status_line = ["thread-title"]', text)
-        self.assertIn("[features]", text)
-        self.assertIn("hooks = true", text)
-
-    @unittest.skipUnless(HAS_TOMLLIB, "needs tomllib")
-    def test_an_existing_features_table_gets_the_key_not_a_second_table(self):
-        (self.codex_dir / "config.toml").write_text(
-            '[features]\nweb_search = true\n\n[tui]\nx = 1\n'
-        )
-        self.cli("install-hook")
-        text = (self.codex_dir / "config.toml").read_text()
-        self.assertEqual(text.count("[features]"), 1)
-        self.assertIn("web_search = true", text)
-        lines = text.splitlines()
-        self.assertEqual(lines[lines.index("[features]") + 1], "hooks = true")
-
-    def test_an_already_true_flag_is_left_alone(self):
-        (self.codex_dir / "config.toml").write_text("[features]\nhooks = true\n")
+    def test_installer_never_changes_the_feature_flag(self):
+        config = self.codex_dir / "config.toml"
+        config.write_text("[features]\nhooks = false\n")
         self.cli("install-hook")
         self.assertEqual(
-            (self.codex_dir / "config.toml").read_text(), "[features]\nhooks = true\n"
+            config.read_text(), "[features]\nhooks = false\n"
         )
 
     def test_the_trust_step_is_printed(self):
@@ -2479,6 +3078,8 @@ class TestDoctor(Base):
         self.assertIn("codex-cli 0.153.4", out)
         self.assertIn("codex on PATH", out)
         self.assertIn("lsof on PATH", out)
+        self.assertIn("process-start probe", out)
+        self.assertIn("Unix-socket bind", out)
         self.assertIn(str(self.claude_dir), out)
         self.assertIn(str(self.socks), out)
         self.assertIn("no registered threads", out)
@@ -2519,6 +3120,37 @@ class TestDoctor(Base):
         _rc, out, _err = self.cli("doctor")
         self.assertIn("disabled", out)
 
+    def test_doctor_reports_an_explicit_global_hook_disable(self):
+        self.cli("install-hook", "--auto-attach")
+        (self.codex_dir / "config.toml").write_text(
+            "[features]\nhooks = false\n"
+        )
+        _rc, out, _err = self.cli("doctor")
+        self.assertIn("hooks = false explicitly disables", out)
+        self.assertIn("SessionStart auto-attach entry", out)
+
+    def test_doctor_reports_unset_hooks_as_enabled_by_default(self):
+        self.cli("install-hook")
+        _rc, out, _err = self.cli("doctor")
+        self.assertIn("hooks is unset (enabled by default)", out)
+
+    def test_doctor_names_a_blocked_process_probe(self):
+        os.environ["FAKE_PS_RC"] = "126"
+        os.environ["FAKE_PS_STDERR"] = "operation not permitted"
+        _rc, out, _err = self.cli("doctor")
+        self.assertIn("fail  process-start probe", out)
+        self.assertIn("operation not permitted", out)
+
+    def test_doctor_names_a_blocked_lsof_probe(self):
+        self.one_thread(name="codex-uzi")
+        os.environ["FAKE_LSOF_RC"] = "126"
+        os.environ["FAKE_LSOF_STDERR"] = "operation not permitted"
+        with contextlib.redirect_stderr(io.StringIO()):
+            _rc, out, _err = self.cli("doctor")
+        self.assertIn("fail  Codex liveness probe unavailable", out)
+        self.assertIn("operation not permitted", out)
+        self.assertIn("bridge GC skipped", out)
+
     def test_doctor_survives_an_unknown_codex_schema(self):
         self.make_state_db([], filename="state_1.sqlite", good=False)
         rc, out, _err = self.cli("doctor")
@@ -2556,17 +3188,11 @@ class TestWrapperInjection(Base):
         self.assertIn("not usable as a peer name", err)
         self.assertEqual(peers.read_registered(), {})
 
-    def test_the_shim_command_refuses_a_hostile_name_cleanly(self):
+    def test_a_hostile_title_gets_a_safe_alias_when_the_shim_starts(self):
         tid, _rollout = self.one_thread(name=HOSTILE_NAME)
-        rc, _out, err = self.cli("shim", "--thread", tid)
-        self.assertEqual(rc, 1)
-        self.assertIn("not usable as a peer name", err)
-        self.assertEqual(self.shim_records(), [])
-
-    def test_a_hostile_name_is_refused_when_the_shim_starts(self):
-        tid, _rollout = self.one_thread(name=HOSTILE_NAME)
-        with self.assertRaises(peers.NameError_):
-            peers.Shim(peers.resolve_thread(tid))
+        shim = peers.Shim(peers.resolve_thread(tid))
+        self.assertEqual(shim.name, "codex-%s" % tid[:8])
+        self.assertNotIn("from-mode", shim.record()["name"])
 
     def test_ordinary_names_still_pass(self):
         for name in ("codex-uzi", "uzi.2", "A_b-9", "x"):
@@ -2615,47 +3241,6 @@ class TestWrapperInjection(Base):
         tag, body = peers.parse_tag(line + "\nreal body")
         self.assertEqual(tag["from"], "a_b")
         self.assertEqual(body, "real body")
-
-
-@unittest.skipUnless(HAS_TOMLLIB, "install-hook only edits config.toml with tomllib")
-class TestFeaturesHooksKey(Base):
-    """B3: a duplicate key makes config.toml invalid TOML."""
-
-    def config(self):
-        return self.codex_dir / "config.toml"
-
-    def test_an_existing_false_flag_is_rewritten_not_shadowed(self):
-        self.config().write_text(
-            'model = "gpt-5"\n\n[features]\nhooks = false\nweb_search = true\n'
-        )
-        self.cli("install-hook")
-        text = self.config().read_text()
-        self.assertEqual(text.count("hooks ="), 1)
-        self.assertIn("hooks = true", text)
-        self.assertNotIn("hooks = false", text)
-        self.assertIn("web_search = true", text)
-        self.assertIn('model = "gpt-5"', text)
-        self.assertIs(peers.read_toml_lite(str(self.config()))["features"]["hooks"], True)
-
-    def test_repeated_installs_never_add_a_second_key(self):
-        self.config().write_text("[features]\nhooks = false\n")
-        for _ in range(3):
-            self.cli("install-hook")
-        self.assertEqual(self.config().read_text().count("hooks ="), 1)
-
-    def test_the_config_is_backed_up_before_it_is_rewritten(self):
-        self.config().write_text("[features]\nhooks = false\n")
-        self.cli("install-hook")
-        backups = list(self.codex_dir.glob("config.toml.session-peers-bak-*"))
-        self.assertEqual(len(backups), 1)
-        self.assertIn("hooks = false", backups[0].read_text())
-
-    def test_a_key_in_a_later_table_is_not_mistaken_for_the_features_one(self):
-        self.config().write_text("[features]\nweb_search = true\n\n[tui]\nhooks = 1\n")
-        self.cli("install-hook")
-        lines = self.config().read_text().splitlines()
-        self.assertEqual(lines[lines.index("[features]") + 1], "hooks = true")
-        self.assertIn("hooks = 1", self.config().read_text())
 
 
 class TestSocketDirTrust(Base):
@@ -2963,6 +3548,7 @@ class TestRestartDeliveryWindow(ShimBase):
         )
         self.assertEqual(peers.parse_time(expected), expected)
         self.assertEqual(peers.parse_time(expected * 1000), expected)
+        self.assertEqual(peers.parse_time(str(expected)), expected)
         self.assertIsNone(peers.parse_time("not a time"))
         self.assertIsNone(peers.parse_time(None))
 
@@ -3128,6 +3714,16 @@ class TestAtomicWriteMode(Base):
         self.assertEqual(peers.read_json(path), {"a": 2})
 
 
+class TestDetachedProcessBounds(Base):
+    def test_a_negative_open_max_uses_a_real_fd_ceiling(self):
+        original = peers.os.sysconf
+        peers.os.sysconf = lambda _name: -1
+        try:
+            self.assertEqual(peers.safe_open_max(), 256)
+        finally:
+            peers.os.sysconf = original
+
+
 class TestCachedBoundary(ShimBase):
     """N6: the interrupt answer must not rescan a 194 MiB file per message."""
 
@@ -3156,94 +3752,24 @@ class TestBudgetResetPersistence(ShimBase):
     def test_the_reset_is_written_to_the_state_file(self):
         shim, tid, _rollout = self.make_shim()
         shim.budgets["s1"] = peers.REPLY_BUDGET
+        shim.budget_sender_sid = "s1"
+        shim.budget_last_at = time.time()
         shim._save_state()
         self.cli("budget", "reset", tid)
         with contextlib.redirect_stderr(io.StringIO()):
             shim._consume_budget_marker()
         self.assertEqual(shim.budgets, {})
+        self.assertIsNone(shim.budget_sender_sid)
+        self.assertIsNone(shim.budget_last_at)
         state = peers.read_json(peers.thread_state_path(tid))
         self.assertEqual(state["budgets"], {})
+        self.assertIsNone(state["budget_sender_sid"])
+        self.assertIsNone(state["budget_last_at"])
 
 
 # ==========================================================================
 # PR review round: P1..P9
 # ==========================================================================
-
-
-@unittest.skipUnless(HAS_TOMLLIB, "install-hook only edits config.toml with tomllib")
-class TestTomlHeaderHandling(Base):
-    """P1: a header may carry a trailing comment; a comment is not a header."""
-
-    def config(self):
-        return self.codex_dir / "config.toml"
-
-    def test_a_header_with_a_trailing_comment_is_one_table(self):
-        self.config().write_text('[features] # flags\nweb_search = true\n')
-        self.cli("install-hook")
-        text = self.config().read_text()
-        self.assertEqual(text.count("[features]"), 1)
-        self.assertEqual(text.count("hooks ="), 1)
-        self.assertIn("web_search = true", text)
-        self.assertTrue(peers.features_hooks_valid(text))
-
-    def test_a_commented_out_header_is_not_edited(self):
-        self.config().write_text(
-            "# [features]\n# hooks = false\n\n[features]\nweb_search = true\n"
-        )
-        self.cli("install-hook")
-        text = self.config().read_text()
-        lines = text.splitlines()
-        self.assertEqual(lines[0], "# [features]")
-        self.assertEqual(lines[1], "# hooks = false")
-        self.assertEqual(text.count("hooks = true"), 1)
-        self.assertTrue(peers.features_hooks_valid(text))
-
-    def test_a_trailing_comment_on_a_later_header_still_ends_the_table(self):
-        self.config().write_text(
-            "[features]\nweb_search = true\n[tui] # ui\nhooks = 1\n"
-        )
-        self.cli("install-hook")
-        text = self.config().read_text()
-        lines = text.splitlines()
-        self.assertEqual(lines[lines.index("[features]") + 1], "hooks = true")
-        self.assertIn("hooks = 1", text)
-
-    def test_the_lite_reader_sees_a_header_with_a_comment(self):
-        self.config().write_text('[features] # flags\nhooks = true\n')
-        cfg = peers.read_toml_lite(str(self.config()))
-        self.assertIs(cfg["features"]["hooks"], True)
-        self.assertNotIn("hooks", cfg[""])
-
-    def test_a_config_that_would_not_parse_is_left_alone(self):
-        # R1: refuse rather than write a file Codex cannot read, and say what
-        # to add by hand.
-        broken = "[features]\nhooks = false\nthis line is not toml\n"
-        self.config().write_text(broken)
-        rc, _out, err = self.cli("install-hook")
-        self.assertEqual(rc, 0)
-        self.assertEqual(self.config().read_text(), broken)
-        self.assertIn("does not parse as TOML", err)
-        self.assertIn('add "hooks = true" under [features]', err)
-        self.assertEqual(list(self.codex_dir.glob("config.toml.*bak*")), [])
-        self.assertEqual(list(self.codex_dir.glob("config.toml.tmp.*")), [])
-
-    def test_a_pre_existing_duplicate_key_is_not_valid_toml_so_nothing_is_written(self):
-        # A duplicate key is already invalid TOML, so the parser gate stops
-        # here rather than the line editor guessing which one to keep.
-        duplicated = "[features]\nhooks = false\nhooks = false\n"
-        self.config().write_text(duplicated)
-        self.cli("install-hook")
-        self.assertEqual(self.config().read_text(), duplicated)
-
-    def test_the_line_editor_still_collapses_a_duplicate_it_is_handed(self):
-        # The editor keeps that branch for input the parser never saw; this
-        # pins it directly rather than through a file install-hook refuses.
-        lines = ["[features]", "hooks = false", "web_search = true", "hooks = false"]
-        out, changed = peers._set_features_hooks_lines(lines)
-        self.assertTrue(changed)
-        self.assertEqual([line for line in out if line.startswith("hooks")],
-                         ["hooks = true"])
-        self.assertIn("web_search = true", out)
 
 
 class TestShimOwnershipIsExclusive(Base):
@@ -3586,133 +4112,19 @@ class TestRegistrationIsLocked(Base):
         self.assertTrue(peers.unregister_thread("a"))
         self.assertEqual(sorted(peers.read_registered()), ["b"])
 
-
-@unittest.skipUnless(HAS_TOMLLIB, "install-hook only edits config.toml with tomllib")
-class TestTomlEditingIsParserGated(Base):
-    """R1: a line editor cannot tell a table header from a string that
-    contains one, so a parser decides whether the edit is allowed."""
-
-    def config(self):
-        return self.codex_dir / "config.toml"
-
-    def write_config(self, body):
-        self.config().write_text(body)
-
-    def test_a_features_example_inside_a_multiline_string_is_left_alone(self):
-        q = '"' * 3
-        body = (
-            "developer_instructions = %s\n"
-            "To turn hooks on, write this:\n"
-            "[features]\n"
-            "hooks = false\n"
-            "%s\n"
-            "\n"
-            "[features]\n"
-            "web_search = true\n"
-        ) % (q, q)
-        self.write_config(body)
-        self.cli("install-hook")
-        text = self.config().read_text()
-        # The example keeps its own text; the real table gains the key.
-        self.assertIn("hooks = false", text)
-        self.assertEqual(text.count("hooks = true"), 1)
-        parsed = peers._load_tomllib().loads(text)
-        self.assertIs(parsed["features"]["hooks"], True)
-        self.assertIn("hooks = false", parsed["developer_instructions"])
-        self.assertIs(parsed["features"]["web_search"], True)
-
-    def test_a_single_quoted_multiline_block_is_handled_too(self):
-        q = "'" * 3
-        body = "notes = %s\n[features]\nhooks = false\n%s\n" % (q, q)
-        self.write_config(body)
-        self.cli("install-hook")
-        parsed = peers._load_tomllib().loads(self.config().read_text())
-        self.assertIn("hooks = false", parsed["notes"])
-        self.assertIs(parsed["features"]["hooks"], True)
-
-    def test_a_quoted_table_header_is_the_same_table(self):
-        # R1c: never add a second [features] beside a ["features"].
-        self.write_config('["features"]\nhooks = false\nweb_search = true\n')
-        self.cli("install-hook")
-        text = self.config().read_text()
-        self.assertEqual(text.count("features"), 1)
-        self.assertEqual(text.count("hooks ="), 1)
-        parsed = peers._load_tomllib().loads(text)
-        self.assertIs(parsed["features"]["hooks"], True)
-        self.assertIs(parsed["features"]["web_search"], True)
-
-    def test_a_spaced_quoted_header_is_recognised(self):
-        self.assertEqual(peers._unquote_table_name('"features"'), "features")
-        self.assertEqual(peers._unquote_table_name(" 'features' "), "features")
-        self.assertEqual(peers._unquote_table_name("features"), "features")
-        # A dotted key with a quoted last part is left alone.
-        self.assertEqual(
-            peers._unquote_table_name('hooks.state."/x:session_start:0:0"'),
-            'hooks.state."/x:session_start:0:0"',
-        )
-
-    def test_an_edit_that_would_change_anything_else_is_refused(self):
-        body = '[features]\nhooks = false\nweb_search = true\n'
-        self.write_config(body)
-        original = peers._set_features_hooks_lines
-
-        def sabotage(lines):
-            out, _changed = original(lines)
-            return [line.replace("web_search = true", "web_search = false")
-                    for line in out], True
-
-        peers._set_features_hooks_lines = sabotage
+    def test_name_refresh_never_waits_behind_shutdown(self):
+        tid = str(uuidlib.uuid4())
+        peers.write_registered({tid: {"name": "old"}})
+        lock = self.hold_reconcile_lock()
+        started = time.monotonic()
         try:
-            rc, _out, err = self.cli("install-hook")
+            self.assertFalse(peers.refresh_registered_name(tid, "new"))
         finally:
-            peers._set_features_hooks_lines = original
-        self.assertEqual(rc, 0)
-        self.assertEqual(self.config().read_text(), body)
-        self.assertIn("more than [features] hooks", err)
-        self.assertIn('add "hooks = true" under [features]', err)
-
-    def test_the_diff_gate_accepts_only_the_hooks_key(self):
-        before = {"model": "gpt-5", "features": {"web_search": True}}
-        after = {"model": "gpt-5", "features": {"web_search": True, "hooks": True}}
-        self.assertTrue(peers._only_features_hooks_changed(before, after))
-        self.assertTrue(peers._only_features_hooks_changed({}, {"features": {"hooks": True}}))
-        self.assertFalse(peers._only_features_hooks_changed(before, {"features": {"hooks": True}}))
-        self.assertFalse(peers._only_features_hooks_changed(before, after | {"model": "x"}))
-        self.assertFalse(peers._only_features_hooks_changed(before, before))
-
-
-class TestNoTomllibRefusesToEdit(Base):
-    """R1b: on 3.9 and 3.10 the config is never edited, only explained."""
-
-    def setUp(self):
-        super().setUp()
-        self._real_loader = peers._load_tomllib
-        peers._load_tomllib = lambda: None
-
-    def tearDown(self):
-        peers._load_tomllib = self._real_loader
-        super().tearDown()
-
-    def test_install_hook_still_succeeds_and_prints_the_manual_step(self):
-        config = self.codex_dir / "config.toml"
-        config.write_text('model = "gpt-5"\n')
-        rc, out, err = self.cli("install-hook")
-        self.assertEqual(rc, 0)
-        self.assertEqual(config.read_text(), 'model = "gpt-5"\n')
-        self.assertIn('add "hooks = true" under [features]', out)
-        self.assertIn("no tomllib", err)
-        # The hook entry itself is still installed; only the flag is manual.
-        data = json.loads((self.codex_dir / "hooks.json").read_text())
-        self.assertEqual(len(data["hooks"]["SessionStart"]), 1)
-
-    def test_a_missing_config_is_not_created(self):
-        self.cli("install-hook")
-        self.assertFalse((self.codex_dir / "config.toml").exists())
-
-    def test_doctor_says_why_the_flag_is_manual(self):
-        _rc, out, _err = self.cli("doctor")
-        self.assertIn("no tomllib", out)
-        self.assertIn('add "hooks = true" under [features]', out)
+            lock.close()
+        self.assertLess(time.monotonic() - started, 0.5)
+        self.assertEqual(peers.read_registered()[tid]["name"], "old")
+        self.assertTrue(peers.refresh_registered_name(tid, "new"))
+        self.assertEqual(peers.read_registered()[tid]["name"], "new")
 
 
 class TestDownIsSerialised(Base):

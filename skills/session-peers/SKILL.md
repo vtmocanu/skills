@@ -13,42 +13,50 @@ the agent you are.
 ## Terms
 
 - **Claude session**: one running `claude` process; it has a name (`/rename`) and
-  an inbox socket.
+  an inbox socket. Claude registers it natively and updates the record on rename.
+  Do not create a second Claude registration hook.
 - **Codex thread**: one conversation held open by a `codex` process; it has a
   name only after `/rename <name>` in the Codex TUI.
 - **Shim**: a small process `peers.py` runs per registered Codex thread. It is
   what Claude sees as the peer. No shim, no peer.
+- **Identity versus alias**: the session UUID is durable; the displayed peer
+  name is mutable. Address by UUID when a rename may race a send.
 
 ## If you are Claude Code
 
-### First time on this machine
+### Automatic attachment (recommended)
 
-1. The user names the Codex thread in its TUI: `/rename <name>`. Letters,
-   digits, dot, underscore and hyphen only, up to 64 characters; anything else
-   is refused at `up`. Add `thread-title` to `[tui] status_line` in
-   `$CODEX_HOME/config.toml` to see the name in the status bar.
-2. Register it and start its shim:
+Install the Codex `SessionStart` hook once:
 
-   ```bash
-   <this skill's directory>/scripts/peers.py up <name>
-   ```
+```bash
+<this skill's directory>/scripts/peers.py install-hook --auto-attach
+```
 
-   `up` resolves the name once, refuses a name held by two live threads
-   (register by UUID instead), persists the UUID, and daemonises the shim. A
-   later `/rename` of a new thread needs another `up <name>`; a bare `up`
-   restarts shims for every registered thread that is live again.
+Then open `/hooks` in Codex and trust the new entry. Installing it is the
+explicit opt-in: every root Codex thread attaches on `startup` or `resume`,
+using the `session_id` from hook input. The attachment is session-scoped and
+does not add an entry to the persistent manual-registration list.
 
-   A brand-new thread registers even before it has run a turn: liveness comes
-   from the writer lock Codex holds from thread creation, not from the rollout
-   `.jsonl`, which Codex may create later (it can appear during the first turn,
-   verified on codex-cli 0.153.4 on 2026-09-08). If a build without the
-   writer lock ever refuses `up <name>` on a just-renamed thread with "no live
-   Codex thread named ... (N past thread(s) carried that name)", have the user
-   type any prompt directly in that Codex TUI so its rollout is written, then
-   retry. `peers.py send` will not help there: it runs the same liveness check,
-   so without a rollout or a lock it refuses the send too.
-3. Confirm with `/list-agents` (or `ListAgents`): the thread appears under its
-   Codex name as `interactive`, `idle` or `busy`.
+Codex exposes no rename hook. The shim therefore re-reads the thread title every
+30 seconds while retaining its 5-second liveness check. Set
+`SESSION_PEERS_ALIAS_REFRESH_INTERVAL` to change the rename cadence. A valid
+`/rename` value (letters, digits, dot, underscore and hyphen, up to 64
+characters) becomes the peer alias without restarting the shim. An absent,
+unsafe or conflicting title uses `codex-<uuid prefix>` instead. Confirm with
+`/list-agents` (or `ListAgents`); the peer appears as `interactive` with `idle`
+or `busy` status.
+
+### Manual persistent attachment
+
+Without the automatic hook, name the Codex thread and register it explicitly:
+
+```bash
+<this skill's directory>/scripts/peers.py up <name|uuid>
+```
+
+Manual registration persists the UUID so a later bare `up` can recreate its
+shim. A brand-new thread can attach before its first turn because liveness uses
+the writer lock Codex holds from thread creation, not only its lazy rollout.
 
 ### Messaging a Codex thread
 
@@ -61,10 +69,13 @@ it; Codex runs it as its next user turn under the thread's own approval mode.
   subject to the live-session and reply-budget checks below. If it is missing,
   check the delivery log (Diagnostics); completion and idle notices do not
   prove delivery. `notify_when_idle: true` fires once per turn end.
-- **Reply budget**: the shim delivers at most 3 replies in a row to
-  bridge-originated turns per (thread, session); past that it drops replies with
-  a stderr line until the user runs `peers.py budget reset <name>` or a fresh
-  `up <name>`. This stops two agents from ping-ponging unattended.
+- **Reply budget**: the shim delivers at most 3 consecutive replies to one peer
+  inside a 30-minute idle window. A direct Codex turn, a request from another
+  peer, the idle window, `peers.py budget reset <name|uuid>`, or a fresh `up`
+  resets the sequence. A blocked fourth reply stays visible in Codex, and the
+  requesting Claude session receives a correlated `failed` status instead of
+  waiting silently. This stops tight unattended ping-pong without turning the
+  budget into a lifetime counter.
 - **Idle thread latency**: up to 10 s (Codex polls its queue), then the turn.
 - **Busy thread**: the message queues and runs after the current turn.
 - **Continuously-driven thread**: a thread another driver keeps feeding
@@ -90,8 +101,8 @@ it; Codex runs it as its next user turn under the thread's own approval mode.
   on macOS); `send` refuses an oversized text, the shim trims it on a UTF-8
   boundary and reports status `truncated` with the trimmed length.
 - **Status frames** you may receive about a message: `held` (queued, thread
-  paused), `failed` (queue error or thread died), `truncated` (delivered, but
-  cut to the argv budget).
+  paused), `failed` (queue error, dead thread, or exhausted loop guard), and
+  `truncated` (delivered, but cut to the argv budget).
 
 ### One-shot from a shell, no shim
 
@@ -103,21 +114,25 @@ it; Codex runs it as its next user turn under the thread's own approval mode.
 When the Codex state schema is recognised, `send` checks liveness first and
 queues by UUID. In degraded mode (unknown schema, see `doctor`), a UUID target
 still queues and prints `liveness unverified`, while a name target is refused.
-Without a shim the reply is visible only in the Codex TUI. `--from-socket <path>` routes the reply to the
-Claude session listening on that socket: `send` resolves its live registry
-record to fill the name and session id itself and refuses when nothing
-listens there; a tag without a session id is never auto-delivered. `send --to cc:<name>` posts a wrapped message straight
-into a Claude session from a host shell.
+Without a shim the reply is visible only in the Codex TUI. `--from-socket <path>`
+routes the reply to the Claude session listening on that socket:
+`send` resolves its live registry record to fill the name and session id and
+refuses when nothing listens there. A tag without a session id is never
+auto-delivered. `send --to cc:<name|uuid>` posts a wrapped message directly
+into a Claude session from a host shell; UUID is stable across renames.
+
+When `send --to codex:...` runs from a Claude Code Bash tool, it automatically
+uses `CLAUDE_CODE_MESSAGING_SOCKET` to resolve the sender's current name, UUID,
+and reply route. Do not hand-build `--from-name`, `--from-sid`, or
+`--from-socket` there. Outside Claude Code, an identity-free send is still
+allowed but prints a warning and cannot route an automatic reply.
 
 ### Keeping shims alive
 
 Shims exit when their thread's process holds neither the rollout nor the writer
-lock (i.e. the thread is gone), on `down`, or on reboot (`/tmp` is cleared). No Claude-side hook is part of delivery. As a
-convenience only, a Claude `SessionStart` hook in the effective settings file
-(`$CLAUDE_CONFIG_DIR/settings.json` when that variable is set, otherwise
-`~/.claude/settings.json`) that runs `<this skill's directory>/scripts/peers.py
-up` re-creates shims for already registered threads at Claude start; it
-registers nothing and is safe to omit. A bare `down` stops every shim
+lock (i.e. the thread is gone), on `down`, or on reboot (`/tmp` is cleared).
+Claude already manages its own registry and rename lifecycle, so no Claude hook
+is needed. A bare `down` stops every shim
 and keeps the registrations (a bare `up` brings them back); `down <name|uuid>`
 also unregisters. On first startup, the shim recovers an already-running turn's
 request and reply address, without replaying completed turns. A restart from
@@ -127,8 +142,14 @@ registered by UUID appears as `codex-<first 8 hex of the uuid>`.
 
 ## If you are Codex
 
-The default sandbox blocks Unix sockets; the shim normally delivers for you.
-Two ways a message reaches a Claude session:
+The default sandbox can block Unix sockets, the Claude-side `ps` probe, and the
+Codex-side `lsof` probe. A failed `lsof` probe keeps a running shim alive but
+refuses new queueing and GC until liveness can be verified.
+Run `list`, `doctor`, and direct `send --to cc:...` with host permission from
+the outset. If permission is unavailable, an `unverified` result is not
+evidence that no session exists. A Claude record missing `procStart` is also
+unverified rather than trusted across possible PID reuse. Two ways a message
+reaches Claude:
 
 1. **Reply to the sender**: when your turn was started by a Claude session (the
    user message starts with a `[session-peers from=@<name> ...]` line), your
@@ -141,30 +162,47 @@ Two ways a message reaches a Claude session:
    `SESSION_PEERS_ALLOW_UNSOLICITED=1` for the shim.
 
 Both count toward the reply budget above; a dropped reply is still shown to the
-user in your TUI. To see live Claude sessions and their names:
+user in your TUI. To see live Claude sessions, mutable names, and stable UUIDs:
 
 ```bash
 <this skill's directory>/scripts/peers.py list --json
 ```
 
 If automatic forwarding failed and sending is authorized, use
-`peers.py send --to cc:<name> --message "<text>"` from an execution context that
-permits local sockets, requesting tool escalation when required. Otherwise ask
-the user to run it from a host shell. Confirm the command's successful
-`sent to <name>` result before reporting delivery.
+`peers.py send --to cc:<name|uuid> --message "<text>"` with host permission.
+Otherwise ask the user to run it from a host shell. Confirm the command's
+successful `sent to ...` result before reporting delivery.
 
-## Optional Codex hook
+## Codex hook
 
-`<this skill's directory>/scripts/peers.py install-hook` appends one
-`SessionStart` entry to `$CODEX_HOME/hooks.json` (backing it up first) that runs
-`up` on every session start, so registered threads get their shims back without
-a manual step. Codex trusts a new hook only after the user reviews it in the TUI
-with `/hooks`; until then it is inert. `install-hook` prints that step. It also
-sets `hooks = true` under `[features]` in `config.toml`, but only on Python 3.11
-or newer, where it can parse the file before and after and prove the edit
-touched nothing else; on 3.9 and 3.10, or when the file does not parse or the
-edit would reach beyond that one key, it leaves `config.toml` alone and prints
-the line to add by hand. Nothing in delivery depends on the hook.
+`install-hook --auto-attach` appends one `startup|resume` `SessionStart` entry
+to `$CODEX_HOME/hooks.json`, backing up an existing file first. Re-running it
+updates the session-peers entry in place and preserves other hook groups. Codex
+requires review through `/hooks` before a new or changed entry runs.
+
+Hooks are enabled by default. The installer never edits `config.toml` and never
+overrides an explicit `[features] hooks = false`; `doctor` reports that disable.
+Plain `install-hook` retains reconcile-only mode for users who want only manual
+persistent registrations.
+
+## Garbage collection
+
+The SessionStart worker removes bridge metadata whose thread has been inactive
+for seven days. It rechecks that the Codex thread is not live and that no shim
+owns the PID file before deleting anything. Only files under
+`$CODEX_HOME/session-peers/` are eligible; Codex rollouts, writer locks, and
+queued messages are never touched.
+
+Persistent manual registrations are bridge metadata and expire too. Resuming a
+thread with the auto-attach hook exposes it again; without that hook, run `up`
+again after a seven-day inactive period.
+
+```bash
+<this skill's directory>/scripts/peers.py gc --dry-run
+<this skill's directory>/scripts/peers.py gc --days 7
+```
+
+Set `SESSION_PEERS_GC_DAYS` to change automatic retention.
 
 ## Diagnostics
 
@@ -172,10 +210,10 @@ the line to add by hand. Nothing in delivery depends on the hook.
 <this skill's directory>/scripts/peers.py doctor
 ```
 
-Reports the socket directory in use, registered versus live shims, the hook's
-trust state, `codex` and `lsof` on `PATH`, and a warning when the installed
-Claude Code or Codex version is newer than the one this skill was validated on
-(then re-run `<this skill's directory>/references/spike-checklist.md`).
+Reports the socket directory, registered versus live shims, hook trust state,
+process and Unix-socket capability, stale metadata count, `codex` and `lsof` on
+`PATH`, and version drift. Re-run
+`<this skill's directory>/references/spike-checklist.md` after an upgrade.
 
 Before claiming a reply was sent, check
 `$CODEX_HOME/session-peers/<thread uuid>.log` (default home: `~/.codex`) for
