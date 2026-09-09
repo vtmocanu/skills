@@ -303,6 +303,7 @@ class Base(unittest.TestCase):
         os.environ["SESSION_PEERS_POLL_INTERVAL"] = "0.05"
         os.environ["SESSION_PEERS_LIVENESS_INTERVAL"] = "0.3"
         os.environ["SESSION_PEERS_ALIAS_REFRESH_INTERVAL"] = "0.6"
+        os.environ["SESSION_PEERS_WAIT_POLL_INTERVAL"] = "0.02"
         os.environ["PATH"] = str(self.bin)
         os.environ["FAKE_LSOF_MAP"] = str(self.lsof_map)
         os.environ.pop("FAKE_LSOF_RC", None)
@@ -1750,6 +1751,26 @@ class TestCorrelatedAskReply(Base):
         self.assertIn("belongs to Claude session wanted", err)
         self.assertFalse(pathlib.Path(peers.request_reply_path(request_id)).exists())
 
+    def test_reply_refuses_and_cleans_an_expired_request(self):
+        request_id = str(uuidlib.uuid4())
+        peers.write_json_atomic(
+            peers.request_path(request_id),
+            {
+                "request_id": request_id,
+                "target_session_id": "s1",
+                "expires_at": time.time() - 1,
+            },
+        )
+        peers.write_json_atomic(peers.request_reply_path(request_id), {"partial": True})
+        os.environ["CLAUDE_CODE_SESSION_ID"] = "s1"
+        rc, _out, err = self.cli(
+            "reply", "--request", request_id, "--message", "too late"
+        )
+        self.assertEqual(rc, 1)
+        self.assertIn("unknown or expired", err)
+        self.assertFalse(pathlib.Path(peers.request_path(request_id)).exists())
+        self.assertFalse(pathlib.Path(peers.request_reply_path(request_id)).exists())
+
     def test_reply_is_idempotent_only_for_the_same_body(self):
         request_id = str(uuidlib.uuid4())
         peers.write_json_atomic(
@@ -1859,6 +1880,40 @@ class TestCorrelatedAskReply(Base):
         )
         self.assertEqual(rc, 0)
         self.assertIn("cc-main is idle", out)
+
+    def test_wait_observes_a_busy_peer_become_idle(self):
+        _listener, rec = self.add_listener(name="cc-main", session_id="s1")
+        path = self.sessions / ("%s.json" % rec["pid"])
+        rec["status"] = "busy"
+        path.write_text(json.dumps(rec))
+
+        def make_idle():
+            time.sleep(0.05)
+            changed = dict(rec)
+            changed["status"] = "idle"
+            path.write_text(json.dumps(changed))
+
+        thread = threading.Thread(target=make_idle)
+        thread.start()
+        try:
+            rc, out, err = self.cli(
+                "wait", "--for", "cc:cc-main", "--state", "idle", "--timeout", "1"
+            )
+        finally:
+            thread.join(timeout=1)
+        self.assertEqual(rc, 0, err)
+        self.assertIn("cc-main is idle", out)
+
+    def test_wait_times_out_while_a_peer_stays_busy(self):
+        _listener, rec = self.add_listener(name="cc-main", session_id="s1")
+        path = self.sessions / ("%s.json" % rec["pid"])
+        rec["status"] = "busy"
+        path.write_text(json.dumps(rec))
+        rc, _out, err = self.cli(
+            "wait", "--for", "cc:cc-main", "--state", "idle", "--timeout", "0.1"
+        )
+        self.assertEqual(rc, 124)
+        self.assertIn("did not become idle", err)
 
 # ==========================================================================
 # M1/M2: registration and list

@@ -202,8 +202,9 @@ must be consumed in the current Codex turn:
 ```
 
 `ask` reads `CODEX_THREAD_ID` automatically (or accepts `--from-thread`), sends
-a single-use request mailbox to that exact Claude session, waits up to 3600
-seconds, and prints the reply without placing it in `codex queue`. Timeout exits
+a single-use request mailbox to that exact Claude session, waits 600 seconds by
+default (`--timeout`, maximum 3600), and prints the reply without placing it in
+`codex queue`. Timeout exits
 124 and deletes the mailbox, so a late response cannot appear as a stale user
 turn. Request/reply files are mode 0600 inside the mode-0700 bridge directory;
 only the intended Claude session may answer. The request deliberately omits the

@@ -75,6 +75,7 @@ REPLY_BUDGET_WINDOW_DEFAULT = 30 * 60.0
 REQUEST_TIMEOUT_DEFAULT = 10 * 60.0
 REQUEST_TIMEOUT_MAX = 60 * 60.0
 REQUEST_POLL_INTERVAL = 0.1
+WAIT_POLL_INTERVAL_DEFAULT = 1.0
 REQUEST_ORPHAN_TTL = 60.0
 VERSION_WARNING_WINDOW = 24 * 60 * 60.0
 
@@ -3503,6 +3504,11 @@ def cmd_wait_peer(args):
         return 1
     sid = rec.get("sessionId")
     deadline = time.monotonic() + timeout
+    interval = _float_env(
+        "SESSION_PEERS_WAIT_POLL_INTERVAL", WAIT_POLL_INTERVAL_DEFAULT
+    )
+    if interval <= 0:
+        interval = WAIT_POLL_INTERVAL_DEFAULT
     while time.monotonic() < deadline:
         candidates = [
             item for item in read_claude_records() if item.get("sessionId") == sid
@@ -3520,7 +3526,7 @@ def cmd_wait_peer(args):
                 else:
                     print("%s is %s" % (current.get("name") or sid, args.state))
                 return 0
-        time.sleep(REQUEST_POLL_INTERVAL)
+        time.sleep(interval)
     sys.stderr.write(
         "error: %s did not become %s within %.0f seconds\n"
         % (args.for_peer, args.state, timeout)
