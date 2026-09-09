@@ -8,9 +8,16 @@ the comments point at that PRD's decision log.
 Subcommands::
 
     peers.py list [--json]
-    peers.py send --to codex:<name|uuid>|cc:<name|uuid> --message <text>
+    peers.py send --to codex:<name|uuid>|cc:<name|uuid>
+                  (--message <text>|--message-file <path>) [--json]
                   [--from-thread <uuid>] [--from-name N] [--from-sid S]
                   [--from-socket P]
+    peers.py ask --to cc:<name|uuid> (--message <text>|--message-file <path>)
+                 [--from-thread <uuid>] [--timeout <seconds>] [--json]
+    peers.py reply --request <uuid> (--message <text>|--message-file <path>)
+                   [--json]
+    peers.py wait --for cc:<name|uuid> [--state idle|busy] [--timeout <seconds>]
+                  [--json]
     peers.py shim --thread <uuid>
     peers.py up [<name|uuid>]
     peers.py down [<name|uuid>]
@@ -65,6 +72,12 @@ MAX_TEXT_CHARS = 1048576
 # D4: replies per (thread, Claude session) before the shim goes quiet.
 REPLY_BUDGET = 3
 REPLY_BUDGET_WINDOW_DEFAULT = 30 * 60.0
+REQUEST_TIMEOUT_DEFAULT = 10 * 60.0
+REQUEST_TIMEOUT_MAX = 60 * 60.0
+REQUEST_POLL_INTERVAL = 0.1
+WAIT_POLL_INTERVAL_DEFAULT = 1.0
+REQUEST_ORPHAN_TTL = 60.0
+VERSION_WARNING_WINDOW = 24 * 60 * 60.0
 
 # Columns the `threads` table must have for the schema to count as recognised.
 THREADS_COLUMNS = frozenset({"id", "rollout_path", "cwd", "name", "updated_at"})
@@ -106,6 +119,7 @@ PEER_NAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 # visible in a transcript, unlike a zero-width character.
 LT_SUBSTITUTE = "\u2039"
 WRAPPER_MARKUP_RE = re.compile(r"<(/?)(cross-session-message)", re.IGNORECASE)
+REQUEST_MARKUP_RE = re.compile(r"<(/?)(session-peers-request)", re.IGNORECASE)
 C0_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
 # Tunables, read at shim start. The tests turn them down so a fixture rollout is
@@ -221,6 +235,54 @@ def write_json_atomic(path, data, mode=0o600):
     os.replace(tmp, path)
 
 
+def write_json_exclusive(path, data, mode=0o600):
+    """Create one small JSON file exactly once; return False if it exists."""
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+    except FileExistsError:
+        return False
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, sort_keys=True)
+            fh.write("\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(path, mode)
+    except BaseException:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+        raise
+    return True
+
+
+def message_from_args(args):
+    """Read one CLI message source and enforce the shared character bound."""
+    value = getattr(args, "message", None)
+    path = getattr(args, "message_file", None)
+    if path:
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                value = fh.read()
+        except (OSError, UnicodeError) as exc:
+            raise ValueError("cannot read message file %s: %s" % (path, exc))
+    if value is None:
+        raise ValueError("one of --message or --message-file is required")
+    if len(value) > MAX_TEXT_CHARS:
+        raise ValueError(
+            "message is %d characters, over the %d cap"
+            % (len(value), MAX_TEXT_CHARS)
+        )
+    size = utf8_len(value)
+    if size > MAX_TEXT_CHARS:
+        raise ValueError(
+            "message is %d UTF-8 bytes, over the %d cap"
+            % (size, MAX_TEXT_CHARS)
+        )
+    return value
+
+
 def is_uuid(value) -> bool:
     return bool(value) and bool(UUID_RE.match(str(value)))
 
@@ -333,11 +395,30 @@ def tool_version(binary):
 
 
 def warn_versions(kinds=("claude", "codex")) -> None:
-    """D11: a newer install than the pin prints one line and keeps going."""
+    """D11: warn once per installed/pinned pair per day, never fail a run."""
+    previous = read_json(version_warning_path(), {}) or {}
+    if not isinstance(previous, dict):
+        previous = {}
+    now = time.time()
+    changed = False
+
+    def warn_once(key, message):
+        nonlocal changed
+        try:
+            last = float(previous.get(key, 0))
+        except (TypeError, ValueError):
+            last = 0
+        if now - last < VERSION_WARNING_WINDOW:
+            return
+        log(message)
+        previous[key] = now
+        changed = True
+
     if "claude" in kinds:
         v = tool_version("claude")
         if v and version_is_newer(v, CLAUDE_CODE_TESTED):
-            log(
+            warn_once(
+                "claude:%s>%s" % (v.strip(), CLAUDE_CODE_TESTED),
                 "Claude Code %s is newer than the tested %s; if peers stop "
                 "appearing, re-run references/spike-checklist.md"
                 % (v.strip(), CLAUDE_CODE_TESTED)
@@ -345,10 +426,16 @@ def warn_versions(kinds=("claude", "codex")) -> None:
     if "codex" in kinds:
         v = tool_version("codex")
         if v and version_is_newer(v, CODEX_TESTED):
-            log(
+            warn_once(
+                "codex:%s>%s" % (v.strip(), CODEX_TESTED),
                 "Codex CLI %s is newer than the tested %s; if discovery breaks, "
                 "re-run references/spike-checklist.md" % (v.strip(), CODEX_TESTED)
             )
+    if changed:
+        try:
+            write_json_atomic(version_warning_path(), previous)
+        except OSError:
+            pass
 
 
 # --------------------------------------------------------------------------
@@ -538,6 +625,32 @@ def thread_log_path(thread_id):
 
 def budget_reset_path(thread_id):
     return os.path.join(state_dir(), "%s.budget-reset" % thread_id)
+
+
+def version_warning_path():
+    return os.path.join(state_dir(), "version-warnings.json")
+
+
+def request_dir():
+    path = os.path.join(state_dir(), "requests")
+    os.makedirs(path, mode=0o700, exist_ok=True)
+    try:
+        os.chmod(path, 0o700)
+    except OSError:
+        pass
+    return path
+
+
+def request_path(request_id):
+    if not is_uuid(request_id):
+        raise ValueError("request id must be a UUID")
+    return os.path.join(request_dir(), "%s.request.json" % request_id)
+
+
+def request_reply_path(request_id):
+    if not is_uuid(request_id):
+        raise ValueError("request id must be a UUID")
+    return os.path.join(request_dir(), "%s.reply.json" % request_id)
 
 
 # --------------------------------------------------------------------------
@@ -1482,6 +1595,11 @@ def escape_attr(value) -> str:
 def neutralise_wrapper_markup(body) -> str:
     """Stop a body closing or forging the wrapper that carries it (B1)."""
     return WRAPPER_MARKUP_RE.sub(LT_SUBSTITUTE + r"\1\2", body or "")
+
+
+def neutralise_request_markup(body) -> str:
+    """Stop request content closing or forging its correlation envelope."""
+    return REQUEST_MARKUP_RE.sub(LT_SUBSTITUTE + r"\1\2", body or "")
 
 
 def build_wrapper(body, from_socket, from_session, from_name) -> str:
@@ -2906,8 +3024,86 @@ def cmd_list(args):
     return 0
 
 
+def _thread_from_args(args, required=False):
+    explicit = getattr(args, "from_thread", None)
+    value = explicit or os.environ.get("CODEX_THREAD_ID") or os.environ.get(
+        "CODEX_SESSION_ID"
+    )
+    if value and not is_uuid(value):
+        if explicit or required:
+            raise ValueError("--from-thread/CODEX_THREAD_ID must be a UUID")
+        return None
+    if required and not value:
+        raise ValueError(
+            "a request needs --from-thread or CODEX_THREAD_ID so its origin is explicit"
+        )
+    return value
+
+
+def _resolve_claude_record(target):
+    records = read_claude_records()
+    candidates = claude_record_by_target(target, records)
+    classified = [(record, record_liveness(record)) for record in candidates]
+    matches = [record for record, status in classified if status == "live"]
+    if any(status == "unverified" for _record, status in classified):
+        raise ResolveError(
+            "cannot verify Claude target %r because the process-start probe is "
+            "unavailable; retry outside the sandbox or with host permission" % target
+        )
+    if not matches:
+        noun = "id" if is_uuid(target) else "name"
+        raise ResolveError("no live Claude session with %s %r" % (noun, target))
+    if len(matches) > 1:
+        raise ResolveError(
+            "%r names %d live sessions (%s); rename one"
+            % (target, len(matches), ", ".join(str(m.get("pid")) for m in matches))
+        )
+    rec = matches[0]
+    if not socket_path_ok(rec.get("messagingSocketPath")):
+        raise ResolveError(
+            "%s listens on %r, outside the allowlisted socket directories"
+            % (target, rec.get("messagingSocketPath"))
+        )
+    return rec
+
+
+def _deliver_claude(rec, message, thread_id=None, reply_route=True):
+    thread_name = None
+    shim_socket = None
+    if thread_id:
+        state = read_json(thread_state_path(thread_id), {}) or {}
+        thread_name = state.get("name")
+        pid = shim_pid(thread_id)
+        if pid:
+            rec_path = os.path.join(claude_sessions_dir(), "%d.json" % pid)
+            shim_rec = read_json(rec_path, {}) or {}
+            shim_socket = shim_rec.get("messagingSocketPath")
+    route = shim_socket if reply_route else None
+    body = build_cc_body(message, thread_id or "", thread_name, route)
+    if len(body) > MAX_TEXT_CHARS or utf8_len(body) > MAX_TEXT_CHARS:
+        raise ValueError(
+            "wrapped message exceeds the %d-character/UTF-8-byte peer cap"
+            % MAX_TEXT_CHARS
+        )
+    frame = build_user_frame(body, route)
+    send_frame(rec["messagingSocketPath"], frame, auth_token=peer_token_for(rec))
+    return frame["msg_id"], bool(route)
+
+
+def _print_send_result(args, payload, human):
+    if getattr(args, "json", False):
+        print(json.dumps(payload, sort_keys=True))
+    else:
+        print(human)
+
+
 def cmd_send(args):
     warn_versions()
+    try:
+        args.message = message_from_args(args)
+    except ValueError as exc:
+        sys.stderr.write("error: %s\n" % exc)
+        return 1
     target = args.to
     if target.startswith("codex:"):
         return _send_codex(target[len("codex:") :], args)
@@ -2974,74 +3170,368 @@ def _send_codex(target, args):
             "sending from Claude Code, use its Bash tool so "
             "CLAUDE_CODE_MESSAGING_SOCKET is available"
         )
-    tag = build_tag(from_name, from_sid, from_socket)
+    msg_id = str(uuidlib.uuid4())
+    tag = build_tag(from_name, from_sid, from_socket, msg_id)
     text = "%s\n%s" % (tag, args.message)
     try:
         codex_queue(thread["id"], text)
     except QueueError as exc:
         sys.stderr.write("error: %s\n" % exc)
         return 1
-    print("queued to %s (%s)" % (thread.get("name") or thread["id"], thread["id"]))
+    name = thread.get("name") or thread["id"]
+    _print_send_result(
+        args,
+        {
+            "status": "queued",
+            "target": "codex",
+            "thread_id": thread["id"],
+            "thread_name": thread.get("name"),
+            "message_id": msg_id,
+        },
+        "queued to %s (%s), message %s" % (name, thread["id"], msg_id),
+    )
     return 0
 
 
 def _send_claude(target, args):
-    records = read_claude_records()
-    candidates = claude_record_by_target(target, records)
-    classified = [(record, record_liveness(record)) for record in candidates]
-    matches = [record for record, status in classified if status == "live"]
-    unverified = [
-        record for record, status in classified if status == "unverified"
-    ]
-    if unverified:
-        sys.stderr.write(
-            "error: cannot verify Claude target %r because the process-start "
-            "probe is unavailable; retry outside the sandbox or with host "
-            "permission\n" % target
-        )
-        return 1
-    if not matches:
-        noun = "id" if is_uuid(target) else "name"
-        sys.stderr.write("error: no live Claude session with %s %r\n" % (noun, target))
-        return 1
-    if len(matches) > 1:
-        sys.stderr.write(
-            "error: %r names %d live sessions (%s); rename one\n"
-            % (target, len(matches), ", ".join(str(m.get("pid")) for m in matches))
-        )
-        return 1
-    rec = matches[0]
-    if not socket_path_ok(rec.get("messagingSocketPath")):
-        sys.stderr.write(
-            "error: %s listens on %r, outside the allowlisted socket directories\n"
-            % (target, rec.get("messagingSocketPath"))
-        )
-        return 1
-
-    thread_id = args.from_thread
-    thread_name = None
-    shim_socket = None
-    if thread_id:
-        state = read_json(thread_state_path(thread_id), {}) or {}
-        thread_name = state.get("name")
-        pid = shim_pid(thread_id)
-        if pid:
-            rec_path = os.path.join(claude_sessions_dir(), "%d.json" % pid)
-            shim_rec = read_json(rec_path, {}) or {}
-            shim_socket = shim_rec.get("messagingSocketPath")
     try:
-        body = build_cc_body(args.message, thread_id or "", thread_name, shim_socket)
-    except ValueError as exc:
+        rec = _resolve_claude_record(target)
+        thread_id = _thread_from_args(args)
+        msg_id, reply_capable = _deliver_claude(rec, args.message, thread_id)
+    except (ResolveError, ValueError) as exc:
         sys.stderr.write("error: %s\n" % exc)
         return 1
-    frame = build_user_frame(body, shim_socket)
-    try:
-        send_frame(rec["messagingSocketPath"], frame, auth_token=peer_token_for(rec))
     except OSError as exc:
         sys.stderr.write("error: could not reach %s: %s\n" % (target, exc))
         return 1
-    print("sent to %s (pid %s)" % (target, rec.get("pid")))
+    if thread_id and not reply_capable:
+        log(
+            "Codex thread %s has no live shim; the message was sent, but a native "
+            "peer reply cannot route back" % thread_id
+        )
+    _print_send_result(
+        args,
+        {
+            "status": "sent",
+            "target": "claude",
+            "session_id": rec.get("sessionId"),
+            "session_name": rec.get("name"),
+            "message_id": msg_id,
+            "from_thread": thread_id,
+            "reply_capable": reply_capable,
+        },
+        "sent to %s (pid %s), message %s" % (target, rec.get("pid"), msg_id),
+    )
     return 0
+
+
+def _bounded_timeout(value):
+    timeout = REQUEST_TIMEOUT_DEFAULT if value is None else float(value)
+    if timeout <= 0 or timeout > REQUEST_TIMEOUT_MAX:
+        raise ValueError(
+            "timeout must be greater than 0 and at most %.0f seconds"
+            % REQUEST_TIMEOUT_MAX
+        )
+    return timeout
+
+
+def _unlink_quiet(path):
+    try:
+        os.unlink(path)
+    except (FileNotFoundError, OSError):
+        pass
+
+
+def cleanup_expired_requests(now=None, dry_run=False):
+    """Remove expired/orphaned request mailboxes; return removed request ids."""
+    now = time.time() if now is None else float(now)
+    removed = []
+    try:
+        names = os.listdir(request_dir())
+    except OSError:
+        return removed
+    suffix = ".request.json"
+    for name in names:
+        if not name.endswith(suffix):
+            continue
+        request_id = name[: -len(suffix)]
+        if not is_uuid(request_id):
+            continue
+        path = request_path(request_id)
+        data = read_json(path, {}) or {}
+        try:
+            expires_at = float(data.get("expires_at", 0))
+        except (TypeError, ValueError):
+            expires_at = 0
+        if expires_at > now:
+            continue
+        if not dry_run:
+            _unlink_quiet(path)
+            _unlink_quiet(request_reply_path(request_id))
+        removed.append(request_id)
+    for name in names:
+        if not name.endswith(".reply.json"):
+            continue
+        request_id = name[: -len(".reply.json")]
+        if not is_uuid(request_id) or os.path.exists(request_path(request_id)):
+            continue
+        path = request_reply_path(request_id)
+        try:
+            stale = os.stat(path).st_mtime <= now - REQUEST_ORPHAN_TTL
+        except OSError:
+            stale = False
+        if stale:
+            if not dry_run:
+                _unlink_quiet(path)
+            if request_id not in removed:
+                removed.append(request_id)
+    return removed
+
+
+def _request_envelope(request_id, message, timeout):
+    script = os.path.abspath(__file__)
+    return (
+        '<session-peers-request id="%s" timeout-seconds="%d">\n'
+        "%s\n"
+        "</session-peers-request>\n\n"
+        "Reply contract: return the result to the waiting Codex turn, not its "
+        "ordinary queue. Write the complete reply to a private temporary file, "
+        "then run:\n"
+        "%s reply --request %s --message-file <absolute-reply-file>\n"
+        "Do not use SendMessage or `send --to codex:` for this request. The "
+        "mailbox is single-use and expires with the timeout."
+        % (
+            request_id,
+            int(timeout),
+            neutralise_request_markup(message),
+            shlex.quote(script),
+            request_id,
+        )
+    )
+
+
+def cmd_ask(args):
+    """Send one correlated request to Claude and return its reply on stdout."""
+    warn_versions()
+    if not args.to.startswith("cc:"):
+        sys.stderr.write("error: ask --to must start with cc:\n")
+        return 2
+    try:
+        message = message_from_args(args)
+        timeout = _bounded_timeout(args.timeout)
+        thread_id = _thread_from_args(args, required=True)
+    except ValueError as exc:
+        sys.stderr.write("error: %s\n" % exc)
+        return 2
+    try:
+        rec = _resolve_claude_record(args.to[len("cc:") :])
+    except ResolveError as exc:
+        sys.stderr.write("error: %s\n" % exc)
+        return 1
+    if not rec.get("sessionId"):
+        sys.stderr.write(
+            "error: Claude target %r has no session id, so its reply cannot be verified\n"
+            % (rec.get("name") or args.to)
+        )
+        return 1
+
+    cleanup_expired_requests()
+    request_id = str(uuidlib.uuid4())
+    meta_path = request_path(request_id)
+    reply_path = request_reply_path(request_id)
+    expires_at = time.time() + timeout
+    write_json_atomic(
+        meta_path,
+        {
+            "request_id": request_id,
+            "requester_thread_id": thread_id,
+            "target_session_id": rec.get("sessionId"),
+            "target_session_name": rec.get("name"),
+            "created_at": now_iso(),
+            "expires_at": expires_at,
+            "reply_path": reply_path,
+        },
+    )
+    try:
+        try:
+            message_id, _reply_capable = _deliver_claude(
+                rec,
+                _request_envelope(request_id, message, timeout),
+                thread_id,
+                reply_route=False,
+            )
+        except (OSError, ValueError) as exc:
+            sys.stderr.write("error: could not send request to %s: %s\n" % (args.to, exc))
+            return 1
+        log(
+            "request %s sent to %s; waiting up to %.0fs"
+            % (request_id, rec.get("name") or rec.get("sessionId"), timeout)
+        )
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            response = read_json(reply_path, None)
+            if isinstance(response, dict):
+                if (
+                    response.get("request_id") == request_id
+                    and response.get("session_id") == rec.get("sessionId")
+                    and isinstance(response.get("message"), str)
+                ):
+                    payload = {
+                        "status": "replied",
+                        "request_id": request_id,
+                        "request_message_id": message_id,
+                        "session_id": rec.get("sessionId"),
+                        "session_name": rec.get("name"),
+                        "message": response["message"],
+                    }
+                    if args.json:
+                        print(json.dumps(payload, sort_keys=True))
+                    else:
+                        sys.stdout.write(response["message"])
+                        if not response["message"].endswith("\n"):
+                            sys.stdout.write("\n")
+                    return 0
+            time.sleep(REQUEST_POLL_INTERVAL)
+        sys.stderr.write(
+            "error: request %s timed out after %.0f seconds; no reply was queued\n"
+            % (request_id, timeout)
+        )
+        return 124
+    finally:
+        _unlink_quiet(meta_path)
+        _unlink_quiet(reply_path)
+
+
+def _current_claude_session_id():
+    sid = os.environ.get("CLAUDE_CODE_SESSION_ID")
+    if sid:
+        return sid
+    sock = os.environ.get("CLAUDE_CODE_MESSAGING_SOCKET")
+    if sock:
+        rec = claude_record_by_socket(sock, read_claude_records())
+        if rec:
+            return rec.get("sessionId")
+    return None
+
+
+def _read_completed_reply(path, attempts=20):
+    """Read a competing reply after its exclusive writer finishes."""
+    for _index in range(attempts):
+        value = read_json(path, None)
+        if isinstance(value, dict):
+            return value
+        time.sleep(0.01)
+    return {}
+
+
+def cmd_reply(args):
+    """Complete one pending ask mailbox from its intended Claude session."""
+    try:
+        message = message_from_args(args)
+        path = request_path(args.request)
+        reply_path = request_reply_path(args.request)
+    except ValueError as exc:
+        sys.stderr.write("error: %s\n" % exc)
+        return 2
+    cleanup_expired_requests()
+    meta = read_json(path, None)
+    if not isinstance(meta, dict):
+        sys.stderr.write("error: request %s is unknown or expired\n" % args.request)
+        return 1
+    try:
+        expires_at = float(meta.get("expires_at", 0))
+    except (TypeError, ValueError):
+        expires_at = 0
+    if expires_at <= time.time():
+        cleanup_expired_requests()
+        sys.stderr.write("error: request %s is expired\n" % args.request)
+        return 1
+    sid = _current_claude_session_id()
+    if not sid:
+        sys.stderr.write(
+            "error: reply must run inside the target Claude session so its "
+            "session id can be verified\n"
+        )
+        return 1
+    if sid != meta.get("target_session_id"):
+        sys.stderr.write(
+            "error: request %s belongs to Claude session %s, not %s\n"
+            % (args.request, meta.get("target_session_id"), sid)
+        )
+        return 1
+    payload = {
+        "request_id": args.request,
+        "session_id": sid,
+        "message": message,
+        "replied_at": now_iso(),
+    }
+    try:
+        created = write_json_exclusive(reply_path, payload)
+    except OSError as exc:
+        sys.stderr.write("error: could not write reply: %s\n" % exc)
+        return 1
+    if not created:
+        existing = _read_completed_reply(reply_path)
+        if existing.get("session_id") != sid or existing.get("message") != message:
+            sys.stderr.write("error: request %s already has a different reply\n" % args.request)
+            return 1
+        status = "already_replied"
+    else:
+        status = "replied"
+    _print_send_result(
+        args,
+        {"status": status, "request_id": args.request, "session_id": sid},
+        "%s to request %s" % (status.replace("_", " "), args.request),
+    )
+    return 0
+
+
+def cmd_wait_peer(args):
+    """Wait for a live Claude peer's registry status to reach one state."""
+    if not args.for_peer.startswith("cc:"):
+        sys.stderr.write("error: wait --for must start with cc:\n")
+        return 2
+    target = args.for_peer[len("cc:") :]
+    try:
+        timeout = _bounded_timeout(args.timeout)
+    except ValueError as exc:
+        sys.stderr.write("error: %s\n" % exc)
+        return 2
+    try:
+        rec = _resolve_claude_record(target)
+    except ResolveError as exc:
+        sys.stderr.write("error: %s\n" % exc)
+        return 1
+    sid = rec.get("sessionId")
+    deadline = time.monotonic() + timeout
+    interval = _float_env(
+        "SESSION_PEERS_WAIT_POLL_INTERVAL", WAIT_POLL_INTERVAL_DEFAULT
+    )
+    if interval <= 0:
+        interval = WAIT_POLL_INTERVAL_DEFAULT
+    while time.monotonic() < deadline:
+        candidates = [
+            item for item in read_claude_records() if item.get("sessionId") == sid
+        ]
+        if candidates:
+            current = candidates[0]
+            if record_liveness(current) == "live" and current.get("status") == args.state:
+                payload = {
+                    "status": args.state,
+                    "session_id": sid,
+                    "session_name": current.get("name"),
+                }
+                if args.json:
+                    print(json.dumps(payload, sort_keys=True))
+                else:
+                    print("%s is %s" % (current.get("name") or sid, args.state))
+                return 0
+        time.sleep(interval)
+    sys.stderr.write(
+        "error: %s did not become %s within %.0f seconds\n"
+        % (args.for_peer, args.state, timeout)
+    )
+    return 124
 
 
 def shim_ready(thread_id):
@@ -3371,7 +3861,10 @@ def cmd_gc(args):
     except ValueError as exc:
         sys.stderr.write("error: %s\n" % exc)
         return 2
-    if not removed:
+    requests = cleanup_expired_requests(dry_run=args.dry_run)
+    for request_id in requests:
+        print("%s expired request %s" % ("would prune" if args.dry_run else "pruned", request_id))
+    if not removed and not requests:
         print("no stale bridge metadata")
     return 0
 
@@ -3421,6 +3914,7 @@ def cmd_hook_reconcile(args):
         gc_bridge_state(days=days, verbose=False)
     except ValueError as exc:
         log("GC skipped: %s" % exc)
+    cleanup_expired_requests()
     reconcile(verbose=False)
     if args.thread:
         deadline = time.time() + 10.0
@@ -3870,6 +4364,13 @@ def build_parser():
     p_list.add_argument("--json", action="store_true", help="machine-readable output")
     p_list.set_defaults(func=cmd_list)
 
+    def add_message_source(parser):
+        group = parser.add_mutually_exclusive_group(required=True)
+        group.add_argument("--message", help="the message body")
+        group.add_argument(
+            "--message-file", metavar="PATH", help="read the message body from PATH"
+        )
+
     p_send = sub.add_parser("send", help="send one message in either direction")
     p_send.add_argument(
         "--to",
@@ -3877,7 +4378,7 @@ def build_parser():
         metavar="codex:<name|uuid>|cc:<name|uuid>",
         help="the peer",
     )
-    p_send.add_argument("--message", required=True, help="the message body")
+    add_message_source(p_send)
     p_send.add_argument(
         "--from-thread", metavar="UUID", help="the Codex thread sending (cc: targets)"
     )
@@ -3886,7 +4387,51 @@ def build_parser():
     p_send.add_argument(
         "--from-socket", metavar="PATH", help="sender socket for the reply tag"
     )
+    p_send.add_argument("--json", action="store_true", help="machine-readable result")
     p_send.set_defaults(func=cmd_send)
+
+    p_ask = sub.add_parser(
+        "ask", help="send a correlated request to Claude and wait for its reply"
+    )
+    p_ask.add_argument(
+        "--to", required=True, metavar="cc:<name|uuid>", help="the Claude peer"
+    )
+    add_message_source(p_ask)
+    p_ask.add_argument(
+        "--from-thread",
+        metavar="UUID",
+        help="the Codex thread asking (defaults to CODEX_THREAD_ID)",
+    )
+    p_ask.add_argument(
+        "--timeout",
+        type=float,
+        help="seconds to wait (default: 600; maximum: 3600)",
+    )
+    p_ask.add_argument("--json", action="store_true", help="machine-readable result")
+    p_ask.set_defaults(func=cmd_ask)
+
+    p_reply = sub.add_parser(
+        "reply", help="reply exactly once to a pending correlated request"
+    )
+    p_reply.add_argument("--request", required=True, metavar="UUID")
+    add_message_source(p_reply)
+    p_reply.add_argument("--json", action="store_true", help="machine-readable result")
+    p_reply.set_defaults(func=cmd_reply)
+
+    p_wait = sub.add_parser("wait", help="wait for a Claude peer registry state")
+    p_wait.add_argument(
+        "--for", dest="for_peer", required=True, metavar="cc:<name|uuid>"
+    )
+    p_wait.add_argument(
+        "--state", choices=("idle", "busy"), default="idle", help="target state"
+    )
+    p_wait.add_argument(
+        "--timeout",
+        type=float,
+        help="seconds to wait (default: 600; maximum: 3600)",
+    )
+    p_wait.add_argument("--json", action="store_true", help="machine-readable result")
+    p_wait.set_defaults(func=cmd_wait_peer)
 
     p_shim = sub.add_parser("shim", help="run as one Codex thread's peer (foreground)")
     p_shim.add_argument("--thread", required=True, metavar="UUID")

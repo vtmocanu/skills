@@ -109,7 +109,7 @@ Partial live check: 2026-09-09, Claude Code 2.1.266, Codex CLI 0.153.4.
     - Correction verified 2026-09-08 on 0.153.4: a rollout contained the tagged
       request and intermediate output before the first turn completed. The old
       claim that the file appears only after completion was too strong;
-    liveness must tolerate an absent file without assuming when it appears.
+      liveness must tolerate an absent file without assuming when it appears.
 16. **SessionStart identity.** Install the auto-attach hook, start a new unnamed
     root thread, and verify the hook attaches the exact `session_id` under its
     `codex-<uuid prefix>` fallback. Rename it to a valid peer name and verify the
@@ -171,3 +171,32 @@ Partial live check: 2026-09-09, Claude Code 2.1.266, Codex CLI 0.153.4.
     thread live and stale rows inactive rather than making every thread
     unverified. Make the preflight path check fail with a permission error and
     verify liveness remains unverified rather than dead.
+23. **Correlated request/reply.** From Codex, run `ask` against a named Claude
+    session. The request must carry its UUID and exact reply command; `reply`
+    from that session must return the body to the still-running `ask` process,
+    remove both mailbox files, and append nothing to `codex queue`. Repeat with
+    a missing target session id, wrong Claude session, two concurrent identical
+    replies, conflicting duplicate, timeout and caller interrupt. The request
+    frame must omit the native shim reply route. Wrong/late/conflicting replies must fail;
+    timeout/interrupt must leave no mailbox that can surface as a stale turn.
+    - 2026-09-09, PR #57 at `5f69488`: a Codex `ask` delivered a second-round
+      review to Claude Code 2.1.266, whose request frame carried no native reply
+      route. Claude returned the complete review through the included `reply`
+      command; `ask --json` emitted matching request, message and session IDs in
+      the same active Codex turn, both mailbox files disappeared, and no Codex
+      queue turn was created. The reviewer independently ran all 324 tests.
+24. **Automatic Codex attribution and message identity.** Run `send --to cc:`
+    from a Codex tool shell without `--from-thread`; verify `CODEX_THREAD_ID`
+    supplies the wrapper's exact thread identity and live shim reply route.
+    Run direct `send --to codex:` and verify its tag has a non-empty UUID `mid`.
+    For both directions, `--json` must report the same message id placed on the
+    wire. Without a live shim, Claude delivery succeeds but the result warns
+    that a native reply cannot route.
+25. **File input, peer wait and warning rate.** Send and ask with
+    `--message-file` containing quotes, newlines and multibyte text; the peer
+    must receive identical content without shell interpolation. Invalid UTF-8
+    must fail instead of being replaced. Change a live
+    Claude record from busy to idle and verify `wait --state idle` returns;
+    timeout exits 124. With a newer installed CLI, the first ordinary command
+    warns, an immediate second command is silent, and `doctor` still reports
+    the version comparison.

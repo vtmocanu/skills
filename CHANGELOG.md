@@ -8,6 +8,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `session-peers`: correlated Codex-to-Claude `ask`/`reply` mailboxes return one
+  peer result to the current Codex tool call instead of injecting it as a stale
+  later user turn. Requests are single-use, session-bound, mode-0600, expire on
+  timeout, and never fall back to `codex queue`. New `wait` observes a Claude
+  peer's busy/idle registry state without manual polling; `send`, `ask`, and
+  `reply` accept `--message-file`, and message-producing commands support
+  machine-readable identity/status output.
 - `session-peers`: cross-session messaging between Claude Code sessions and Codex
   CLI threads on one machine (PRD #44). A registered Codex thread gets a shim
   process that appears in Claude's `ListAgents` and `@` typeahead under its
@@ -23,6 +30,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- `reflect`: reflection now targets the whole authored skill package, routing
+  executable defects to bundled scripts/hooks plus regression tests and usage
+  changes to instructions/references. Its apply phase inventories package
+  resources, checks for overlapping dirty work, runs focused package tests and
+  skill validation, and commits only the approved source files.
+- `session-peers`: direct sends now generate correlation IDs, Codex-to-Claude
+  sends infer `CODEX_THREAD_ID`, substantial bodies can come from files, and
+  unchanged CLI version-drift warnings are rate-limited to once per day while
+  `doctor` remains authoritative.
 - `agent-team`: trimmed the manifest template's dated illustrative examples in four
   sections to match a downstream resync (uzi's `.claude/agent-team.md`, merged at
   vtmocanu/uzi@d584ea3b), keeping every rule and dropping only the story that

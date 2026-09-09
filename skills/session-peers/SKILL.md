@@ -1,6 +1,6 @@
 ---
 name: session-peers
-description: Messages between Claude Code sessions and Codex CLI threads on one machine. Registers a Codex thread as a real Claude peer so it shows in ListAgents and the @ typeahead, delivers with codex queue, and pushes Codex replies back into the Claude session that asked. Use when (1) a Claude session must tell, ask or hand work to a running Codex thread, (2) a Codex thread must answer or notify a Claude session, (3) listing which Codex threads or Claude sessions are live, (4) a message to a Codex peer seems stuck (paused queue, dead thread, budget). Triggers include "message the codex session", "tell codex", "ask codex", "list codex sessions", "reply to the claude session", "@codex", "codex peer", "session peers".
+description: Messages between Claude Code sessions and Codex CLI threads on one machine, including correlated request/reply without stale queued turns. Registers Codex as a Claude peer, delivers asynchronous messages through codex queue, and provides ask/reply/wait commands for supervised multi-round work. Use when sending cross-session messages or handoffs, requesting peer review, waiting on a peer, listing live sessions, or diagnosing a stuck, paused, or dead peer. Triggers include "message codex", "ask claude", "reply to the session", "@codex", "session peers", "peer review".
 ---
 
 # session-peers
@@ -21,6 +21,9 @@ the agent you are.
   what Claude sees as the peer. No shim, no peer.
 - **Identity versus alias**: the session UUID is durable; the displayed peer
   name is mutable. Address by UUID when a rename may race a send.
+- **Notification versus request**: `send` is asynchronous and may arrive in a
+  later turn; `ask` waits for one correlated reply in the caller's current
+  Codex turn and consumes it instead of queueing it later.
 
 ## If you are Claude Code
 
@@ -104,11 +107,25 @@ it; Codex runs it as its next user turn under the thread's own approval mode.
   paused), `failed` (queue error, dead thread, or exhausted loop guard), and
   `truncated` (delivered, but cut to the argv budget).
 
+### Replying to a waiting Codex request
+
+A message wrapped in `<session-peers-request ...>` came from `peers.py ask`.
+Complete the requested work, write the complete response to a private scratch
+file, then run the exact `peers.py reply --request ... --message-file ...`
+command included in the message. Confirm `replied to request ...` before ending.
+
+Do not use `SendMessage` or `send --to codex:` for that response. Those are
+asynchronous and would reach Codex as a later user turn after `ask` timed out or
+moved on. A request is single-use, bound to this Claude session, and expires at
+its stated timeout. An expired or unknown request must fail rather than create a
+fallback queue message.
+
 ### One-shot from a shell, no shim
 
 ```bash
 <this skill's directory>/scripts/peers.py list --json
-<this skill's directory>/scripts/peers.py send --to codex:<name|uuid> --message "<text>"
+<this skill's directory>/scripts/peers.py send \
+  --to codex:<name|uuid> --message-file <path> --json
 ```
 
 When the Codex state schema is recognised, `send` checks liveness first and
@@ -121,8 +138,10 @@ refuses when nothing listens there. A tag without a session id is never
 auto-delivered. `send --to cc:<name|uuid>` posts a wrapped message directly
 into a Claude session from a host shell; UUID is stable across renames.
 
-When `send --to codex:...` runs from a Claude Code Bash tool, it automatically
-uses `CLAUDE_CODE_MESSAGING_SOCKET` to resolve the sender's current name, UUID,
+Every direct `send` generates a message id, includes it as `mid` on a Codex
+message, and reports it in `--json` output. When `send --to codex:...` runs from
+a Claude Code Bash tool, it automatically uses
+`CLAUDE_CODE_MESSAGING_SOCKET` to resolve the sender's current name, UUID,
 and reply route. Do not hand-build `--from-name`, `--from-sid`, or
 `--from-socket` there. Outside Claude Code, an identity-free send is still
 allowed but prints a warning and cannot route an automatic reply.
@@ -172,10 +191,56 @@ user in your TUI. To see live Claude sessions, mutable names, and stable UUIDs:
 <this skill's directory>/scripts/peers.py list --json
 ```
 
-If automatic forwarding failed and sending is authorized, use
-`peers.py send --to cc:<name|uuid> --message "<text>"` with host permission.
-Otherwise ask the user to run it from a host shell. Confirm the command's
-successful `sent to ...` result before reporting delivery.
+### Codex to Claude: choose `ask` or `send`
+
+Use `ask` for peer review, brainstorming, or any multi-round task whose answer
+must be consumed in the current Codex turn:
+
+```bash
+<this skill's directory>/scripts/peers.py ask \
+  --to cc:<name|uuid> --message-file <request-path> --timeout 600 --json
+```
+
+`ask` reads `CODEX_THREAD_ID` automatically (or accepts `--from-thread`), sends
+a single-use request mailbox to that exact Claude session, waits 600 seconds by
+default (`--timeout`, maximum 3600), and prints the reply without placing it in
+`codex queue`. Timeout exits
+124 and deletes the mailbox, so a late response cannot appear as a stale user
+turn. Request/reply files are mode 0600 inside the mode-0700 bridge directory;
+only the intended Claude session may answer. The request deliberately omits the
+shim/native reply route, so even a mistaken ordinary peer reply has no route
+back to the Codex queue; the included `reply` command is the only response path.
+
+Use asynchronous `send` for notifications, handoffs, or a final response that
+may safely become a later turn:
+
+```bash
+<this skill's directory>/scripts/peers.py send \
+  --to cc:<name|uuid> --message-file <path> --json
+```
+
+`send` also reads `CODEX_THREAD_ID` automatically. A live shim makes the native
+reply route available; without one the command warns that replies cannot route.
+Every send returns a message id. Use `--message` for short text and
+`--message-file` for substantial content to avoid shell quoting and command
+substitution. Message files must be valid UTF-8; invalid bytes fail instead of
+being silently rewritten.
+
+Wait for an asynchronously working Claude peer without polling `list`:
+
+```bash
+<this skill's directory>/scripts/peers.py wait \
+  --for cc:<name|uuid> --state idle --timeout 600 --json
+```
+
+For multi-round collaboration, use one `ask` per round and send only the final
+artifact asynchronously. Never scrape Claude's internal transcript JSONL to
+obtain a reply: that bypasses correlation, can expose unrelated or sensitive
+context, and leaves the queued reply to arrive stale later.
+
+If normal automatic forwarding failed and asynchronous sending is authorized,
+use `send` with host permission. Otherwise ask the user to run it from a host
+shell. Confirm the successful result and message id before reporting delivery.
 
 ## Codex hook
 
@@ -216,7 +281,8 @@ Set `SESSION_PEERS_GC_DAYS` to change automatic retention.
 
 Reports the socket directory, registered versus live shims, hook trust state,
 process and Unix-socket capability, stale metadata count, `codex` and `lsof` on
-`PATH`, and version drift. Re-run
+`PATH`, and version drift. Ordinary commands rate-limit an unchanged version
+warning to once per 24 hours; `doctor` always reports the current comparison. Re-run
 `<this skill's directory>/references/spike-checklist.md` after an upgrade.
 
 Before claiming a reply was sent, check
@@ -234,6 +300,8 @@ corrected on 2026-09-08; see the startup checks in the spike checklist.
 - macOS and Linux only (Windows uses named pipes).
 - Message body cap 1 MiB on both sides; Claude also refuses rapid bursts to one
   session and drops identical repeats.
+- `ask` is Codex-to-Claude only, accepts one reply, waits at most one hour, and
+  requires the Claude peer to run the included `reply` command.
 - One reply per turn: a `Stop`-hook continuation or an interrupted turn
   (`turn_aborted`) delivers nothing; a completed turn with no final text
   delivers nothing.
