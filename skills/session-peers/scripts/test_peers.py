@@ -2037,7 +2037,10 @@ class TestNonblockingDispatchAwait(Base):
 
     def test_two_peers_reply_without_crossing_results(self):
         self.add_listener(name="cc-one", session_id="s1")
-        self.add_listener(name="cc-two", session_id="s2", pid=os.getpid() + 1)
+        # A second *live* session needs a real live pid distinct from this
+        # process; os.getpid()+1 is not reliably a running process (it failed
+        # on CI). os.getppid() is live and is treated as "mine" in tearDown.
+        self.add_listener(name="cc-two", session_id="s2", pid=os.getppid())
         tid, _rollout = self.one_thread()
         req1 = self._dispatch("cc:cc-one", tid, message="to one")["request_id"]
         req2 = self._dispatch("cc:cc-two", tid, message="to two")["request_id"]
