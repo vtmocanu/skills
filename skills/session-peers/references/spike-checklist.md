@@ -200,3 +200,18 @@ Partial live check: 2026-09-09, Claude Code 2.1.266, Codex CLI 0.153.4.
     timeout exits 124. With a newer installed CLI, the first ordinary command
     warns, an immediate second command is silent, and `doctor` still reports
     the version comparison.
+26. **Nonblocking dispatch and await.** From Codex, `dispatch` a bounded task to
+    a named Claude session and confirm it returns at once with
+    `status: socket_write_succeeded`, the `request_id` and `expires_at`, and no
+    `codex queue` turn, while the mailbox files persist (unlike `ask`). Do
+    independent local work, then `await --request <uuid>`: it must consume the
+    reply once, print it, and remove both files. Verify the two clocks are
+    distinct: an `await --timeout` shorter than the request lifetime returns
+    `status: pending` (exit 124) and leaves the mailbox re-awaitable, a later
+    `await` then consumes it, and a request past `expires_at` returns
+    `status: expired` (exit 1). Confirm a reply that lands after an `await`
+    timed out never appears as a queued Codex turn, that a different thread's
+    `await` is refused, and that two concurrent requests to one peer replied out
+    of order do not cross. Record versions.
+    - Not yet run live; unit tests cover every case above (see
+      `TestNonblockingDispatchAwait`).

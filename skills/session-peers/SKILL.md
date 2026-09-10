@@ -1,6 +1,6 @@
 ---
 name: session-peers
-description: Messages between Claude Code sessions and Codex CLI threads on one machine, including correlated request/reply without stale queued turns. Registers Codex as a Claude peer, delivers asynchronous messages through codex queue, and provides ask/reply/wait commands for supervised multi-round work. Use when sending cross-session messages or handoffs, requesting peer review, waiting on a peer, listing live sessions, or diagnosing a stuck, paused, or dead peer. Triggers include "message codex", "ask claude", "reply to the session", "@codex", "session peers", "peer review".
+description: Messages between Claude Code sessions and Codex CLI threads on one machine, including correlated request/reply without stale queued turns, blocking (ask) or nonblocking (dispatch then await). Registers Codex as a Claude peer, delivers asynchronous messages through codex queue, and provides ask/dispatch/await/reply/wait commands for supervised multi-round work. Use when sending cross-session messages or handoffs, requesting peer review, dispatching correlated work without blocking, waiting on a peer, listing live sessions, or diagnosing a stuck, paused, or dead peer. Triggers include "message codex", "ask claude", "dispatch to claude", "reply to the session", "@codex", "session peers", "peer review".
 ---
 
 # session-peers
@@ -23,7 +23,9 @@ the agent you are.
   name is mutable. Address by UUID when a rename may race a send.
 - **Notification versus request**: `send` is asynchronous and may arrive in a
   later turn; `ask` waits for one correlated reply in the caller's current
-  Codex turn and consumes it instead of queueing it later.
+  Codex turn and consumes it instead of queueing it later. `dispatch` starts
+  that same correlated request but returns at once, so a later `await --request`
+  consumes the reply without blocking the whole tool call.
 
 ## If you are Claude Code
 
@@ -191,7 +193,7 @@ user in your TUI. To see live Claude sessions, mutable names, and stable UUIDs:
 <this skill's directory>/scripts/peers.py list --json
 ```
 
-### Codex to Claude: choose `ask` or `send`
+### Codex to Claude: choose `ask`, `dispatch`/`await`, or `send`
 
 Use `ask` for peer review, brainstorming, or any multi-round task whose answer
 must be consumed in the current Codex turn:
@@ -210,6 +212,32 @@ turn. Request/reply files are mode 0600 inside the mode-0700 bridge directory;
 only the intended Claude session may answer. The request deliberately omits the
 shim/native reply route, so even a mistaken ordinary peer reply has no route
 back to the Codex queue; the included `reply` command is the only response path.
+
+Use `dispatch` plus `await` when the request is `ask`'s but the coordinator must
+keep working instead of blocking one whole tool call for the peer's task:
+
+```bash
+<this skill's directory>/scripts/peers.py dispatch \
+  --to cc:<name|uuid> --message-file <request-path> --timeout 1800 --json
+# ... do independent local work ...
+<this skill's directory>/scripts/peers.py await --request <uuid> --timeout 600 --json
+```
+
+`dispatch` creates the same single-use mailbox, correlation envelope, and
+`reply_route=False` safety as `ask`, sends it, and returns at once with
+`status: socket_write_succeeded` and the `request_id`, target session UUID, and
+`expires_at`. Its `--timeout` sets the request lifetime, not a wait. `await`
+consumes only that request's reply, exactly once, and prints it like `ask`. The
+two timeouts are distinct: `await --timeout` bounds only that call. A call that
+times out while the request is still live returns `status: pending` (exit 124)
+and leaves the mailbox intact, so a later `await` resumes it; a request past its
+`expires_at` returns `status: expired` (exit 1). `await` is bound to the
+dispatching thread and the target session UUID, so a rename cannot retarget it
+and only the dispatcher may consume the reply. A reply that arrives after an
+`await` gave up is still just a filesystem write: it never becomes a queued
+Codex turn. This path does not consume the shim reply budget, so keep the loop
+supervised and bounded: dispatch one task, work, await and verify, then dispatch
+the next only when it is useful.
 
 Use asynchronous `send` for notifications, handoffs, or a final response that
 may safely become a later turn:
