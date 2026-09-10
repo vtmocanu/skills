@@ -2158,6 +2158,45 @@ class TestNonblockingDispatchAwait(Base):
         self.assertNotIn(request_id, removed)
         self.assertTrue(pathlib.Path(peers.request_path(request_id)).exists())
 
+    def test_claim_reply_gives_the_reply_to_exactly_one_caller(self):
+        # The exactly-once invariant two concurrent awaits rely on: whoever
+        # wins the atomic rename gets the reply, the loser gets None (and so
+        # reports the request as already consumed).
+        request_id = str(uuidlib.uuid4())
+        reply_path = peers.request_reply_path(request_id)
+        peers.write_json_atomic(
+            reply_path,
+            {"request_id": request_id, "session_id": "s1", "message": "once"},
+        )
+        first = peers._claim_reply(reply_path)
+        second = peers._claim_reply(reply_path)
+        self.assertIsInstance(first, dict)
+        self.assertEqual(first["message"], "once")
+        self.assertIsNone(second)
+        self.assertFalse(pathlib.Path(reply_path).exists())
+
+    def test_two_concurrent_awaits_deliver_the_reply_once(self):
+        # End-to-end: two separate await processes race on one replied request.
+        # Exactly one prints the reply; the other reports it already gone.
+        self.add_listener(name="cc-main", session_id="s1")
+        tid, _rollout = self.one_thread()
+        request_id = self._dispatch("cc:cc-main", tid, timeout="30")["request_id"]
+        self._reply(request_id, "s1", "shared answer")
+        procs = [
+            self.spawn(
+                "await", "--request", request_id, "--from-thread", tid,
+                "--timeout", "3", "--json",
+                stderr=subprocess.PIPE,  # keep stdout clean JSON for parsing
+            )
+            for _ in range(2)
+        ]
+        outs = [p.communicate(timeout=10)[0] for p in procs]
+        statuses = sorted(json.loads(o)["status"] for o in outs)
+        self.assertEqual(statuses, ["expired", "replied"])
+        winner = [json.loads(o) for o in outs if json.loads(o)["status"] == "replied"][0]
+        self.assertEqual(winner["message"], "shared answer")
+        self.assertFalse(pathlib.Path(peers.request_path(request_id)).exists())
+
 # ==========================================================================
 # M1/M2: registration and list
 # ==========================================================================
