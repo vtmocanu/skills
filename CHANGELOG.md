@@ -8,6 +8,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `session-peers`: nonblocking correlated requests. `dispatch` sends the same
+  single-use, session-bound, `reply_route=False` mailbox as `ask` but returns at
+  once with the request ID and `expires_at`; a later `await --request <uuid>`
+  consumes that exact reply once. The request lifetime (`dispatch --timeout`) is
+  separate from an `await` call's own timeout: an await that times out while the
+  request is still live returns `pending` and leaves the mailbox re-awaitable,
+  and a request past its expiry returns `expired`. A late reply is a filesystem
+  write and never becomes a queued Codex turn; `await` is bound to the
+  dispatching thread and target session UUID. `ask` is unchanged. Issue #58.
 - `session-peers`: correlated Codex-to-Claude `ask`/`reply` mailboxes return one
   peer result to the current Codex tool call instead of injecting it as a stale
   later user turn. Requests are single-use, session-bound, mode-0600, expire on

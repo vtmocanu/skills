@@ -3310,6 +3310,33 @@ def _request_envelope(request_id, message, timeout):
     )
 
 
+def _request_meta(request_id, requester_thread_id, rec, expires_at, reply_path):
+    """The single-use mailbox metadata shared by `ask` and `dispatch`.
+
+    Keeping one builder means the two entry points cannot drift in the fields
+    `reply`, `await`, and `cleanup_expired_requests` all read back.
+    """
+    return {
+        "request_id": request_id,
+        "requester_thread_id": requester_thread_id,
+        "target_session_id": rec.get("sessionId"),
+        "target_session_name": rec.get("name"),
+        "created_at": now_iso(),
+        "expires_at": expires_at,
+        "reply_path": reply_path,
+    }
+
+
+def _reply_matches(response, request_id, target_session_id):
+    """True when a reply file is the intended one and carries a text body."""
+    return (
+        isinstance(response, dict)
+        and response.get("request_id") == request_id
+        and response.get("session_id") == target_session_id
+        and isinstance(response.get("message"), str)
+    )
+
+
 def cmd_ask(args):
     """Send one correlated request to Claude and return its reply on stdout."""
     warn_versions()
@@ -3342,15 +3369,7 @@ def cmd_ask(args):
     expires_at = time.time() + timeout
     write_json_atomic(
         meta_path,
-        {
-            "request_id": request_id,
-            "requester_thread_id": thread_id,
-            "target_session_id": rec.get("sessionId"),
-            "target_session_name": rec.get("name"),
-            "created_at": now_iso(),
-            "expires_at": expires_at,
-            "reply_path": reply_path,
-        },
+        _request_meta(request_id, thread_id, rec, expires_at, reply_path),
     )
     try:
         try:
@@ -3370,27 +3389,22 @@ def cmd_ask(args):
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             response = read_json(reply_path, None)
-            if isinstance(response, dict):
-                if (
-                    response.get("request_id") == request_id
-                    and response.get("session_id") == rec.get("sessionId")
-                    and isinstance(response.get("message"), str)
-                ):
-                    payload = {
-                        "status": "replied",
-                        "request_id": request_id,
-                        "request_message_id": message_id,
-                        "session_id": rec.get("sessionId"),
-                        "session_name": rec.get("name"),
-                        "message": response["message"],
-                    }
-                    if args.json:
-                        print(json.dumps(payload, sort_keys=True))
-                    else:
-                        sys.stdout.write(response["message"])
-                        if not response["message"].endswith("\n"):
-                            sys.stdout.write("\n")
-                    return 0
+            if _reply_matches(response, request_id, rec.get("sessionId")):
+                payload = {
+                    "status": "replied",
+                    "request_id": request_id,
+                    "request_message_id": message_id,
+                    "session_id": rec.get("sessionId"),
+                    "session_name": rec.get("name"),
+                    "message": response["message"],
+                }
+                if args.json:
+                    print(json.dumps(payload, sort_keys=True))
+                else:
+                    sys.stdout.write(response["message"])
+                    if not response["message"].endswith("\n"):
+                        sys.stdout.write("\n")
+                return 0
             time.sleep(REQUEST_POLL_INTERVAL)
         sys.stderr.write(
             "error: request %s timed out after %.0f seconds; no reply was queued\n"
@@ -3484,6 +3498,213 @@ def cmd_reply(args):
         "%s to request %s" % (status.replace("_", " "), args.request),
     )
     return 0
+
+
+def cmd_dispatch(args):
+    """Send a correlated request to Claude and return immediately.
+
+    Same private mailbox, correlation envelope, and `reply_route=False` safety
+    as `ask`, but the mailbox is expiry-scoped rather than process-scoped: it
+    outlives this invocation so a later `await --request` can consume the
+    reply. `--timeout` sets the request lifetime and the mailbox `expires_at`.
+    """
+    warn_versions()
+    if not args.to.startswith("cc:"):
+        sys.stderr.write("error: dispatch --to must start with cc:\n")
+        return 2
+    try:
+        message = message_from_args(args)
+        timeout = _bounded_timeout(args.timeout)
+        thread_id = _thread_from_args(args, required=True)
+    except ValueError as exc:
+        sys.stderr.write("error: %s\n" % exc)
+        return 2
+    try:
+        rec = _resolve_claude_record(args.to[len("cc:") :])
+    except ResolveError as exc:
+        sys.stderr.write("error: %s\n" % exc)
+        return 1
+    if not rec.get("sessionId"):
+        sys.stderr.write(
+            "error: Claude target %r has no session id, so its reply cannot be verified\n"
+            % (rec.get("name") or args.to)
+        )
+        return 1
+
+    cleanup_expired_requests()
+    request_id = str(uuidlib.uuid4())
+    meta_path = request_path(request_id)
+    reply_path = request_reply_path(request_id)
+    expires_at = time.time() + timeout
+    meta = _request_meta(request_id, thread_id, rec, expires_at, reply_path)
+    write_json_atomic(meta_path, meta)
+    try:
+        message_id, _reply_capable = _deliver_claude(
+            rec,
+            _request_envelope(request_id, message, timeout),
+            thread_id,
+            reply_route=False,
+        )
+    except (OSError, ValueError) as exc:
+        # Delivery failed, so no reply can ever arrive: do not leave an orphan
+        # mailbox that a later `await` would poll until it expired.
+        _unlink_quiet(meta_path)
+        _unlink_quiet(reply_path)
+        if args.json:
+            print(
+                json.dumps(
+                    {
+                        "status": "delivery_failed",
+                        "request_id": request_id,
+                        "target_session_id": rec.get("sessionId"),
+                        "detail": str(exc),
+                    },
+                    sort_keys=True,
+                )
+            )
+        sys.stderr.write("error: could not send request to %s: %s\n" % (args.to, exc))
+        return 1
+    log(
+        "dispatched request %s to %s; expires in %.0fs"
+        % (request_id, rec.get("name") or rec.get("sessionId"), timeout)
+    )
+    payload = {
+        "status": "socket_write_succeeded",
+        "request_id": request_id,
+        "request_message_id": message_id,
+        "requester_thread_id": thread_id,
+        "target_session_id": rec.get("sessionId"),
+        "target_session_name": rec.get("name"),
+        "created_at": meta["created_at"],
+        "expires_at": expires_at,
+    }
+    _print_send_result(
+        args,
+        payload,
+        "dispatched request %s to %s; await it with "
+        "`peers.py await --request %s`"
+        % (request_id, rec.get("name") or rec.get("sessionId"), request_id),
+    )
+    return 0
+
+
+def _await_expired(args, detail):
+    """Report a mailbox that is no longer awaitable and fail closed."""
+    if getattr(args, "json", False):
+        print(
+            json.dumps(
+                {"status": "expired", "request_id": args.request, "detail": detail},
+                sort_keys=True,
+            )
+        )
+    sys.stderr.write("error: request %s is %s\n" % (args.request, detail))
+    return 1
+
+
+def _claim_reply(reply_path):
+    """Atomically take ownership of a reply file so it is consumed once.
+
+    `os.rename` is atomic, so exactly one caller renames the single reply file
+    away; a racing `await` sees it gone and stands down. Returns the parsed
+    reply for the winner, or None if another consumer already claimed it.
+    """
+    claim_path = "%s.consumed.%d.%s" % (reply_path, os.getpid(), uuidlib.uuid4().hex)
+    try:
+        os.rename(reply_path, claim_path)
+    except OSError:
+        return None
+    try:
+        data = read_json(claim_path, None)
+    finally:
+        _unlink_quiet(claim_path)
+    return data if isinstance(data, dict) else None
+
+
+def cmd_await(args):
+    """Consume the reply to one dispatched request, or report why not.
+
+    `--timeout` bounds only this invocation, never the request lifetime. A
+    call that times out while the request is still unexpired reports `pending`
+    and leaves the mailbox intact so a later `await` resumes it; a request past
+    its `expires_at` reports `expired`. The reply is consumed exactly once.
+    """
+    try:
+        meta_path = request_path(args.request)
+        reply_path = request_reply_path(args.request)
+        timeout = _bounded_timeout(args.timeout)
+        thread_id = _thread_from_args(args, required=True)
+    except ValueError as exc:
+        sys.stderr.write("error: %s\n" % exc)
+        return 2
+
+    cleanup_expired_requests()
+    meta = read_json(meta_path, None)
+    if not isinstance(meta, dict):
+        # Expired-and-collected, already consumed, or never dispatched. Without
+        # a durable terminal marker (deferred to a later slice) these cannot be
+        # told apart, so all three report the terminal `expired` state.
+        return _await_expired(args, "unknown, already consumed, or expired")
+    if thread_id != meta.get("requester_thread_id"):
+        sys.stderr.write(
+            "error: request %s was dispatched by thread %s, not %s\n"
+            % (args.request, meta.get("requester_thread_id"), thread_id)
+        )
+        return 1
+    target_sid = meta.get("target_session_id")
+    try:
+        expires_at = float(meta.get("expires_at", 0))
+    except (TypeError, ValueError):
+        expires_at = 0
+
+    deadline = time.monotonic() + timeout
+    while True:
+        if expires_at <= time.time():
+            cleanup_expired_requests()
+            return _await_expired(args, "expired before a reply arrived")
+        if not os.path.exists(meta_path):
+            return _await_expired(args, "unknown, already consumed, or expired")
+        response = read_json(reply_path, None)
+        if _reply_matches(response, args.request, target_sid):
+            claimed = _claim_reply(reply_path)
+            if claimed is None:
+                # A concurrent await consumed this reply first.
+                return _await_expired(args, "already consumed")
+            _unlink_quiet(meta_path)
+            payload = {
+                "status": "replied",
+                "request_id": args.request,
+                "session_id": target_sid,
+                "session_name": meta.get("target_session_name"),
+                "message": claimed["message"],
+            }
+            if args.json:
+                print(json.dumps(payload, sort_keys=True))
+            else:
+                sys.stdout.write(claimed["message"])
+                if not claimed["message"].endswith("\n"):
+                    sys.stdout.write("\n")
+            return 0
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(REQUEST_POLL_INTERVAL)
+
+    if expires_at <= time.time():
+        cleanup_expired_requests()
+        return _await_expired(args, "expired before a reply arrived")
+    # This call timed out, but the request is still live and re-awaitable.
+    payload = {
+        "status": "pending",
+        "request_id": args.request,
+        "expires_at": meta.get("expires_at"),
+    }
+    if args.json:
+        print(json.dumps(payload, sort_keys=True))
+    else:
+        sys.stderr.write(
+            "request %s has no reply yet; still pending and re-awaitable\n"
+            % args.request
+        )
+    return 124
 
 
 def cmd_wait_peer(args):
@@ -4417,6 +4638,47 @@ def build_parser():
     add_message_source(p_reply)
     p_reply.add_argument("--json", action="store_true", help="machine-readable result")
     p_reply.set_defaults(func=cmd_reply)
+
+    p_dispatch = sub.add_parser(
+        "dispatch",
+        help="send a correlated request to Claude and return immediately",
+    )
+    p_dispatch.add_argument(
+        "--to", required=True, metavar="cc:<name|uuid>", help="the Claude peer"
+    )
+    add_message_source(p_dispatch)
+    p_dispatch.add_argument(
+        "--from-thread",
+        metavar="UUID",
+        help="the Codex thread dispatching (defaults to CODEX_THREAD_ID)",
+    )
+    p_dispatch.add_argument(
+        "--timeout",
+        type=float,
+        help="request lifetime in seconds (default: 600; maximum: 3600)",
+    )
+    p_dispatch.add_argument(
+        "--json", action="store_true", help="machine-readable result"
+    )
+    p_dispatch.set_defaults(func=cmd_dispatch)
+
+    p_await = sub.add_parser(
+        "await", help="consume the reply to a dispatched request by its id"
+    )
+    p_await.add_argument("--request", required=True, metavar="UUID")
+    p_await.add_argument(
+        "--from-thread",
+        metavar="UUID",
+        help="the Codex thread that dispatched it (defaults to CODEX_THREAD_ID)",
+    )
+    p_await.add_argument(
+        "--timeout",
+        type=float,
+        help="seconds this call waits, distinct from the request lifetime "
+        "(default: 600; maximum: 3600)",
+    )
+    p_await.add_argument("--json", action="store_true", help="machine-readable result")
+    p_await.set_defaults(func=cmd_await)
 
     p_wait = sub.add_parser("wait", help="wait for a Claude peer registry state")
     p_wait.add_argument(
