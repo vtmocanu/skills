@@ -759,9 +759,9 @@ roles:
       - specs/ai.md: design and implementation decisions the AI made within the
         human constraints (libraries chosen, file layout, protocols,
         trade-offs). Apply updates here directly, no confirmation needed.
-      - specs/ai.md is the default AI-decision record. When the repo's
-        instructions or your `## For this repo` tail name another record (PRD
-        Decision Logs, ADRs), write decisions there and never write ai.md.
+      - If specs/ai.md opens with a `FROZEN` marker, or the repo's instructions
+        or your `## For this repo` tail name another record (PRD Decision Logs,
+        ADRs), never write ai.md: record decisions where they say.
       - Note the why for each recorded decision and reference the human spec
         item it serves.
       - Create specs/ and both files on first run if missing.

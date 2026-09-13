@@ -39,7 +39,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- `agent-team`: spec-keeper (v4 to v5): `specs/ai.md` stays the default AI-decision record, and the repo's instructions or the `## For this repo` tail may name another record (PRD Decision Logs, ADRs), in which case the role writes decisions there and never writes `ai.md`. The quality bar and per-dispatch workflow read "the AI-decision record" instead of hardcoding `ai.md`. Version bumped so consumers resync. Regenerated `product-agents/spec-keeper.md`. Motivated by vtmocanu/uzi#1317, where `ai.md` duplicates the PRD Decision Logs and its append-numbered tail collides on every close landing.
+- `agent-team`: spec-keeper (v4 to v5): `specs/ai.md` stays the default AI-decision record; when it opens with a `FROZEN` marker, or the repo's instructions or the `## For this repo` tail name another record (PRD Decision Logs, ADRs), the role writes decisions there and never writes `ai.md`. The marker is the channel that reaches a tail-free product subagent: it never sees the repo's CLAUDE.md, but its workflow reads `ai.md` on every dispatch. The quality bar and per-dispatch workflow read "the AI-decision record" instead of hardcoding `ai.md`. Version bumped so consumers resync. Regenerated `product-agents/spec-keeper.md`. Motivated by vtmocanu/uzi#1317, where `ai.md` duplicates the PRD Decision Logs and its append-numbered tail collides on every close landing.
 
 - `reflect`: reflection now targets the whole authored skill package, routing
   executable defects to bundled scripts/hooks plus regression tests and usage
