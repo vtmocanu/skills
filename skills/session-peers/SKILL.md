@@ -51,6 +51,14 @@ unsafe or conflicting title uses `codex-<uuid prefix>` instead. Confirm with
 `/list-agents` (or `ListAgents`); the peer appears as `interactive` with `idle`
 or `busy` status.
 
+**Addressing caution.** A title that is not a valid alias (spaces, other
+punctuation) shows only as the opaque `codex-<first 8 hex>` in `ListAgents`, and
+two threads sharing those 8 hex fall back to the full UUID. `ListAgents` alone
+cannot tell you which thread an opaque `codex-…` peer is, so before messaging
+one run `peers.py list` to read its human title (and `peers.py doctor` to catch
+a live thread that has no shim yet) rather than guessing — messaging the wrong
+thread is silent.
+
 ### Manual persistent attachment
 
 Without the automatic hook, name the Codex thread and register it explicitly:
@@ -77,10 +85,13 @@ it; Codex runs it as its next user turn under the thread's own approval mode.
 - **Reply budget**: the shim delivers at most 3 consecutive replies to one peer
   inside a 30-minute idle window. A direct Codex turn, a request from another
   peer, the idle window, `peers.py budget reset <name|uuid>`, or a fresh `up`
-  resets the sequence. A blocked fourth reply stays visible in Codex, and the
-  requesting Claude session receives a correlated `failed` status instead of
-  waiting silently. This stops tight unattended ping-pong without turning the
-  budget into a lifetime counter.
+  resets the sequence. A blocked fourth reply stays visible in Codex. The shim
+  emits a correlated `failed` status, which the requesting session surfaces only
+  when it is tracking the originating peer message; because an ordinary
+  `SendMessage`-style delivery is not tracked, the shim also delivers one plain,
+  non-replyable notice to that session the first time a reply is dropped in a
+  sequence, naming `peers.py budget reset <thread>`. This stops tight unattended
+  ping-pong without turning the budget into a lifetime counter.
 - **Idle thread latency**: up to 10 s (Codex polls its queue), then the turn.
 - **Busy thread**: the message queues and runs after the current turn.
 - **Continuously-driven thread**: a thread another driver keeps feeding
@@ -139,6 +150,12 @@ routes the reply to the Claude session listening on that socket:
 refuses when nothing listens there. A tag without a session id is never
 auto-delivered. `send --to cc:<name|uuid>` posts a wrapped message directly
 into a Claude session from a host shell; UUID is stable across renames.
+
+`list --json` reports Codex threads under `.codex[]` (proven live) and
+`.codex_unverified[]` (liveness unproven), and each entry carries an explicit
+`live` field — `true` on a `.codex[]` entry, `null` on an unverified one — so a
+caller reads liveness directly instead of inferring it from `holder_pid`.
+`.codex[]` stays live-only, so `live` is never `false` there.
 
 Every direct `send` generates a message id, includes it as `mid` on a Codex
 message, and reports it in `--json` output. When `send --to codex:...` runs from
@@ -309,8 +326,12 @@ Set `SESSION_PEERS_GC_DAYS` to change automatic retention.
 
 Reports the socket directory, registered versus live shims, hook trust state,
 process and Unix-socket capability, stale metadata count, `codex` and `lsof` on
-`PATH`, and version drift. Ordinary commands rate-limit an unchanged version
-warning to once per 24 hours; `doctor` always reports the current comparison. Re-run
+`PATH`, and version drift. It also warns for each **live Codex thread that has no
+shim and is not registered** (`<name>: live Codex thread, not attached (run
+peers.py up <uuid>)`) — the state where a message queues but no reply routes
+back, and which `ListAgents` cannot show. Ordinary commands rate-limit an
+unchanged version warning to once per 24 hours; `doctor` always reports the
+current comparison. Re-run
 `<this skill's directory>/references/spike-checklist.md` after an upgrade.
 
 Before claiming a reply was sent, check

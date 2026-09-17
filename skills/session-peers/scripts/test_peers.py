@@ -2521,6 +2521,47 @@ class TestList(Base):
         _rc, out, _err = self.cli("list")
         self.assertIn("degraded", out)
 
+    def test_list_json_exposes_live_true_on_a_codex_thread(self):
+        self.one_thread(name="codex-uzi")
+        _rc, out, _err = self.cli("list", "--json")
+        self.assertIs(json.loads(out)["codex"][0]["live"], True)
+
+    def test_list_json_marks_an_unverified_thread_live_null(self):
+        self.one_thread(name="codex-uzi")
+        os.environ["FAKE_LSOF_RC"] = "126"
+        with contextlib.redirect_stderr(io.StringIO()):
+            _rc, out, _err = self.cli("list", "--json")
+        self.assertIsNone(json.loads(out)["codex_unverified"][0]["live"])
+
+
+class TestDoctorAttachment(Base):
+    def _doctor_text(self):
+        rc, out, err = self.cli("doctor")
+        self.assertEqual(rc, 0)
+        return out + err
+
+    def test_doctor_flags_an_unregistered_live_thread_with_no_shim(self):
+        # one_thread() is live, holder-backed, unregistered, and un-shimmed —
+        # exactly the state that hid 1393-review/skills. The registered loop
+        # never walks it, so this new pass must.
+        tid, _r = self.one_thread(name="skills")
+        text = self._doctor_text()
+        self.assertIn("live Codex thread, not attached", text)
+        self.assertIn("peers.py up %s" % tid, text)
+
+    def test_a_registered_live_no_shim_thread_warns_exactly_once(self):
+        tid, _r = self.one_thread(name="skills")
+        peers.write_registered({tid: {"name": "skills"}})
+        text = self._doctor_text()
+        self.assertIn("thread is live but no shim", text)  # existing loop
+        self.assertNotIn("not attached", text)             # new pass stays out
+
+    def test_doctor_does_not_flag_an_unverified_thread_as_unattached(self):
+        self.one_thread(name="skills")
+        os.environ["FAKE_LSOF_RC"] = "126"
+        text = self._doctor_text()
+        self.assertNotIn("not attached", text)
+
 
 # ==========================================================================
 # M2: the shim, in process
@@ -2731,6 +2772,17 @@ class TestShimReplies(ShimBase):
         return peers.Turn(turn_id, "ping", tag, outcome,
                           text if outcome == "complete" else None)
 
+    @staticmethod
+    def _reply_frames(listener):
+        # A delivered reply carries a `from` reply route; the budget-drop notice
+        # (build_user_frame(body, None)) deliberately has none. Counting frames
+        # with `from` isolates real replies from the notice.
+        return [f for f in listener.of_type("user") if f.get("from")]
+
+    @staticmethod
+    def _notice_frames(listener):
+        return [f for f in listener.of_type("user") if not f.get("from")]
+
     def test_a_bridged_turn_is_answered_back_to_its_sender(self):
         shim, tid, _rollout = self.make_shim()
         listener, _rec = self.add_listener(name="cc-main", session_id="s1")
@@ -2836,9 +2888,9 @@ class TestShimReplies(ShimBase):
             for i in range(peers.REPLY_BUDGET + 2):
                 shim._handle_turn_end(self._turn(listener.path, turn_id="t%d" % i))
                 time.sleep(0.05)
-        wait_for(lambda: len(listener.of_type("user")) >= peers.REPLY_BUDGET)
+        wait_for(lambda: len(self._reply_frames(listener)) >= peers.REPLY_BUDGET)
         time.sleep(0.2)
-        self.assertEqual(len(listener.of_type("user")), peers.REPLY_BUDGET)
+        self.assertEqual(len(self._reply_frames(listener)), peers.REPLY_BUDGET)
         self.assertIn("reply budget", err.getvalue())
 
     def test_the_fourth_reply_notifies_the_requesting_peer(self):
@@ -2855,10 +2907,62 @@ class TestShimReplies(ShimBase):
         statuses = wait_for(
             lambda: listener.of_type("control", "peer_message_status")
         )
-        self.assertEqual(len(listener.of_type("user")), peers.REPLY_BUDGET)
+        self.assertEqual(len(self._reply_frames(listener)), peers.REPLY_BUDGET)
         self.assertEqual(statuses[-1]["status"], "failed")
         self.assertEqual(statuses[-1]["orig_msg_id"], "m3")
         self.assertIn("loop guard", statuses[-1]["detail"])
+
+    def test_a_dropped_reply_sends_one_nonreplyable_notice(self):
+        # The correlated status frame above is surfaced only when the peer is
+        # tracking the originating message; an ordinary SendMessage-style send is
+        # not, so a visible, non-replyable notice also fires on the drop. Distinct
+        # msg ids here double as the guard-intact regression: same sid, fresh
+        # inbound each turn, the 4th consecutive reply still dropped.
+        shim, _tid, _rollout = self.make_shim()
+        listener, _rec = self.add_listener(name="cc-main", session_id="s1")
+        with contextlib.redirect_stderr(io.StringIO()):
+            for i in range(peers.REPLY_BUDGET + 1):
+                shim._handle_turn_end(
+                    self._turn(listener.path, turn_id="t%d" % i, msg_id="m%d" % i)
+                )
+        # Synchronize on BOTH the delivered replies and the notice before
+        # counting, so neither assertion races a frame still in flight.
+        notices = wait_for(
+            lambda: self._notice_frames(listener)
+            if len(self._reply_frames(listener)) >= peers.REPLY_BUDGET
+            else None
+        )
+        self.assertIsNotNone(notices)
+        self.assertEqual(len(self._reply_frames(listener)), peers.REPLY_BUDGET)
+        self.assertEqual(len(notices), 1)
+        self.assertNotIn("from", notices[0])  # no reply route: cannot loop back
+        self.assertIn("budget reset", notices[0]["message"]["content"])
+        self.assertTrue(
+            wait_for(lambda: listener.of_type("control", "peer_message_status"))
+        )
+
+    def test_the_drop_notice_fires_once_per_sequence(self):
+        shim, _tid, _rollout = self.make_shim()
+        listener, _rec = self.add_listener(name="cc-main", session_id="s1")
+        with contextlib.redirect_stderr(io.StringIO()):
+            for i in range(peers.REPLY_BUDGET + 3):  # several drops, one sequence
+                shim._handle_turn_end(
+                    self._turn(listener.path, turn_id="t%d" % i, msg_id="m%d" % i)
+                )
+                time.sleep(0.02)
+        wait_for(lambda: self._notice_frames(listener))
+        time.sleep(0.2)
+        self.assertEqual(len(self._notice_frames(listener)), 1)
+
+    def test_a_sequence_reset_clears_the_drop_notice_flag(self):
+        shim, _tid, _rollout = self.make_shim()
+        shim.budgets = {"s1": peers.REPLY_BUDGET}
+        shim.budget_notified = {"s1"}
+        shim.budget_sender_sid = "s1"
+        shim.budget_last_at = time.time()
+        shim._advance_budget_sequence({"sid": "s2"})  # an intervening peer
+        self.assertEqual(shim.budgets, {})
+        self.assertEqual(shim.budget_notified, set())
 
     def test_the_budget_counts_an_at_name_reply_too(self):
         shim, _tid, _rollout = self.make_shim()
@@ -2884,7 +2988,7 @@ class TestShimReplies(ShimBase):
                 )
                 time.sleep(0.05)
         time.sleep(0.2)
-        self.assertEqual(len(listener.of_type("user")), peers.REPLY_BUDGET)
+        self.assertEqual(len(self._reply_frames(listener)), peers.REPLY_BUDGET)
         self.assertIn("reply budget", err.getvalue())
 
     def test_the_budget_marker_clears_the_counter(self):
@@ -2896,11 +3000,11 @@ class TestShimReplies(ShimBase):
         with contextlib.redirect_stderr(io.StringIO()):
             shim._handle_turn_end(self._turn(listener.path, turn_id="t-blocked"))
         time.sleep(0.2)
-        self.assertEqual(listener.of_type("user"), [])
+        self.assertEqual(self._reply_frames(listener), [])  # a notice may appear
         self.cli("budget", "reset", tid)
         shim._consume_budget_marker()
         shim._handle_turn_end(self._turn(listener.path, turn_id="t-after"))
-        self.assertIsNotNone(wait_for(lambda: listener.of_type("user")))
+        self.assertTrue(wait_for(lambda: self._reply_frames(listener)))
 
     def test_a_legacy_lifetime_counter_starts_a_fresh_sequence(self):
         shim, _tid, _rollout = self.make_shim()
@@ -4402,6 +4506,7 @@ class TestBudgetResetPersistence(ShimBase):
         shim.budgets["s1"] = peers.REPLY_BUDGET
         shim.budget_sender_sid = "s1"
         shim.budget_last_at = time.time()
+        shim.budget_notified = {"s1"}
         shim._save_state()
         self.cli("budget", "reset", tid)
         with contextlib.redirect_stderr(io.StringIO()):
@@ -4409,10 +4514,12 @@ class TestBudgetResetPersistence(ShimBase):
         self.assertEqual(shim.budgets, {})
         self.assertIsNone(shim.budget_sender_sid)
         self.assertIsNone(shim.budget_last_at)
+        self.assertEqual(shim.budget_notified, set())
         state = peers.read_json(peers.thread_state_path(tid))
         self.assertEqual(state["budgets"], {})
         self.assertIsNone(state["budget_sender_sid"])
         self.assertIsNone(state["budget_last_at"])
+        self.assertEqual(state["budget_notified"], [])
 
 
 # ==========================================================================
