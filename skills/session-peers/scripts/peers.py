@@ -2084,6 +2084,10 @@ class Shim:
         self.budgets = dict(state.get("budgets") or {})
         self.budget_sender_sid = state.get("budget_sender_sid")
         self.budget_last_at = parse_time(state.get("budget_last_at"))
+        # Sessions already told (once) that a reply of theirs was dropped for
+        # budget; cleared whenever the budget sequence resets so a genuinely new
+        # sequence can notify again.
+        self.budget_notified = set(state.get("budget_notified") or [])
         self.contacts = dict(state.get("contacts") or {})
         self.fresh = not state
         if self.fresh:
@@ -2327,6 +2331,7 @@ class Shim:
                 "budgets": self._bound(self.budgets),
                 "budget_sender_sid": self.budget_sender_sid,
                 "budget_last_at": self.budget_last_at,
+                "budget_notified": sorted(self.budget_notified),
                 "contacts": self._bound(self.contacts),
                 "updated_at": now_iso(),
             },
@@ -2750,6 +2755,7 @@ class Shim:
         self.budgets = {}
         self.budget_sender_sid = None
         self.budget_last_at = None
+        self.budget_notified = set()
         if not initial:
             log("reply budget reset for thread %s" % self.thread_id)
             self._save_state()
@@ -2773,6 +2779,7 @@ class Shim:
                     reason = "the requesting peer changed"
                 log("reply budget sequence reset: %s" % reason)
             self.budgets = {}
+            self.budget_notified = set()
         self.budget_sender_sid = sender_sid
         self.budget_last_at = now if sender_sid else None
 
@@ -2889,6 +2896,28 @@ class Shim:
                     "failed",
                     detail,
                 )
+                # The status frame above is surfaced only when the requesting
+                # session is tracking the originating peer message; an ordinary
+                # SendMessage-style delivery has nothing correlating it, so
+                # without this it drops silently. Deliver ONE non-replyable
+                # notice per exhausted sequence (no `from` route, no answer
+                # body) naming the reset command.
+                if sid not in self.budget_notified:
+                    notice = (
+                        "[session-peers] a reply from %s was not delivered: the "
+                        "reply budget of %d consecutive replies is spent for this "
+                        "peer. It resets after another peer, a direct Codex turn, "
+                        "or %.0fs idle; run `peers.py budget reset %s` to clear it "
+                        "now." % (
+                            self.name or self.thread_id,
+                            REPLY_BUDGET,
+                            self.reply_budget_window,
+                            self.thread_id,
+                        )
+                    )
+                    body = build_cc_body(notice, self.thread_id, self.name, None)
+                    if deliver_to_record(rec, build_user_frame(body, None)):
+                        self.budget_notified.add(sid)
                 continue
             try:
                 body = build_cc_body(text, self.thread_id, self.name, self.sock_path)
@@ -2960,6 +2989,10 @@ def cmd_list(args):
             "registered": thread["id"] in registered,
             "holder_pid": thread.get("holder_pid"),
             "shim_pid": pid,
+            # Liveness straight off the thread record: `true` for a codex[]
+            # entry, `null` for a codex_unverified[] one. codex[] stays
+            # live-only, so `false` never appears here (see the module docs).
+            "live": thread.get("live"),
             "liveness_error": thread.get("liveness_error"),
         }
 
@@ -4507,6 +4540,27 @@ def cmd_doctor(_args):
             add("ok", "%s: registered, thread not running" % name)
     if not registered:
         add("warn", "no registered threads (run `peers.py up <name|uuid>`)")
+    # A live thread that is neither registered nor shimmed is invisible to the
+    # loop above (it walks `registered` only), yet it is exactly the state that
+    # silently swallows messages: SessionStart never attached it, or its shim
+    # died. Surface each with the command that attaches it. `live is None`
+    # (unverified) threads are not reported here, and a registered thread is
+    # already covered above, so it warns exactly once, never twice.
+    for thread in sorted(
+        (
+            t
+            for t in threads
+            if t.get("live") is True
+            and t["id"] not in registered
+            and not shim_pid(t["id"])
+        ),
+        key=lambda t: t["id"],
+    ):
+        add(
+            "warn",
+            "%s: live Codex thread, not attached (run `peers.py up %s`)"
+            % (thread.get("name") or thread["id"], thread["id"]),
+        )
 
     hooks_path = os.path.join(codex_home(), "hooks.json")
     data = read_json(hooks_path, None)
