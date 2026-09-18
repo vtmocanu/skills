@@ -55,8 +55,6 @@ If `.agents/skills` already contains a skill, move the remaining skill directori
 
 This form has two costs. First, every skill becomes visible to Codex and OpenCode, so it cannot keep a Claude-only skill private to Claude. Second, do not use it with project-scope npx installs: the package manager's `.claude/skills/<name>` projection resolves on top of the canonical `.agents/skills/<name>` store instead of remaining a distinct projection. Use the per-skill form below when either cost applies.
 
-The directory form was verified on 2026-09-08 in [vtmocanu/uzi#1204](https://github.com/vtmocanu/uzi/pull/1204): a Claude Code session launched in that checkout discovered the skills through the directory symlink, while Codex read the real `.agents/skills` tree.
-
 ### Per-skill symlinks
 
 Use this form when the repository mixes cross-agent and Claude-only skills, or when project-scope npx installs exist. Keep `.claude/skills` itself as a real directory so cross-agent symlinks, Claude-only skills, and npx-managed projections can coexist:
@@ -128,7 +126,7 @@ Fix: a **`<sub>/.claude-plugin/plugin.json`** manifest. Manifest-declared skill 
 
 The CLI resolves each entry under the subpath dir and registers its **parent** directory, then walks that dir one level for `SKILL.md`. So one entry `./prd/<any-skill>` registers the whole `prd/` folder and finds every skill directly inside it — new skills dropped into an already-registered folder **auto-join with no manifest edit**. The gap the manifest does not close on its own: a brand-new nested folder that no entry registers. Guard it in CI with a coverage check that recomputes what the subpath install would find and fails if any on-disk `SKILL.md` is unreachable (see `scripts/check_bundle_coverage.py`).
 
-Verified 2026-08-13 on the `skills/agent-kit` bundle, default-branch install (no `--branch`): nested `prd/*` **without** the manifest resolved to only the one depth-1 skill; **with** the manifest, all eleven installed. Verify layout changes with a real default-branch `add` (e.g. push to a throwaway repo's default branch) — `add --branch <x>` and `add … -l` can take a different code path than the plain default-branch install a SessionStart hook runs, so a green result there is not proof the hook will agree.
+Verify layout changes with a real default-branch `add`. `add --branch <x>` and `add … -l` can use a different path from the default-branch install used by SessionStart hooks.
 
 ## Frontmatter
 
@@ -153,6 +151,8 @@ Adapted from Anthropic's upstream [`skill-creator`](https://github.com/anthropic
 
 - **Concise.** Only add what the model does not already know. Imperative ("Run agnix before committing"), no hedging ("you should", "we recommend").
 - **Audience is the model at runtime**, not humans. Skip onboarding prose, rationale dumps, changelogs, install guides.
+- **Instructions, not archaeology.** Keep the rule, trigger, command, constraint, and exception. Delete dates, incident narratives, observed/verified/measured anecdotes, why-added prose, and root-cause history. Put evidence in the commit or PR. Keep a version only when behavior depends on it.
+- **Byte-preserving publication.** Never auto-rewrite prose in refresh or publish scripts. Trim the authored source with review.
 - **Discover, don't hardcode.** For mutable values (versions, IPs, namespaces, secret paths) give the discovery command, not the value — "how to find X" stays correct, "X is 1.2.3" rots. Label any concrete value as an example and tell the model to re-query.
 - **Match specificity to fragility.** Text instructions where judgement varies; parameterized scripts where a pattern exists; specific scripts when sequence matters.
 - **Provide a default, not a menu.** Pick one recommended tool/approach; offer alternatives only for clearly different cases.
@@ -186,7 +186,7 @@ Gerund (`processing-pdfs`), noun phrase (`pdf-processing`), or action verb (`pro
 
 ### Never put a bare `$1` / `$2` in a code block
 
-When a skill is invoked **with arguments** (`/<skill> some args`), the runner substitutes argument tokens into `$N` **everywhere in the rendered body, including fenced code blocks** — the files on disk are untouched, so it is invisible unless you compare what ran against the source. The model then runs a silently corrupted command (observed: `awk '{print $1"/"$2}'` arrived as `awk '{print foo,"/"bar}'`). Avoid `$N` in code blocks — prefer `cut -f1`, `jq -r '.[0]'`, or a named regex capture. Where `$N` is unavoidable, put a warning beside the snippet that the `$1` is literal. Do not assume `$$1` / `\$1` escapes survive without checking.
+When a skill is invoked **with arguments** (`/<skill> some args`), the runner substitutes argument tokens into `$N` **everywhere in the rendered body, including fenced code blocks**. Avoid `$N` in code blocks; prefer `cut -f1`, `jq -r '.[0]'`, or a named regex capture. Where `$N` is unavoidable, put a warning beside the snippet that the `$1` is literal. Do not assume `$$1` / `\$1` escapes survive without checking.
 
 ## Linting with agnix
 
@@ -206,6 +206,8 @@ agnix --target codex <skill-file>
 `--target` still works and is listed in `agnix --help`, but recent agnix versions print `Field 'target' is deprecated` and steer toward a config-file `tools` array (there is no `--tools` CLI flag); the warning is benign. To silence it in a repo you lint often, add an `.agnix.toml` (`agnix init`) with `tools = ["claude-code"]`, then drop the flag: `agnix <skill-file>`.
 
 Add `--show-fixes` to preview rewrites, or `--fix-safe` for high-confidence ones (always re-read the diff — "fixable" ≠ "correct in context"). **Errors must be fixed before commit; warnings are advisory** — fix the real ones. **Pre-existing warnings count**: when a file is open for a real edit, surface warnings that predate your change and propose fixing them in the same commit, rather than re-committing a file with the same warning count forever.
+
+**Agnix does not catch historical noise.** After it passes, sweep every edited `SKILL.md`, reference, template, and asset for the instruction-only rule above. Remove pre-existing noise surfaced by the edit.
 
 ## Workflow
 
@@ -230,11 +232,11 @@ Use the bundled refresher for automatic installs and updates:
 ~/.agents/skills/skill-maker/scripts/refresh_skills.py --source <source>
 ```
 
-The explicit pair is load-bearing. In `skills` CLI 1.5.23, targeting only the non-universal `claude-code` directory selects copy mode and writes only `.claude/skills`; no canonical `.agents/skills` entry exists for Codex or OpenCode to discover. Targeting `claude-code codex` selects canonical-plus-symlink mode: Codex supplies the universal `.agents/skills` target, Claude gets a symlink, and OpenCode discovers the same canonical store without a redundant third target. This was reproduced in isolated global installs on 2026-09-08. Re-run that probe when changing the rolling package-manager version.
+The explicit pair is load-bearing. In `skills` CLI 1.5.23, targeting only the non-universal `claude-code` directory selects copy mode and writes only `.claude/skills`; no canonical `.agents/skills` entry exists for Codex or OpenCode to discover. Targeting `claude-code codex` selects canonical-plus-symlink mode: Codex supplies the universal `.agents/skills` target, Claude gets a symlink, and OpenCode discovers the same canonical store without a redundant third target. Re-run the probe when changing the package-manager version.
 
 The macOS/Linux stdlib wrapper holds `fcntl.flock` on `~/.agents/.skills-refresh.lock` across staging and publication. It asks Vercel's CLI to install configured catalogs with `--skill '*'` into temporary projects, then installs other tracked global and current-project dependencies by their recorded names and refs. New catalog skills are discovered automatically; repo-authored skills absent from `skills-lock.json` stay untouched. The default catalog is this public repo; repeat `--source` for another required catalog or `--best-effort-source` for an optional one. Vercel handles fetching, discovery, and staged installation; the wrapper publishes complete files into the live canonical and Claude stores and adapts the staged lock metadata.
 
-**Readers do not take the wrapper lock.** Their protection is staging plus atomic file replacement, with supporting files published before `SKILL.md`. Existing paths and retired supporting files remain readable; unchanged files are not rewritten. This is atomic per file, not a snapshot of a whole skill. Read [refresh safety](references/refresh-safety.md) when changing the script, diagnosing missing-file warnings, or handling metadata and cleanup limits. It records the 2026-09-08 reproduction that disproved the old assumption that async refresh merely leaves an older inventory.
+**Readers do not take the wrapper lock.** Their protection is staging plus atomic file replacement, with supporting files published before `SKILL.md`. Existing paths and retired supporting files remain readable; unchanged files are not rewritten. This is atomic per file, not a snapshot of a whole skill. Read [refresh safety](references/refresh-safety.md) when changing the script, diagnosing missing-file warnings, or handling metadata and cleanup limits.
 
 After installing `skill-maker`, use its actual installed script path directly. If the hook command must keep a stable trust identity or supply machine-local source arguments, point it at a thin machine-local trampoline that `exec`s the installed script with those arguments. Never copy the refresher implementation to the stable path: npx updates the installed skill, not the detached copy, so the hook would keep running stale logic. Do not configure either hook until the installed script and any trampoline exist and are executable. Every entry path must ultimately execute the installed refresher; its shared `fcntl.flock` on `~/.agents/.skills-refresh.lock` is the serialization boundary.
 
@@ -282,10 +284,11 @@ Codex user hooks are loaded from `~/.codex/hooks.json`, and a new or changed hoo
 
 ### Edit and publish an existing skill
 1. Edit the source `<name>/SKILL.md` (and any supporting files) in its repo.
-2. **Lint** with agnix; fix errors, triage warnings.
-3. **Commit + push** to the source repo. Stage only the file(s) you touched (`git add <name>/`) — do **not** `git add -A`; the worktree may carry unrelated in-progress edits on other skills.
-4. **Publish** by invoking the installed refresher, or letting its next SessionStart invocation run. With all consumers closed, direct `npx -y skills@latest update -g -p` remains available (`-g` global, `-p` current project). Do not put that direct modifying command in an async hook.
-5. **Verify the canonical installed store and each target projection**, since the source file is not what the model reads:
+2. **Trim** every edited package file to instruction-only content; remove pre-existing noise surfaced by the edit.
+3. **Lint** with agnix; fix errors, triage warnings.
+4. **Commit + push** to the source repo. Stage only the file(s) you touched (`git add <name>/`) — do **not** `git add -A`; the worktree may carry unrelated in-progress edits on other skills.
+5. **Publish** by invoking the installed refresher, or letting its next SessionStart invocation run. With all consumers closed, direct `npx -y skills@latest update -g -p` remains available (`-g` global, `-p` current project). Do not put that direct modifying command in an async hook.
+6. **Verify the canonical installed store and each target projection**, since the source file is not what the model reads:
    ```bash
    grep "<distinctive phrase from your edit>" ~/.agents/skills/<name>/SKILL.md
    grep "<distinctive phrase from your edit>" ~/.claude/skills/<name>/SKILL.md

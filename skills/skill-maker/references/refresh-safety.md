@@ -5,14 +5,11 @@ skill-loading warnings. Vercel's `skills` CLI remains responsible for fetching,
 discovery, and installation into staging. The local wrapper coordinates calls
 and publishes their output; it does not patch Vercel's package.
 
-## Verified failure and correction
+## Failure model
 
-On 2026-09-08, source inspection of `skills` 1.5.23 and 1.5.24 found that
-`cleanAndCreateDirectory` recursively deletes an installed skill before copying
-the replacement, including an unchanged `add`. A concurrent reader during ten
-isolated 1.5.24 reinstalls observed 114 missing-file reads and eight partial reads.
-All files were intact afterward. This explains intermittent `Skipped loading ...
-invalid SKILL.md` and `No such file or directory` warnings with changing names.
+`skills` 1.5.23 and 1.5.24 delete an installed skill before copying its
+replacement, including an unchanged `add`. Concurrent readers can see missing
+or partial files even when the final files are complete.
 
 The old wrapper's `flock` serialized installers, but agent readers never acquired
 that lock. Its documentation described only an older inventory at startup;
