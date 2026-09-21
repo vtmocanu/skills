@@ -194,6 +194,8 @@ To start working on this PRD, run `/prd-start [issue-id]`
 
 If the user picked **Commit & push for later**:
 
+> **Commit the PRD straight to `main` — no PR, no feature branch.** This overrides any "branch first on the default branch" rule; branches and PRs are for the `prd-start` implementation, not the PRD file.
+
 ```bash
 # Stage the PRD file (and ROADMAP.md if it was updated)
 git add prds/[issue-id]-[feature-name].md
@@ -259,5 +261,6 @@ This runs the `uzi` **binary** directly (like Option 3's `uzi repo list --json`)
 - **Option 2**: Best when creating multiple PRDs or planning future work
 - **Option 3 (send to uzi)**: hands the PRD to the `uzi-cli` skill's **Send to uzi** menu, which picks how much to automate (Auto / Supervised / Seed & ship / let uzi plan it) and explains the budget tradeoff. A seeded run uses uzi's global default budget (keep the plan small), while the gated path scales the budget to the milestones uzi freezes (fits large or multi-component PRDs).
 - **Option 4 (queue for a uzi sweep)**: the deferred sibling of Option 2 — commits & pushes the PRD, then labels the issue for a uzi **sweep schedule** (label discovered at runtime via `uzi schedule list --json`, never hardcoded) so a scheduled sweep implements it later, with no run started now. Offered only when uzi is detected and a sweep schedule exists.
+- **No PR for a PRD**: commit straight to `main` (Option 1/2), never a feature branch or PR. Overrides the general "branch first" rule; branches/PRs are for the `prd-start` implementation.
 - **Skip CI flag**: Always use `[skip ci]` when committing PRD-only changes
 - **Issue reference**: Include issue number in commit message for traceability
