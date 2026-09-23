@@ -56,10 +56,15 @@ reviews:
     # opened under a different account.
     ignore_usernames:
       - "renovate[bot]"
+    # On-demand skip: put "[skip-cr]" anywhere in a PR title and CodeRabbit will
+    # not auto-review it (same convention as uzi). For a PR already open, post
+    # the native comment "@coderabbitai ignore" instead. Use either only when a
+    # local reviewer covers the change.
     ignore_title_keywords:
       - "chore(deps)"
       - "fix(deps)"
       - "build(deps)"
+      - "[skip-cr]"
 
   # Path-specific instructions
   path_instructions:
