@@ -8,6 +8,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- `agent-team`: an exact model-ID pin in a repo's role file now defaults to
+  re-floating to the library alias (`opus`/`sonnet`) instead of `keep local`;
+  a stale pin silently ran every subagent on an older generation.
 - `session-peers`: a reply the loop guard blocks (the 4th consecutive reply to
   one peer) is now held instead of lost. The latest one per peer is kept in the
   mode-0600 shim state and released by `peers.py budget reset`, marked

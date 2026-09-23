@@ -1101,7 +1101,7 @@ roles:
     version: 5
     description: UX/UI design lead. Sets opinionated visual and IA direction, prototypes and implements the frontend/UI, and validates it in a real browser. Owns the design layer; defers backend logic to the coder.
     tools: []
-    model: opus  # switched from fable 2026-08-15: opus for stronger design + implementation reasoning (alias floats; repos may pin an exact generation, e.g. claude-opus-4-8)
+    model: opus  # switched from fable 2026-08-15: opus for stronger design + implementation reasoning (alias floats with the current generation; prefer it over an exact pin)
     triggers_on:
       - "web/**"
       - "frontend/**"
