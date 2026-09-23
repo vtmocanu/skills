@@ -1260,6 +1260,23 @@ def resolve_thread(target, require_live=True):
     return matches[0]
 
 
+def resolve_thread_prefer_live(target):
+    """Resolve for commands that also act on a stopped thread (`budget`, `down`).
+
+    Codex's title suggester reuses names, so a bare name usually also matches
+    past threads; resolving across dead threads first made a unique LIVE name
+    ambiguous. Prefer the live match; only when there is none, fall back to any
+    thread with that name. Raises the more specific ResolveError otherwise.
+    """
+    try:
+        return resolve_thread(target, require_live=True)
+    except ResolveError as live_error:
+        try:
+            return resolve_thread(target, require_live=False)
+        except ResolveError:
+            raise live_error
+
+
 # --------------------------------------------------------------------------
 # Registration (D6)
 # --------------------------------------------------------------------------
@@ -1657,6 +1674,19 @@ def build_user_frame(body, from_socket=None):
     if from_socket:
         frame["from"] = "uds:%s" % from_socket
     return frame
+
+
+def reply_text(text, msg_id, held_reply=False):
+    """Prefix a reply with the id of the request it answers.
+
+    `msg_id` is the requester's own SendMessage msg_id (carried in the turn
+    tag), so a Claude session can tell which of its messages a reply answers
+    when several crossed. No id, no prefix.
+    """
+    if not msg_id:
+        return text
+    label = "held reply, in reply to message" if held_reply else "in reply to message"
+    return "[%s %s]\n%s" % (label, msg_id, text)
 
 
 def build_cc_body(text, thread_id, thread_name, shim_socket):
@@ -2088,6 +2118,15 @@ class Shim:
         # budget; cleared whenever the budget sequence resets so a genuinely new
         # sequence can notify again.
         self.budget_notified = set(state.get("budget_notified") or [])
+        # The latest budget-dropped reply per requesting session, held (not lost) so
+        # an explicit `peers.py budget reset` can release it. Bounded to one per
+        # session, expired with the idle window, discarded on any other sequence
+        # reset, and kept only in this mode-0600 state file, never in the log.
+        self.held = dict(state.get("held") or {})
+        # Set when a startup reset leaves held replies to release: the release
+        # waits until this shim is bound and registered, so the reply's `from`
+        # route names a socket that exists.
+        self.release_after_start = False
         self.contacts = dict(state.get("contacts") or {})
         self.fresh = not state
         if self.fresh:
@@ -2194,6 +2233,10 @@ class Shim:
                 "shim up: thread=%s name=%s socket=%s holder=%s"
                 % (self.thread_id, self.name, self.sock_path, self.holder_pid)
             )
+            if self.release_after_start:
+                self.release_after_start = False
+                self._release_held()
+                self._save_state()
             self._poll_loop()
         finally:
             self._cleanup()
@@ -2332,6 +2375,7 @@ class Shim:
                 "budget_sender_sid": self.budget_sender_sid,
                 "budget_last_at": self.budget_last_at,
                 "budget_notified": sorted(self.budget_notified),
+                "held": self._bound(self.held),
                 "contacts": self._bound(self.contacts),
                 "updated_at": now_iso(),
             },
@@ -2647,6 +2691,7 @@ class Shim:
         last_alias = last_live
         while not self.stop.wait(self.poll_interval):
             self._consume_budget_marker()
+            self._expire_held()
             try:
                 events = self.tail.poll()
             except Exception as exc:  # never let a bad line kill the shim
@@ -2756,9 +2801,66 @@ class Shim:
         self.budget_sender_sid = None
         self.budget_last_at = None
         self.budget_notified = set()
-        if not initial:
-            log("reply budget reset for thread %s" % self.thread_id)
-            self._save_state()
+        if initial:
+            # Not yet bound or registered: defer the release (see run()).
+            self.release_after_start = bool(self.held)
+            return
+        log("reply budget reset for thread %s" % self.thread_id)
+        # An explicit reset is the supervision signal the loop guard waits for,
+        # so it also releases the reply the guard held back.
+        self._release_held()
+        self._save_state()
+
+    def _expire_held(self, now=None):
+        """Purge held replies past the idle window from memory AND the state file."""
+        if not self.held:
+            return
+        now = time.time() if now is None else now
+        stale = [
+            sid
+            for sid, entry in self.held.items()
+            if not isinstance(entry, dict)
+            or now - float(entry.get("at") or 0) > self.reply_budget_window
+        ]
+        if not stale:
+            return
+        for sid in stale:
+            self.held.pop(sid, None)
+        log("purged %d expired held reply(s)" % len(stale))
+        self._save_state()
+
+    def _release_held(self):
+        """Deliver each still-fresh held reply once; it opens the new sequence."""
+        held, self.held = self.held, {}
+        if not held:
+            return
+        now = time.time()
+        records = live_claude_records()
+        for sid, entry in held.items():
+            if not isinstance(entry, dict) or not entry.get("text"):
+                continue
+            age = now - float(entry.get("at") or 0)
+            if age > self.reply_budget_window:
+                log("discarding a held reply for %s: %.0fs old" % (sid, age))
+                continue
+            rec = next((r for r in records if r.get("sessionId") == sid), None)
+            if rec is None:
+                log("discarding a held reply: session %s is gone" % sid)
+                continue
+            text = reply_text(entry["text"], entry.get("mid"), held_reply=True)
+            try:
+                body = build_cc_body(text, self.thread_id, self.name, self.sock_path)
+            except ValueError as exc:
+                log("cannot build a held reply for %s: %s" % (sid, exc))
+                continue
+            if deliver_to_record(rec, build_user_frame(body, self.sock_path)):
+                self.budgets[sid] = 1
+                self.budget_sender_sid = sid
+                self.budget_last_at = now
+                log(
+                    "released a held reply (turn %s) to %s"
+                    % (entry.get("turn_id"), rec.get("name") or sid)
+                )
 
     def _advance_budget_sequence(self, tag):
         """Reset the loop guard when the peer sequence is genuinely broken."""
@@ -2778,8 +2880,13 @@ class Shim:
                 else:
                     reason = "the requesting peer changed"
                 log("reply budget sequence reset: %s" % reason)
+            if self.held:
+                # Only an explicit reset releases a held reply; a sequence that
+                # moved on must not receive a stale answer later.
+                log("discarding %d held reply(s): the sequence moved on" % len(self.held))
             self.budgets = {}
             self.budget_notified = set()
+            self.held = {}
         self.budget_sender_sid = sender_sid
         self.budget_last_at = now if sender_sid else None
 
@@ -2875,19 +2982,30 @@ class Shim:
             spent = self.budgets.get(sid, 0)
             if spent >= REPLY_BUDGET:
                 detail = (
-                    "reply not delivered: the loop guard reached %d consecutive "
-                    "replies for this peer. It resets after another peer, a "
-                    "direct Codex turn, or %.0f seconds idle; run `peers.py "
-                    "budget reset %s` to clear it now"
+                    "reply held, not delivered: the loop guard reached %d "
+                    "consecutive replies for this peer. `peers.py budget reset %s` "
+                    "releases the latest held reply and clears the guard; another "
+                    "peer, a direct Codex turn, or %.0f seconds idle also clears "
+                    "it but discards the held reply"
                     % (
                         REPLY_BUDGET,
-                        self.reply_budget_window,
                         self.thread_id,
+                        self.reply_budget_window,
                     )
                 )
+                # Hold the latest reply instead of losing it: the guard still
+                # stops the loop, and an explicit reset (the supervision signal)
+                # releases it. Only the requester's own reply is held.
+                if sid == tag.get("sid"):
+                    self.held[sid] = {
+                        "text": text,
+                        "mid": tag.get("mid"),
+                        "turn_id": turn.turn_id,
+                        "at": time.time(),
+                    }
                 log(
-                    "reply budget of %d spent for session %s; dropping the reply "
-                    "(peers.py budget reset %s to clear)"
+                    "reply budget of %d spent for session %s; holding the reply "
+                    "(peers.py budget reset %s releases it)"
                     % (REPLY_BUDGET, rec.get("name") or sid, self.thread_id)
                 )
                 self._status_to_record(
@@ -2904,23 +3022,27 @@ class Shim:
                 # body) naming the reset command.
                 if sid not in self.budget_notified:
                     notice = (
-                        "[session-peers] a reply from %s was not delivered: the "
-                        "reply budget of %d consecutive replies is spent for this "
-                        "peer. It resets after another peer, a direct Codex turn, "
-                        "or %.0fs idle; run `peers.py budget reset %s` to clear it "
-                        "now." % (
+                        "[session-peers] a reply from %s is held, not delivered: "
+                        "the reply budget of %d consecutive replies is spent for "
+                        "this peer. Run `peers.py budget reset %s` to release the "
+                        "latest held reply and clear the guard. Another peer, a "
+                        "direct Codex turn, or %.0fs idle also clears it but "
+                        "discards the held reply." % (
                             self.name or self.thread_id,
                             REPLY_BUDGET,
-                            self.reply_budget_window,
                             self.thread_id,
+                            self.reply_budget_window,
                         )
                     )
                     body = build_cc_body(notice, self.thread_id, self.name, None)
                     if deliver_to_record(rec, build_user_frame(body, None)):
                         self.budget_notified.add(sid)
                 continue
+            out = (
+                reply_text(text, tag.get("mid")) if sid == tag.get("sid") else text
+            )
             try:
-                body = build_cc_body(text, self.thread_id, self.name, self.sock_path)
+                body = build_cc_body(out, self.thread_id, self.name, self.sock_path)
             except ValueError as exc:
                 log("cannot build a reply for turn %s: %s" % (turn.turn_id, exc))
                 break
@@ -4028,12 +4150,12 @@ def cmd_up(args):
 def cmd_down(args):
     if args.target:
         try:
-            thread = resolve_thread(args.target, require_live=False)
+            thread = resolve_thread_prefer_live(args.target)
             tid = thread["id"]
-        except ResolveError:
+        except ResolveError as exc:
             tid = args.target if is_uuid(args.target) else None
             if tid is None:
-                sys.stderr.write("error: no thread matches %r\n" % args.target)
+                sys.stderr.write("error: %s\n" % exc)
                 return 1
         # R2: stop and unregister under ONE hold of the reconcile lock. A bare
         # `up` landing between them would restart the still-registered thread,
@@ -4086,11 +4208,11 @@ def cmd_budget(args):
         sys.stderr.write("error: the only budget subcommand is `reset`\n")
         return 2
     try:
-        thread = resolve_thread(args.thread, require_live=False)
+        thread = resolve_thread_prefer_live(args.thread)
         tid = thread["id"]
-    except ResolveError:
+    except ResolveError as exc:
         if not is_uuid(args.thread):
-            sys.stderr.write("error: no thread matches %r\n" % args.thread)
+            sys.stderr.write("error: %s\n" % exc)
             return 1
         tid = args.thread
     with open(budget_reset_path(tid), "w", encoding="utf-8") as fh:

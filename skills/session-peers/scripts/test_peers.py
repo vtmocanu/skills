@@ -2312,6 +2312,45 @@ class TestRegistration(Base):
         self.assertEqual(started, 1, out.getvalue())
         self.assertIsNotNone(peers.shim_pid(tid))
 
+    def _live_and_dead_namesakes(self, name="helper"):
+        """One live thread and two past threads that carry the same name."""
+        live_tid, dead_a, dead_b = (str(uuidlib.uuid4()) for _ in range(3))
+        live_rollout = self.make_rollout(name="live.jsonl", lines=[])
+        dead_rollouts = [
+            self.make_rollout(name="dead-%d.jsonl" % i, lines=[]) for i in range(2)
+        ]
+        self.make_state_db([
+            {"id": dead_a, "name": name, "rollout_path": str(dead_rollouts[0])},
+            {"id": live_tid, "name": name, "rollout_path": str(live_rollout)},
+            {"id": dead_b, "name": name, "rollout_path": str(dead_rollouts[1])},
+        ])
+        self.set_holder(live_rollout)
+        return live_tid, (dead_a, dead_b)
+
+    def test_budget_reset_by_name_picks_the_live_thread_over_past_namesakes(self):
+        # Codex reuses thread titles: the live `helper` shared its name with
+        # past threads, and resolving across dead ones made it "ambiguous",
+        # reported as the misleading "no thread matches 'helper'".
+        live_tid, dead = self._live_and_dead_namesakes()
+        rc, out, err = self.cli("budget", "reset", "helper")
+        self.assertEqual(rc, 0, err)
+        self.assertIn(live_tid, out)
+        self.assertTrue(os.path.exists(peers.budget_reset_path(live_tid)))
+        for tid in dead:
+            self.assertFalse(os.path.exists(peers.budget_reset_path(tid)))
+
+    def test_budget_reset_reports_the_real_resolution_error(self):
+        self.one_thread(name="someone-else")
+        rc, _out, err = self.cli("budget", "reset", "no-such-name")
+        self.assertEqual(rc, 1)
+        self.assertIn("no Codex thread named 'no-such-name'", err)
+
+    def test_down_by_name_picks_the_live_thread_over_past_namesakes(self):
+        live_tid, _dead = self._live_and_dead_namesakes()
+        rc, _out, err = self.cli("down", "helper")
+        self.assertEqual(rc, 0, err)
+        self.assertNotIn("no thread matches", err)
+
     def test_budget_reset_writes_the_marker_and_clears_the_state_file(self):
         tid, _r = self.one_thread()
         peers.write_json_atomic(
@@ -2790,7 +2829,7 @@ class TestShimReplies(ShimBase):
         frames = wait_for(lambda: listener.of_type("user"))
         self.assertEqual(len(frames), 1)
         body, attrs = peers.unwrap_message(frames[0]["message"]["content"])
-        self.assertEqual(body, "the answer")
+        self.assertEqual(body, "[in reply to message m-1]\nthe answer")
         self.assertEqual(attrs["from-name"], "codex-uzi")
         self.assertEqual(attrs["from-session"], tid)
         self.assertEqual(frames[0]["from"], "uds:%s" % shim.sock_path)
@@ -3006,6 +3045,133 @@ class TestShimReplies(ShimBase):
         shim._handle_turn_end(self._turn(listener.path, turn_id="t-after"))
         self.assertTrue(wait_for(lambda: self._reply_frames(listener)))
 
+    def test_a_reply_without_a_message_id_has_no_header(self):
+        shim, _tid, _rollout = self.make_shim()
+        listener, _rec = self.add_listener(name="cc-main", session_id="s1")
+        shim._handle_turn_end(self._turn(listener.path, msg_id=None))
+        frames = wait_for(lambda: self._reply_frames(listener))
+        body, _attrs = peers.unwrap_message(frames[0]["message"]["content"])
+        self.assertEqual(body, "the answer")
+
+    def test_a_budget_dropped_reply_is_held_and_released_by_a_reset(self):
+        # The guard still stops the 4th consecutive reply (same sid, fresh
+        # inbound each turn), but the reply is HELD, not lost: an explicit
+        # `budget reset` releases exactly the latest one, correlated to its
+        # request and marked as held, and it opens the new sequence.
+        shim, tid, _rollout = self.make_shim()
+        listener, _rec = self.add_listener(name="cc-main", session_id="s1")
+        with contextlib.redirect_stderr(io.StringIO()):
+            for i in range(peers.REPLY_BUDGET + 2):
+                shim._handle_turn_end(
+                    self._turn(
+                        listener.path,
+                        turn_id="t%d" % i,
+                        msg_id="m%d" % i,
+                        text="answer %d" % i,
+                    )
+                )
+        wait_for(lambda: len(self._reply_frames(listener)) >= peers.REPLY_BUDGET)
+        time.sleep(0.2)
+        self.assertEqual(len(self._reply_frames(listener)), peers.REPLY_BUDGET)
+        self.assertEqual(sorted(shim.held), ["s1"])
+        # Persisted, so a shim restart before the reset does not lose it.
+        state = peers.read_json(peers.thread_state_path(tid), {})
+        self.assertEqual(state["held"]["s1"]["mid"], "m%d" % (peers.REPLY_BUDGET + 1))
+        self.cli("budget", "reset", tid)
+        with contextlib.redirect_stderr(io.StringIO()):
+            shim._consume_budget_marker()
+        frames = wait_for(
+            lambda: self._reply_frames(listener)
+            if len(self._reply_frames(listener)) > peers.REPLY_BUDGET
+            else None
+        )
+        self.assertIsNotNone(frames)
+        time.sleep(0.2)
+        self.assertEqual(len(self._reply_frames(listener)), peers.REPLY_BUDGET + 1)
+        body, _attrs = peers.unwrap_message(frames[-1]["message"]["content"])
+        last = peers.REPLY_BUDGET + 1
+        self.assertEqual(
+            body, "[held reply, in reply to message m%d]\nanswer %d" % (last, last)
+        )
+        self.assertEqual(shim.held, {})
+        self.assertEqual(shim.budgets["s1"], 1)  # the released reply opens the sequence
+
+    def test_a_held_reply_is_discarded_when_the_sequence_moves_on(self):
+        shim, tid, _rollout = self.make_shim()
+        listener, _rec = self.add_listener(name="cc-main", session_id="s1")
+        shim.budgets = {"s1": peers.REPLY_BUDGET}
+        shim.budget_sender_sid = "s1"
+        shim.budget_last_at = time.time()
+        with contextlib.redirect_stderr(io.StringIO()):
+            shim._handle_turn_end(self._turn(listener.path, turn_id="t-held"))
+            self.assertEqual(sorted(shim.held), ["s1"])
+            shim._advance_budget_sequence({"sid": "s2"})  # an intervening peer
+            self.assertEqual(shim.held, {})
+            self.cli("budget", "reset", tid)
+            shim._consume_budget_marker()
+        time.sleep(0.2)
+        self.assertEqual(self._reply_frames(listener), [])
+
+    def test_a_stale_held_reply_is_not_released(self):
+        shim, tid, _rollout = self.make_shim()
+        listener, _rec = self.add_listener(name="cc-main", session_id="s1")
+        shim.held = {
+            "s1": {
+                "text": "old answer",
+                "mid": "m-old",
+                "turn_id": "t-old",
+                "at": time.time() - shim.reply_budget_window - 1,
+            }
+        }
+        self.cli("budget", "reset", tid)
+        with contextlib.redirect_stderr(io.StringIO()):
+            shim._consume_budget_marker()
+        time.sleep(0.2)
+        self.assertEqual(self._reply_frames(listener), [])
+        self.assertEqual(shim.held, {})
+
+    def test_a_startup_reset_defers_the_held_release(self):
+        # At startup the shim is not yet bound or registered, so a release then
+        # would carry a `from` route to a socket that does not exist yet.
+        shim, tid, _rollout = self.make_shim()
+        listener, _rec = self.add_listener(name="cc-main", session_id="s1")
+        shim.held = {
+            "s1": {"text": "held answer", "mid": "m-h", "turn_id": "t-h", "at": time.time()}
+        }
+        self.cli("budget", "reset", tid)
+        shim._consume_budget_marker(initial=True)
+        time.sleep(0.2)
+        self.assertEqual(self._reply_frames(listener), [])
+        self.assertEqual(sorted(shim.held), ["s1"])
+        self.assertTrue(shim.release_after_start)
+
+    def test_an_expired_held_reply_is_purged_from_the_state_file(self):
+        shim, tid, _rollout = self.make_shim()
+        shim.held = {
+            "s1": {
+                "text": "secret-ish answer",
+                "mid": "m-x",
+                "turn_id": "t-x",
+                "at": time.time() - shim.reply_budget_window - 1,
+            }
+        }
+        shim._save_state()
+        self.assertIn(
+            "secret-ish answer", pathlib.Path(peers.thread_state_path(tid)).read_text()
+        )
+        with contextlib.redirect_stderr(io.StringIO()):
+            shim._expire_held()
+        self.assertEqual(shim.held, {})
+        self.assertNotIn(
+            "secret-ish answer", pathlib.Path(peers.thread_state_path(tid)).read_text()
+        )
+
+    def test_a_fresh_held_reply_survives_the_purge(self):
+        shim, _tid, _rollout = self.make_shim()
+        shim.held = {"s1": {"text": "a", "mid": "m", "turn_id": "t", "at": time.time()}}
+        shim._expire_held()
+        self.assertEqual(sorted(shim.held), ["s1"])
+
     def test_a_legacy_lifetime_counter_starts_a_fresh_sequence(self):
         shim, _tid, _rollout = self.make_shim()
         listener, _ = self.add_listener(name="cc-main", session_id="s1")
@@ -3064,7 +3230,7 @@ class TestShimReplies(ShimBase):
         shim._handle_turn_end(self._turn(listener.path, text=echoed))
         frames = wait_for(lambda: listener.of_type("user"))
         body, _attrs = peers.unwrap_message(frames[0]["message"]["content"])
-        self.assertEqual(body, "the answer")
+        self.assertEqual(body, "[in reply to message m-1]\nthe answer")
 
 
 class TestStatusFrameShape(ShimBase):
@@ -3417,6 +3583,38 @@ class TestShimEndToEnd(Base):
         path = getattr(self, "_log_path", None)
         return pathlib.Path(path).read_text() if path and os.path.exists(path) else ""
 
+    def test_a_startup_reset_releases_the_held_reply_after_the_shim_is_up(self):
+        # A marker left across a restart: the held reply is released only once
+        # the shim is bound and registered, so its `from` route is live.
+        tid, _rollout = self.one_thread()
+        listener, _rec = self.add_listener(name="cc-main", session_id="s1")
+        peers.write_json_atomic(
+            peers.thread_state_path(tid),
+            {
+                "thread_id": tid,
+                "held": {
+                    "s1": {
+                        "text": "held across restart",
+                        "mid": "m-restart",
+                        "turn_id": "t-restart",
+                        "at": time.time(),
+                    }
+                },
+            },
+            mode=0o600,
+        )
+        self.cli("budget", "reset", tid)
+        _proc, rec = self.start_shim(tid)
+        frames = wait_for(lambda: [f for f in listener.of_type("user") if f.get("from")])
+        self.assertIsNotNone(frames, "no held reply arrived: %s" % self.shim_log())
+        self.assertEqual(frames[0]["from"], "uds:%s" % rec["messagingSocketPath"])
+        body, _attrs = peers.unwrap_message(frames[0]["message"]["content"])
+        self.assertEqual(
+            body, "[held reply, in reply to message m-restart]\nheld across restart"
+        )
+        log_text = self.shim_log()
+        self.assertLess(log_text.index("shim up:"), log_text.index("released a held reply"))
+
     def test_first_start_mid_turn_replies_once_without_replaying_history(self):
         tid, rollout = self.one_thread()
         listener, _rec = self.add_listener(name="cc-main", session_id="s1")
@@ -3505,7 +3703,11 @@ class TestShimEndToEnd(Base):
         frames = wait_for(lambda: listener.of_type("user"))
         self.assertIsNotNone(frames, "no reply arrived: %s" % self.shim_log())
         reply_body, attrs = peers.unwrap_message(frames[0]["message"]["content"])
-        self.assertEqual(reply_body, "all done")
+        # The header names the SENDER'S OWN frame msg_id (what SendMessage
+        # returned), carried through the Codex turn tag end to end.
+        self.assertEqual(
+            reply_body, "[in reply to message %s]\nall done" % frame["msg_id"]
+        )
         self.assertEqual(attrs["from-name"], "codex-uzi")
         self.assertTrue(
             wait_for(lambda: (self.shim_records() or [{}])[0].get("status") == "idle")

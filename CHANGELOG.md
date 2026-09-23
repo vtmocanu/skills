@@ -6,6 +6,33 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- `session-peers`: a reply the loop guard blocks (the 4th consecutive reply to
+  one peer) is now held instead of lost. The latest one per peer is kept in the
+  mode-0600 shim state and released by `peers.py budget reset`, marked
+  `[held reply, in reply to message <msg_id>]`; a reset left across a shim
+  restart releases it only after the shim is bound and registered. Any other
+  sequence reset discards it, and the shim purges it from its state file once
+  the idle window passes. The guard itself is unchanged: a fresh inbound from
+  the same peer still does not reset it.
+- `session-peers`: a reply delivered to the session that asked now starts with
+  `[in reply to message <msg_id>]` (that session's own `SendMessage` id), so
+  crossed or superseded requests can be told apart. **Compatibility:** a caller
+  that parses an asynchronous reply body as exact text or JSON must strip that
+  first line; correlated `ask`/`await` replies and `@name` replies to another
+  session are unchanged. `SKILL.md` documents both and tells supervised
+  multi-round loops to check `peers.py list` for a missing shim (`up` first)
+  and to reset the budget before round 4.
+
+### Fixed
+
+- `session-peers`: `budget reset <name>` and `down <name>` resolved the name
+  across past threads as well as live ones. Codex reuses thread titles, so a
+  unique live name became "ambiguous", reported as the misleading `no thread
+  matches '<name>'`. Both now prefer the live thread, fall back to a past one
+  only when none is live, and print the real resolution error.
+
 ## [0.37.0] - 2026-09-13
 
 ### Added
