@@ -141,7 +141,7 @@ Verify layout changes with a real default-branch `add`. `add --branch <x>` and `
 - **Third person** ("Generates X", "Manages Y"). It is injected into the system prompt; first/second person breaks auto-invocation.
 - **Put all "when to use" info here**, not in the body: `Use when (1)… (2)…` and `Triggers include "…"`.
 - **Lean slightly pushy** — models under-trigger skills. Frame triggers to pull the model in, not "use if relevant".
-- ~500–700 chars is the style target; **1024 is the hard cap** at the Anthropic Skills API (npx itself does not enforce it). It loads in every session, so do not pad.
+- ~500–700 chars is the style target; **1024 is the hard cap** at the Anthropic Skills API (npx itself does not enforce it; agnix reports it as an error). Re-lint after adding triggers. It loads in every session, so do not pad.
 
 **Always-on cost / name-only.** The `description` loads in every session whether or not the skill fires, so a niche or over-matching skill can carry a real per-session cost. Claude Code lets you make a skill fire on explicit invocation only via `skillOverrides` in `settings.json` (`"<skill>": "name-only"`) — the description stops loading, the name stays invokable. Use it for single-purpose skills or ones whose triggers over-match.
 
@@ -205,7 +205,11 @@ agnix --target codex <skill-file>
 
 `--target` still works and is listed in `agnix --help`, but recent agnix versions print `Field 'target' is deprecated` and steer toward a config-file `tools` array (there is no `--tools` CLI flag); the warning is benign. To silence it in a repo you lint often, add an `.agnix.toml` (`agnix init`) with `tools = ["claude-code"]`, then drop the flag: `agnix <skill-file>`.
 
-Add `--show-fixes` to preview rewrites, or `--fix-safe` for high-confidence ones (always re-read the diff — "fixable" ≠ "correct in context"). **Errors must be fixed before commit; warnings are advisory** — fix the real ones. **Pre-existing warnings count**: when a file is open for a real edit, surface warnings that predate your change and propose fixing them in the same commit, rather than re-committing a file with the same warning count forever.
+Add `--show-fixes` to preview rewrites, or `--fix-safe` for high-confidence ones (always re-read the diff — "fixable" ≠ "correct in context"). Lint the skill **directory** as well as the file: `agnix <skill-dir>` also checks `references/` and other bundled Markdown, which `agnix <skill-file>` skips.
+
+agnix reads a `<placeholder>` inside an inline-code span that wraps onto the next line as an `Unclosed XML tag` error; the same span on one line passes. Keep each inline-code span on one line, or write the placeholder as `UPPER_CASE`.
+
+**Errors must be fixed before commit; warnings are advisory** — fix the real ones. **Pre-existing warnings count**: when a file is open for a real edit, surface warnings that predate your change and propose fixing them in the same commit, rather than re-committing a file with the same warning count forever.
 
 **Agnix does not catch historical noise.** After it passes, sweep every edited `SKILL.md`, reference, template, and asset for the instruction-only rule above. Remove pre-existing noise surfaced by the edit.
 
