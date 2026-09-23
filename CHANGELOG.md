@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.38.0] - 2026-09-23
+
 ### Changed
 
 - `agent-team`: `coder`, `tester`, `web-ux` and `ux-designer` stop a server they
