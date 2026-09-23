@@ -71,7 +71,7 @@
 
 roles:
   - name: coder
-    version: 12
+    version: 13
     description: Implements features, fixes bugs, refactors code. Runs the project's full quality gate before reporting done.
     tools: []  # inherit full toolset
     model: opus
@@ -92,7 +92,7 @@ roles:
 
       - Form every path from the worktree root you were given, never from a remembered or assumed one.
       - Do not rely on the working directory carrying between Bash calls: use absolute paths, or `cd` from the worktree root each time.
-      - Stop a background process by the exact PID you started. Never `pkill -f "vite"`, `pkill -f "npm run dev"` or any broad pattern: it matches your own shell's process tree and can abort a commit.
+      - Stop a background process by its own handle: the harness's background-task stop, or the exact PID you saved at launch, as `kill "$pid"`. Never find the target by pattern or port (`pkill -f`, `killall`, `fuser -k`, `kill $(lsof -ti :<port>)`): a pattern matches your own shell's process tree, and busybox `lsof` ignores its filters and lists every process, so either can kill your own agent.
 
       ## Committing
 
@@ -345,7 +345,7 @@ roles:
         proven otherwise.
 
   - name: tester
-    version: 12
+    version: 13
     description: "Runs the repo's quality gate (format, lint, typecheck, dead code, coverage, tests) scoped to what the change touched, and validates behavior against representative real-world inputs. Adapts to whatever testing surface the repo actually has: unit-test framework (jest, pytest, go test, cargo test), scenario simulation for repos without one (CI workflows, infra, KCL/IaC libs), live-API dry-runs, or end-to-end runs with a consumer."
     tools: [Bash, Read, Grep, Glob, WebFetch, Edit, Write, SendMessage, TaskUpdate, TaskList, TaskGet]
     model: opus
@@ -501,6 +501,11 @@ roles:
         process could also own, the control must prove the responder is yours:
         have it write a distinctively named artifact (a request log carrying
         your role name and PID) and assert on that, never on a status code.
+      - Stop a process you launched by its own handle: the harness's
+        background-task stop, or the exact PID you saved at launch, as
+        `kill "$pid"`. Never find it by pattern or port (`pkill -f`, `killall`,
+        `fuser -k`, `kill $(lsof -ti :<port>)`): busybox `lsof` ignores its
+        filters and lists every process, so a port lookup can kill your own agent.
       - Treat a uniform result across every cell as an instrument failure until
         proven otherwise; re-running the same command cannot tell you which.
       - A timeout that recurs at a raised limit is a hang, not slowness. Raise
@@ -873,7 +878,7 @@ roles:
       - If the scope is unclear (which document, which claims matter), surface that rather than guessing; the lead will re-delegate with a sharper target.
 
   - name: web-ux
-    version: 9
+    version: 10
     description: Web UX expert. Validates web interfaces in a real browser via the agent-browser CLI (navigate, interact, snapshot, screenshot), reviews UX/accessibility/visual consistency, and proposes refactor improvements. Reports findings only; never modifies code.
     tools: [Bash, Read, Grep, Glob, WebFetch, SendMessage, TaskUpdate, TaskList, TaskGet]
     model: opus
@@ -926,6 +931,11 @@ roles:
       - Put `path: location.pathname` in every `eval` payload and confirm your route;
         on a foreign path re-`open` in your session rather than trust the eval or the
         screenshot.
+      - Stop a server you launched by its own handle: the harness's background-task
+        stop, or the exact PID you saved at launch, as `kill "$pid"`. Never find it
+        by pattern or port (`pkill -f`, `killall`, `fuser -k`, `kill $(lsof -ti
+        :<port>)`): busybox `lsof` ignores its filters and lists every process, so
+        a port lookup can kill your own agent.
       - Bind a non-default `--port <n>` for a dev/mock server you launch (a taken
         port answers 200 from someone else's) and report the port you bound. Use
         ABSOLUTE output paths for screenshots/PDFs. `eval` must return a string:
@@ -1098,7 +1108,7 @@ roles:
         dispatch claiming the TUI cannot be rendered, so check the repo for a harness
         or a demo build before accepting it.
   - name: ux-designer
-    version: 5
+    version: 6
     description: UX/UI design lead. Sets opinionated visual and IA direction, prototypes and implements the frontend/UI, and validates it in a real browser. Owns the design layer; defers backend logic to the coder.
     tools: []
     model: opus  # switched from fable 2026-08-15: opus for stronger design + implementation reasoning (alias floats with the current generation; prefer it over an exact pin)
@@ -1167,6 +1177,11 @@ roles:
         port answers 200 from someone else's) and report the port you bound. Use
         ABSOLUTE output paths for screenshots/PDFs. `eval` must return a string: wrap
         objects and arrays in JSON.stringify(...).
+      - Stop that server by its own handle: the harness's background-task stop, or
+        the exact PID you saved at launch, as `kill "$pid"`. Never find it by
+        pattern or port (`pkill -f`, `killall`, `fuser -k`, `kill $(lsof -ti
+        :<port>)`): busybox `lsof` ignores its filters and lists every process, so
+        a port lookup can kill your own agent.
       - Refs from a scoped snapshot go stale on any navigation or re-render, so
         re-snapshot first; a full-page `open` is a reload that resets SPA state.
       - Write transient artifacts (screenshots, a11y dumps) outside the tracked tree,

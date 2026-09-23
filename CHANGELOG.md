@@ -8,6 +8,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- `agent-team`: `coder`, `tester`, `web-ux` and `ux-designer` stop a server they
+  launched by its own handle (harness task stop or saved PID), never by pattern
+  or port lookup; busybox `lsof` ignores its filters, and a `kill` fed from it
+  killed a uzi run's own agent.
 - `agent-team`: an exact model-ID pin in a repo's role file now defaults to
   re-floating to the library alias (`opus`/`sonnet`) instead of `keep local`;
   a stale pin silently ran every subagent on an older generation.
