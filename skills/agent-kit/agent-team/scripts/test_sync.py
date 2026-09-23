@@ -901,9 +901,8 @@ class TestHistoricalCorpus(unittest.TestCase):
                      "--library", str(self.library)],
                     capture_output=True, text=True, cwd=str(tmp),
                 )
-                # `apply` keeps the model pin LOCAL by design (Mode 2 axis 3: an
-                # exact-id-vs-alias pin is a chosen divergence, not drift to
-                # reconcile). So when the library's model for a role changed
+                # `apply` never touches `model:` (Mode 2: re-floating an exact
+                # pin is a hand edit). So when the library's model for a role changed
                 # since `rev` — e.g. ux-designer fable -> opus — the synced file
                 # keeps its own model and `check` reports a model-only MODIFIED
                 # that no apply can clear. That is keep-local, not a sync
