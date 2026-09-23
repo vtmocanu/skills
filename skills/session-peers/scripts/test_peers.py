@@ -3091,6 +3091,48 @@ class TestShimReplies(ShimBase):
         self.assertEqual(self._reply_frames(listener), [])
         self.assertEqual(shim.held, {})
 
+    def test_a_startup_reset_defers_the_held_release(self):
+        # At startup the shim is not yet bound or registered, so a release then
+        # would carry a `from` route to a socket that does not exist yet.
+        shim, tid, _rollout = self.make_shim()
+        listener, _rec = self.add_listener(name="cc-main", session_id="s1")
+        shim.held = {
+            "s1": {"text": "held answer", "mid": "m-h", "turn_id": "t-h", "at": time.time()}
+        }
+        self.cli("budget", "reset", tid)
+        shim._consume_budget_marker(initial=True)
+        time.sleep(0.2)
+        self.assertEqual(self._reply_frames(listener), [])
+        self.assertEqual(sorted(shim.held), ["s1"])
+        self.assertTrue(shim.release_after_start)
+
+    def test_an_expired_held_reply_is_purged_from_the_state_file(self):
+        shim, tid, _rollout = self.make_shim()
+        shim.held = {
+            "s1": {
+                "text": "secret-ish answer",
+                "mid": "m-x",
+                "turn_id": "t-x",
+                "at": time.time() - shim.reply_budget_window - 1,
+            }
+        }
+        shim._save_state()
+        self.assertIn(
+            "secret-ish answer", pathlib.Path(peers.thread_state_path(tid)).read_text()
+        )
+        with contextlib.redirect_stderr(io.StringIO()):
+            shim._expire_held()
+        self.assertEqual(shim.held, {})
+        self.assertNotIn(
+            "secret-ish answer", pathlib.Path(peers.thread_state_path(tid)).read_text()
+        )
+
+    def test_a_fresh_held_reply_survives_the_purge(self):
+        shim, _tid, _rollout = self.make_shim()
+        shim.held = {"s1": {"text": "a", "mid": "m", "turn_id": "t", "at": time.time()}}
+        shim._expire_held()
+        self.assertEqual(sorted(shim.held), ["s1"])
+
     def test_a_legacy_lifetime_counter_starts_a_fresh_sequence(self):
         shim, _tid, _rollout = self.make_shim()
         listener, _ = self.add_listener(name="cc-main", session_id="s1")
@@ -3501,6 +3543,38 @@ class TestShimEndToEnd(Base):
     def shim_log(self):
         path = getattr(self, "_log_path", None)
         return pathlib.Path(path).read_text() if path and os.path.exists(path) else ""
+
+    def test_a_startup_reset_releases_the_held_reply_after_the_shim_is_up(self):
+        # A marker left across a restart: the held reply is released only once
+        # the shim is bound and registered, so its `from` route is live.
+        tid, _rollout = self.one_thread()
+        listener, _rec = self.add_listener(name="cc-main", session_id="s1")
+        peers.write_json_atomic(
+            peers.thread_state_path(tid),
+            {
+                "thread_id": tid,
+                "held": {
+                    "s1": {
+                        "text": "held across restart",
+                        "mid": "m-restart",
+                        "turn_id": "t-restart",
+                        "at": time.time(),
+                    }
+                },
+            },
+            mode=0o600,
+        )
+        self.cli("budget", "reset", tid)
+        _proc, rec = self.start_shim(tid)
+        frames = wait_for(lambda: [f for f in listener.of_type("user") if f.get("from")])
+        self.assertIsNotNone(frames, "no held reply arrived: %s" % self.shim_log())
+        self.assertEqual(frames[0]["from"], "uds:%s" % rec["messagingSocketPath"])
+        body, _attrs = peers.unwrap_message(frames[0]["message"]["content"])
+        self.assertEqual(
+            body, "[held reply, in reply to message m-restart]\nheld across restart"
+        )
+        log_text = self.shim_log()
+        self.assertLess(log_text.index("shim up:"), log_text.index("released a held reply"))
 
     def test_first_start_mid_turn_replies_once_without_replaying_history(self):
         tid, rollout = self.one_thread()

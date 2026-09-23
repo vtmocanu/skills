@@ -84,7 +84,9 @@ it; Codex runs it as its next user turn under the thread's own approval mode.
   prove delivery. `notify_when_idle: true` fires once per turn end.
 - **Reply header**: a reply to your own message starts with
   `[in reply to message <msg_id>]`, the `msg_id` your `SendMessage` returned.
-  When messages cross, match it before acting on the reply.
+  When messages cross, match it before acting on the reply. Strip that first
+  line before parsing a reply body as exact text or JSON. Correlated
+  `ask`/`await` replies and `@name` replies to another session carry no header.
 - **Reply budget**: the shim delivers at most 3 consecutive replies to one peer
   inside a 30-minute idle window. Your new message does NOT reset it: an
   unattended loop also sends one every round, so that is the pattern the guard
@@ -92,8 +94,9 @@ it; Codex runs it as its next user turn under the thread's own approval mode.
   `peers.py budget reset <name|uuid>`, or a fresh `up` resets the sequence.
   A blocked reply is HELD, not lost: the latest one per peer is kept (mode-0600
   state, never the log) and `budget reset` releases it, marked
-  `[held reply, in reply to message <msg_id>]`. Any other reset, or holding past
-  the idle window, discards it. The shim emits a correlated `failed` status
+  `[held reply, in reply to message <msg_id>]`, once the shim is up. Any other
+  reset discards it, and the shim purges it from its state once the idle window
+  passes. The shim emits a correlated `failed` status
   (surfaced only when the requester tracks the originating message) and one
   plain, non-replyable notice per sequence naming the reset command.
 - **Supervised multi-round work** (a user-requested review loop): run

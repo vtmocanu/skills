@@ -2106,6 +2106,10 @@ class Shim:
         # session, expired with the idle window, discarded on any other sequence
         # reset, and kept only in this mode-0600 state file, never in the log.
         self.held = dict(state.get("held") or {})
+        # Set when a startup reset leaves held replies to release: the release
+        # waits until this shim is bound and registered, so the reply's `from`
+        # route names a socket that exists.
+        self.release_after_start = False
         self.contacts = dict(state.get("contacts") or {})
         self.fresh = not state
         if self.fresh:
@@ -2212,6 +2216,10 @@ class Shim:
                 "shim up: thread=%s name=%s socket=%s holder=%s"
                 % (self.thread_id, self.name, self.sock_path, self.holder_pid)
             )
+            if self.release_after_start:
+                self.release_after_start = False
+                self._release_held()
+                self._save_state()
             self._poll_loop()
         finally:
             self._cleanup()
@@ -2666,6 +2674,7 @@ class Shim:
         last_alias = last_live
         while not self.stop.wait(self.poll_interval):
             self._consume_budget_marker()
+            self._expire_held()
             try:
                 events = self.tail.poll()
             except Exception as exc:  # never let a bad line kill the shim
@@ -2775,13 +2784,33 @@ class Shim:
         self.budget_sender_sid = None
         self.budget_last_at = None
         self.budget_notified = set()
-        if not initial:
-            log("reply budget reset for thread %s" % self.thread_id)
+        if initial:
+            # Not yet bound or registered: defer the release (see run()).
+            self.release_after_start = bool(self.held)
+            return
+        log("reply budget reset for thread %s" % self.thread_id)
         # An explicit reset is the supervision signal the loop guard waits for,
         # so it also releases the reply the guard held back.
         self._release_held()
-        if not initial:
-            self._save_state()
+        self._save_state()
+
+    def _expire_held(self, now=None):
+        """Purge held replies past the idle window from memory AND the state file."""
+        if not self.held:
+            return
+        now = time.time() if now is None else now
+        stale = [
+            sid
+            for sid, entry in self.held.items()
+            if not isinstance(entry, dict)
+            or now - float(entry.get("at") or 0) > self.reply_budget_window
+        ]
+        if not stale:
+            return
+        for sid in stale:
+            self.held.pop(sid, None)
+        log("purged %d expired held reply(s)" % len(stale))
+        self._save_state()
 
     def _release_held(self):
         """Deliver each still-fresh held reply once; it opens the new sequence."""
