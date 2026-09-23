@@ -22,7 +22,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   that parses an asynchronous reply body as exact text or JSON must strip that
   first line; correlated `ask`/`await` replies and `@name` replies to another
   session are unchanged. `SKILL.md` documents both and tells supervised
-  multi-round loops to reset the budget before round 4.
+  multi-round loops to check `peers.py list` for a missing shim (`up` first)
+  and to reset the budget before round 4.
+
+### Fixed
+
+- `session-peers`: `budget reset <name>` and `down <name>` resolved the name
+  across past threads as well as live ones. Codex reuses thread titles, so a
+  unique live name became "ambiguous", reported as the misleading `no thread
+  matches '<name>'`. Both now prefer the live thread, fall back to a past one
+  only when none is live, and print the real resolution error.
 
 ## [0.37.0] - 2026-09-13
 

@@ -1260,6 +1260,23 @@ def resolve_thread(target, require_live=True):
     return matches[0]
 
 
+def resolve_thread_prefer_live(target):
+    """Resolve for commands that also act on a stopped thread (`budget`, `down`).
+
+    Codex's title suggester reuses names, so a bare name usually also matches
+    past threads; resolving across dead threads first made a unique LIVE name
+    ambiguous. Prefer the live match; only when there is none, fall back to any
+    thread with that name. Raises the more specific ResolveError otherwise.
+    """
+    try:
+        return resolve_thread(target, require_live=True)
+    except ResolveError as live_error:
+        try:
+            return resolve_thread(target, require_live=False)
+        except ResolveError:
+            raise live_error
+
+
 # --------------------------------------------------------------------------
 # Registration (D6)
 # --------------------------------------------------------------------------
@@ -4133,12 +4150,12 @@ def cmd_up(args):
 def cmd_down(args):
     if args.target:
         try:
-            thread = resolve_thread(args.target, require_live=False)
+            thread = resolve_thread_prefer_live(args.target)
             tid = thread["id"]
-        except ResolveError:
+        except ResolveError as exc:
             tid = args.target if is_uuid(args.target) else None
             if tid is None:
-                sys.stderr.write("error: no thread matches %r\n" % args.target)
+                sys.stderr.write("error: %s\n" % exc)
                 return 1
         # R2: stop and unregister under ONE hold of the reconcile lock. A bare
         # `up` landing between them would restart the still-registered thread,
@@ -4191,11 +4208,11 @@ def cmd_budget(args):
         sys.stderr.write("error: the only budget subcommand is `reset`\n")
         return 2
     try:
-        thread = resolve_thread(args.thread, require_live=False)
+        thread = resolve_thread_prefer_live(args.thread)
         tid = thread["id"]
-    except ResolveError:
+    except ResolveError as exc:
         if not is_uuid(args.thread):
-            sys.stderr.write("error: no thread matches %r\n" % args.thread)
+            sys.stderr.write("error: %s\n" % exc)
             return 1
         tid = args.thread
     with open(budget_reset_path(tid), "w", encoding="utf-8") as fh:

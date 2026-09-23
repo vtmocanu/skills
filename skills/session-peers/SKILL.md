@@ -99,8 +99,10 @@ it; Codex runs it as its next user turn under the thread's own approval mode.
   passes. The shim emits a correlated `failed` status
   (surfaced only when the requester tracks the originating message) and one
   plain, non-replyable notice per sequence naming the reset command.
-- **Supervised multi-round work** (a user-requested review loop): run
-  `peers.py budget reset <thread>` before sending round 4, so no reply is held.
+- **Supervised multi-round work** (a user-requested review loop): first run
+  `peers.py list`; a target showing `not registered` with no `shim <pid>` has no
+  reply route, so run `peers.py up <name|uuid>` before sending. Then run
+  `peers.py budget reset <name|uuid>` before round 4, so no reply is held.
   Reset only for a loop the user asked for, never to prolong an unattended one.
 - **Idle thread latency**: up to 10 s (Codex polls its queue), then the turn.
 - **Busy thread**: the message queues and runs after the current turn.

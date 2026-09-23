@@ -2312,6 +2312,45 @@ class TestRegistration(Base):
         self.assertEqual(started, 1, out.getvalue())
         self.assertIsNotNone(peers.shim_pid(tid))
 
+    def _live_and_dead_namesakes(self, name="helper"):
+        """One live thread and two past threads that carry the same name."""
+        live_tid, dead_a, dead_b = (str(uuidlib.uuid4()) for _ in range(3))
+        live_rollout = self.make_rollout(name="live.jsonl", lines=[])
+        dead_rollouts = [
+            self.make_rollout(name="dead-%d.jsonl" % i, lines=[]) for i in range(2)
+        ]
+        self.make_state_db([
+            {"id": dead_a, "name": name, "rollout_path": str(dead_rollouts[0])},
+            {"id": live_tid, "name": name, "rollout_path": str(live_rollout)},
+            {"id": dead_b, "name": name, "rollout_path": str(dead_rollouts[1])},
+        ])
+        self.set_holder(live_rollout)
+        return live_tid, (dead_a, dead_b)
+
+    def test_budget_reset_by_name_picks_the_live_thread_over_past_namesakes(self):
+        # Codex reuses thread titles: the live `helper` shared its name with
+        # past threads, and resolving across dead ones made it "ambiguous",
+        # reported as the misleading "no thread matches 'helper'".
+        live_tid, dead = self._live_and_dead_namesakes()
+        rc, out, err = self.cli("budget", "reset", "helper")
+        self.assertEqual(rc, 0, err)
+        self.assertIn(live_tid, out)
+        self.assertTrue(os.path.exists(peers.budget_reset_path(live_tid)))
+        for tid in dead:
+            self.assertFalse(os.path.exists(peers.budget_reset_path(tid)))
+
+    def test_budget_reset_reports_the_real_resolution_error(self):
+        self.one_thread(name="someone-else")
+        rc, _out, err = self.cli("budget", "reset", "no-such-name")
+        self.assertEqual(rc, 1)
+        self.assertIn("no Codex thread named 'no-such-name'", err)
+
+    def test_down_by_name_picks_the_live_thread_over_past_namesakes(self):
+        live_tid, _dead = self._live_and_dead_namesakes()
+        rc, _out, err = self.cli("down", "helper")
+        self.assertEqual(rc, 0, err)
+        self.assertNotIn("no thread matches", err)
+
     def test_budget_reset_writes_the_marker_and_clears_the_state_file(self):
         tid, _r = self.one_thread()
         peers.write_json_atomic(
