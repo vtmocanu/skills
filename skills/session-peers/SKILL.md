@@ -82,16 +82,23 @@ it; Codex runs it as its next user turn under the thread's own approval mode.
   subject to the live-session and reply-budget checks below. If it is missing,
   check the delivery log (Diagnostics); completion and idle notices do not
   prove delivery. `notify_when_idle: true` fires once per turn end.
+- **Reply header**: a reply to your own message starts with
+  `[in reply to message <msg_id>]`, the `msg_id` your `SendMessage` returned.
+  When messages cross, match it before acting on the reply.
 - **Reply budget**: the shim delivers at most 3 consecutive replies to one peer
-  inside a 30-minute idle window. A direct Codex turn, a request from another
-  peer, the idle window, `peers.py budget reset <name|uuid>`, or a fresh `up`
-  resets the sequence. A blocked fourth reply stays visible in Codex. The shim
-  emits a correlated `failed` status, which the requesting session surfaces only
-  when it is tracking the originating peer message; because an ordinary
-  `SendMessage`-style delivery is not tracked, the shim also delivers one plain,
-  non-replyable notice to that session the first time a reply is dropped in a
-  sequence, naming `peers.py budget reset <thread>`. This stops tight unattended
-  ping-pong without turning the budget into a lifetime counter.
+  inside a 30-minute idle window. Your new message does NOT reset it: an
+  unattended loop also sends one every round, so that is the pattern the guard
+  stops. A direct Codex turn, a request from another peer, the idle window,
+  `peers.py budget reset <name|uuid>`, or a fresh `up` resets the sequence.
+  A blocked reply is HELD, not lost: the latest one per peer is kept (mode-0600
+  state, never the log) and `budget reset` releases it, marked
+  `[held reply, in reply to message <msg_id>]`. Any other reset, or holding past
+  the idle window, discards it. The shim emits a correlated `failed` status
+  (surfaced only when the requester tracks the originating message) and one
+  plain, non-replyable notice per sequence naming the reset command.
+- **Supervised multi-round work** (a user-requested review loop): run
+  `peers.py budget reset <thread>` before sending round 4, so no reply is held.
+  Reset only for a loop the user asked for, never to prolong an unattended one.
 - **Idle thread latency**: up to 10 s (Codex polls its queue), then the turn.
 - **Busy thread**: the message queues and runs after the current turn.
 - **Continuously-driven thread**: a thread another driver keeps feeding
@@ -203,7 +210,7 @@ reaches Claude:
    this thread before (prior contact), unless the user set
    `SESSION_PEERS_ALLOW_UNSOLICITED=1` for the shim.
 
-Both count toward the reply budget above; a dropped reply is still shown to the
+Both count toward the reply budget above; a held reply is still shown to the
 user in your TUI. To see live Claude sessions, mutable names, and stable UUIDs:
 
 ```bash
