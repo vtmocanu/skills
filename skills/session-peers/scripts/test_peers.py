@@ -112,6 +112,16 @@ args = sys.argv[1:]
 if args and args[0] == "--version":
     print(os.environ.get("FAKE_CODEX_VERSION", "codex-cli 0.153.4"))
     raise SystemExit(0)
+try:
+    cwd = os.getcwd()
+except FileNotFoundError:
+    # Real `codex queue` resolves its config from the working directory.
+    sys.stderr.write("Error: failed to resolve config cwd: No such file or directory\\n")
+    raise SystemExit(1)
+cwd_log = os.environ.get("FAKE_CODEX_CWD_LOG")
+if cwd_log:
+    with open(cwd_log, "a") as fh:
+        fh.write(cwd + "\\n")
 log = os.environ.get("FAKE_CODEX_LOG")
 if log:
     with open(log, "a") as fh:
@@ -2640,6 +2650,23 @@ class TestShimInbound(ShimBase):
         self.assertEqual(body, "do the thing")
         self.assertIn("s1", shim.contacts)
 
+    def test_a_failed_queue_sends_the_sender_one_visible_notice(self):
+        # A plain SendMessage does not track the correlated `failed` status, so
+        # without this notice a queue failure is silent on the sender's side.
+        shim, _tid, _rollout = self.make_shim()
+        listener, _rec = self.add_listener(name="cc-main", session_id="s1")
+        os.environ["FAKE_CODEX_RC"] = "1"
+        os.environ["FAKE_CODEX_STDERR"] = "boom"
+        with contextlib.redirect_stderr(io.StringIO()):
+            shim._handle_line(json.dumps(self.inbound_frame("do it", listener.path)))
+        notices = wait_for(
+            lambda: [f for f in listener.of_type("user") if not f.get("from")]
+        )
+        self.assertIsNotNone(notices)
+        self.assertEqual(len(notices), 1)
+        self.assertIn("was not queued", notices[0]["message"]["content"])
+        self.assertIn("boom", notices[0]["message"]["content"])
+
     def test_an_auth_line_before_the_user_frame_is_accepted(self):
         shim, _tid, _rollout = self.make_shim()
         listener, _rec = self.add_listener()
@@ -3551,6 +3578,67 @@ class TestShimRecord(ShimBase):
     def test_the_socket_path_fits_the_af_unix_limit(self):
         shim, _tid, _rollout = self.make_shim()
         self.assertLess(len(shim.sock_path.encode("utf-8")), 100)
+
+
+class TestStableCwd(Base):
+    """A shim started from a since-deleted directory (a removed worktree)."""
+
+    def setUp(self):
+        super().setUp()
+        self.cwd_log = self.root / "codex-cwd.log"
+        os.environ["FAKE_CODEX_CWD_LOG"] = str(self.cwd_log)
+        self.saved_cwd = os.getcwd()
+
+    def tearDown(self):
+        os.chdir(self.saved_cwd)
+        super().tearDown()
+
+    def last_cwd(self):
+        return self.cwd_log.read_text().splitlines()[-1]
+
+    def test_codex_queue_runs_in_the_threads_own_directory(self):
+        thread_dir = pathlib.Path(tempfile.mkdtemp(dir=str(self.root)))
+        peers.codex_queue(str(uuidlib.uuid4()), "hi", cwd=str(thread_dir))
+        self.assertEqual(os.path.realpath(self.last_cwd()), os.path.realpath(str(thread_dir)))
+
+    def test_codex_queue_falls_back_to_home_when_the_thread_dir_is_gone(self):
+        gone = pathlib.Path(tempfile.mkdtemp(dir=str(self.root)))
+        gone.rmdir()
+        peers.codex_queue(str(uuidlib.uuid4()), "hi", cwd=str(gone))
+        self.assertEqual(
+            os.path.realpath(self.last_cwd()),
+            os.path.realpath(os.path.expanduser("~")),
+        )
+
+    def test_codex_queue_survives_a_deleted_process_cwd(self):
+        # The reported failure: `up` ran from a worktree that was later
+        # removed, so the shim's inherited cwd no longer exists.
+        doomed = pathlib.Path(tempfile.mkdtemp(dir=str(self.root)))
+        os.chdir(str(doomed))
+        doomed.rmdir()
+        peers.codex_queue(str(uuidlib.uuid4()), "hi")  # raises QueueError if broken
+        self.assertEqual(
+            os.path.realpath(self.last_cwd()),
+            os.path.realpath(os.path.expanduser("~")),
+        )
+
+    def test_a_detached_process_does_not_inherit_the_callers_directory(self):
+        out = self.root / "detached-cwd.txt"
+        caller = pathlib.Path(tempfile.mkdtemp(dir=str(self.root)))
+        os.chdir(str(caller))
+        pid = peers.spawn_detached(
+            [
+                sys.executable,
+                "-c",
+                "import os; open(%r, 'w').write(os.getcwd())" % str(out),
+            ],
+            str(self.root / "detached.log"),
+        )
+        self.assertTrue(wait_for(lambda: out.exists() and out.read_text()), pid)
+        self.assertEqual(
+            os.path.realpath(out.read_text()),
+            os.path.realpath(os.path.expanduser("~")),
+        )
 
 
 # ==========================================================================

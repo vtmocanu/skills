@@ -308,7 +308,7 @@ def version_is_newer(installed, pinned) -> bool:
     return a > b
 
 
-def run_cmd(argv, timeout=10, env=None):
+def run_cmd(argv, timeout=10, env=None, cwd=None):
     """Run a command, returning (rc, stdout, stderr). A missing binary is rc 127."""
     try:
         proc = subprocess.run(
@@ -317,6 +317,7 @@ def run_cmd(argv, timeout=10, env=None):
             stderr=subprocess.PIPE,
             timeout=timeout,
             env=env,
+            cwd=cwd,
         )
     except FileNotFoundError:
         return 127, "", "%s: not found" % argv[0]
@@ -327,6 +328,19 @@ def run_cmd(argv, timeout=10, env=None):
         proc.stdout.decode("utf-8", "replace"),
         proc.stderr.decode("utf-8", "replace"),
     )
+
+
+def stable_dir(preferred=None):
+    """The first existing directory of `preferred`, `$HOME`, `/`.
+
+    A detached shim must not depend on the directory of whoever started it:
+    `codex queue` resolves its config from the working directory and fails on
+    a deleted one (a removed git worktree, say).
+    """
+    for candidate in (preferred, os.path.expanduser("~"), "/"):
+        if candidate and os.path.isdir(candidate):
+            return candidate
+    return "/"
 
 
 def spawn_detached(argv, log_path):
@@ -348,6 +362,7 @@ def spawn_detached(argv, log_path):
         os.close(read_fd)
         try:
             os.setsid()
+            os.chdir(stable_dir())
             daemon = os.fork()
             if daemon > 0:
                 os.write(write_fd, ("%d\n" % daemon).encode("ascii"))
@@ -2013,10 +2028,11 @@ def argv_text_budget():
     return max(4096, min(MAX_TEXT_CHARS, budget))
 
 
-def codex_queue(thread_id, text):
-    """`codex queue --thread <uuid> --message <text>`.
+def codex_queue(thread_id, text, cwd=None):
+    """`codex queue --thread <uuid> --message <text>`, run in `stable_dir(cwd)`.
 
     rc != 0, or "No active session" on stderr, means the thread is not live.
+    Pass the thread's own cwd; a deleted one falls back to `$HOME`.
     """
     budget = argv_text_budget()
     size = utf8_len(text)
@@ -2032,7 +2048,9 @@ def codex_queue(thread_id, text):
             % (len(text), MAX_TEXT_CHARS)
         )
     rc, out, err = run_cmd(
-        ["codex", "queue", "--thread", str(thread_id), "--message", text], timeout=60
+        ["codex", "queue", "--thread", str(thread_id), "--message", text],
+        timeout=60,
+        cwd=stable_dir(cwd),
     )
     if rc == 127:
         raise QueueError("codex is not on PATH")
@@ -2095,7 +2113,7 @@ class Shim:
             self.thread_id,
             title_owner=codex_title_owner(self.thread_name),
         )
-        self.cwd = thread.get("cwd") or os.getcwd()
+        self.cwd = thread.get("cwd") or stable_dir()
 
         self.sock_dir = default_socket_dir()
         self.sock_path = os.path.join(self.sock_dir, "%d.sock" % os.getpid())
@@ -2589,10 +2607,24 @@ class Shim:
         # no longer rescans the whole rollout (194 MiB files exist).
         paused = self.tail.last_boundary == "aborted"
         try:
-            codex_queue(self.thread_id, text)
+            codex_queue(self.thread_id, text, cwd=self.thread.get("cwd"))
         except QueueError as exc:
             log("queue failed: %s" % exc)
             self._status_back(frame, sender, "failed", str(exc))
+            # The status frame reaches only a sender tracking this message; a
+            # plain SendMessage is not, so the loss was silent. Tell it once,
+            # with no reply route so the notice cannot start a loop.
+            if sender:
+                notice = (
+                    "[session-peers] your message to %s was not queued: %s"
+                    % (self.name or self.thread_id, exc)
+                )
+                deliver_to_record(
+                    sender,
+                    build_user_frame(
+                        build_cc_body(notice, self.thread_id, self.name, None), None
+                    ),
+                )
             return
         if not paused:
             # We just queued a turn that will run, so advertise busy now. The
@@ -3329,7 +3361,7 @@ def _send_codex(target, args):
     tag = build_tag(from_name, from_sid, from_socket, msg_id)
     text = "%s\n%s" % (tag, args.message)
     try:
-        codex_queue(thread["id"], text)
+        codex_queue(thread["id"], text, cwd=thread.get("cwd"))
     except QueueError as exc:
         sys.stderr.write("error: %s\n" % exc)
         return 1
