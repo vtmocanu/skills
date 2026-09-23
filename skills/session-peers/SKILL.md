@@ -350,7 +350,10 @@ Before claiming a reply was sent, check
 `$CODEX_HOME/session-peers/<thread uuid>.log` (default home: `~/.codex`) for
 `delivered turn <turn id> to <session name>`, or confirm receipt in the target
 session. A successful socket write is transport evidence, not proof the target
-agent has read or acted on it. The state JSON's `processed_turns` list includes
+agent has read or acted on it. A message that fails to queue (`queue failed:` in
+that log) also sends the sender one plain `was not queued` notice. The shim runs
+from `$HOME` and queues from the thread's own directory (`$HOME` if that is
+gone), so removing the directory `up` ran from no longer breaks it. The state JSON's `processed_turns` list includes
 skipped replies and is only a deduplication ledger; older state files called
 it `delivered`, which also did not prove a send. The script reads that legacy
 key on upgrade. The startup failure and misleading field were reproduced and

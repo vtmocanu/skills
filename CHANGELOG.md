@@ -32,6 +32,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   unique live name became "ambiguous", reported as the misleading `no thread
   matches '<name>'`. Both now prefer the live thread, fall back to a past one
   only when none is live, and print the real resolution error.
+- `session-peers`: a shim inherited the directory of whoever ran `peers.py up`;
+  once that directory was deleted (a removed git worktree), every `codex queue`
+  failed with `failed to resolve config cwd` while the sender still saw
+  "queued". The shim now detaches into `$HOME` and runs `codex queue` from the
+  thread's own directory (falling back to `$HOME`), and a failed queue sends
+  the sender one plain `was not queued` notice.
 
 ## [0.37.0] - 2026-09-13
 
