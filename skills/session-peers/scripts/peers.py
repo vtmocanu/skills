@@ -1239,9 +1239,26 @@ def resolve_thread(target, require_live=True):
         if isinstance(meta, dict) and meta.get("name") == target
     }
     matches = [t for t in threads if t.get("name") == target or t["id"] in reg_ids]
+    # The peer list advertises UUID-derived aliases for unsafe or absent titles.
+    # Check aliases alongside exact names: if they identify different threads,
+    # refuse the collision instead of silently sending to either one.
+    prefix_target = target[6:] if target.startswith("codex-") else target
+    prefix = None
+    if is_uuid(prefix_target):
+        prefix = prefix_target.replace("-", "").lower()
+    elif re.fullmatch(r"[0-9a-fA-F]{8,32}", prefix_target):
+        prefix = prefix_target.lower()
+    if prefix:
+        prefix_matches = [
+            t for t in threads
+            if t["id"].replace("-", "").lower().startswith(prefix)
+        ]
+        matched_ids = {t["id"] for t in matches}
+        matches.extend(t for t in prefix_matches if t["id"] not in matched_ids)
     if not matches:
         raise ResolveError(
-            "no Codex thread named %r; /rename it in the TUI, or pass its UUID"
+            "no Codex thread named %r or matching that ID prefix; run `peers.py list` "
+            "for current UUIDs, or /rename it in the TUI"
             % target
         )
     if require_live:
@@ -1263,14 +1280,13 @@ def resolve_thread(target, require_live=True):
             )
         matches = live
     if len(matches) > 1:
+        candidates = ", ".join(
+            "%s (%s)" % (t["id"], t.get("name") or "unnamed")
+            for t in matches
+        )
         raise ResolveError(
-            "the name %r is held by %d %sthreads (%s); register by UUID instead"
-            % (
-                target,
-                len(matches),
-                "live " if require_live else "",
-                ", ".join(t["id"] for t in matches),
-            )
+            "%r matches %d %sthreads (%s); register by UUID instead"
+            % (target, len(matches), "live " if require_live else "", candidates)
         )
     return matches[0]
 
@@ -2609,7 +2625,10 @@ class Shim:
         try:
             codex_queue(self.thread_id, text, cwd=self.thread.get("cwd"))
         except QueueError as exc:
-            log("queue failed: %s" % exc)
+            log(
+                "queue failed for message %s: %s"
+                % (frame.get("msg_id") or "unknown", exc)
+            )
             self._status_back(frame, sender, "failed", str(exc))
             # The status frame reaches only a sender tracking this message; a
             # plain SendMessage is not, so the loss was silent. Tell it once,
@@ -2626,6 +2645,10 @@ class Shim:
                     ),
                 )
             return
+        log(
+            "queued inbound message %s to thread %s"
+            % (frame.get("msg_id") or "unknown", self.thread_id)
+        )
         if not paused:
             # We just queued a turn that will run, so advertise busy now. The
             # tail would otherwise flip us busy only when it sees task_started

@@ -1149,6 +1149,63 @@ class TestResolveThread(Base):
         tid, _r = self.one_thread(name="codex-uzi")
         self.assertEqual(peers.resolve_thread("codex-uzi")["id"], tid)
 
+    def test_a_listed_alias_and_raw_uuid_prefix_resolve(self):
+        tid = "1234abcd-1111-2222-3333-444444444444"
+        self.one_thread(tid=tid, name="unsafe title with spaces")
+        self.assertEqual(peers.resolve_thread("codex-1234abcd")["id"], tid)
+        self.assertEqual(peers.resolve_thread("1234abcd1111")["id"], tid)
+        rc, _out, _err = self.cli(
+            "send", "--to", "codex:codex-1234abcd", "--message", "hi"
+        )
+        self.assertEqual(rc, 0)
+        self.assertEqual(self.queue_calls()[0][2], tid)
+
+    def test_an_ambiguous_prefix_lists_both_live_candidates(self):
+        first = "abcd1234-1111-2222-3333-444444444444"
+        second = "abcd1234-aaaa-bbbb-cccc-dddddddddddd"
+        r1 = self.make_rollout("a.jsonl")
+        r2 = self.make_rollout("b.jsonl")
+        self.make_state_db([
+            {"id": first, "name": "review", "rollout_path": str(r1)},
+            {"id": second, "name": "other", "rollout_path": str(r2)},
+        ])
+        self.set_holder(r1)
+        self.set_holder(r2)
+        with self.assertRaises(peers.ResolveError) as ctx:
+            peers.resolve_thread("codex-abcd1234")
+        self.assertIn(first, str(ctx.exception))
+        self.assertIn(second, str(ctx.exception))
+        self.assertIn("review", str(ctx.exception))
+        self.assertIn("other", str(ctx.exception))
+
+    def test_a_dead_prefix_collision_does_not_block_the_live_thread(self):
+        first = "abcd1234-1111-2222-3333-444444444444"
+        second = "abcd1234-aaaa-bbbb-cccc-dddddddddddd"
+        r1 = self.make_rollout("a.jsonl")
+        r2 = self.make_rollout("b.jsonl")
+        self.make_state_db([
+            {"id": first, "name": "past", "rollout_path": str(r1)},
+            {"id": second, "name": "live", "rollout_path": str(r2)},
+        ])
+        self.set_holder(r2)
+        self.assertEqual(peers.resolve_thread("codex-abcd1234")["id"], second)
+
+    def test_an_alias_colliding_with_an_exact_title_is_refused(self):
+        r1 = self.make_rollout("a.jsonl")
+        r2 = self.make_rollout("b.jsonl")
+        first = "12345678-0000-0000-0000-000000000001"
+        second = "aaaaaaaa-0000-0000-0000-000000000002"
+        self.make_state_db([
+            {"id": first, "name": "other", "rollout_path": str(r1)},
+            {"id": second, "name": "codex-12345678", "rollout_path": str(r2)},
+        ])
+        self.set_holder(r1)
+        self.set_holder(r2)
+        with self.assertRaises(peers.ResolveError) as ctx:
+            peers.resolve_thread("codex-12345678")
+        self.assertIn(first, str(ctx.exception))
+        self.assertIn(second, str(ctx.exception))
+
     def test_a_name_held_by_two_live_threads_is_refused(self):
         r1 = self.make_rollout("a.jsonl")
         r2 = self.make_rollout("b.jsonl")
@@ -1218,6 +1275,7 @@ class TestResolveThread(Base):
         with self.assertRaises(peers.ResolveError) as ctx:
             peers.resolve_thread("missing")
         self.assertIn("/rename", str(ctx.exception))
+        self.assertIn("peers.py list", str(ctx.exception))
 
     def test_degraded_mode_resolves_a_uuid_but_refuses_a_name(self):
         self.make_state_db([], filename="state_1.sqlite", good=False)
@@ -2638,7 +2696,9 @@ class TestShimInbound(ShimBase):
     def test_a_user_frame_is_queued_with_the_senders_tag(self):
         shim, tid, _rollout = self.make_shim()
         listener, rec = self.add_listener(name="cc-main", session_id="s1")
-        shim._handle_line(json.dumps(self.inbound_frame("do the thing", listener.path)))
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            shim._handle_line(json.dumps(self.inbound_frame("do the thing", listener.path)))
         calls = self.queue_calls()
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0][2], tid)
@@ -2649,6 +2709,18 @@ class TestShimInbound(ShimBase):
         self.assertEqual(tag["reply"], listener.path)
         self.assertEqual(body, "do the thing")
         self.assertIn("s1", shim.contacts)
+        self.assertIn("queued inbound message m-1", err.getvalue())
+
+    def test_a_failed_queue_names_the_message_in_the_diagnostic_log(self):
+        shim, _tid, _rollout = self.make_shim()
+        listener, _rec = self.add_listener()
+        os.environ["FAKE_CODEX_RC"] = "1"
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            shim._handle_line(json.dumps(
+                self.inbound_frame("hello", listener.path, msg_id="review-123")
+            ))
+        self.assertIn("queue failed for message review-123", err.getvalue())
 
     def test_a_failed_queue_sends_the_sender_one_visible_notice(self):
         # A plain SendMessage does not track the correlated `failed` status, so

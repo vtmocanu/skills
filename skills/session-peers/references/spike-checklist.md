@@ -13,7 +13,7 @@ Partial live check: 2026-09-09, Claude Code 2.1.266, Codex CLI 0.153.4.
    thread must appear under its name as `interactive`.
    - 2026-09-07: appeared 4 s after start, `codex-uzi [a6a2b4] · interactive · idle`.
    - Record shape used: `pid, sessionId (= thread uuid), cwd, startedAt, procStart,
-     version ("codex-<ver>"), peerProtocol 1, peerFeatures ["notify_idle"], kind
+     version ("codex-VERSION"), peerProtocol 1, peerFeatures ["notify_idle"], kind
      "interactive", entrypoint "codex", pidDomain, messagingSocketPath, name,
      nameSource "user", nameSince, status, updatedAt, statusUpdatedAt`.
    - No `.key` file was written and the send still worked (auth line optional on
@@ -55,7 +55,7 @@ Partial live check: 2026-09-09, Claude Code 2.1.266, Codex CLI 0.153.4.
 
 ## Codex side
 
-8. **`codex queue` reaches a live thread.** `codex queue --thread <uuid> --message
+8. **`codex queue` reaches a live thread.** `codex queue --thread UUID --message
    ping` into a live, idle, un-interrupted thread must start a turn within 10 s.
    - 2026-09-07: three trials under 1 s on a thread that had just completed a
      turn; 5.9 s on an idle thread (the poll interval).
