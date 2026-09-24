@@ -77,6 +77,13 @@ Use `SendMessage` (or `@<name>` in the prompt) exactly as for another Claude
 session. The shim tags the message with your name and reply address and queues
 it; Codex runs it as its next user turn under the thread's own approval mode.
 
+For a request whose reply gates an action, use `peers.py list` to identify the
+live thread and its busy/idle state, then match the reply's message-id header
+before acting. `SendMessage` and `peers.py send --to codex:<uuid>` both report
+queue acceptance before a busy thread processes the message. Use the direct
+`send` command when an alias is ambiguous or you need its explicit CLI result;
+it does not bypass the busy thread's queue.
+
 - **Replies normally come back on their own**: when that turn completes, the
   shim posts Codex's final message into this session as `Message from @<name>`,
   subject to the live-session and reply-budget checks below. If it is missing,
@@ -176,6 +183,10 @@ a Claude Code Bash tool, it automatically uses
 and reply route. Do not hand-build `--from-name`, `--from-sid`, or
 `--from-socket` there. Outside Claude Code, an identity-free send is still
 allowed but prints a warning and cannot route an automatic reply.
+`status: queued` means `codex queue` accepted the message, not that the thread
+has read it. A unique live `codex-<UUID prefix>` or raw UUID prefix of at least
+eight hex characters also resolves; ambiguous prefixes fail with candidate
+UUIDs and titles. Use the full UUID for consequential requests.
 
 ### Keeping shims alive
 
@@ -339,9 +350,9 @@ Set `SESSION_PEERS_GC_DAYS` to change automatic retention.
 Reports the socket directory, registered versus live shims, hook trust state,
 process and Unix-socket capability, stale metadata count, `codex` and `lsof` on
 `PATH`, and version drift. It also warns for each **live Codex thread that has no
-shim and is not registered** (`<name>: live Codex thread, not attached (run
-peers.py up <uuid>)`) — the state where a message queues but no reply routes
-back, and which `ListAgents` cannot show. Ordinary commands rate-limit an
+shim and is not registered** (`NAME: live Codex thread, not attached (run peers.py up UUID)`).
+In that state a message queues but no reply routes back, and `ListAgents`
+cannot show it. Ordinary commands rate-limit an
 unchanged version warning to once per 24 hours; `doctor` always reports the
 current comparison. Re-run
 `<this skill's directory>/references/spike-checklist.md` after an upgrade.
@@ -350,7 +361,9 @@ Before claiming a reply was sent, check
 `$CODEX_HOME/session-peers/<thread uuid>.log` (default home: `~/.codex`) for
 `delivered turn <turn id> to <session name>`, or confirm receipt in the target
 session. A successful socket write is transport evidence, not proof the target
-agent has read or acted on it. A message that fails to queue (`queue failed:` in
+agent has read or acted on it. A `queued inbound message <msg_id>` line proves
+the shim passed that message to `codex queue`, not that Codex processed it. A
+message that fails to queue (`queue failed for message` in
 that log) also sends the sender one plain `was not queued` notice. The shim runs
 from `$HOME` and queues from the thread's own directory (`$HOME` if that is
 gone), so removing the directory `up` ran from no longer breaks it. The state JSON's `processed_turns` list includes
