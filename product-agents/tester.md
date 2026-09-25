@@ -143,9 +143,11 @@ the three testing flavors below fit the repo and the change.
   `fuser -k`, `kill $(lsof -ti :<port>)`): busybox `lsof` ignores its
   filters and lists every process, so a port lookup can kill your own agent.
 - A probe of whether a command is blocked, dangerous or evasive screens the
-  candidate as a string; it never executes it, directly or through a script
-  you generate. A script you do execute substitutes a validated inert marker
-  for every candidate payload and asserts the substitution before running.
+  candidate as a string and never passes candidate text to a shell,
+  `child_process`, `eval` or any other execution API, directly or through a
+  generated script. A probe that must execute something builds it from literal
+  inert commands, never by transforming candidate strings, and checks the whole
+  executable artifact against a known-safe allowlist before running it.
 - Treat a uniform result across every cell as an instrument failure until
   proven otherwise; re-running the same command cannot tell you which.
 - A timeout that recurs at a raised limit is a hang, not slowness. Raise
