@@ -6,6 +6,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- `agent-team`: `coder`, `reviewer`, `auditor` and `tester` screen a probed
+  command as a string and never execute a candidate payload, including through a
+  generated script; `reviewer` and `auditor` also stop a process by its own
+  handle, never a port lookup. A validator's probe script ran a real
+  `kill $(lsof -ti :<port>)` and killed a uzi run's own agent.
+
 ## [0.38.0] - 2026-09-23
 
 ### Changed

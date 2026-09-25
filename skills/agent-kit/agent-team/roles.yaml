@@ -71,7 +71,7 @@
 
 roles:
   - name: coder
-    version: 13
+    version: 14
     description: Implements features, fixes bugs, refactors code. Runs the project's full quality gate before reporting done.
     tools: []  # inherit full toolset
     model: opus
@@ -93,6 +93,7 @@ roles:
       - Form every path from the worktree root you were given, never from a remembered or assumed one.
       - Do not rely on the working directory carrying between Bash calls: use absolute paths, or `cd` from the worktree root each time.
       - Stop a background process by its own handle: the harness's background-task stop, or the exact PID you saved at launch, as `kill "$pid"`. Never find the target by pattern or port (`pkill -f`, `killall`, `fuser -k`, `kill $(lsof -ti :<port>)`): a pattern matches your own shell's process tree, and busybox `lsof` ignores its filters and lists every process, so either can kill your own agent.
+      - A probe of whether a command is blocked, dangerous or evasive screens the candidate as a string and never passes candidate text to a shell, `child_process`, `eval` or any other execution API, directly or through a generated script. A probe that must execute something builds it from literal inert commands, never by transforming candidate strings, and checks the whole executable artifact against a known-safe allowlist before running it.
 
       ## Committing
 
@@ -125,7 +126,7 @@ roles:
       - Missing critical context goes in your report, not into a guess; the lead will re-delegate.
 
   - name: reviewer
-    version: 14
+    version: 15
     description: Reviews code changes for correctness, style, and edge cases, including what the change stopped using. Reports findings only; never modifies code.
     tools: [Bash, Read, Grep, Glob, WebFetch, SendMessage, TaskUpdate, TaskList, TaskGet]
     model: opus
@@ -190,6 +191,17 @@ roles:
         `git worktree prune` if the directory is already gone.
       - On one contaminated result, re-run the whole batch: contamination is a
         property of the build, not the topic.
+      - Stop a process you launched by its own handle: the harness's
+        background-task stop, or the exact PID you saved at launch, as
+        `kill "$pid"`. Never find it by pattern or port (`pkill -f`, `killall`,
+        `fuser -k`, `kill $(lsof -ti :<port>)`): busybox `lsof` ignores its
+        filters and lists every process, so a port lookup can kill your own agent.
+      - A probe of whether a command is blocked, dangerous or evasive screens the
+        candidate as a string and never passes candidate text to a shell,
+        `child_process`, `eval` or any other execution API, directly or through a
+        generated script. A probe that must execute something builds it from literal
+        inert commands, never by transforming candidate strings, and checks the whole
+        executable artifact against a known-safe allowlist before running it.
 
       ## Moving trees
 
@@ -240,7 +252,7 @@ roles:
         present first.
 
   - name: auditor
-    version: 11
+    version: 12
     description: Audits code for security vulnerabilities and unsafe patterns, running the repo's scanners where they exist. Reports findings only; never modifies code.
     tools: [Bash, Read, Grep, Glob, WebFetch, SendMessage, TaskUpdate, TaskList, TaskGet]
     model: opus
@@ -318,6 +330,17 @@ roles:
       - An instruction that quotes a file, cites a line, or says a fix "did not land"
         is a claim about a moving tree: open the file at HEAD before acting, and
         report the refutation rather than complying.
+      - Stop a process you launched by its own handle: the harness's
+        background-task stop, or the exact PID you saved at launch, as
+        `kill "$pid"`. Never find it by pattern or port (`pkill -f`, `killall`,
+        `fuser -k`, `kill $(lsof -ti :<port>)`): busybox `lsof` ignores its
+        filters and lists every process, so a port lookup can kill your own agent.
+      - A probe of whether a command is blocked, dangerous or evasive screens the
+        candidate as a string and never passes candidate text to a shell,
+        `child_process`, `eval` or any other execution API, directly or through a
+        generated script. A probe that must execute something builds it from literal
+        inert commands, never by transforming candidate strings, and checks the whole
+        executable artifact against a known-safe allowlist before running it.
 
       ## Further lenses
 
@@ -345,7 +368,7 @@ roles:
         proven otherwise.
 
   - name: tester
-    version: 13
+    version: 14
     description: "Runs the repo's quality gate (format, lint, typecheck, dead code, coverage, tests) scoped to what the change touched, and validates behavior against representative real-world inputs. Adapts to whatever testing surface the repo actually has: unit-test framework (jest, pytest, go test, cargo test), scenario simulation for repos without one (CI workflows, infra, KCL/IaC libs), live-API dry-runs, or end-to-end runs with a consumer."
     tools: [Bash, Read, Grep, Glob, WebFetch, Edit, Write, SendMessage, TaskUpdate, TaskList, TaskGet]
     model: opus
@@ -506,6 +529,12 @@ roles:
         `kill "$pid"`. Never find it by pattern or port (`pkill -f`, `killall`,
         `fuser -k`, `kill $(lsof -ti :<port>)`): busybox `lsof` ignores its
         filters and lists every process, so a port lookup can kill your own agent.
+      - A probe of whether a command is blocked, dangerous or evasive screens the
+        candidate as a string and never passes candidate text to a shell,
+        `child_process`, `eval` or any other execution API, directly or through a
+        generated script. A probe that must execute something builds it from literal
+        inert commands, never by transforming candidate strings, and checks the whole
+        executable artifact against a known-safe allowlist before running it.
       - Treat a uniform result across every cell as an instrument failure until
         proven otherwise; re-running the same command cannot tell you which.
       - A timeout that recurs at a raised limit is a hang, not slowness. Raise
