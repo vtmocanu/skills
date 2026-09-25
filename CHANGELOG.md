@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.39.0] - 2026-09-25
+
 ### Changed
 
 - `agent-team`: `coder`, `reviewer`, `auditor` and `tester` screen a probed
