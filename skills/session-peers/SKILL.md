@@ -86,7 +86,7 @@ it does not bypass the busy thread's queue.
 
 - **Peer unreachable**: when `SendMessage` reports no reachable agent by that
   name, or `ListAgents` omits a Codex thread you expect, run `peers.py list`. A
-  live thread shown `not registered` with no `shim <pid>` has lost its shim: run
+  live thread shown `not registered` with no `shim <pid>` has no active shim: run
   `peers.py up <uuid>`, then send by the bare name.
 - **Replies normally come back on their own**: when that turn completes, the
   shim posts Codex's final message into this session as `Message from @<name>`,
