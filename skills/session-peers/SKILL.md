@@ -84,6 +84,10 @@ queue acceptance before a busy thread processes the message. Use the direct
 `send` command when an alias is ambiguous or you need its explicit CLI result;
 it does not bypass the busy thread's queue.
 
+- **Peer unreachable**: when `SendMessage` reports no reachable agent by that
+  name, or `ListAgents` omits a Codex thread you expect, run `peers.py list`. A
+  live thread shown `not registered` with no `shim <pid>` has no active shim: run
+  `peers.py up <uuid>`, then send by the bare name.
 - **Replies normally come back on their own**: when that turn completes, the
   shim posts Codex's final message into this session as `Message from @<name>`,
   subject to the live-session and reply-budget checks below. If it is missing,

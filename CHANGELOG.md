@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- `session-peers`: when `SendMessage` cannot reach a Codex peer or `ListAgents`
+  omits it, check `peers.py list` for a live thread with no active shim and
+  re-attach it with `peers.py up <uuid>`.
+
 ## [0.39.0] - 2026-09-25
 
 ### Changed
