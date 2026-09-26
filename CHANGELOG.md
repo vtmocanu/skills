@@ -11,6 +11,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `session-peers`: when `SendMessage` cannot reach a Codex peer or `ListAgents`
   omits it, check `peers.py list` for a live thread with no active shim and
   re-attach it with `peers.py up <uuid>`.
+- `session-peers`: in a supervised multi-round loop, reset the reply budget
+  before every send from round 4 on, not only before round 4: a reset zeroes the
+  count, so the three-reply cap trips again three replies later.
 
 ## [0.39.0] - 2026-09-25
 
