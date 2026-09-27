@@ -2971,6 +2971,7 @@ class Shim:
 
     @staticmethod
     def _valid_allowance(value):
+        """Well-formed sid and total, and a grant time that parses."""
         if not isinstance(value, dict) or not isinstance(value.get("sid"), str):
             return False
         total = value.get("total")
@@ -2978,7 +2979,17 @@ class Shim:
             isinstance(total, int)
             and not isinstance(total, bool)
             and 1 <= total <= BUDGET_ALLOW_MAX
+            and parse_time(value.get("at")) is not None
         )
+
+    def _allowance_fresh(self, at, now):
+        """A grant counts only within the idle window of when it was GRANTED.
+
+        Consumption can lag the grant (a shim that starts late), so the
+        original time decides, never the time the shim read it. A grant stamped
+        more than a minute ahead is refused rather than trusted to last.
+        """
+        return -60.0 <= now - at <= self.reply_budget_window
 
     def _cap_for(self, sid):
         """The consecutive-reply cap for one requesting session."""
@@ -3000,6 +3011,14 @@ class Shim:
             log("ignoring a malformed reply allowance for thread %s" % self.thread_id)
             return
         sid, total = grant["sid"], grant["total"]
+        granted_at = parse_time(grant["at"])
+        if not self._allowance_fresh(granted_at, time.time()):
+            log(
+                "ignoring a stale reply allowance for %s: granted %.0fs ago, "
+                "outside the %.0fs idle window"
+                % (sid, time.time() - granted_at, self.reply_budget_window)
+            )
+            return
         current = self.allowance
         if current and current.get("sid") == sid and current["total"] >= total:
             log(
@@ -3008,7 +3027,7 @@ class Shim:
             )
             return
         old_cap = self._cap_for(sid)
-        self.allowance = {"sid": sid, "total": total, "at": time.time()}
+        self.allowance = {"sid": sid, "total": total, "at": granted_at}
         new_cap = self._cap_for(sid)
         log(
             "reply allowance for %s set to %d (%d spent)"
@@ -3066,7 +3085,7 @@ class Shim:
             and sender_sid is not None
             and not expired
             and self.allowance.get("sid") == sender_sid
-            and now - float(self.allowance.get("at") or 0) <= self.reply_budget_window
+            and self._allowance_fresh(parse_time(self.allowance.get("at")) or 0.0, now)
         )
 
     def _handle_turn_end(self, turn):
@@ -4495,12 +4514,25 @@ def cmd_budget_allow(args):
     path = budget_allow_path(tid)
     total = args.replies
     pending = read_json(path, None)
+    window = _float_env("SESSION_PEERS_REPLY_BUDGET_WINDOW", REPLY_BUDGET_WINDOW_DEFAULT)
+    if window <= 0:
+        window = REPLY_BUDGET_WINDOW_DEFAULT
+    granted_at = now_iso()
     if isinstance(pending, dict) and pending.get("sid") == sid:
-        # Not yet consumed: two grants before the shim polls keep the higher.
+        # Not yet consumed: two grants before the shim polls keep the higher,
+        # with the higher's own time, so a merge never refreshes an old grant.
         previous = pending.get("total")
-        if isinstance(previous, int) and not isinstance(previous, bool):
-            total = max(total, min(previous, BUDGET_ALLOW_MAX))
-    write_json_atomic(path, {"sid": sid, "total": total, "at": now_iso()}, mode=0o600)
+        previous_at = parse_time(pending.get("at"))
+        if (
+            isinstance(previous, int)
+            and not isinstance(previous, bool)
+            and previous_at is not None
+            and time.time() - previous_at <= window
+            and min(previous, BUDGET_ALLOW_MAX) >= total
+        ):
+            total = min(previous, BUDGET_ALLOW_MAX)
+            granted_at = pending["at"]
+    write_json_atomic(path, {"sid": sid, "total": total, "at": granted_at}, mode=0o600)
     print(
         "reply allowance for %s: up to %d consecutive replies to session %s "
         "(a total for this sequence; replies already delivered still count)"

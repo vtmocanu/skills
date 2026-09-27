@@ -5945,6 +5945,92 @@ class TestBudgetAllow(BuddyBase):
         )
         self.assertIn("budget allow", status[0]["detail"])
 
+    def write_marker(self, grant):
+        path = peers.budget_allow_path(self.tid)
+        if isinstance(grant, str):
+            pathlib.Path(path).write_text(grant)
+        else:
+            peers.write_json_atomic(path, grant, mode=0o600)
+        return path
+
+    @staticmethod
+    def iso_ago(seconds):
+        return datetime.fromtimestamp(time.time() - seconds, timezone.utc).isoformat()
+
+    def test_a_grant_consumed_by_a_late_shim_is_judged_by_its_grant_time(self):
+        # The marker was written a day before any shim consumed it.
+        path = self.write_marker(
+            {"sid": self.sid_a, "total": peers.BUDGET_ALLOW_MAX, "at": self.iso_ago(86400)}
+        )
+        late = peers.Shim(peers.resolve_thread(self.tid))
+        late.codex_version = "0.153.4"
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            late._consume_budget_allow_marker()
+        self.assertFalse(os.path.exists(path))
+        self.assertIsNone(late.allowance)
+        self.assertEqual(late._cap_for(self.sid_a), peers.REPLY_BUDGET)
+        self.assertIn("stale reply allowance", err.getvalue())
+        with contextlib.redirect_stderr(io.StringIO()):
+            for i in range(peers.REPLY_BUDGET + 1):
+                late._handle_turn_end(self.turn(self.sid_a, self.listener_a, "t%d" % i))
+        wait_for(lambda: len(self.replies(self.listener_a)) >= peers.REPLY_BUDGET)
+        time.sleep(0.2)
+        self.assertEqual(len(self.replies(self.listener_a)), peers.REPLY_BUDGET)
+
+    def test_a_fresh_grant_keeps_its_original_time(self):
+        granted = time.time() - 60
+        self.write_marker({"sid": self.sid_a, "total": 5, "at": self.iso_ago(60)})
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.shim._consume_budget_allow_marker()
+        self.assertEqual(self.shim._cap_for(self.sid_a), 5)
+        self.assertAlmostEqual(self.shim.allowance["at"], granted, delta=2)
+
+    def test_a_pre_sequence_grant_expires_from_its_grant_time(self):
+        # Interpretation A: an up-front grant is honoured by its own first
+        # reply only inside the window measured from when it was granted.
+        window = self.shim.reply_budget_window
+        self.write_marker({"sid": self.sid_a, "total": 5, "at": self.iso_ago(window - 30)})
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.shim._consume_budget_allow_marker()
+        self.assertEqual(self.shim._cap_for(self.sid_a), 5)
+        self.shim.allowance["at"] = time.time() - window - 1  # time passes
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.shim._advance_budget_sequence({"sid": self.sid_a})
+        self.assertIsNone(self.shim.allowance)
+
+    def test_a_malformed_grant_is_discarded(self):
+        for grant in (
+            "not json",
+            {"sid": self.sid_a, "total": 5},
+            {"sid": self.sid_a, "total": 5, "at": "yesterday-ish"},
+            {"sid": self.sid_a, "total": 21, "at": self.iso_ago(1)},
+            {"sid": self.sid_a, "total": True, "at": self.iso_ago(1)},
+            {"total": 5, "at": self.iso_ago(1)},
+            {"sid": self.sid_a, "total": 5, "at": self.iso_ago(-3600)},  # future
+        ):
+            path = self.write_marker(grant)
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.shim._consume_budget_allow_marker()
+            self.assertFalse(os.path.exists(path), grant)
+            self.assertIsNone(self.shim.allowance, grant)
+
+    def test_a_pending_stale_grant_is_not_refreshed_by_a_new_one(self):
+        self.write_marker({"sid": self.sid_a, "total": 20, "at": self.iso_ago(86400)})
+        rc, _out, err = self.cli(
+            "budget", "allow", self.tid, "--replies", "4", "--for-session", self.sid_a
+        )
+        self.assertEqual(rc, 0, err)
+        marker = peers.read_json(peers.budget_allow_path(self.tid))
+        self.assertEqual(marker["total"], 4)
+        self.assertLess(time.time() - peers.parse_time(marker["at"]), 60)
+        # A fresh pending higher grant keeps its own time, not a refreshed one.
+        self.write_marker({"sid": self.sid_a, "total": 9, "at": self.iso_ago(120)})
+        self.cli("budget", "allow", self.tid, "--replies", "4", "--for-session", self.sid_a)
+        marker = peers.read_json(peers.budget_allow_path(self.tid))
+        self.assertEqual(marker["total"], 9)
+        self.assertGreater(time.time() - peers.parse_time(marker["at"]), 100)
+
     def test_out_of_range_replies_are_rejected(self):
         for n in ("0", "21"):
             rc, _out, err = self.cli(
