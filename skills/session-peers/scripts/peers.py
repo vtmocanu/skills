@@ -1233,6 +1233,10 @@ class ResolveNotFound(ResolveError):
     """Nothing carries that name or id (as opposed to ambiguous or unverified)."""
 
 
+class ResolveNoLive(ResolveError):
+    """Only threads whose process is verified gone carry that name."""
+
+
 def resolve_thread(target, require_live=True):
     """Turn `<name|uuid>` into one thread dict, or raise ResolveError.
 
@@ -1310,7 +1314,7 @@ def resolve_thread(target, require_live=True):
                 )
             # Never silently pick a thread whose process is gone: Codex's title
             # suggester reuses names, so a dead match is not evidence of intent.
-            raise ResolveError(
+            raise ResolveNoLive(
                 "no live Codex thread named %r (%d past thread(s) carried that "
                 "name); /rename the running one, or pass its UUID"
                 % (target, len(matches))
@@ -4572,7 +4576,7 @@ def caller_identity(args):
     raise ValueError("cannot tell which session is asking; pass --as")
 
 
-def _resolve_typed_kind(kind, target):
+def _resolve_typed_kind(kind, target, live_only=False):
     if kind == "cc":
         rec = _resolve_claude_record(target)
         sid = rec.get("sessionId")
@@ -4581,7 +4585,12 @@ def _resolve_typed_kind(kind, target):
             # re-read as a name later.
             raise ResolveError("Claude session %r has no UUID session id" % target)
         return {"kind": "cc", "uuid": sid, "name": rec.get("name")}
-    thread = resolve_thread(target, require_live=False)
+    # Codex reuses titles, so a live thread usually shares its name with dead
+    # ones: the live match wins, and dead threads count only when none is live.
+    if live_only:
+        thread = resolve_thread(target, require_live=True)
+    else:
+        thread = resolve_thread_prefer_live(target)
     return {"kind": "codex", "uuid": thread["id"], "name": thread.get("name")}
 
 
@@ -4598,14 +4607,21 @@ def resolve_typed(target):
             return _resolve_typed_kind(kind, target[len(kind) + 1 :])
     if not target:
         raise ResolveError("an empty target names no session")
-    found, errors = [], []
+    found, errors, dead_codex = [], [], False
     for kind in BUDDY_KINDS:
         try:
-            found.append(_resolve_typed_kind(kind, target))
+            # Live Codex threads only here: a dead namesake must not compete
+            # with a live Claude session for the same bare name.
+            found.append(_resolve_typed_kind(kind, target, live_only=True))
         except ResolveNotFound:
             pass
+        except ResolveNoLive:
+            dead_codex = True
         except ResolveError as exc:
             errors.append(exc)
+    if dead_codex and not found and not errors:
+        # Nothing live carries the name: bind the dead thread as `codex:` would.
+        return _resolve_typed_kind("codex", target)
     if errors:
         # An ambiguous or unverifiable side could be the one meant: never guess.
         raise ResolveError(

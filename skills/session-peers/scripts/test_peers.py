@@ -5599,6 +5599,52 @@ class TestBuddyRecords(BuddyBase):
         rc, _out, err = self.buddy(owner, "set", "cc:cc-other")
         self.assertEqual(rc, 0, err)
 
+    def namesakes(self, name="helper", live=True):
+        """One live (optionally) and one dead Codex thread sharing a name."""
+        live_tid, dead_tid = new_uuid(), new_uuid()
+        live_rollout = self.make_rollout("%s.jsonl" % live_tid)
+        dead_rollout = self.make_rollout("%s.jsonl" % dead_tid)
+        self.make_state_db([
+            {"id": live_tid, "name": name, "rollout_path": str(live_rollout)},
+            {"id": dead_tid, "name": name, "rollout_path": str(dead_rollout)},
+        ])
+        if live:
+            self.set_holder(live_rollout)
+        return live_tid, dead_tid
+
+    def test_a_live_codex_thread_wins_over_a_dead_namesake(self):
+        live_tid, _dead = self.namesakes()
+        for target in ("helper", "codex:helper"):
+            owner = "cc:%s" % new_uuid()
+            rc, _out, err = self.buddy(owner, "set", target)
+            self.assertEqual(rc, 0, "%s: %s" % (target, err))
+            record = json.loads(self.record_path(owner).read_text())
+            self.assertEqual(record["buddy"]["uuid"], live_tid, target)
+
+    def test_a_dead_codex_namesake_does_not_compete_with_a_live_claude_session(self):
+        sid = new_uuid()
+        self.add_listener(name="helper", session_id=sid)
+        dead_tid = new_uuid()
+        rollout = self.make_rollout("%s.jsonl" % dead_tid)
+        self.make_state_db([{"id": dead_tid, "name": "helper", "rollout_path": str(rollout)}])
+        owner = "codex:%s" % new_uuid()
+        rc, _out, err = self.buddy(owner, "set", "helper")
+        self.assertEqual(rc, 0, err)
+        record = json.loads(self.record_path(owner).read_text())
+        self.assertEqual(record["buddy"], {"kind": "cc", "uuid": sid, "name": "helper"})
+
+    def test_a_bare_name_carried_only_by_a_dead_thread_binds_it_like_codex_does(self):
+        dead_tid = new_uuid()
+        rollout = self.make_rollout("%s.jsonl" % dead_tid)
+        self.make_state_db([{"id": dead_tid, "name": "helper", "rollout_path": str(rollout)}])
+        for target in ("helper", "codex:helper"):
+            owner = "cc:%s" % new_uuid()
+            rc, _out, err = self.buddy(owner, "set", target)
+            self.assertEqual(rc, 0, "%s: %s" % (target, err))
+            record = json.loads(self.record_path(owner).read_text())
+            self.assertEqual(record["buddy"]["uuid"], dead_tid, target)
+        self.assertEqual(self.attach_calls, [])  # a dead thread is never attached
+
     def test_an_unknown_target_is_refused(self):
         self.one_thread(name="someone")
         owner = "cc:%s" % new_uuid()
