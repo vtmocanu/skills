@@ -6,6 +6,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `session-peers`: a buddy. `buddy: @NAME` (or `peers.py buddy set`) binds one
+  peer by UUID as this session's default reviewer and brainstorm partner, with
+  optional `--uses` scope; `--to buddy` addresses it from `send`, `ask`,
+  `dispatch`, `wait` and `budget`; `buddy ping` attaches its shim without
+  resetting budgets. `peers.py budget allow` grants a finite per-requester reply
+  allowance (maximum 20) for a supervised loop instead of repeated resets.
+
 ### Changed
 
 - `session-peers`: when `SendMessage` cannot reach a Codex peer or `ListAgents`

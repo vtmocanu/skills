@@ -5471,5 +5471,583 @@ class TestCliSurface(Base):
         self.assertEqual(first, "#!/usr/bin/env python3")
 
 
+# ==========================================================================
+# Buddies and `budget allow`
+# ==========================================================================
+
+
+def new_uuid():
+    return str(uuidlib.uuid4())
+
+
+class BuddyBase(ShimBase):
+    def setUp(self):
+        super().setUp()
+        self.attach_calls = []
+        self._saved_attach = peers.attach_thread
+
+        def fake_attach(thread_id, verbose=True):
+            self.attach_calls.append((thread_id, verbose))
+            return None
+
+        peers.attach_thread = fake_attach
+
+    def tearDown(self):
+        peers.attach_thread = self._saved_attach
+        super().tearDown()
+
+    def two_threads(self, first="fail-codex", second="other-codex"):
+        """Two live Codex threads in one state DB."""
+        out = []
+        rows = []
+        for name in (first, second):
+            tid = new_uuid()
+            rollout = self.make_rollout("%s.jsonl" % tid)
+            rows.append({"id": tid, "name": name, "rollout_path": str(rollout)})
+            self.set_holder(rollout)
+            out.append(tid)
+        self.make_state_db(rows)
+        return out
+
+    def buddy(self, owner, *args):
+        return self.cli("buddy", *(args + ("--as", owner)))
+
+    def record_path(self, owner):
+        kind, _sep, ident = owner.partition(":")
+        return pathlib.Path(peers.buddies_dir()) / ("%s-%s.json" % (kind, ident))
+
+
+class TestBuddyRecords(BuddyBase):
+    def test_set_show_clear_round_trip_with_private_modes(self):
+        tid, _rollout = self.one_thread(name="fail-codex")
+        owner = "cc:%s" % new_uuid()
+        rc, out, err = self.buddy(owner, "set", "fail-codex")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("buddy = fail-codex (codex, %s)" % tid[:8], out)
+        self.assertIn("registered=no", out)
+        self.assertIn("uses: %s" % ", ".join(peers.BUDDY_USES), out)
+        for word in ("answered", "responsive"):
+            self.assertNotIn(word, out)
+        # `set` ensures the route like `ping`, through the transient attach.
+        self.assertEqual(self.attach_calls, [(tid, False)])
+        path = self.record_path(owner)
+        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE(path.parent.stat().st_mode), 0o700)
+        record = json.loads(path.read_text())
+        self.assertEqual(record["buddy"], {"kind": "codex", "uuid": tid, "name": "fail-codex"})
+        self.assertEqual(record["owner"]["uuid"], owner[3:])
+
+        rc, out, _err = self.cli("buddy", "--as", owner, "--json")
+        self.assertEqual(rc, 0)
+        payload = json.loads(out)
+        self.assertEqual(payload["buddy"]["uuid"], tid)
+        status = payload["status"]
+        self.assertIs(status["live"], True)
+        self.assertIs(status["registered"], False)
+        self.assertIsNone(status["shim_pid"])
+        self.assertIsNone(status["status"])
+        self.assertIs(status["paused"], False)
+        self.assertTrue(status["route"].startswith("unavailable: no shim"))
+        # `show` never attaches.
+        self.assertEqual(len(self.attach_calls), 1)
+
+        rc, out, _err = self.buddy(owner, "clear")
+        self.assertEqual((rc, out.strip()), (0, "buddy cleared"))
+        self.assertFalse(path.exists())
+        rc, _out, err = self.buddy(owner, "show")
+        self.assertEqual(rc, 1)
+        self.assertIn("no buddy set; run `peers.py buddy set <name|uuid>`", err)
+        rc, out, _err = self.buddy(owner, "clear")
+        self.assertEqual((rc, out.strip()), (0, "no buddy was set"))
+
+    def test_a_leading_at_is_stripped_and_a_codex_owner_binds_a_claude_buddy(self):
+        sid = new_uuid()
+        self.add_listener(name="cc-other", session_id=sid)
+        self.make_state_db([])
+        owner = "codex:%s" % new_uuid()
+        rc, out, err = self.buddy(owner, "set", "@cc-other", "--uses", "review,ping")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("buddy = cc-other (cc, %s) live" % sid[:8], out)
+        self.assertIn("route available; uses: review, ping", out)
+        record = json.loads(self.record_path(owner).read_text())
+        self.assertEqual(record["buddy"]["kind"], "cc")
+        self.assertEqual(record["buddy"]["uuid"], sid)
+        self.assertEqual(self.attach_calls, [])
+
+    def test_an_ambiguous_bare_name_is_refused_naming_both_typed_forms(self):
+        sid = new_uuid()
+        self.add_listener(name="twin", session_id=sid)
+        tid, _rollout = self.one_thread(name="twin")
+        owner = "cc:%s" % new_uuid()
+        rc, _out, err = self.buddy(owner, "set", "twin")
+        self.assertEqual(rc, 1)
+        self.assertIn("cc:%s" % sid, err)
+        self.assertIn("codex:%s" % tid, err)
+        self.assertFalse(self.record_path(owner).exists())
+        # A typed target settles it.
+        rc, _out, err = self.buddy(owner, "set", "codex:twin")
+        self.assertEqual(rc, 0, err)
+
+    def test_a_bare_name_is_refused_when_codex_discovery_is_unavailable(self):
+        # No state DB: a Codex thread by that name cannot be ruled out.
+        sid = new_uuid()
+        self.add_listener(name="cc-other", session_id=sid)
+        owner = "codex:%s" % new_uuid()
+        rc, _out, err = self.buddy(owner, "set", "cc-other")
+        self.assertEqual(rc, 1)
+        self.assertIn("pass cc:cc-other or codex:cc-other", err)
+        rc, _out, err = self.buddy(owner, "set", "cc:cc-other")
+        self.assertEqual(rc, 0, err)
+
+    def test_an_unknown_target_is_refused(self):
+        self.one_thread(name="someone")
+        owner = "cc:%s" % new_uuid()
+        rc, _out, err = self.buddy(owner, "set", "nobody")
+        self.assertEqual(rc, 1)
+        self.assertIn("no Claude session or Codex thread named 'nobody'", err)
+
+    def test_a_session_cannot_be_its_own_buddy(self):
+        tid, _rollout = self.one_thread(name="self-codex")
+        rc, _out, err = self.buddy("codex:%s" % tid, "set", tid)
+        self.assertEqual(rc, 2)
+        self.assertIn("its own buddy", err)
+        self.assertFalse(self.record_path("codex:%s" % tid).exists())
+
+    def test_an_unknown_uses_word_is_rejected_listing_the_supported_ones(self):
+        self.one_thread(name="fail-codex")
+        owner = "cc:%s" % new_uuid()
+        rc, _out, err = self.buddy(owner, "set", "fail-codex", "--uses", "review,deploy")
+        self.assertEqual(rc, 2)
+        self.assertIn("deploy", err)
+        for word in peers.BUDDY_USES:
+            self.assertIn(word, err)
+        self.assertFalse(self.record_path(owner).exists())
+
+    def test_two_owners_keep_independent_buddies(self):
+        tid, other = self.two_threads()
+        first, second = "cc:%s" % new_uuid(), "cc:%s" % new_uuid()
+        self.assertEqual(self.buddy(first, "set", "fail-codex")[0], 0)
+        self.assertEqual(self.buddy(second, "set", "other-codex")[0], 0)
+        _rc, out, _err = self.cli("buddy", "--as", first, "--json")
+        self.assertEqual(json.loads(out)["buddy"]["uuid"], tid)
+        _rc, out, _err = self.cli("buddy", "--as", second, "--json")
+        self.assertEqual(json.loads(out)["buddy"]["uuid"], other)
+        self.assertEqual(self.buddy(first, "clear")[0], 0)
+        _rc, out, _err = self.cli("buddy", "--as", second, "--json")
+        self.assertEqual(json.loads(out)["buddy"]["uuid"], other)
+
+    def test_no_caller_identity_is_a_usage_error(self):
+        rc, _out, err = self.cli("buddy")
+        self.assertEqual(rc, 2)
+        self.assertIn("cannot tell which session is asking; pass --as", err)
+
+    def test_the_caller_defaults_to_the_claude_session_then_the_codex_thread(self):
+        tid, _rollout = self.one_thread(name="fail-codex")
+        sid = new_uuid()
+        os.environ["CODEX_THREAD_ID"] = new_uuid()
+        os.environ["CLAUDE_CODE_SESSION_ID"] = sid
+        self.assertEqual(self.cli("buddy", "set", "fail-codex")[0], 0)
+        self.assertTrue(self.record_path("cc:%s" % sid).exists())
+        del os.environ["CLAUDE_CODE_SESSION_ID"]
+        rc, _out, err = self.cli("buddy", "show")
+        self.assertEqual(rc, 1)  # the Codex thread has no buddy of its own
+        self.assertIn("no buddy set", err)
+
+
+class TestBuddyRouting(BuddyBase):
+    def test_a_renamed_buddy_is_still_reached_by_uuid_not_by_its_old_name(self):
+        sid = new_uuid()
+        bound, _rec = self.add_listener(name="cc-other", session_id=sid)
+        self.make_state_db([])
+        owner_sid = new_uuid()
+        self.assertEqual(self.buddy("cc:%s" % owner_sid, "set", "cc-other")[0], 0)
+        # The buddy renames itself; a newcomer takes the old name.
+        self.write_record(os.getpid(), "renamed", sid, bound.path)
+        newcomer, _rec = self.add_listener(name="cc-other", session_id=new_uuid(), pid=1)
+        os.environ["CLAUDE_CODE_SESSION_ID"] = owner_sid
+        rc, _out, err = self.cli("send", "--to", "buddy", "--message", "hello")
+        self.assertEqual(rc, 0, err)
+        self.assertTrue(wait_for(lambda: bound.of_type("user")))
+        time.sleep(0.2)
+        self.assertEqual(newcomer.of_type("user"), [])
+        rc, out, _err = self.cli("buddy", "show")
+        self.assertIn("buddy = renamed (cc, %s)" % sid[:8], out)
+
+    def test_a_claude_owner_sends_to_its_codex_buddy_by_uuid(self):
+        tid, _other = self.two_threads()
+        owner_sid = new_uuid()
+        self.assertEqual(self.buddy("cc:%s" % owner_sid, "set", "fail-codex")[0], 0)
+        os.environ["CLAUDE_CODE_SESSION_ID"] = owner_sid
+        rc, _out, err = self.cli("send", "--to", "@buddy", "--message", "hi")
+        self.assertEqual(rc, 0, err)
+        calls = self.queue_calls()
+        self.assertEqual(len(calls), 1)
+        self.assertIn(tid, calls[0])
+
+    def test_a_codex_owner_sends_and_dispatches_to_its_claude_buddy(self):
+        sid = new_uuid()
+        listener, _rec = self.add_listener(name="cc-other", session_id=sid)
+        self.make_state_db([])
+        owner_tid = new_uuid()
+        self.assertEqual(self.buddy("codex:%s" % owner_tid, "set", "cc-other")[0], 0)
+        os.environ["CODEX_THREAD_ID"] = owner_tid
+        rc, _out, err = self.cli("send", "--to", "buddy", "--message", "note")
+        self.assertEqual(rc, 0, err)
+        rc, out, err = self.cli(
+            "dispatch", "--to", "buddy", "--message", "review this", "--json"
+        )
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(json.loads(out)["target_session_id"], sid)
+        self.assertTrue(wait_for(lambda: len(listener.of_type("user")) == 2))
+
+    def test_ask_dispatch_and_wait_refuse_a_codex_buddy_and_send_nothing(self):
+        self.one_thread(name="fail-codex")
+        owner_sid = new_uuid()
+        self.assertEqual(self.buddy("cc:%s" % owner_sid, "set", "fail-codex")[0], 0)
+        os.environ["CLAUDE_CODE_SESSION_ID"] = owner_sid
+        for argv in (
+            ("ask", "--to", "buddy", "--message", "q", "--from-thread", new_uuid()),
+            ("dispatch", "--to", "buddy", "--message", "q", "--from-thread", new_uuid()),
+            ("wait", "--for", "buddy", "--timeout", "1"),
+        ):
+            rc, _out, err = self.cli(*argv)
+            self.assertEqual(rc, 2, argv)
+            self.assertIn(
+                "ask/dispatch/wait need a Claude buddy; use send (asynchronous)", err
+            )
+        self.assertEqual(self.queue_calls(), [])
+        self.assertEqual(os.listdir(peers.request_dir()), [])
+
+    def test_budget_commands_refuse_a_claude_buddy(self):
+        sid = new_uuid()
+        self.add_listener(name="cc-other", session_id=sid)
+        self.make_state_db([])
+        owner_tid = new_uuid()
+        self.assertEqual(self.buddy("codex:%s" % owner_tid, "set", "cc-other")[0], 0)
+        os.environ["CODEX_THREAD_ID"] = owner_tid
+        rc, _out, err = self.cli("budget", "reset", "buddy")
+        self.assertEqual(rc, 2)
+        self.assertIn("Codex thread's shim", err)
+        rc, _out, err = self.cli(
+            "budget", "allow", "buddy", "--replies", "5", "--for-session", sid
+        )
+        self.assertEqual(rc, 2)
+        leftovers = [
+            name for name in os.listdir(peers.state_dir())
+            if name.endswith((".budget-reset", ".budget-allow"))
+        ]
+        self.assertEqual(leftovers, [])
+
+    def test_budget_commands_accept_a_codex_buddy(self):
+        tid, _rollout = self.one_thread(name="fail-codex")
+        owner_sid = new_uuid()
+        self.assertEqual(self.buddy("cc:%s" % owner_sid, "set", "fail-codex")[0], 0)
+        os.environ["CLAUDE_CODE_SESSION_ID"] = owner_sid
+        rc, _out, err = self.cli("budget", "allow", "buddy", "--replies", "6")
+        self.assertEqual(rc, 0, err)
+        marker = peers.read_json(peers.budget_allow_path(tid))
+        self.assertEqual((marker["sid"], marker["total"]), (owner_sid, 6))
+        rc, _out, err = self.cli("budget", "reset", "buddy")
+        self.assertEqual(rc, 0, err)
+        self.assertTrue(os.path.exists(peers.budget_reset_path(tid)))
+        # An explicit reset drops the grant not yet consumed.
+        self.assertFalse(os.path.exists(peers.budget_allow_path(tid)))
+
+    def test_to_buddy_without_a_record_is_a_clear_error(self):
+        self.one_thread(name="fail-codex")
+        os.environ["CLAUDE_CODE_SESSION_ID"] = new_uuid()
+        rc, _out, err = self.cli("send", "--to", "buddy", "--message", "hi")
+        self.assertEqual(rc, 1)
+        self.assertIn("no buddy set", err)
+        self.assertIn("peers.py buddy set", err)
+        self.assertEqual(self.queue_calls(), [])
+
+    def test_repeated_ping_is_budget_neutral(self):
+        tid, _rollout = self.one_thread(name="fail-codex")
+        owner = "cc:%s" % new_uuid()
+        self.assertEqual(self.buddy(owner, "set", "fail-codex")[0], 0)
+        held = {"s1": {"text": "held", "mid": "m", "turn_id": "t", "at": time.time()}}
+        peers.write_json_atomic(
+            peers.thread_state_path(tid),
+            {"thread_id": tid, "budgets": {"s1": 3}, "held": held},
+        )
+        before = pathlib.Path(peers.thread_state_path(tid)).read_bytes()
+        saved_up = peers.cmd_up
+        peers.cmd_up = lambda _args: self.fail("ping must not run `up`")
+        try:
+            for _ in range(3):
+                rc, _out, err = self.buddy(owner, "ping")
+                self.assertEqual(rc, 0, err)
+        finally:
+            peers.cmd_up = saved_up
+        self.assertEqual(self.attach_calls, [(tid, False)] * 4)  # set + 3 pings
+        self.assertFalse(os.path.exists(peers.budget_reset_path(tid)))
+        self.assertFalse(os.path.exists(peers.budget_allow_path(tid)))
+        self.assertEqual(pathlib.Path(peers.thread_state_path(tid)).read_bytes(), before)
+        self.assertEqual(peers.read_registered(), {})
+
+    def test_ping_reports_a_running_shim_without_attaching(self):
+        tid, _rollout = self.one_thread(name="fail-codex")
+        owner = "cc:%s" % new_uuid()
+        pid = self.hold_pidfile(tid)
+        rc, out, err = self.buddy(owner, "set", "fail-codex")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self.attach_calls, [])
+        self.assertIn("shim=%d" % pid, out)
+        self.assertIn("route available", out)
+
+
+class TestBudgetAllow(BuddyBase):
+    def setUp(self):
+        super().setUp()
+        self.shim, self.tid, _rollout = self.make_shim()
+        self.sid_a, self.sid_b = new_uuid(), new_uuid()
+        self.listener_a, _ = self.add_listener(name="cc-a", session_id=self.sid_a)
+        self.listener_b, _ = self.add_listener(
+            name="cc-b", session_id=self.sid_b, pid=os.getppid()
+        )
+
+    def turn(self, sid, listener, turn_id, text="answer"):
+        tag = {"from": "cc", "sid": sid, "mid": "m-" + turn_id, "reply": listener.path}
+        return peers.Turn(turn_id, "ping", tag, "complete", text)
+
+    @staticmethod
+    def replies(listener):
+        return [f for f in listener.of_type("user") if f.get("from")]
+
+    def allow(self, replies, sid=None):
+        rc, _out, err = self.cli(
+            "budget", "allow", self.tid, "--replies", str(replies),
+            "--for-session", sid or self.sid_a,
+        )
+        self.assertEqual(rc, 0, err)
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.shim._consume_budget_allow_marker()
+
+    def exhaust(self, sid, listener, count=peers.REPLY_BUDGET):
+        self.shim.budgets[sid] = count
+        self.shim.budget_sender_sid = sid
+        self.shim.budget_last_at = time.time()
+
+    def test_the_cap_is_raised_for_that_session_only(self):
+        self.allow(5)
+        self.assertEqual(self.shim._cap_for(self.sid_a), 5)
+        self.assertEqual(self.shim._cap_for(self.sid_b), peers.REPLY_BUDGET)
+        with contextlib.redirect_stderr(io.StringIO()):
+            for i in range(6):
+                self.shim._handle_turn_end(self.turn(self.sid_a, self.listener_a, "t%d" % i))
+        wait_for(lambda: len(self.replies(self.listener_a)) >= 5)
+        time.sleep(0.2)
+        self.assertEqual(len(self.replies(self.listener_a)), 5)
+        self.assertEqual(sorted(self.shim.held), [self.sid_a])
+        state = peers.read_json(peers.thread_state_path(self.tid))
+        self.assertEqual(state["allowance"]["total"], 5)
+
+    def test_a_repeated_or_lower_grant_does_not_replenish(self):
+        self.allow(5)
+        self.exhaust(self.sid_a, self.listener_a, 5)
+        self.allow(5)
+        self.allow(4)
+        self.assertEqual(self.shim.allowance["total"], 5)
+        self.assertEqual(self.shim.budgets[self.sid_a], 5)
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.shim._handle_turn_end(self.turn(self.sid_a, self.listener_a, "t-held"))
+        time.sleep(0.2)
+        self.assertEqual(self.replies(self.listener_a), [])
+        self.allow(8)  # higher: raises the total, usage untouched
+        self.assertEqual(self.shim._cap_for(self.sid_a), 8)
+
+    def test_the_allowance_is_dropped_when_the_sequence_resets(self):
+        for breaker in ({"sid": self.sid_b}, {}):
+            self.allow(5)
+            self.exhaust(self.sid_a, self.listener_a)
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.shim._advance_budget_sequence(breaker)
+            self.assertIsNone(self.shim.allowance, breaker)
+        self.allow(5)
+        self.exhaust(self.sid_a, self.listener_a)
+        self.shim.budget_last_at = time.time() - self.shim.reply_budget_window - 1
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.shim._advance_budget_sequence({"sid": self.sid_a})
+        self.assertIsNone(self.shim.allowance)
+        self.allow(5)
+        self.cli("budget", "reset", self.tid)
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.shim._consume_budget_marker()
+        self.assertIsNone(self.shim.allowance)
+
+    def test_a_grant_made_before_the_sequence_survives_its_first_reply(self):
+        self.allow(4)
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.shim._advance_budget_sequence({"sid": self.sid_a})
+        self.assertEqual(self.shim._cap_for(self.sid_a), 4)
+
+    def test_a_raising_grant_releases_the_held_reply_once(self):
+        self.exhaust(self.sid_a, self.listener_a)
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.shim._handle_turn_end(
+                self.turn(self.sid_a, self.listener_a, "t-held", text="held answer")
+            )
+        self.assertEqual(sorted(self.shim.held), [self.sid_a])
+        self.allow(5)
+        frames = wait_for(lambda: self.replies(self.listener_a))
+        body, _attrs = peers.unwrap_message(frames[0]["message"]["content"])
+        self.assertEqual(body, "[held reply, in reply to message m-t-held]\nheld answer")
+        self.assertEqual(self.shim.held, {})
+        self.assertEqual(self.shim.budgets[self.sid_a], peers.REPLY_BUDGET + 1)
+        self.allow(6)  # raising again: nothing left to release
+        time.sleep(0.2)
+        self.assertEqual(len(self.replies(self.listener_a)), 1)
+
+    def test_a_non_raising_grant_releases_nothing(self):
+        entry = {"text": "held", "mid": "m", "turn_id": "t", "at": time.time()}
+        self.allow(5)
+        self.exhaust(self.sid_a, self.listener_a, 5)
+        self.shim.held = {self.sid_a: dict(entry)}
+        self.allow(5)
+        self.allow(peers.REPLY_BUDGET, sid=self.sid_b)  # at the default: no raise
+        time.sleep(0.2)
+        self.assertEqual(self.replies(self.listener_a), [])
+        self.assertEqual(sorted(self.shim.held), [self.sid_a])
+
+    def test_a_grant_never_releases_to_a_gone_session_or_an_expired_entry(self):
+        gone = new_uuid()
+        self.exhaust(gone, self.listener_a)
+        self.shim.held = {
+            gone: {"text": "held", "mid": "m", "turn_id": "t", "at": time.time()}
+        }
+        self.allow(5, sid=gone)
+        self.assertEqual(self.shim.held, {})
+        self.exhaust(self.sid_a, self.listener_a)
+        self.shim.held = {
+            self.sid_a: {
+                "text": "stale", "mid": "m", "turn_id": "t",
+                "at": time.time() - self.shim.reply_budget_window - 1,
+            }
+        }
+        self.allow(5)
+        time.sleep(0.2)
+        self.assertEqual(self.replies(self.listener_a), [])
+        self.assertEqual(self.shim.held, {})
+
+    def test_the_exhausted_notice_names_allow_and_reset(self):
+        self.exhaust(self.sid_a, self.listener_a)
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.shim._handle_turn_end(self.turn(self.sid_a, self.listener_a, "t-x"))
+        notice = wait_for(
+            lambda: [f for f in self.listener_a.of_type("user") if not f.get("from")]
+        )
+        text = notice[0]["message"]["content"]
+        self.assertIn("peers.py budget allow %s --replies N" % self.tid, text)
+        self.assertIn("peers.py budget reset %s" % self.tid, text)
+        status = wait_for(
+            lambda: self.listener_a.of_type("control", "peer_message_status")
+        )
+        self.assertIn("budget allow", status[0]["detail"])
+
+    def test_out_of_range_replies_are_rejected(self):
+        for n in ("0", "21"):
+            rc, _out, err = self.cli(
+                "budget", "allow", self.tid, "--replies", n, "--for-session", self.sid_a
+            )
+            self.assertEqual(rc, 2, n)
+            self.assertIn("between 1 and %d" % peers.BUDGET_ALLOW_MAX, err)
+        self.assertFalse(os.path.exists(peers.budget_allow_path(self.tid)))
+
+    def test_the_requester_defaults_to_the_calling_claude_session(self):
+        rc, _out, err = self.cli(
+            "budget", "allow", self.tid, "--replies", "4", "--as", "cc:%s" % self.sid_b
+        )
+        self.assertEqual(rc, 0, err)
+        marker = peers.read_json(peers.budget_allow_path(self.tid))
+        self.assertEqual(marker["sid"], self.sid_b)
+        self.assertEqual(stat.S_IMODE(os.stat(peers.budget_allow_path(self.tid)).st_mode), 0o600)
+        rc, _out, err = self.cli(
+            "budget", "allow", self.tid, "--replies", "4", "--as", "codex:%s" % new_uuid()
+        )
+        self.assertEqual(rc, 2)
+        self.assertIn("--for-session", err)
+
+    def test_buddy_set_and_clear_leave_budgets_alone(self):
+        self.allow(5)
+        self.exhaust(self.sid_a, self.listener_a, 5)
+        self.shim.held = {self.sid_a: {"text": "h", "mid": "m", "turn_id": "t", "at": time.time()}}
+        self.shim._save_state()
+        before = pathlib.Path(peers.thread_state_path(self.tid)).read_bytes()
+        owner = "cc:%s" % self.sid_a
+        self.assertEqual(self.buddy(owner, "set", self.tid)[0], 0)
+        self.assertEqual(self.buddy(owner, "clear")[0], 0)
+        self.assertEqual(pathlib.Path(peers.thread_state_path(self.tid)).read_bytes(), before)
+        self.assertFalse(os.path.exists(peers.budget_reset_path(self.tid)))
+        self.assertFalse(os.path.exists(peers.budget_allow_path(self.tid)))
+
+
+class TestBuddyGarbageCollection(BuddyBase):
+    def write_buddy(self, owner, age_days=8):
+        kind, _sep, ident = owner.partition(":")
+        path = self.record_path(owner)
+        peers.write_json_atomic(
+            str(path),
+            {
+                "owner": {"kind": kind, "uuid": ident},
+                "buddy": {"kind": "codex", "uuid": new_uuid(), "name": "x"},
+                "uses": ["review"],
+                "set_at": "2026-09-01T00:00:00Z",
+            },
+        )
+        old = time.time() - age_days * 86400
+        os.utime(str(path), (old, old))
+        return path
+
+    def test_a_verified_gone_owner_with_an_old_record_is_pruned(self):
+        self.make_state_db([])
+        path = self.write_buddy("cc:%s" % new_uuid())
+        rc, out, _err = self.cli("gc")
+        self.assertEqual(rc, 0)
+        self.assertIn("pruned buddy record", out)
+        self.assertFalse(path.exists())
+
+    def test_a_recent_record_is_kept_even_when_the_owner_is_gone(self):
+        path = self.write_buddy("cc:%s" % new_uuid(), age_days=1)
+        self.assertEqual(peers.gc_buddy_records(days=7, verbose=False), [])
+        self.assertTrue(path.exists())
+
+    def test_an_unverified_or_live_claude_owner_keeps_its_record(self):
+        sid = new_uuid()
+        self.add_listener(name="cc-owner", session_id=sid)
+        path = self.write_buddy("cc:%s" % sid)
+        self.assertEqual(peers.gc_buddy_records(days=7, verbose=False), [])
+        os.environ["FAKE_PS_RC"] = "126"
+        self.assertEqual(peers.gc_buddy_records(days=7, verbose=False), [])
+        self.assertTrue(path.exists())
+
+    def test_a_codex_owner_is_pruned_only_when_verified_not_live(self):
+        tid, _rollout = self.one_thread(name="owner-codex")
+        path = self.write_buddy("codex:%s" % tid)
+        self.assertEqual(peers.gc_buddy_records(days=7, verbose=False), [])  # live
+        os.environ["FAKE_LSOF_RC"] = "126"
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(peers.gc_buddy_records(days=7, verbose=False), [])
+        self.assertTrue(path.exists())
+        del os.environ["FAKE_LSOF_RC"]
+        unknown = self.write_buddy("codex:%s" % new_uuid())  # not in the DB
+        self.clear_holders()
+        removed = peers.gc_buddy_records(days=7, verbose=False)
+        self.assertEqual(removed, [path.name])
+        self.assertTrue(unknown.exists())
+
+    def test_a_stale_budget_allow_marker_is_pruned_with_its_thread(self):
+        tid = new_uuid()
+        rollout = self.make_rollout("%s.jsonl" % tid)
+        old = time.time() - 8 * 86400
+        self.make_state_db([{"id": tid, "name": "old", "rollout_path": str(rollout),
+                             "updated_at": old}])
+        marker = pathlib.Path(peers.budget_allow_path(tid))
+        marker.write_text("{}")
+        os.utime(str(marker), (old, old))
+        self.assertEqual(peers.gc_bridge_state(days=7, verbose=False), [tid])
+        self.assertFalse(marker.exists())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
