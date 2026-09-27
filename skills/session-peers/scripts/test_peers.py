@@ -5904,14 +5904,16 @@ class TestBudgetAllow(BuddyBase):
         self.assertEqual(self.shim._cap_for(self.sid_a), 8)
 
     def test_the_allowance_is_dropped_when_the_sequence_resets(self):
+        # Granted during A's running sequence, the grant ends with it.
         for breaker in ({"sid": self.sid_b}, {}):
-            self.allow(5)
             self.exhaust(self.sid_a, self.listener_a)
+            self.allow(5)
+            self.assertTrue(self.shim.allowance["bound"])
             with contextlib.redirect_stderr(io.StringIO()):
                 self.shim._advance_budget_sequence(breaker)
             self.assertIsNone(self.shim.allowance, breaker)
-        self.allow(5)
         self.exhaust(self.sid_a, self.listener_a)
+        self.allow(5)
         self.shim.budget_last_at = time.time() - self.shim.reply_budget_window - 1
         with contextlib.redirect_stderr(io.StringIO()):
             self.shim._advance_budget_sequence({"sid": self.sid_a})
@@ -6076,6 +6078,97 @@ class TestBudgetAllow(BuddyBase):
         marker = peers.read_json(peers.budget_allow_path(self.tid))
         self.assertEqual(marker["total"], 9)
         self.assertGreater(time.time() - peers.parse_time(marker["at"]), 100)
+
+    def test_a_grant_made_while_another_peer_holds_the_sequence_waits_for_its_own(self):
+        # B has been using the shim; A is granted 5, then A's sequence starts.
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.shim._handle_turn_end(self.turn(self.sid_b, self.listener_b, "b1"))
+        self.allow(5)
+        self.assertFalse(self.shim.allowance["bound"])
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.shim._handle_turn_end(self.turn(self.sid_b, self.listener_b, "b2"))
+            for i in range(6):
+                self.shim._handle_turn_end(self.turn(self.sid_a, self.listener_a, "a%d" % i))
+        wait_for(lambda: len(self.replies(self.listener_a)) >= 5)
+        time.sleep(0.2)
+        self.assertEqual(len(self.replies(self.listener_a)), 5)
+        self.assertEqual(self.shim._cap_for(self.sid_a), 5)
+        self.assertTrue(self.shim.allowance["bound"])
+        self.assertEqual(sorted(self.shim.held), [self.sid_a])
+
+    def test_a_spent_or_stale_waiting_grant_is_not_revived(self):
+        # Spent: A's sequence ran under the grant, then ended; A comes back.
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.shim._handle_turn_end(self.turn(self.sid_b, self.listener_b, "b1"))
+        self.allow(5)
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.shim._advance_budget_sequence({"sid": self.sid_a})
+            self.shim._advance_budget_sequence({"sid": self.sid_b})
+            self.assertIsNone(self.shim.allowance)
+            self.shim._advance_budget_sequence({"sid": self.sid_a})
+        self.assertEqual(self.shim._cap_for(self.sid_a), peers.REPLY_BUDGET)
+        # Stale: granted while B held the sequence, A starts after the window.
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.shim._advance_budget_sequence({"sid": self.sid_b})
+        self.allow(5)
+        self.assertFalse(self.shim.allowance["bound"])
+        self.shim.allowance["at"] = time.time() - self.shim.reply_budget_window - 1
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.shim._advance_budget_sequence({"sid": self.sid_a})
+        self.assertIsNone(self.shim.allowance)
+        self.assertEqual(self.shim._cap_for(self.sid_a), peers.REPLY_BUDGET)
+
+    def test_a_held_reply_survives_a_failed_release_and_is_delivered_once(self):
+        self.exhaust(self.sid_a, self.listener_a)
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.shim._handle_turn_end(
+                self.turn(self.sid_a, self.listener_a, "t-held", text="held answer")
+            )
+        self.assertEqual(sorted(self.shim.held), [self.sid_a])
+        saved = peers.deliver_to_record
+        peers.deliver_to_record = lambda _rec, _frame: False  # the route is down
+        try:
+            self.allow(5)
+            self.assertEqual(sorted(self.shim.held), [self.sid_a])
+            self.assertEqual(self.shim.held[self.sid_a]["release"], "allow")
+            self.assertEqual(self.shim.budgets[self.sid_a], peers.REPLY_BUDGET)
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.shim._retry_held()  # still down: kept, uncounted
+            self.assertEqual(self.shim.budgets[self.sid_a], peers.REPLY_BUDGET)
+            state = peers.read_json(peers.thread_state_path(self.tid))
+            self.assertEqual(state["held"][self.sid_a]["release"], "allow")
+        finally:
+            peers.deliver_to_record = saved
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.shim._retry_held()  # the route recovered
+            self.shim._retry_held()
+        frames = wait_for(lambda: self.replies(self.listener_a))
+        time.sleep(0.2)
+        self.assertEqual(len(self.replies(self.listener_a)), 1)
+        body, _attrs = peers.unwrap_message(frames[0]["message"]["content"])
+        self.assertEqual(body, "[held reply, in reply to message m-t-held]\nheld answer")
+        self.assertEqual(self.shim.held, {})
+        self.assertEqual(self.shim.budgets[self.sid_a], peers.REPLY_BUDGET + 1)
+
+    def test_a_failed_reset_release_keeps_the_held_reply_for_a_retry(self):
+        self.exhaust(self.sid_a, self.listener_a)
+        self.shim.held = {
+            self.sid_a: {"text": "held", "mid": "m", "turn_id": "t", "at": time.time()}
+        }
+        saved = peers.deliver_to_record
+        peers.deliver_to_record = lambda _rec, _frame: False
+        try:
+            self.cli("budget", "reset", self.tid)
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.shim._consume_budget_marker()
+        finally:
+            peers.deliver_to_record = saved
+        self.assertEqual(self.shim.held[self.sid_a]["release"], "reset")
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.shim._retry_held()
+        self.assertTrue(wait_for(lambda: self.replies(self.listener_a)))
+        self.assertEqual(self.shim.held, {})
+        self.assertEqual(self.shim.budgets[self.sid_a], 1)
 
     def test_out_of_range_replies_are_rejected(self):
         for n in ("0", "21"):

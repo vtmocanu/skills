@@ -2818,6 +2818,7 @@ class Shim:
             self._check_liveness()
             if self.stop.is_set():
                 return last_live, last_alias
+            self._retry_held()
         if now - last_alias >= self.alias_refresh_interval:
             last_alias = now
             self._refresh_name()
@@ -2934,34 +2935,76 @@ class Shim:
 
     def _release_held(self):
         """Deliver each still-fresh held reply once; it opens the new sequence."""
-        held, self.held = self.held, {}
-        if not held:
+        if not self.held:
             return
         records = live_claude_records()
-        for sid, entry in held.items():
-            self._deliver_held(sid, entry, records, new_sequence=True)
+        for sid in list(self.held):
+            self._release_one(sid, "reset", records)
+
+    def _release_one(self, sid, reason, records):
+        """Release one held reply; drop it once delivered or undeliverable.
+
+        A transient write failure keeps a fresh entry, tagged with why it was
+        being released, so `_retry_held` tries it again. Usage is counted only
+        by a delivery that succeeded, so a retry never double-counts.
+        """
+        entry = self.held.get(sid)
+        outcome = self._deliver_held(sid, entry, records, new_sequence=(reason == "reset"))
+        if outcome == "failed":
+            entry["release"] = reason
+        else:
+            self.held.pop(sid, None)
+        return outcome
+
+    def _retry_held(self):
+        """Retry held replies whose release failed on a transient write error."""
+        pending = [
+            (sid, entry.get("release"))
+            for sid, entry in self.held.items()
+            if isinstance(entry, dict) and entry.get("release")
+        ]
+        if not pending:
+            return
+        records = live_claude_records()
+        changed = False
+        for sid, reason in pending:
+            if reason == "allow" and self.budgets.get(sid, 0) >= self._cap_for(sid):
+                # The allowance that released it is gone or spent.
+                self.held[sid].pop("release", None)
+                changed = True
+                continue
+            changed = self._release_one(sid, reason, records) != "failed" or changed
+        if changed:
+            self._save_state()
 
     def _deliver_held(self, sid, entry, records, new_sequence):
-        """One held reply to its live requester, if still fresh and routable."""
+        """One held reply to its live requester, if still fresh and routable.
+
+        Returns ``delivered``, ``failed`` (worth a retry) or ``discarded``.
+        """
         if not isinstance(entry, dict) or not entry.get("text"):
-            return False
+            return "discarded"
         now = time.time()
         age = now - float(entry.get("at") or 0)
         if age > self.reply_budget_window:
             log("discarding a held reply for %s: %.0fs old" % (sid, age))
-            return False
+            return "discarded"
         rec = next((r for r in records if r.get("sessionId") == sid), None)
         if rec is None:
             log("discarding a held reply: session %s is gone" % sid)
-            return False
+            return "discarded"
+        if not socket_path_ok(rec.get("messagingSocketPath")):
+            log("discarding a held reply: %s listens outside the allowlist" % sid)
+            return "discarded"
         text = reply_text(entry["text"], entry.get("mid"), held_reply=True)
         try:
             body = build_cc_body(text, self.thread_id, self.name, self.sock_path)
         except ValueError as exc:
             log("cannot build a held reply for %s: %s" % (sid, exc))
-            return False
+            return "discarded"
         if not deliver_to_record(rec, build_user_frame(body, self.sock_path)):
-            return False
+            log("keeping the held reply for %s to retry" % sid)
+            return "failed"
         # An explicit reset opens a new sequence; an allowance continues the
         # current one, so the release counts toward its usage.
         self.budgets[sid] = 1 if new_sequence else self.budgets.get(sid, 0) + 1
@@ -2971,7 +3014,7 @@ class Shim:
             "released a held reply (turn %s) to %s"
             % (entry.get("turn_id"), rec.get("name") or sid)
         )
-        return True
+        return "delivered"
 
     @staticmethod
     def _valid_allowance(value):
@@ -3031,7 +3074,14 @@ class Shim:
             )
             return
         old_cap = self._cap_for(sid)
-        self.allowance = {"sid": sid, "total": total, "at": granted_at}
+        # Bound: the grant continues sid's running sequence and ends with it.
+        # Otherwise it waits, while fresh, for sid's next sequence to open it.
+        self.allowance = {
+            "sid": sid,
+            "total": total,
+            "at": granted_at,
+            "bound": self.budget_sender_sid == sid,
+        }
         new_cap = self._cap_for(sid)
         log(
             "reply allowance for %s set to %d (%d spent)"
@@ -3041,8 +3091,7 @@ class Shim:
             # The requester may hit the raised cap later and should hear so.
             self.budget_notified.discard(sid)
             if self.budgets.get(sid, 0) < new_cap and sid in self.held:
-                entry = self.held.pop(sid)
-                self._deliver_held(sid, entry, live_claude_records(), new_sequence=False)
+                self._release_one(sid, "allow", live_claude_records())
         self._save_state()
 
     def _advance_budget_sequence(self, tag):
@@ -3070,25 +3119,26 @@ class Shim:
             self.budgets = {}
             self.budget_notified = set()
             self.held = {}
-            if self.allowance and not self._allowance_opens(sender_sid, expired, now):
+            if self.allowance and not self._allowance_waiting(now):
                 log("reply allowance for %s dropped: the sequence moved on"
                     % self.allowance.get("sid"))
                 self.allowance = None
+        if self.allowance and self.allowance.get("sid") == sender_sid:
+            # The grantee's sequence is running: the grant now ends with it.
+            self.allowance["bound"] = True
         self.budget_sender_sid = sender_sid
         self.budget_last_at = now if sender_sid else None
 
-    def _allowance_opens(self, sender_sid, expired, now):
-        """True when a grant made before any sequence is opened by its own sid.
+    def _allowance_waiting(self, now):
+        """True for a fresh grant still waiting for its grantee's next sequence.
 
-        Granting ahead of the first reply (or right after a reset) leaves no
-        sequence to continue; the grantee's first reply starts it rather than
-        breaking it. A different peer, a direct turn, or an idle grant does not.
+        A grant made while another peer (or nobody) held the sequence applies
+        to the grantee's next sequence, so that peer's turns or a direct turn
+        do not spend it. A grant that already ran with a sequence of the
+        grantee's (bound) ends when that sequence does, and an old one expires.
         """
         return (
-            self.budget_sender_sid is None
-            and sender_sid is not None
-            and not expired
-            and self.allowance.get("sid") == sender_sid
+            not self.allowance.get("bound", True)
             and self._allowance_fresh(parse_time(self.allowance.get("at")) or 0.0, now)
         )
 
