@@ -3066,12 +3066,20 @@ class Shim:
                 % (sid, time.time() - granted_at, self.reply_budget_window)
             )
             return
+        if self._sequence_expired(time.time()):
+            # A sequence already past its idle window is over even though no
+            # turn has said so yet: end it first, so this grant waits for and
+            # binds to the NEXT sequence instead of the dead one.
+            self._reset_sequence(
+                "the %.0fs idle window elapsed" % self.reply_budget_window, time.time()
+            )
         current = self.allowance
         if current and current.get("sid") == sid and current["total"] >= total:
             log(
                 "reply allowance of %d for %s already covers %d; unchanged"
                 % (current["total"], sid, total)
             )
+            self._save_state()  # an idle expiry above may have ended a sequence
             return
         old_cap = self._cap_for(sid)
         # Bound: the grant continues sid's running sequence and ends with it.
@@ -3098,36 +3106,46 @@ class Shim:
         """Reset the loop guard when the peer sequence is genuinely broken."""
         sender_sid = tag.get("sid") if isinstance(tag, dict) else None
         now = time.time()
-        expired = (
-            self.budget_last_at is not None
-            and now - self.budget_last_at > self.reply_budget_window
-        )
+        expired = self._sequence_expired(now)
         changed_peer = sender_sid != self.budget_sender_sid
         if sender_sid is None or expired or changed_peer:
-            if self.budgets:
-                if sender_sid is None:
-                    reason = "a direct Codex turn"
-                elif expired:
-                    reason = "the %.0fs idle window elapsed" % self.reply_budget_window
-                else:
-                    reason = "the requesting peer changed"
-                log("reply budget sequence reset: %s" % reason)
-            if self.held:
-                # Only an explicit reset releases a held reply; a sequence that
-                # moved on must not receive a stale answer later.
-                log("discarding %d held reply(s): the sequence moved on" % len(self.held))
-            self.budgets = {}
-            self.budget_notified = set()
-            self.held = {}
-            if self.allowance and not self._allowance_waiting(now):
-                log("reply allowance for %s dropped: the sequence moved on"
-                    % self.allowance.get("sid"))
-                self.allowance = None
+            if sender_sid is None:
+                reason = "a direct Codex turn"
+            elif expired:
+                reason = "the %.0fs idle window elapsed" % self.reply_budget_window
+            else:
+                reason = "the requesting peer changed"
+            self._reset_sequence(reason, now)
         if self.allowance and self.allowance.get("sid") == sender_sid:
             # The grantee's sequence is running: the grant now ends with it.
             self.allowance["bound"] = True
         self.budget_sender_sid = sender_sid
         self.budget_last_at = now if sender_sid else None
+
+    def _sequence_expired(self, now):
+        return (
+            self.budget_last_at is not None
+            and now - self.budget_last_at > self.reply_budget_window
+        )
+
+    def _reset_sequence(self, reason, now):
+        """End the current sequence: its usage, notices, held replies and any
+        grant bound to it go; a fresh grant still waiting for its grantee stays."""
+        if self.budgets:
+            log("reply budget sequence reset: %s" % reason)
+        if self.held:
+            # Only an explicit reset releases a held reply; a sequence that
+            # moved on must not receive a stale answer later.
+            log("discarding %d held reply(s): the sequence moved on" % len(self.held))
+        self.budgets = {}
+        self.budget_notified = set()
+        self.held = {}
+        if self.allowance and not self._allowance_waiting(now):
+            log("reply allowance for %s dropped: the sequence moved on"
+                % self.allowance.get("sid"))
+            self.allowance = None
+        self.budget_sender_sid = None
+        self.budget_last_at = None
 
     def _allowance_waiting(self, now):
         """True for a fresh grant still waiting for its grantee's next sequence.

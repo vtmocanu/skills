@@ -6096,6 +6096,57 @@ class TestBudgetAllow(BuddyBase):
         self.assertTrue(self.shim.allowance["bound"])
         self.assertEqual(sorted(self.shim.held), [self.sid_a])
 
+    def run_a(self, count, prefix):
+        with contextlib.redirect_stderr(io.StringIO()):
+            for i in range(count):
+                self.shim._handle_turn_end(
+                    self.turn(self.sid_a, self.listener_a, "%s%d" % (prefix, i))
+                )
+
+    def age_sequence(self):
+        """Push A's current sequence past the idle window without a turn."""
+        self.shim.budget_last_at = time.time() - self.shim.reply_budget_window - 1
+
+    def test_a_grant_after_an_idle_expiry_binds_to_the_next_sequence(self):
+        self.run_a(peers.REPLY_BUDGET, "old")
+        wait_for(lambda: len(self.replies(self.listener_a)) >= peers.REPLY_BUDGET)
+        self.age_sequence()
+        self.allow(5)
+        self.assertFalse(self.shim.allowance["bound"])
+        self.run_a(6, "new")
+        wait_for(lambda: len(self.replies(self.listener_a)) >= peers.REPLY_BUDGET + 5)
+        time.sleep(0.2)
+        self.assertEqual(len(self.replies(self.listener_a)), peers.REPLY_BUDGET + 5)
+        self.assertEqual(self.shim.budgets[self.sid_a], 5)
+        self.assertEqual(sorted(self.shim.held), [self.sid_a])
+
+    def test_a_fresh_grant_replaces_one_bound_to_an_expired_sequence(self):
+        # A's old sequence ran under a raised allowance of 5 and went idle.
+        self.run_a(1, "old")
+        self.allow(5)
+        self.assertTrue(self.shim.allowance["bound"])
+        self.run_a(4, "more")
+        wait_for(lambda: len(self.replies(self.listener_a)) >= 5)
+        self.age_sequence()
+        self.allow(5)
+        self.assertFalse(self.shim.allowance["bound"])
+        self.assertEqual(self.shim.budgets, {})
+        self.run_a(6, "new")
+        wait_for(lambda: len(self.replies(self.listener_a)) >= 10)
+        time.sleep(0.2)
+        self.assertEqual(len(self.replies(self.listener_a)), 10)
+        self.assertEqual(self.shim._cap_for(self.sid_a), 5)
+        self.assertEqual(sorted(self.shim.held), [self.sid_a])
+
+    def test_an_expired_sequence_does_not_revive_its_own_grant(self):
+        # Without a new grant, the old bound one ends with its idle sequence.
+        self.run_a(1, "old")
+        self.allow(5)
+        self.age_sequence()
+        self.run_a(1, "new")
+        self.assertIsNone(self.shim.allowance)
+        self.assertEqual(self.shim._cap_for(self.sid_a), peers.REPLY_BUDGET)
+
     def test_a_spent_or_stale_waiting_grant_is_not_revived(self):
         # Spent: A's sequence ran under the grant, then ended; A comes back.
         with contextlib.redirect_stderr(io.StringIO()):
