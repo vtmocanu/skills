@@ -8,20 +8,25 @@ the comments point at that PRD's decision log.
 Subcommands::
 
     peers.py list [--json]
-    peers.py send --to codex:<name|uuid>|cc:<name|uuid>
+    peers.py send --to codex:<name|uuid>|cc:<name|uuid>|buddy
                   (--message <text>|--message-file <path>) [--json]
                   [--from-thread <uuid>] [--from-name N] [--from-sid S]
                   [--from-socket P]
-    peers.py ask --to cc:<name|uuid> (--message <text>|--message-file <path>)
+    peers.py ask --to cc:<name|uuid>|buddy (--message <text>|--message-file <path>)
                  [--from-thread <uuid>] [--timeout <seconds>] [--json]
     peers.py reply --request <uuid> (--message <text>|--message-file <path>)
                    [--json]
-    peers.py wait --for cc:<name|uuid> [--state idle|busy] [--timeout <seconds>]
+    peers.py wait --for cc:<name|uuid>|buddy [--state idle|busy] [--timeout <seconds>]
                   [--json]
     peers.py shim --thread <uuid>
     peers.py up [<name|uuid>]
     peers.py down [<name|uuid>]
-    peers.py budget reset <name|uuid>
+    peers.py budget reset <name|uuid|buddy>
+    peers.py budget allow <name|uuid|buddy> --replies N [--for-session <uuid>]
+                          [--as cc:<uuid>|codex:<uuid>]
+    peers.py buddy [show|ping|clear] [--as cc:<uuid>|codex:<uuid>] [--json]
+    peers.py buddy set [cc:|codex:|@]<name|uuid> [--uses a,b]
+                       [--as cc:<uuid>|codex:<uuid>] [--json]
     peers.py session-hook
     peers.py install-hook [--auto-attach]
     peers.py gc [--days 7] [--dry-run]
@@ -71,6 +76,8 @@ MAX_TEXT_CHARS = 1048576
 
 # D4: replies per (thread, Claude session) before the shim goes quiet.
 REPLY_BUDGET = 3
+# `budget allow` may raise one requester's cap to at most this many replies.
+BUDGET_ALLOW_MAX = 20
 REPLY_BUDGET_WINDOW_DEFAULT = 30 * 60.0
 REQUEST_TIMEOUT_DEFAULT = 10 * 60.0
 REQUEST_TIMEOUT_MAX = 60 * 60.0
@@ -140,6 +147,12 @@ MAX_ROLLOUT_LINE = 8 * 1024 * 1024
 # S7: a completion older than this at shim start is recorded, never posted.
 RESTART_DELIVERY_WINDOW = 900.0
 GC_DAYS_DEFAULT = 7.0
+# Per-thread files in state_dir(), named <thread uuid><suffix>. GC owns them.
+THREAD_ARTIFACT_SUFFIXES = (".json", ".log", ".pid", ".budget-reset", ".budget-allow")
+
+# What a buddy is for. Advisory scope only: nothing grants a permission from it.
+BUDDY_USES = ("review", "brainstorm", "second-opinion", "co-steer", "ping", "sanity-check")
+BUDDY_KINDS = ("cc", "codex")
 
 def parse_time(value):
     """Epoch seconds from an ISO-8601 string or a numeric epoch. None if unclear.
@@ -640,6 +653,26 @@ def thread_log_path(thread_id):
 
 def budget_reset_path(thread_id):
     return os.path.join(state_dir(), "%s.budget-reset" % thread_id)
+
+
+def budget_allow_path(thread_id):
+    return os.path.join(state_dir(), "%s.budget-allow" % thread_id)
+
+
+def buddies_dir():
+    path = os.path.join(state_dir(), "buddies")
+    os.makedirs(path, mode=0o700, exist_ok=True)
+    try:
+        os.chmod(path, 0o700)
+    except OSError:
+        pass
+    return path
+
+
+def buddy_path(owner):
+    if owner.get("kind") not in BUDDY_KINDS or not is_uuid(owner.get("uuid")):
+        raise ValueError("a buddy owner must be cc:<uuid> or codex:<uuid>")
+    return os.path.join(buddies_dir(), "%s-%s.json" % (owner["kind"], owner["uuid"]))
 
 
 def version_warning_path():
@@ -1196,6 +1229,14 @@ class ResolveError(Exception):
     """A thread target that cannot be turned into exactly one live thread."""
 
 
+class ResolveNotFound(ResolveError):
+    """Nothing carries that name or id (as opposed to ambiguous or unverified)."""
+
+
+class ResolveNoLive(ResolveError):
+    """Only threads whose process is verified gone carry that name."""
+
+
 def resolve_thread(target, require_live=True):
     """Turn `<name|uuid>` into one thread dict, or raise ResolveError.
 
@@ -1226,7 +1267,7 @@ def resolve_thread(target, require_live=True):
         for t in threads:
             if t["id"] == target:
                 return t
-        raise ResolveError("no Codex thread with id %s" % target)
+        raise ResolveNotFound("no Codex thread with id %s" % target)
     # Match the name from the state DB / session index, OR from our own
     # registration: `up <uuid>` records name->uuid, and a later `/rename` may
     # not have propagated to the DB's `name` column yet (measured on
@@ -1256,7 +1297,7 @@ def resolve_thread(target, require_live=True):
         matched_ids = {t["id"] for t in matches}
         matches.extend(t for t in prefix_matches if t["id"] not in matched_ids)
     if not matches:
-        raise ResolveError(
+        raise ResolveNotFound(
             "no Codex thread named %r or matching that ID prefix; run `peers.py list` "
             "for current UUIDs, or /rename it in the TUI"
             % target
@@ -1273,7 +1314,7 @@ def resolve_thread(target, require_live=True):
                 )
             # Never silently pick a thread whose process is gone: Codex's title
             # suggester reuses names, so a dead match is not evidence of intent.
-            raise ResolveError(
+            raise ResolveNoLive(
                 "no live Codex thread named %r (%d past thread(s) carried that "
                 "name); /rename the running one, or pass its UUID"
                 % (target, len(matches))
@@ -1375,9 +1416,8 @@ def _bridge_thread_ids():
         names = os.listdir(state_dir())
     except OSError:
         return out
-    suffixes = (".json", ".log", ".pid", ".budget-reset")
     for name in names:
-        for suffix in suffixes:
+        for suffix in THREAD_ARTIFACT_SUFFIXES:
             if not name.endswith(suffix):
                 continue
             candidate = name[: -len(suffix)]
@@ -1405,7 +1445,7 @@ def _thread_last_seen(thread_id, registered, threads):
         value = parse_time(thread.get("updated_at"))
         if value is not None:
             seen.append(value)
-    for suffix in (".json", ".log", ".pid", ".budget-reset"):
+    for suffix in THREAD_ARTIFACT_SUFFIXES:
         path = os.path.join(state_dir(), thread_id + suffix)
         try:
             seen.append(os.stat(path).st_mtime)
@@ -1476,7 +1516,7 @@ def gc_bridge_state(days=GC_DAYS_DEFAULT, dry_run=False, verbose=True):
             if last_seen is None or last_seen > cutoff:
                 continue
             failed = False
-            for suffix in (".json", ".log", ".pid", ".budget-reset"):
+            for suffix in THREAD_ARTIFACT_SUFFIXES:
                 path = os.path.join(state_dir(), thread_id + suffix)
                 try:
                     os.unlink(path)
@@ -2157,6 +2197,10 @@ class Shim:
         # session, expired with the idle window, discarded on any other sequence
         # reset, and kept only in this mode-0600 state file, never in the log.
         self.held = dict(state.get("held") or {})
+        # `budget allow`: {"sid", "total", "at"} raises that one requester's cap
+        # for the current sequence. Dropped whenever the sequence resets.
+        allowance = state.get("allowance")
+        self.allowance = allowance if self._valid_allowance(allowance) else None
         # Set when a startup reset leaves held replies to release: the release
         # waits until this shim is bound and registered, so the reply's `from`
         # route names a socket that exists.
@@ -2410,6 +2454,7 @@ class Shim:
                 "budget_last_at": self.budget_last_at,
                 "budget_notified": sorted(self.budget_notified),
                 "held": self._bound(self.held),
+                "allowance": self.allowance,
                 "contacts": self._bound(self.contacts),
                 "updated_at": now_iso(),
             },
@@ -2746,6 +2791,8 @@ class Shim:
         last_alias = last_live
         while not self.stop.wait(self.poll_interval):
             self._consume_budget_marker()
+            # Never at startup: a release it triggers needs the bound socket.
+            self._consume_budget_allow_marker()
             self._expire_held()
             try:
                 events = self.tail.poll()
@@ -2771,6 +2818,7 @@ class Shim:
             self._check_liveness()
             if self.stop.is_set():
                 return last_live, last_alias
+            self._retry_held()
         if now - last_alias >= self.alias_refresh_interval:
             last_alias = now
             self._refresh_name()
@@ -2856,6 +2904,7 @@ class Shim:
         self.budget_sender_sid = None
         self.budget_last_at = None
         self.budget_notified = set()
+        self.allowance = None
         if initial:
             # Not yet bound or registered: defer the release (see run()).
             self.release_after_start = bool(self.held)
@@ -2886,64 +2935,230 @@ class Shim:
 
     def _release_held(self):
         """Deliver each still-fresh held reply once; it opens the new sequence."""
-        held, self.held = self.held, {}
-        if not held:
+        if not self.held:
             return
-        now = time.time()
         records = live_claude_records()
-        for sid, entry in held.items():
-            if not isinstance(entry, dict) or not entry.get("text"):
+        for sid in list(self.held):
+            self._release_one(sid, "reset", records)
+
+    def _release_one(self, sid, reason, records):
+        """Release one held reply; drop it once delivered or undeliverable.
+
+        A transient write failure keeps a fresh entry, tagged with why it was
+        being released, so `_retry_held` tries it again. Usage is counted only
+        by a delivery that succeeded, so a retry never double-counts.
+        """
+        entry = self.held.get(sid)
+        outcome = self._deliver_held(sid, entry, records, new_sequence=(reason == "reset"))
+        if outcome == "failed":
+            entry["release"] = reason
+        else:
+            self.held.pop(sid, None)
+        return outcome
+
+    def _retry_held(self):
+        """Retry held replies whose release failed on a transient write error."""
+        pending = [
+            (sid, entry.get("release"))
+            for sid, entry in self.held.items()
+            if isinstance(entry, dict) and entry.get("release")
+        ]
+        if not pending:
+            return
+        records = live_claude_records()
+        changed = False
+        for sid, reason in pending:
+            if reason == "allow" and self.budgets.get(sid, 0) >= self._cap_for(sid):
+                # The allowance that released it is gone or spent.
+                self.held[sid].pop("release", None)
+                changed = True
                 continue
-            age = now - float(entry.get("at") or 0)
-            if age > self.reply_budget_window:
-                log("discarding a held reply for %s: %.0fs old" % (sid, age))
-                continue
-            rec = next((r for r in records if r.get("sessionId") == sid), None)
-            if rec is None:
-                log("discarding a held reply: session %s is gone" % sid)
-                continue
-            text = reply_text(entry["text"], entry.get("mid"), held_reply=True)
-            try:
-                body = build_cc_body(text, self.thread_id, self.name, self.sock_path)
-            except ValueError as exc:
-                log("cannot build a held reply for %s: %s" % (sid, exc))
-                continue
-            if deliver_to_record(rec, build_user_frame(body, self.sock_path)):
-                self.budgets[sid] = 1
-                self.budget_sender_sid = sid
-                self.budget_last_at = now
-                log(
-                    "released a held reply (turn %s) to %s"
-                    % (entry.get("turn_id"), rec.get("name") or sid)
-                )
+            changed = self._release_one(sid, reason, records) != "failed" or changed
+        if changed:
+            self._save_state()
+
+    def _deliver_held(self, sid, entry, records, new_sequence):
+        """One held reply to its live requester, if still fresh and routable.
+
+        Returns ``delivered``, ``failed`` (worth a retry) or ``discarded``.
+        """
+        if not isinstance(entry, dict) or not entry.get("text"):
+            return "discarded"
+        now = time.time()
+        age = now - float(entry.get("at") or 0)
+        if age > self.reply_budget_window:
+            log("discarding a held reply for %s: %.0fs old" % (sid, age))
+            return "discarded"
+        rec = next((r for r in records if r.get("sessionId") == sid), None)
+        if rec is None:
+            log("discarding a held reply: session %s is gone" % sid)
+            return "discarded"
+        if not socket_path_ok(rec.get("messagingSocketPath")):
+            log("discarding a held reply: %s listens outside the allowlist" % sid)
+            return "discarded"
+        text = reply_text(entry["text"], entry.get("mid"), held_reply=True)
+        try:
+            body = build_cc_body(text, self.thread_id, self.name, self.sock_path)
+        except ValueError as exc:
+            log("cannot build a held reply for %s: %s" % (sid, exc))
+            return "discarded"
+        if not deliver_to_record(rec, build_user_frame(body, self.sock_path)):
+            log("keeping the held reply for %s to retry" % sid)
+            return "failed"
+        # An explicit reset opens a new sequence; an allowance continues the
+        # current one, so the release counts toward its usage.
+        self.budgets[sid] = 1 if new_sequence else self.budgets.get(sid, 0) + 1
+        self.budget_sender_sid = sid
+        self.budget_last_at = now
+        log(
+            "released a held reply (turn %s) to %s"
+            % (entry.get("turn_id"), rec.get("name") or sid)
+        )
+        return "delivered"
+
+    @staticmethod
+    def _valid_allowance(value):
+        """Well-formed sid and total, and a grant time that parses."""
+        if not isinstance(value, dict) or not isinstance(value.get("sid"), str):
+            return False
+        total = value.get("total")
+        return (
+            isinstance(total, int)
+            and not isinstance(total, bool)
+            and 1 <= total <= BUDGET_ALLOW_MAX
+            and parse_time(value.get("at")) is not None
+        )
+
+    def _allowance_fresh(self, at, now):
+        """A grant counts only within the idle window of when it was GRANTED.
+
+        Consumption can lag the grant (a shim that starts late), so the
+        original time decides, never the time the shim read it. A grant stamped
+        more than a minute ahead is refused rather than trusted to last.
+        """
+        return -60.0 <= now - at <= self.reply_budget_window
+
+    def _cap_for(self, sid):
+        """The consecutive-reply cap for one requesting session."""
+        if self.allowance and self.allowance.get("sid") == sid:
+            return max(REPLY_BUDGET, self.allowance["total"])
+        return REPLY_BUDGET
+
+    def _consume_budget_allow_marker(self):
+        """Apply a `budget allow` grant: a total, never additive or replenishing."""
+        path = budget_allow_path(self.thread_id)
+        if not os.path.exists(path):
+            return
+        grant = read_json(path, None)
+        try:
+            os.unlink(path)
+        except OSError:
+            return
+        if not self._valid_allowance(grant):
+            log("ignoring a malformed reply allowance for thread %s" % self.thread_id)
+            return
+        sid, total = grant["sid"], grant["total"]
+        granted_at = parse_time(grant["at"])
+        if not self._allowance_fresh(granted_at, time.time()):
+            log(
+                "ignoring a stale reply allowance for %s: granted %.0fs ago, "
+                "outside the %.0fs idle window"
+                % (sid, time.time() - granted_at, self.reply_budget_window)
+            )
+            return
+        if self._sequence_expired(time.time()):
+            # A sequence already past its idle window is over even though no
+            # turn has said so yet: end it first, so this grant waits for and
+            # binds to the NEXT sequence instead of the dead one.
+            self._reset_sequence(
+                "the %.0fs idle window elapsed" % self.reply_budget_window, time.time()
+            )
+        current = self.allowance
+        if current and current.get("sid") == sid and current["total"] >= total:
+            log(
+                "reply allowance of %d for %s already covers %d; unchanged"
+                % (current["total"], sid, total)
+            )
+            self._save_state()  # an idle expiry above may have ended a sequence
+            return
+        old_cap = self._cap_for(sid)
+        # Bound: the grant continues sid's running sequence and ends with it.
+        # Otherwise it waits, while fresh, for sid's next sequence to open it.
+        self.allowance = {
+            "sid": sid,
+            "total": total,
+            "at": granted_at,
+            "bound": self.budget_sender_sid == sid,
+        }
+        new_cap = self._cap_for(sid)
+        log(
+            "reply allowance for %s set to %d (%d spent)"
+            % (sid, new_cap, self.budgets.get(sid, 0))
+        )
+        if new_cap > old_cap:
+            # The requester may hit the raised cap later and should hear so.
+            self.budget_notified.discard(sid)
+            if self.budgets.get(sid, 0) < new_cap and sid in self.held:
+                self._release_one(sid, "allow", live_claude_records())
+        self._save_state()
 
     def _advance_budget_sequence(self, tag):
         """Reset the loop guard when the peer sequence is genuinely broken."""
         sender_sid = tag.get("sid") if isinstance(tag, dict) else None
         now = time.time()
-        expired = (
+        expired = self._sequence_expired(now)
+        changed_peer = sender_sid != self.budget_sender_sid
+        if sender_sid is None or expired or changed_peer:
+            if sender_sid is None:
+                reason = "a direct Codex turn"
+            elif expired:
+                reason = "the %.0fs idle window elapsed" % self.reply_budget_window
+            else:
+                reason = "the requesting peer changed"
+            self._reset_sequence(reason, now)
+        if self.allowance and self.allowance.get("sid") == sender_sid:
+            # The grantee's sequence is running: the grant now ends with it.
+            self.allowance["bound"] = True
+        self.budget_sender_sid = sender_sid
+        self.budget_last_at = now if sender_sid else None
+
+    def _sequence_expired(self, now):
+        return (
             self.budget_last_at is not None
             and now - self.budget_last_at > self.reply_budget_window
         )
-        changed_peer = sender_sid != self.budget_sender_sid
-        if sender_sid is None or expired or changed_peer:
-            if self.budgets:
-                if sender_sid is None:
-                    reason = "a direct Codex turn"
-                elif expired:
-                    reason = "the %.0fs idle window elapsed" % self.reply_budget_window
-                else:
-                    reason = "the requesting peer changed"
-                log("reply budget sequence reset: %s" % reason)
-            if self.held:
-                # Only an explicit reset releases a held reply; a sequence that
-                # moved on must not receive a stale answer later.
-                log("discarding %d held reply(s): the sequence moved on" % len(self.held))
-            self.budgets = {}
-            self.budget_notified = set()
-            self.held = {}
-        self.budget_sender_sid = sender_sid
-        self.budget_last_at = now if sender_sid else None
+
+    def _reset_sequence(self, reason, now):
+        """End the current sequence: its usage, notices, held replies and any
+        grant bound to it go; a fresh grant still waiting for its grantee stays."""
+        if self.budgets:
+            log("reply budget sequence reset: %s" % reason)
+        if self.held:
+            # Only an explicit reset releases a held reply; a sequence that
+            # moved on must not receive a stale answer later.
+            log("discarding %d held reply(s): the sequence moved on" % len(self.held))
+        self.budgets = {}
+        self.budget_notified = set()
+        self.held = {}
+        if self.allowance and not self._allowance_waiting(now):
+            log("reply allowance for %s dropped: the sequence moved on"
+                % self.allowance.get("sid"))
+            self.allowance = None
+        self.budget_sender_sid = None
+        self.budget_last_at = None
+
+    def _allowance_waiting(self, now):
+        """True for a fresh grant still waiting for its grantee's next sequence.
+
+        A grant made while another peer (or nobody) held the sequence applies
+        to the grantee's next sequence, so that peer's turns or a direct turn
+        do not spend it. A grant that already ran with a sequence of the
+        grantee's (bound) ends when that sequence does, and an old one expires.
+        """
+        return (
+            not self.allowance.get("bound", True)
+            and self._allowance_fresh(parse_time(self.allowance.get("at")) or 0.0, now)
+        )
 
     def _handle_turn_end(self, turn):
         if turn.turn_id in self.processed_turns:
@@ -3035,15 +3250,20 @@ class Shim:
                 continue
             seen.add(sid)
             spent = self.budgets.get(sid, 0)
-            if spent >= REPLY_BUDGET:
+            cap = self._cap_for(sid)
+            if spent >= cap:
                 detail = (
                     "reply held, not delivered: the loop guard reached %d "
-                    "consecutive replies for this peer. `peers.py budget reset %s` "
+                    "consecutive replies for this peer. `peers.py budget allow %s "
+                    "--replies N` raises this requester's total (up to %d) and "
+                    "releases the held reply; `peers.py budget reset %s` "
                     "releases the latest held reply and clears the guard; another "
                     "peer, a direct Codex turn, or %.0f seconds idle also clears "
                     "it but discards the held reply"
                     % (
-                        REPLY_BUDGET,
+                        cap,
+                        self.thread_id,
+                        BUDGET_ALLOW_MAX,
                         self.thread_id,
                         self.reply_budget_window,
                     )
@@ -3060,8 +3280,9 @@ class Shim:
                     }
                 log(
                     "reply budget of %d spent for session %s; holding the reply "
-                    "(peers.py budget reset %s releases it)"
-                    % (REPLY_BUDGET, rec.get("name") or sid, self.thread_id)
+                    "(peers.py budget allow %s --replies N or peers.py budget "
+                    "reset %s releases it)"
+                    % (cap, rec.get("name") or sid, self.thread_id, self.thread_id)
                 )
                 self._status_to_record(
                     rec,
@@ -3079,12 +3300,16 @@ class Shim:
                     notice = (
                         "[session-peers] a reply from %s is held, not delivered: "
                         "the reply budget of %d consecutive replies is spent for "
-                        "this peer. Run `peers.py budget reset %s` to release the "
-                        "latest held reply and clear the guard. Another peer, a "
-                        "direct Codex turn, or %.0fs idle also clears it but "
+                        "this peer. Run `peers.py budget allow %s --replies N` "
+                        "(N up to %d, a total for this sequence) to continue and "
+                        "release the held reply, or `peers.py budget reset %s` to "
+                        "release the latest held reply and clear the guard. Another "
+                        "peer, a direct Codex turn, or %.0fs idle also clears it but "
                         "discards the held reply." % (
                             self.name or self.thread_id,
-                            REPLY_BUDGET,
+                            cap,
+                            self.thread_id,
+                            BUDGET_ALLOW_MAX,
                             self.thread_id,
                             self.reply_budget_window,
                         )
@@ -3262,7 +3487,7 @@ def _resolve_claude_record(target):
         )
     if not matches:
         noun = "id" if is_uuid(target) else "name"
-        raise ResolveError("no live Claude session with %s %r" % (noun, target))
+        raise ResolveNotFound("no live Claude session with %s %r" % (noun, target))
     if len(matches) > 1:
         raise ResolveError(
             "%r names %d live sessions (%s); rename one"
@@ -3307,8 +3532,21 @@ def _print_send_result(args, payload, human):
         print(human)
 
 
+def _expand_buddy_arg(args, attr, purpose):
+    """Replace `buddy` in args.<attr>; returns an exit code on failure."""
+    try:
+        setattr(args, attr, expand_buddy(getattr(args, attr), args, purpose))
+    except BuddyError as exc:
+        sys.stderr.write("error: %s\n" % exc)
+        return exc.code
+    return None
+
+
 def cmd_send(args):
     warn_versions()
+    failed = _expand_buddy_arg(args, "to", "send")
+    if failed is not None:
+        return failed
     try:
         args.message = message_from_args(args)
     except ValueError as exc:
@@ -3550,6 +3788,9 @@ def _reply_matches(response, request_id, target_session_id):
 def cmd_ask(args):
     """Send one correlated request to Claude and return its reply on stdout."""
     warn_versions()
+    failed = _expand_buddy_arg(args, "to", "ask")
+    if failed is not None:
+        return failed
     if not args.to.startswith("cc:"):
         sys.stderr.write("error: ask --to must start with cc:\n")
         return 2
@@ -3719,6 +3960,9 @@ def cmd_dispatch(args):
     reply. `--timeout` sets the request lifetime and the mailbox `expires_at`.
     """
     warn_versions()
+    failed = _expand_buddy_arg(args, "to", "dispatch")
+    if failed is not None:
+        return failed
     if not args.to.startswith("cc:"):
         sys.stderr.write("error: dispatch --to must start with cc:\n")
         return 2
@@ -3919,6 +4163,9 @@ def cmd_await(args):
 
 def cmd_wait_peer(args):
     """Wait for a live Claude peer's registry status to reach one state."""
+    failed = _expand_buddy_arg(args, "for_peer", "wait")
+    if failed is not None:
+        return failed
     if not args.for_peer.startswith("cc:"):
         sys.stderr.write("error: wait --for must start with cc:\n")
         return 2
@@ -4258,27 +4505,478 @@ def stop_shim(thread_id) -> bool:
     return True
 
 
-def cmd_budget(args):
-    if args.budget_cmd != "reset":
-        sys.stderr.write("error: the only budget subcommand is `reset`\n")
-        return 2
+class BuddyError(Exception):
+    """A buddy lookup or direction that fails; carries the exit code."""
+
+    def __init__(self, message, code=1):
+        super().__init__(message)
+        self.code = code
+
+
+def _budget_target(value, args):
+    """(thread uuid, None) for a budget command, or (None, (code, message))."""
     try:
-        thread = resolve_thread_prefer_live(args.thread)
-        tid = thread["id"]
+        value = expand_buddy(value, args, "budget")
+    except BuddyError as exc:
+        return None, (exc.code, str(exc))
+    if value.startswith("cc:"):
+        return None, (2, "the reply budget belongs to a Codex thread's shim, not "
+                         "a Claude session")
+    if value.startswith("codex:"):
+        value = value[len("codex:") :]
+    try:
+        return resolve_thread_prefer_live(value)["id"], None
     except ResolveError as exc:
-        if not is_uuid(args.thread):
-            sys.stderr.write("error: %s\n" % exc)
-            return 1
-        tid = args.thread
+        if not is_uuid(value):
+            return None, (1, str(exc))
+        return value, None
+
+
+def cmd_budget(args):
+    if args.budget_cmd == "allow":
+        return cmd_budget_allow(args)
+    if args.budget_cmd != "reset":
+        sys.stderr.write("error: budget subcommands are `reset` and `allow`\n")
+        return 2
+    tid, failure = _budget_target(args.thread, args)
+    if failure:
+        sys.stderr.write("error: %s\n" % failure[1])
+        return failure[0]
+    # An explicit reset drops any allowance, including one not yet consumed.
+    _unlink_quiet(budget_allow_path(tid))
     with open(budget_reset_path(tid), "w", encoding="utf-8") as fh:
         fh.write(now_iso() + "\n")
     state_path = thread_state_path(tid)
     state = read_json(state_path, None)
-    if isinstance(state, dict) and state.get("budgets"):
+    if isinstance(state, dict) and (state.get("budgets") or state.get("allowance")):
         state["budgets"] = {}
+        state["allowance"] = None
         write_json_atomic(state_path, state, mode=0o600)
     print("reply budget reset for %s" % tid)
     return 0
+
+
+def cmd_budget_allow(args):
+    """Grant one requester a TOTAL reply allowance on one Codex thread."""
+    if not 1 <= args.replies <= BUDGET_ALLOW_MAX:
+        sys.stderr.write(
+            "error: --replies must be between 1 and %d\n" % BUDGET_ALLOW_MAX
+        )
+        return 2
+    sid = args.for_session
+    if sid is None:
+        try:
+            caller = caller_identity(args)
+        except ValueError:
+            caller = None
+        if caller is None or caller["kind"] != "cc":
+            sys.stderr.write(
+                "error: --for-session <uuid> is required when the caller is not "
+                "a Claude session\n"
+            )
+            return 2
+        sid = caller["uuid"]
+    if not is_uuid(sid):
+        sys.stderr.write("error: --for-session must be a Claude session UUID\n")
+        return 2
+    tid, failure = _budget_target(args.thread, args)
+    if failure:
+        sys.stderr.write("error: %s\n" % failure[1])
+        return failure[0]
+    path = budget_allow_path(tid)
+    total = args.replies
+    pending = read_json(path, None)
+    window = _float_env("SESSION_PEERS_REPLY_BUDGET_WINDOW", REPLY_BUDGET_WINDOW_DEFAULT)
+    if window <= 0:
+        window = REPLY_BUDGET_WINDOW_DEFAULT
+    granted_at = now_iso()
+    if isinstance(pending, dict) and pending.get("sid") == sid:
+        # Not yet consumed: two grants before the shim polls keep the higher,
+        # with the higher's own time, so a merge never refreshes an old grant.
+        previous = pending.get("total")
+        previous_at = parse_time(pending.get("at"))
+        if (
+            isinstance(previous, int)
+            and not isinstance(previous, bool)
+            and previous_at is not None
+            and time.time() - previous_at <= window
+            and min(previous, BUDGET_ALLOW_MAX) >= total
+        ):
+            total = min(previous, BUDGET_ALLOW_MAX)
+            granted_at = pending["at"]
+    write_json_atomic(path, {"sid": sid, "total": total, "at": granted_at}, mode=0o600)
+    print(
+        "reply allowance for %s: up to %d consecutive replies to session %s "
+        "(a total for this sequence; replies already delivered still count)"
+        % (tid, max(REPLY_BUDGET, total), sid)
+    )
+    if not shim_pid(tid):
+        print("no shim is running for %s; the grant applies once one starts" % tid)
+    return 0
+
+
+# --------------------------------------------------------------------------
+# Buddies: one bound peer per session
+# --------------------------------------------------------------------------
+
+
+def parse_typed(value):
+    """`cc:<uuid>` / `codex:<uuid>` into a typed identity, or ValueError."""
+    kind, sep, ident = str(value or "").partition(":")
+    if not sep or kind not in BUDDY_KINDS or not is_uuid(ident):
+        raise ValueError("expected cc:<uuid> or codex:<uuid>, got %r" % value)
+    return {"kind": kind, "uuid": ident}
+
+
+def caller_identity(args):
+    """The typed identity of the session running this command."""
+    explicit = getattr(args, "as_identity", None)
+    if explicit:
+        return parse_typed(explicit)
+    sid = _current_claude_session_id()
+    if sid:
+        if not is_uuid(sid):
+            raise ValueError("this Claude session's id %r is not a UUID" % sid)
+        return {"kind": "cc", "uuid": sid}
+    tid = _thread_from_args(args)
+    if tid:
+        return {"kind": "codex", "uuid": tid}
+    raise ValueError("cannot tell which session is asking; pass --as")
+
+
+def _resolve_typed_kind(kind, target, live_only=False):
+    if kind == "cc":
+        rec = _resolve_claude_record(target)
+        sid = rec.get("sessionId")
+        if not is_uuid(sid):
+            # A bound buddy is addressed by UUID only; a non-UUID id would be
+            # re-read as a name later.
+            raise ResolveError("Claude session %r has no UUID session id" % target)
+        return {"kind": "cc", "uuid": sid, "name": rec.get("name")}
+    # Codex reuses titles, so a live thread usually shares its name with dead
+    # ones: the live match wins, and dead threads count only when none is live.
+    if live_only:
+        thread = resolve_thread(target, require_live=True)
+    else:
+        thread = resolve_thread_prefer_live(target)
+    return {"kind": "codex", "uuid": thread["id"], "name": thread.get("name")}
+
+
+def resolve_typed(target):
+    """`cc:x`, `codex:x` or a bare `[@]x` into one typed identity with its name.
+
+    Names are resolved here, once; a bound buddy is used by UUID afterwards.
+    """
+    target = str(target or "")
+    if target.startswith("@"):
+        target = target[1:]
+    for kind in BUDDY_KINDS:
+        if target.startswith(kind + ":"):
+            return _resolve_typed_kind(kind, target[len(kind) + 1 :])
+    if not target:
+        raise ResolveError("an empty target names no session")
+    found, errors, dead_codex = [], [], False
+    for kind in BUDDY_KINDS:
+        try:
+            # Live Codex threads only here: a dead namesake must not compete
+            # with a live Claude session for the same bare name.
+            found.append(_resolve_typed_kind(kind, target, live_only=True))
+        except ResolveNotFound:
+            pass
+        except ResolveNoLive:
+            dead_codex = True
+        except ResolveError as exc:
+            errors.append(exc)
+    if dead_codex and not found and not errors:
+        # Nothing live carries the name: bind the dead thread as `codex:` would.
+        return _resolve_typed_kind("codex", target)
+    if errors:
+        # An ambiguous or unverifiable side could be the one meant: never guess.
+        raise ResolveError(
+            "%s; pass cc:%s or codex:%s to pick the kind" % (errors[0], target, target)
+        )
+    if len(found) > 1:
+        raise ResolveError(
+            "%r matches both %s; pass one of them"
+            % (target, " and ".join("%s:%s" % (i["kind"], i["uuid"]) for i in found))
+        )
+    if not found:
+        raise ResolveError(
+            "no Claude session or Codex thread named %r; run `peers.py list`" % target
+        )
+    return found[0]
+
+
+def read_buddy(owner):
+    """The owner's buddy record, or None when absent or malformed."""
+    rec = read_json(buddy_path(owner), None)
+    if not isinstance(rec, dict):
+        return None
+    buddy = rec.get("buddy")
+    if (
+        not isinstance(buddy, dict)
+        or buddy.get("kind") not in BUDDY_KINDS
+        or not is_uuid(buddy.get("uuid"))
+    ):
+        return None
+    return rec
+
+
+def _parse_uses(value):
+    if value is None:
+        return list(BUDDY_USES)
+    uses = []
+    for word in value.split(","):
+        word = word.strip()
+        if word and word not in uses:
+            uses.append(word)
+    unknown = [word for word in uses if word not in BUDDY_USES]
+    if unknown or not uses:
+        raise ValueError(
+            "unsupported --uses %s; supported: %s"
+            % (", ".join(unknown) or "(empty)", ", ".join(BUDDY_USES))
+        )
+    return uses
+
+
+def expand_buddy(value, args, purpose):
+    """Turn `buddy`/`@buddy` into the caller's bound `cc:`/`codex:` UUID."""
+    if value not in ("buddy", "@buddy"):
+        return value
+    try:
+        owner = caller_identity(args)
+    except ValueError as exc:
+        raise BuddyError(str(exc), 2)
+    rec = read_buddy(owner)
+    if rec is None:
+        raise BuddyError(
+            "no buddy set for %s:%s; run `peers.py buddy set <name|uuid>`"
+            % (owner["kind"], owner["uuid"])
+        )
+    buddy = rec["buddy"]
+    if purpose in ("ask", "dispatch", "wait") and buddy["kind"] != "cc":
+        raise BuddyError(
+            "ask/dispatch/wait need a Claude buddy; use send (asynchronous)", 2
+        )
+    if purpose == "budget" and buddy["kind"] != "codex":
+        raise BuddyError(
+            "the reply budget belongs to a Codex thread's shim; this buddy is a "
+            "Claude session", 2
+        )
+    return "%s:%s" % (buddy["kind"], buddy["uuid"])
+
+
+def _claude_status(uuid):
+    status = {"name": None, "live": None, "registered": None, "shim_pid": None,
+              "status": None, "paused": None}
+    records = [r for r in read_claude_records() if r.get("sessionId") == uuid]
+    states = [(r, record_liveness(r)) for r in records]
+    live = [r for r, state in states if state == "live"]
+    if live:
+        rec = live[0]
+        status.update(live=True, name=rec.get("name"), status=rec.get("status"))
+        if socket_path_ok(rec.get("messagingSocketPath")):
+            status["route"] = "available"
+        else:
+            status["route"] = "unavailable: its socket is outside the allowlist"
+    elif any(state == "unverified" for _r, state in states):
+        status["name"] = states[0][0].get("name")
+        status["route"] = "unavailable: liveness is unverified (process probe denied)"
+    else:
+        status["live"] = False
+        status["route"] = "unavailable: no live Claude session with that id"
+    return status
+
+
+def _codex_status(uuid, attach):
+    status = {"name": None, "live": None, "registered": None, "shim_pid": None,
+              "status": None, "paused": None}
+    try:
+        thread = resolve_thread(uuid, require_live=False)
+    except ResolveError as exc:
+        status["route"] = "unavailable: %s" % exc
+        return status
+    status.update(
+        name=thread.get("name"),
+        live=thread.get("live"),
+        registered=thread.get("registered"),
+    )
+    pid = shim_pid(uuid)
+    if attach and pid is None and thread.get("live") is True:
+        # Transient attach only: `up` would also reset the reply budget,
+        # release held replies and register the thread persistently.
+        pid = attach_thread(uuid, verbose=False)
+    status["shim_pid"] = pid
+    if pid:
+        shim_rec = read_json(os.path.join(claude_sessions_dir(), "%d.json" % pid), None)
+        if isinstance(shim_rec, dict) and shim_rec.get("sessionId") == uuid:
+            status["status"] = shim_rec.get("status")
+    rollout = thread.get("rollout_path")
+    if rollout and os.access(rollout, os.R_OK):
+        status["paused"] = thread_is_paused(rollout)
+    if thread.get("live") is None:
+        status["route"] = "unavailable: liveness is unverified"
+    elif not thread.get("live"):
+        status["route"] = "unavailable: the thread is not live"
+    elif not pid:
+        status["route"] = "unavailable: no shim attached (`peers.py buddy ping` attaches one)"
+    else:
+        status["route"] = "available"
+    return status
+
+
+def buddy_status(buddy, attach=False):
+    """Observed facts about a bound buddy; unknown values stay None."""
+    if buddy["kind"] == "cc":
+        status = _claude_status(buddy["uuid"])
+    else:
+        status = _codex_status(buddy["uuid"], attach)
+    status["kind"] = buddy["kind"]
+    status["uuid"] = buddy["uuid"]
+    return status
+
+
+def _buddy_line(rec, status):
+    name = status.get("name") or rec["buddy"].get("name") or "(unnamed)"
+    live = {True: "live", False: "not live", None: "liveness unknown"}[status.get("live")]
+    parts = ["%s" % live]
+    if status["kind"] == "codex":
+        registered = status.get("registered")
+        parts.append(
+            "registered=%s"
+            % ({True: "yes", False: "no"}.get(registered, "unknown"))
+        )
+        parts.append("shim=%s" % (status.get("shim_pid") or "none"))
+    parts.append(status.get("status") or "status unknown")
+    if status.get("paused"):
+        parts.append("paused")
+    route = status.get("route") or "unavailable: unknown"
+    route_text = "route available" if route == "available" else "route %s" % route
+    return "buddy = %s (%s, %s) %s; %s; uses: %s" % (
+        name,
+        status["kind"],
+        status["uuid"][:8],
+        ", ".join(parts),
+        route_text,
+        ", ".join(rec.get("uses") or []),
+    )
+
+
+def _print_buddy(args, rec, status):
+    if getattr(args, "json", False):
+        payload = dict(rec)
+        payload["status"] = status
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print(_buddy_line(rec, status))
+
+
+def cmd_buddy(args):
+    action = args.buddy_cmd or "show"
+    try:
+        owner = caller_identity(args)
+    except ValueError as exc:
+        sys.stderr.write("error: %s\n" % exc)
+        return 2
+    path = buddy_path(owner)
+    if action == "clear":
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            print("no buddy was set")
+            return 0
+        print("buddy cleared")
+        return 0
+    if action == "set":
+        try:
+            uses = _parse_uses(args.uses)
+        except ValueError as exc:
+            sys.stderr.write("error: %s\n" % exc)
+            return 2
+        try:
+            buddy = resolve_typed(args.target)
+        except ResolveError as exc:
+            sys.stderr.write("error: %s\n" % exc)
+            return 1
+        if buddy["kind"] == owner["kind"] and buddy["uuid"] == owner["uuid"]:
+            sys.stderr.write("error: a session cannot be its own buddy\n")
+            return 2
+        rec = {
+            "owner": owner,
+            "buddy": buddy,
+            "uses": uses,
+            "set_at": now_iso(),
+        }
+        write_json_atomic(path, rec, mode=0o600)
+        _print_buddy(args, rec, buddy_status(buddy, attach=True))
+        return 0
+    rec = read_buddy(owner)
+    if rec is None:
+        sys.stderr.write("error: no buddy set; run `peers.py buddy set <name|uuid>`\n")
+        return 1
+    _print_buddy(args, rec, buddy_status(rec["buddy"], attach=(action == "ping")))
+    return 0
+
+
+def _owner_verified_gone(owner):
+    """True only when the owner is PROVEN not live; unknown keeps the record."""
+    if owner["kind"] == "cc":
+        try:
+            os.listdir(claude_sessions_dir())
+        except FileNotFoundError:
+            return True
+        except OSError:
+            return False
+        states = [
+            record_liveness(r)
+            for r in read_claude_records()
+            if r.get("sessionId") == owner["uuid"]
+        ]
+        return all(state == "dead" for state in states)
+    try:
+        thread = resolve_thread(owner["uuid"], require_live=False)
+    except ResolveError:
+        return False
+    return thread.get("live") is False
+
+
+def gc_buddy_records(days=GC_DAYS_DEFAULT, dry_run=False, verbose=True):
+    """Prune buddy records whose owner is verified gone and older than days."""
+    if days < 0:
+        raise ValueError("retention days must be zero or greater")
+    cutoff = time.time() - days * 86400.0
+    try:
+        names = sorted(os.listdir(buddies_dir()))
+    except OSError:
+        return []
+    removed = []
+    for name in names:
+        kind, sep, rest = name.partition("-")
+        if not sep or kind not in BUDDY_KINDS or not rest.endswith(".json"):
+            continue
+        ident = rest[: -len(".json")]
+        if not is_uuid(ident):
+            continue
+        path = os.path.join(buddies_dir(), name)
+        try:
+            if os.stat(path).st_mtime > cutoff:
+                continue
+        except OSError:
+            continue
+        if not _owner_verified_gone({"kind": kind, "uuid": ident}):
+            continue
+        if not dry_run:
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                log("could not prune %s: %s" % (path, exc))
+                continue
+        removed.append(name)
+        if verbose:
+            print("%s buddy record %s" % ("would prune" if dry_run else "pruned", name))
+    return removed
 
 
 def cmd_gc(args):
@@ -4292,10 +4990,11 @@ def cmd_gc(args):
     except ValueError as exc:
         sys.stderr.write("error: %s\n" % exc)
         return 2
+    buddies = gc_buddy_records(days=days, dry_run=args.dry_run)
     requests = cleanup_expired_requests(dry_run=args.dry_run)
     for request_id in requests:
         print("%s expired request %s" % ("would prune" if args.dry_run else "pruned", request_id))
-    if not removed and not requests:
+    if not removed and not requests and not buddies:
         print("no stale bridge metadata")
     return 0
 
@@ -4827,7 +5526,7 @@ def build_parser():
     p_send.add_argument(
         "--to",
         required=True,
-        metavar="codex:<name|uuid>|cc:<name|uuid>",
+        metavar="codex:<name|uuid>|cc:<name|uuid>|buddy",
         help="the peer",
     )
     add_message_source(p_send)
@@ -4846,7 +5545,7 @@ def build_parser():
         "ask", help="send a correlated request to Claude and wait for its reply"
     )
     p_ask.add_argument(
-        "--to", required=True, metavar="cc:<name|uuid>", help="the Claude peer"
+        "--to", required=True, metavar="cc:<name|uuid>|buddy", help="the Claude peer"
     )
     add_message_source(p_ask)
     p_ask.add_argument(
@@ -4875,7 +5574,7 @@ def build_parser():
         help="send a correlated request to Claude and return immediately",
     )
     p_dispatch.add_argument(
-        "--to", required=True, metavar="cc:<name|uuid>", help="the Claude peer"
+        "--to", required=True, metavar="cc:<name|uuid>|buddy", help="the Claude peer"
     )
     add_message_source(p_dispatch)
     p_dispatch.add_argument(
@@ -4913,7 +5612,7 @@ def build_parser():
 
     p_wait = sub.add_parser("wait", help="wait for a Claude peer registry state")
     p_wait.add_argument(
-        "--for", dest="for_peer", required=True, metavar="cc:<name|uuid>"
+        "--for", dest="for_peer", required=True, metavar="cc:<name|uuid>|buddy"
     )
     p_wait.add_argument(
         "--state", choices=("idle", "busy"), default="idle", help="target state"
@@ -4941,9 +5640,65 @@ def build_parser():
     p_budget = sub.add_parser("budget", help="reply budget maintenance")
     bsub = p_budget.add_subparsers(dest="budget_cmd")
     p_reset = bsub.add_parser("reset", help="clear a thread's reply budget")
-    p_reset.add_argument("thread", metavar="name|uuid")
+    p_reset.add_argument("thread", metavar="name|uuid|buddy")
     p_reset.set_defaults(func=cmd_budget)
+    p_allow = bsub.add_parser(
+        "allow", help="let one requester receive up to N consecutive replies"
+    )
+    p_allow.add_argument("thread", metavar="name|uuid|buddy")
+    p_allow.add_argument(
+        "--replies",
+        type=int,
+        required=True,
+        metavar="N",
+        help="total consecutive replies for this sequence (1..%d)" % BUDGET_ALLOW_MAX,
+    )
+    p_allow.add_argument(
+        "--for-session",
+        metavar="UUID",
+        help="the requesting Claude session (default: the calling session)",
+    )
+    p_allow.add_argument(
+        "--as", dest="as_identity", metavar="cc:<uuid>|codex:<uuid>",
+        help="the calling session, when it cannot be detected",
+    )
+    p_allow.set_defaults(func=cmd_budget)
     p_budget.set_defaults(func=cmd_budget, budget_cmd=None, thread=None)
+
+    p_buddy = sub.add_parser("buddy", help="bind, show, ping or clear this session's buddy")
+    p_buddy.add_argument(
+        "--as", dest="as_identity", metavar="cc:<uuid>|codex:<uuid>",
+        help="the calling session, when it cannot be detected",
+    )
+    p_buddy.add_argument("--json", action="store_true", help="machine-readable output")
+    buddy_sub = p_buddy.add_subparsers(dest="buddy_cmd")
+
+    def buddy_action(name, help_text):
+        parser = buddy_sub.add_parser(name, help=help_text)
+        # SUPPRESS: an option given before the action must survive the subparser.
+        parser.add_argument(
+            "--as", dest="as_identity", default=argparse.SUPPRESS,
+            metavar="cc:<uuid>|codex:<uuid>",
+        )
+        parser.add_argument(
+            "--json", action="store_true", default=argparse.SUPPRESS,
+            help="machine-readable output",
+        )
+        return parser
+
+    buddy_action("show", "report the buddy's status without attaching")
+    p_buddy_set = buddy_action("set", "bind a buddy by name or UUID")
+    p_buddy_set.add_argument(
+        "target", metavar="[cc:|codex:|@]name|uuid", help="the peer to bind"
+    )
+    p_buddy_set.add_argument(
+        "--uses",
+        metavar="a,b",
+        help="advisory scope (default: all of %s)" % ", ".join(BUDDY_USES),
+    )
+    buddy_action("ping", "report status, attaching a Codex buddy's shim if needed")
+    buddy_action("clear", "unbind the buddy")
+    p_buddy.set_defaults(func=cmd_buddy, buddy_cmd=None)
 
     p_hook = sub.add_parser("session-hook", help="Codex SessionStart entry point")
     p_hook.add_argument(

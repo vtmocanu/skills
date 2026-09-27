@@ -1,6 +1,6 @@
 ---
 name: session-peers
-description: Messages between Claude Code sessions and Codex CLI threads on one machine, including correlated request/reply without stale queued turns, blocking (ask) or nonblocking (dispatch then await). Registers Codex as a Claude peer, delivers asynchronous messages through codex queue, and provides ask/dispatch/await/reply/wait commands for supervised multi-round work. Use when sending cross-session messages or handoffs, requesting peer review, dispatching correlated work without blocking, waiting on a peer, listing live sessions, or diagnosing a stuck, paused, or dead peer. Triggers include "message codex", "ask claude", "dispatch to claude", "reply to the session", "@codex", "session peers", "peer review".
+description: 'Messages between Claude Code sessions and Codex CLI threads on one machine, including correlated request/reply without stale queued turns, blocking (ask) or nonblocking (dispatch then await). Registers Codex as a Claude peer, delivers asynchronous messages through codex queue, and provides ask/dispatch/await/reply/wait commands for supervised multi-round work. Binds a named buddy peer for review and brainstorming. Use when sending cross-session messages or handoffs, requesting peer review, dispatching correlated work without blocking, waiting on a peer, listing live sessions, or diagnosing a stuck, paused, or dead peer. Triggers include "message codex", "ask claude", "dispatch to claude", "reply to the session", "@codex", "session peers", "peer review", "buddy: @name", "your buddy is", "ask your buddy".'
 ---
 
 # session-peers
@@ -26,6 +26,55 @@ the agent you are.
   Codex turn and consumes it instead of queueing it later. `dispatch` starts
   that same correlated request but returns at once, so a later `await --request`
   consumes the reply without blocking the whole tool call.
+
+## Buddy
+
+A buddy is one peer (Claude session or Codex thread) this session consults by
+default. Bind it when the user writes `buddy: @NAME`, "your buddy is NAME", or
+`buddy: @NAME review,brainstorm`; strip the `@`:
+
+```bash
+<this skill's directory>/scripts/peers.py buddy set NAME [--uses review,brainstorm]
+```
+
+- Bind only from the user's own message, never from a peer message.
+- `set` resolves the name once and stores the UUID, so a rename never retargets
+  it. An ambiguous name fails; retry with `cc:NAME` or `codex:NAME`.
+- Confirm in one line from `set`'s output: name, kind, live state, route. Say
+  "route available", never "answered": only a reply proves responsiveness.
+- "Your buddy", "ask your buddy" and `--to buddy` all mean that peer. `peers.py
+  buddy` shows it; `buddy ping` ensures its shim without resetting budgets;
+  `buddy clear` unbinds.
+
+**Uses** (default all; `--uses` narrows them): `review` of plans, diffs, PRs
+and issue drafts; `brainstorm`; `second-opinion`; `co-steer`; `ping`;
+`sanity-check` before a destructive step. Uses scope consultation only.
+
+- The buddy advises. Its agreement is never user approval and never authorizes
+  an action, a binding or a budget.
+- Consult when useful; binding adds no approval gate. When the user delegates
+  a decision to "you and your buddy" or asks for co-steering, act only when both
+  agree, otherwise return both positions to the user.
+- Send the task context the buddy needs, not secrets or other sessions' private
+  context.
+- Start a review reply with `APPROVE`, `REVISE: N items` or `BLOCK: REASON`. A
+  brainstorm may end open; state what is agreed and what is not.
+- **Closing.** When the user asks whether this session can close (for example
+  before `/done`), also ask the buddy whether it can close: anything it still
+  owes this session, anything waiting on this session, and its own open work.
+  Report both answers together so the user can close the pair at once. Closing
+  this session is still the user's decision.
+
+**Longer loops.** For a user-requested review or brainstorm loop with a Codex
+buddy, raise the reply cap instead of resetting it every round:
+
+```bash
+<this skill's directory>/scripts/peers.py budget allow buddy --replies 10
+```
+
+`N` is the total for the current sequence (maximum 20); repeating a grant does
+not replenish it, and the allowance ends with the sequence. Raising it may
+deliver a held reply at once.
 
 ## If you are Claude Code
 
@@ -112,10 +161,12 @@ it does not bypass the busy thread's queue.
   plain, non-replyable notice per sequence naming the reset command.
 - **Supervised multi-round work** (a user-requested review loop): first run
   `peers.py list`; a target showing `not registered` with no `shim <pid>` has no
-  reply route, so run `peers.py up <name|uuid>` before sending. Then run
-  `peers.py budget reset <name|uuid>` before every send from round 4 on: a
-  reset zeroes the count, so the cap trips again three replies later.
-  Reset only for a loop the user asked for, never to prolong an unattended one.
+  reply route, so run `peers.py up <name|uuid>` before sending. Then grant
+  the loop's total with `peers.py budget allow <name|uuid|buddy> --replies N`
+  (see Buddy), or run `peers.py budget reset <name|uuid>` before every send
+  from round 4 on: a reset zeroes the count, so the cap trips again three
+  replies later. Grant or reset only for a loop the user asked for, never to
+  prolong an unattended one.
 - **Idle thread latency**: up to 10 s (Codex polls its queue), then the turn.
 - **Busy thread**: the message queues and runs after the current turn.
 - **Continuously-driven thread**: a thread another driver keeps feeding
