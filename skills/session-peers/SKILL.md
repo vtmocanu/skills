@@ -80,9 +80,9 @@ not replenish it. Raising it may deliver a held reply at once.
   `up`.
 - Reset before granting, never after: a reset drops the grant. `budget reset`
   then `budget allow` back to back is safe.
-- `allow` exits 1 when the running shim predates it (a shim keeps the code it
-  started with). Run `peers.py down <uuid>`, then `peers.py up <uuid>`, then
-  grant again.
+- `allow` exits 1 unless the running shim's state proves it reads grants (a
+  shim keeps the code it started with). Run `peers.py down <uuid>`, then
+  `peers.py up <uuid>`, then grant again.
 
 ## If you are Claude Code
 

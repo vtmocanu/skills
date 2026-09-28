@@ -26,9 +26,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
-- `session-peers`: `budget allow` refuses, naming the restart, when the running
-  shim started from a `peers.py` older than the allowance. Such a shim never
-  read the grant, so the reply cap silently stayed at 3. Shims now record the
+- `session-peers`: `budget allow` refuses, naming the restart, unless the
+  running shim's state proves it supports allowances. A shim started from an
+  older `peers.py` never read the grant, so the reply cap silently stayed at 3. Shims now record the
   features their code supports in their state file.
 
 ## [0.39.0] - 2026-09-25

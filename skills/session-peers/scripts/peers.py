@@ -4591,11 +4591,11 @@ def cmd_budget_allow(args):
     pid = shim_pid(tid)
     if pid and not shim_supports(tid, pid, "budget_allow"):
         sys.stderr.write(
-            "error: the shim for %s (pid %d) started from a peers.py older than "
-            "`budget allow` and never reads the grant, so the cap stays %d. "
-            "Restart it with `peers.py down %s` then `peers.py up %s` (a fresh "
-            "`up` also resets the budget), then grant again\n"
-            % (tid, pid, REPLY_BUDGET, tid, tid)
+            "error: cannot verify the running shim for %s (pid %d) supports "
+            "allowances; a shim started from an older peers.py never reads the "
+            "grant, so the cap would stay %d. Restart it: `peers.py down %s && "
+            "peers.py up %s` (a fresh `up` also resets the budget), then grant "
+            "again\n" % (tid, pid, REPLY_BUDGET, tid, tid)
         )
         return 1
     path = budget_allow_path(tid)
@@ -4631,15 +4631,15 @@ def cmd_budget_allow(args):
 
 
 def shim_supports(thread_id, pid, feature):
-    """False only when the state file proves shim ``pid`` lacks ``feature``.
+    """True only when the state file proves shim ``pid`` has ``feature``.
 
-    Every shim saves its state, pid included, before it serves, so state naming
-    this pid without the feature is a shim running older code. State naming
-    another pid cannot tell, so it does not refuse.
+    A shim saves its state, pid included, before it serves. Missing state, or
+    state naming another pid, proves nothing about the running code, so it
+    counts as unsupported rather than risking a grant nothing reads.
     """
     state = read_json(thread_state_path(thread_id), None)
     if not isinstance(state, dict) or state.get("shim_pid") != pid:
-        return True
+        return False
     return feature in (state.get("shim_features") or [])
 
 
