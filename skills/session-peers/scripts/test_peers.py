@@ -6221,6 +6221,48 @@ class TestBudgetAllow(BuddyBase):
         self.assertEqual(self.shim.held, {})
         self.assertEqual(self.shim.budgets[self.sid_a], 1)
 
+    def test_a_shim_older_than_budget_allow_refuses_the_grant(self):
+        # A shim keeps the code it started with. One started before `budget
+        # allow` existed never reads the marker, so the grant silently did
+        # nothing and the requester was held after 3 replies (field report).
+        pid = self.hold_pidfile(self.tid)
+        peers.write_json_atomic(
+            peers.thread_state_path(self.tid),
+            {"thread_id": self.tid, "shim_pid": pid, "budgets": {self.sid_a: 1}},
+        )
+        rc, _out, err = self.cli(
+            "budget", "allow", self.tid, "--replies", "20", "--for-session", self.sid_a
+        )
+        self.assertEqual(rc, 1)
+        self.assertIn("older than `budget allow`", err)
+        self.assertIn("peers.py down %s` then `peers.py up %s`" % (self.tid, self.tid), err)
+        self.assertFalse(os.path.exists(peers.budget_allow_path(self.tid)))
+
+    def test_a_current_shim_advertises_budget_allow_and_takes_the_grant(self):
+        self.shim._save_state()
+        state = peers.read_json(peers.thread_state_path(self.tid))
+        self.assertIn("budget_allow", state["shim_features"])
+        pid = self.hold_pidfile(self.tid, pid=state["shim_pid"])
+        rc, out, err = self.cli(
+            "budget", "allow", self.tid, "--replies", "20", "--for-session", self.sid_a
+        )
+        self.assertEqual(rc, 0, err)
+        self.assertNotIn("no shim is running", out)
+        self.assertEqual(peers.read_json(peers.budget_allow_path(self.tid))["total"], 20)
+        self.assertEqual(pid, os.getpid())
+
+    def test_state_from_another_shim_does_not_refuse_the_grant(self):
+        self.hold_pidfile(self.tid)
+        peers.write_json_atomic(
+            peers.thread_state_path(self.tid),
+            {"thread_id": self.tid, "shim_pid": os.getppid() + 1},
+        )
+        rc, _out, err = self.cli(
+            "budget", "allow", self.tid, "--replies", "5", "--for-session", self.sid_a
+        )
+        self.assertEqual(rc, 0, err)
+        self.assertTrue(os.path.exists(peers.budget_allow_path(self.tid)))
+
     def test_out_of_range_replies_are_rejected(self):
         for n in ("0", "21"):
             rc, _out, err = self.cli(

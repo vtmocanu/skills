@@ -24,6 +24,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   before every send from round 4 on, not only before round 4: a reset zeroes the
   count, so the three-reply cap trips again three replies later.
 
+### Fixed
+
+- `session-peers`: `budget allow` refuses, naming the restart, when the running
+  shim started from a `peers.py` older than the allowance. Such a shim never
+  read the grant, so the reply cap silently stayed at 3. Shims now record the
+  features their code supports in their state file.
+
 ## [0.39.0] - 2026-09-25
 
 ### Changed
