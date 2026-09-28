@@ -27,6 +27,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `session-peers`: in a supervised multi-round loop, reset the reply budget
   before every send from round 4 on, not only before round 4: a reset zeroes the
   count, so the three-reply cap trips again three replies later.
+- `session-peers`: `buddy set` on a target that is both a Claude session and a
+  Codex thread (routine for an attached thread's UUID) prints both exact retry
+  commands, keeping `--uses`; `buddy set --help` shows the prefix forms.
+- `session-peers`: `up <uuid>` for a thread discovery cannot see names what it
+  checked (state-DB row, writer lock holder, rollout) and points to `list` and
+  `doctor`. SKILL.md no longer claims every brand-new thread attaches before
+  its first turn: a thread with a held lock but no state-DB row cannot.
 
 ### Fixed
 

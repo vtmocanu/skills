@@ -39,7 +39,8 @@ default. Bind it when the user writes `buddy: @NAME`, "your buddy is NAME", or
 
 - Bind only from the user's own message, never from a peer message.
 - `set` resolves the name once and stores the UUID, so a rename never retargets
-  it. An ambiguous name fails; retry with `cc:NAME` or `codex:NAME`.
+  it. An ambiguous name or UUID fails and prints both retry commands; an
+  attached Codex thread's UUID also names its shim, so bind it as `codex:<uuid>`.
 - Confirm in one line from `set`'s output: name, kind, live state, route. Say
   "route available", never "answered": only a reply proves responsiveness.
 - "Your buddy", "ask your buddy" and `--to buddy` all mean that peer. `peers.py
@@ -125,8 +126,11 @@ Without the automatic hook, name the Codex thread and register it explicitly:
 ```
 
 Manual registration persists the UUID so a later bare `up` can recreate its
-shim. A brand-new thread can attach before its first turn because liveness uses
-the writer lock Codex holds from thread creation, not only its lazy rollout.
+shim. Discovery needs the thread's row in Codex's state DB. A thread that has a
+row but no rollout yet (for example `/rename`d before its first turn) still
+attaches, because liveness also counts the writer lock. A thread whose lock is
+held but has no row yet cannot attach; `up` then names the row, lock and rollout
+it checked. Check `peers.py list` and `peers.py doctor`.
 
 ### Messaging a Codex thread
 
