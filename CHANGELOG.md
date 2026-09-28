@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- `agent-team`: the update-mode docs said `sync.py apply` exits 3 when it drops body lines; it exits 0 and warns, and a backup that already exists gets a numbered `.pre-sync.N` sibling, so the `.gitignore` pattern is `*.md.pre-sync*`.
+
 ## [0.40.0] - 2026-09-28
 
 ### Added
