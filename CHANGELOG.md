@@ -14,6 +14,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `dispatch`, `wait` and `budget`; `buddy ping` attaches its shim without
   resetting budgets. `peers.py budget allow` grants a finite per-requester reply
   allowance (maximum 20) for a supervised loop instead of repeated resets.
+- `session-peers`: topics. `peers.py topic post|tail|list` keeps a pull-only,
+  append-only log per opaque topic under the bridge state directory, with a
+  per-topic monotonic `seq`, cursor paging, TTL and size retention that reports
+  a pruned gap, and `gc` pruning idle topics.
 
 ### Changed
 

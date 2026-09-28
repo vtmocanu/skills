@@ -29,6 +29,11 @@ Subcommands::
                        [--as cc:<uuid>|codex:<uuid>] [--json]
     peers.py session-hook
     peers.py install-hook [--auto-attach]
+    peers.py topic post <topic> (--message <text>|--message-file <path>|
+                       --json-file <path>) [--kind KIND] [--as cc:<uuid>|codex:<uuid>]
+                       [--json]
+    peers.py topic tail <topic> [--since SEQ] [--limit N] [--json]
+    peers.py topic list [--json]
     peers.py gc [--days 7] [--dry-run]
     peers.py doctor
 
@@ -5020,6 +5025,8 @@ def cmd_gc(args):
         return 2
     buddies = gc_buddy_records(days=days, dry_run=args.dry_run)
     requests = cleanup_expired_requests(dry_run=args.dry_run)
+    if not args.dry_run:
+        topic_prune_all()
     for request_id in requests:
         print("%s expired request %s" % ("would prune" if args.dry_run else "pruned", request_id))
     if not removed and not requests and not buddies:
@@ -5528,6 +5535,371 @@ def cmd_doctor(_args):
 
 
 # --------------------------------------------------------------------------
+# Topics: pull-only, append-only logs any peer can post to and read
+# --------------------------------------------------------------------------
+
+TOPIC_MAX_CHARS = 256
+TOPIC_TTL_DAYS_DEFAULT = 7.0
+TOPIC_MAX_ENTRIES_DEFAULT = 1000
+TOPIC_MAX_BYTES_DEFAULT = 16 * 1024 * 1024
+TOPIC_TAIL_DEFAULT = 20
+TOPIC_TAIL_MAX = 1000
+TOPIC_KIND_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$")
+# C0 and C1 controls: a topic is one printable line.
+TOPIC_BAD_CHARS_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+
+
+class TopicError(Exception):
+    """A refused topic operation; carries the exit code."""
+
+    def __init__(self, message, code=1):
+        super().__init__(message)
+        self.code = code
+
+
+def topics_dir():
+    path = os.path.join(state_dir(), "topics")
+    os.makedirs(path, mode=0o700, exist_ok=True)
+    os.chmod(path, 0o700)
+    return path
+
+
+def validate_topic(topic):
+    """The topic string unchanged, or TopicError. It is opaque otherwise."""
+    if not isinstance(topic, str) or not topic.strip():
+        raise TopicError("a topic must be a non-empty string", 2)
+    if len(topic) > TOPIC_MAX_CHARS:
+        raise TopicError("a topic is at most %d characters" % TOPIC_MAX_CHARS, 2)
+    if TOPIC_BAD_CHARS_RE.search(topic):
+        raise TopicError("a topic must not contain control characters", 2)
+    try:
+        topic.encode("utf-8")
+    except UnicodeError:
+        raise TopicError("a topic must be valid UTF-8", 2)
+    return topic
+
+
+def _topic_paths(topic):
+    """(log, meta, lock) paths. The file name is a digest, never the topic,
+    so no topic string can name a path outside the topics directory."""
+    digest = hashlib.sha256(topic.encode("utf-8")).hexdigest()[:40]
+    base = os.path.join(topics_dir(), digest)
+    return base + ".jsonl", base + ".meta.json", base + ".lock"
+
+
+@contextlib.contextmanager
+def _topic_lock(lock_path):
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)  # closing drops the flock
+
+
+def _topic_limits():
+    ttl = _float_env("SESSION_PEERS_TOPIC_TTL_DAYS", TOPIC_TTL_DAYS_DEFAULT)
+    entries = int(_float_env("SESSION_PEERS_TOPIC_MAX_ENTRIES", TOPIC_MAX_ENTRIES_DEFAULT))
+    size = int(_float_env("SESSION_PEERS_TOPIC_MAX_BYTES", TOPIC_MAX_BYTES_DEFAULT))
+    return (
+        ttl if ttl > 0 else TOPIC_TTL_DAYS_DEFAULT,
+        entries if entries > 0 else TOPIC_MAX_ENTRIES_DEFAULT,
+        size if size > 0 else TOPIC_MAX_BYTES_DEFAULT,
+    )
+
+
+def _read_topic_lines(log_path):
+    """Parsed entries in file order; a torn or foreign line is skipped."""
+    out = []
+    try:
+        with open(log_path, "r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                try:
+                    entry = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(entry, dict) and isinstance(entry.get("seq"), int):
+                    out.append((entry, len(line.encode("utf-8"))))
+    except FileNotFoundError:
+        pass
+    return out
+
+
+def _topic_state(topic, log_path, meta_path, now):
+    """Retained entries after pruning, and the next seq. Call under the lock.
+
+    The next seq lives in the meta file, so it survives pruning every entry;
+    the log's own last seq covers a meta write lost to a crash.
+    """
+    ttl_days, max_entries, max_bytes = _topic_limits()
+    lines = _read_topic_lines(log_path)
+    meta = read_json(meta_path, {}) or {}
+    next_seq = meta.get("next_seq") if isinstance(meta.get("next_seq"), int) else 1
+    if lines:
+        next_seq = max(next_seq, lines[-1][0]["seq"] + 1)
+    cutoff = now - ttl_days * 86400.0
+    kept = [
+        (entry, size) for entry, size in lines
+        if (parse_time(entry.get("ts")) or 0.0) >= cutoff
+    ]
+    kept = kept[-max_entries:]
+    total = sum(size for _entry, size in kept)
+    while kept and total > max_bytes:
+        total -= kept.pop(0)[1]
+    if len(kept) != len(lines):
+        _write_topic_log(log_path, [entry for entry, _size in kept])
+    return [entry for entry, _size in kept], next_seq
+
+
+def _write_topic_log(log_path, entries):
+    tmp = "%s.tmp.%d" % (log_path, os.getpid())
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        for entry in entries:
+            fh.write(json.dumps(entry, sort_keys=True, ensure_ascii=False) + "\n")
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, log_path)
+
+
+def _write_topic_meta(meta_path, topic, next_seq, last_ts):
+    write_json_atomic(
+        meta_path,
+        {"topic": topic, "next_seq": next_seq, "last_ts": last_ts},
+        mode=0o600,
+    )
+
+
+_NO_DATA = object()
+
+
+def topic_post(topic, from_identity, kind=None, text=None, data=_NO_DATA):
+    """Append one entry and return it. Seq is unique and monotonic per topic."""
+    validate_topic(topic)
+    if kind is not None and not TOPIC_KIND_RE.match(kind):
+        raise TopicError(
+            "--kind must be 1-64 characters of letters, digits, '.', '_', ':' "
+            "or '-', starting with a letter or digit", 2
+        )
+    log_path, meta_path, lock_path = _topic_paths(topic)
+    with _topic_lock(lock_path):
+        now = time.time()
+        _entries, next_seq = _topic_state(topic, log_path, meta_path, now)
+        entry = {
+            "seq": next_seq,
+            "ts": now_iso(),
+            "topic": topic,
+            "from_kind": from_identity.get("kind"),
+            "from_name": from_identity.get("name"),
+            "from_sid": from_identity.get("uuid"),
+            "kind": kind,
+        }
+        if data is not _NO_DATA:
+            entry["data"] = data
+        else:
+            entry["text"] = text
+        line = json.dumps(entry, sort_keys=True, ensure_ascii=False) + "\n"
+        fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(line)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(log_path, 0o600)
+        _write_topic_meta(meta_path, topic, next_seq + 1, entry["ts"])
+    return entry
+
+
+def topic_tail(topic, since=None, limit=TOPIC_TAIL_DEFAULT):
+    """{"entries", "next", "gap"}: entries with seq > since in order, or the
+    last ``limit`` when since is None. ``gap`` names pruned seqs the cursor
+    skipped, so a slow reader learns it lost entries instead of guessing."""
+    validate_topic(topic)
+    log_path, meta_path, lock_path = _topic_paths(topic)
+    if not os.path.exists(meta_path) and not os.path.exists(log_path):
+        return {"topic": topic, "entries": [], "next": since or 0, "gap": None}
+    with _topic_lock(lock_path):
+        entries, next_seq = _topic_state(topic, log_path, meta_path, time.time())
+    last_seq = next_seq - 1
+    gap = None
+    if since is None:
+        chosen = entries[-limit:]
+    else:
+        oldest = entries[0]["seq"] if entries else next_seq
+        if since + 1 < oldest and since < last_seq:
+            gap = {"from": since + 1, "to": oldest - 1}
+        chosen = [e for e in entries if e["seq"] > since][:limit]
+    if chosen:
+        cursor = chosen[-1]["seq"]
+    elif since is None:
+        cursor = last_seq
+    else:
+        # Nothing newer: stay put, or move past a gap that ends the log.
+        cursor = max(since, gap["to"]) if gap else since
+    return {"topic": topic, "entries": chosen, "next": cursor, "gap": gap}
+
+
+def topic_list():
+    out = []
+    try:
+        names = sorted(os.listdir(topics_dir()))
+    except OSError:
+        return out
+    for name in names:
+        if not name.endswith(".meta.json"):
+            continue
+        meta = read_json(os.path.join(topics_dir(), name), None)
+        if not isinstance(meta, dict) or not isinstance(meta.get("topic"), str):
+            continue
+        next_seq = meta.get("next_seq")
+        out.append({
+            "topic": meta["topic"],
+            "last_seq": next_seq - 1 if isinstance(next_seq, int) else None,
+            "last_ts": meta.get("last_ts"),
+        })
+    out.sort(key=lambda item: item["topic"])
+    return out
+
+
+def topic_prune_all():
+    """Apply retention to every topic, including ones nobody posts to or reads."""
+    for item in topic_list():
+        log_path, meta_path, lock_path = _topic_paths(item["topic"])
+        with _topic_lock(lock_path):
+            _topic_state(item["topic"], log_path, meta_path, time.time())
+
+
+def topic_sender(args):
+    """This session's identity for a post, or None (anonymous).
+
+    The same sources `send` uses: the Claude messaging socket or session id,
+    then the Codex thread id. ``--as`` overrides when detection cannot work.
+    """
+    explicit = getattr(args, "as_identity", None)
+    if explicit:
+        ident = parse_typed(explicit)
+    else:
+        sock = os.environ.get("CLAUDE_CODE_MESSAGING_SOCKET")
+        rec = claude_record_by_socket(sock) if sock else None
+        if rec and is_uuid(rec.get("sessionId")):
+            return {"kind": "cc", "uuid": rec["sessionId"], "name": rec.get("name")}
+        sid = os.environ.get("CLAUDE_CODE_SESSION_ID")
+        tid = _thread_from_args(args)
+        if is_uuid(sid):
+            ident = {"kind": "cc", "uuid": sid}
+        elif tid:
+            ident = {"kind": "codex", "uuid": tid}
+        else:
+            return None
+    if ident["kind"] == "cc":
+        matches = claude_record_by_target(ident["uuid"])
+        ident["name"] = matches[0].get("name") if len(matches) == 1 else None
+    else:
+        entry = read_registered().get(ident["uuid"])
+        ident["name"] = entry.get("name") if isinstance(entry, dict) else None
+    return ident
+
+
+def _topic_printable(text):
+    """Escape control characters except newline and tab for a terminal."""
+    return re.sub(
+        r"[\x00-\x08\x0b-\x1f\x7f-\x9f]",
+        lambda m: "\\x%02x" % ord(m.group(0)),
+        text,
+    )
+
+
+def cmd_topic(args):
+    try:
+        if args.topic_cmd == "post":
+            return _cmd_topic_post(args)
+        if args.topic_cmd == "tail":
+            return _cmd_topic_tail(args)
+        if args.topic_cmd == "list":
+            return _cmd_topic_list(args)
+    except TopicError as exc:
+        sys.stderr.write("error: %s\n" % exc)
+        return exc.code
+    sys.stderr.write("error: topic subcommands are `post`, `tail` and `list`\n")
+    return 2
+
+
+def _cmd_topic_post(args):
+    validate_topic(args.topic)
+    data, text = _NO_DATA, None
+    try:
+        if args.json_file:
+            raw = message_from_args(
+                argparse.Namespace(message=None, message_file=args.json_file)
+            )
+            try:
+                data = json.loads(raw)
+            except ValueError as exc:
+                raise TopicError("--json-file is not valid JSON: %s" % exc)
+        else:
+            text = message_from_args(args)
+    except UnicodeError:
+        raise TopicError("the message is not valid UTF-8")
+    except ValueError as exc:
+        raise TopicError(str(exc))
+    try:
+        sender = topic_sender(args)
+    except ValueError as exc:
+        raise TopicError(str(exc), 2)
+    if sender is None:
+        log(
+            "sender identity absent: posting anonymously; from Claude Code use "
+            "its Bash tool, from Codex its shell, or pass --as"
+        )
+        sender = {}
+    entry = topic_post(args.topic, sender, kind=args.kind, text=text, data=data)
+    if args.json:
+        print(json.dumps({"topic": entry["topic"], "seq": entry["seq"], "ts": entry["ts"]}))
+    else:
+        print("posted %s #%d" % (args.topic, entry["seq"]))
+    return 0
+
+
+def _cmd_topic_tail(args):
+    if args.since is not None and args.since < 0:
+        raise TopicError("--since must be zero or greater", 2)
+    if not 1 <= args.limit <= TOPIC_TAIL_MAX:
+        raise TopicError("--limit must be between 1 and %d" % TOPIC_TAIL_MAX, 2)
+    result = topic_tail(args.topic, since=args.since, limit=args.limit)
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False))
+        return 0
+    gap = result["gap"]
+    if gap:
+        print("gap: entries %d..%d pruned" % (gap["from"], gap["to"]))
+    for entry in result["entries"]:
+        who = entry.get("from_name") or entry.get("from_sid") or "anonymous"
+        kind = " [%s]" % entry["kind"] if entry.get("kind") else ""
+        if "data" in entry:
+            body = json.dumps(entry["data"], ensure_ascii=False)
+        else:
+            body = entry.get("text") or ""
+        print("#%d %s %s%s: %s" % (
+            entry["seq"], entry.get("ts"), _topic_printable(str(who)), kind,
+            _topic_printable(body),
+        ))
+    print("next: --since %d" % result["next"])
+    return 0
+
+
+def _cmd_topic_list(args):
+    topics = topic_list()
+    if args.json:
+        print(json.dumps(topics, ensure_ascii=False))
+        return 0
+    if not topics:
+        print("no topics")
+    for item in topics:
+        print("%s  last #%s  %s" % (
+            _topic_printable(item["topic"]), item["last_seq"], item["last_ts"] or "-",
+        ))
+    return 0
+
+
+# --------------------------------------------------------------------------
 # CLI
 # --------------------------------------------------------------------------
 
@@ -5745,6 +6117,39 @@ def build_parser():
         help="automatically expose each starting or resumed Codex thread",
     )
     p_install.set_defaults(func=cmd_install_hook)
+
+    p_topic = sub.add_parser("topic", help="pull-only topic logs any peer can post to")
+    tsub = p_topic.add_subparsers(dest="topic_cmd")
+    p_tpost = tsub.add_parser("post", help="append one entry to a topic")
+    p_tpost.add_argument("topic", metavar="TOPIC")
+    tsource = p_tpost.add_mutually_exclusive_group(required=True)
+    tsource.add_argument("--message", help="the entry text")
+    tsource.add_argument("--message-file", metavar="PATH", help="read the entry text from PATH")
+    tsource.add_argument("--json-file", metavar="PATH", help="a JSON value stored as data")
+    p_tpost.add_argument("--kind", metavar="KIND", help="an opaque label for readers")
+    p_tpost.add_argument(
+        "--as", dest="as_identity", metavar="cc:<uuid>|codex:<uuid>",
+        help="the posting session, when it cannot be detected",
+    )
+    p_tpost.add_argument("--json", action="store_true", help="machine-readable result")
+    p_tpost.set_defaults(func=cmd_topic)
+    p_ttail = tsub.add_parser("tail", help="print entries after a cursor")
+    p_ttail.add_argument("topic", metavar="TOPIC")
+    p_ttail.add_argument(
+        "--since", type=int, metavar="SEQ",
+        help="print entries after SEQ (default: the last --limit entries)",
+    )
+    p_ttail.add_argument(
+        "--limit", type=int, default=TOPIC_TAIL_DEFAULT, metavar="N",
+        help="at most N entries (default %d, maximum %d)"
+        % (TOPIC_TAIL_DEFAULT, TOPIC_TAIL_MAX),
+    )
+    p_ttail.add_argument("--json", action="store_true", help="machine-readable output")
+    p_ttail.set_defaults(func=cmd_topic)
+    p_tlist = tsub.add_parser("list", help="topics with their last seq and time")
+    p_tlist.add_argument("--json", action="store_true", help="machine-readable output")
+    p_tlist.set_defaults(func=cmd_topic)
+    p_topic.set_defaults(func=cmd_topic, topic_cmd=None)
 
     p_gc = sub.add_parser("gc", help="prune inactive bridge metadata")
     p_gc.add_argument("--days", type=float, help="retention in days (default: 7)")
