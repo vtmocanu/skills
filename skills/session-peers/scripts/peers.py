@@ -1246,6 +1246,49 @@ class ResolveNoLive(ResolveError):
     """Only threads whose process is verified gone carry that name."""
 
 
+class ResolveAmbiguousKind(ResolveError):
+    """A bare target that could be either kind; ``choices`` are the typed
+    targets (``cc:x``, ``codex:x``) that would each resolve it."""
+
+    def __init__(self, message, choices):
+        super().__init__(message)
+        self.choices = choices
+
+
+def missing_thread_message(thread_id):
+    """Why discovery found no thread for a UUID, naming what it looked for."""
+    db = find_state_db()
+    evidence = ["no row in the threads table of %s" % (db or "the Codex state DB")]
+    lock = writer_lock_path(thread_id)
+    held = False
+    if not os.path.exists(lock):
+        evidence.append("no writer lock at %s" % lock)
+    else:
+        holders, verified, error = lsof_holders_checked([lock])
+        found = holders.get(canon_path(lock)) or []
+        if found:
+            held = True
+            evidence.append("writer lock %s held by pid %s" % (lock, found[0][0]))
+        elif verified:
+            evidence.append("writer lock %s present but not held" % lock)
+        else:
+            evidence.append("writer lock %s holder unverified (%s)" % (lock, error))
+    pattern = os.path.join(codex_home(), "sessions", "*", "*", "*", "rollout-*%s.jsonl" % thread_id)
+    rollouts = glob.glob(pattern)
+    if rollouts:
+        evidence.append("rollout %s exists" % rollouts[0])
+    else:
+        evidence.append("no rollout under %s" % os.path.join(codex_home(), "sessions"))
+    message = "no Codex thread with id %s: %s." % (thread_id, "; ".join(evidence))
+    if held:
+        message += (
+            " A Codex process holds this thread, but discovery reads the "
+            "state-DB row, so `up` cannot attach the thread until Codex "
+            "writes one."
+        )
+    return message + " Check `peers.py list` and `peers.py doctor`."
+
+
 def resolve_thread(target, require_live=True):
     """Turn `<name|uuid>` into one thread dict, or raise ResolveError.
 
@@ -1276,7 +1319,7 @@ def resolve_thread(target, require_live=True):
         for t in threads:
             if t["id"] == target:
                 return t
-        raise ResolveNotFound("no Codex thread with id %s" % target)
+        raise ResolveNotFound(missing_thread_message(target))
     # Match the name from the state DB / session index, OR from our own
     # registration: `up <uuid>` records name->uuid, and a later `/rename` may
     # not have propagated to the DB's `name` column yet (measured on
@@ -4725,13 +4768,17 @@ def resolve_typed(target):
         return _resolve_typed_kind("codex", target)
     if errors:
         # An ambiguous or unverifiable side could be the one meant: never guess.
-        raise ResolveError(
-            "%s; pass cc:%s or codex:%s to pick the kind" % (errors[0], target, target)
+        raise ResolveAmbiguousKind(
+            "%s; pick the kind" % errors[0],
+            ["%s:%s" % (kind, target) for kind in BUDDY_KINDS],
         )
     if len(found) > 1:
-        raise ResolveError(
-            "%r matches both %s; pass one of them"
-            % (target, " and ".join("%s:%s" % (i["kind"], i["uuid"]) for i in found))
+        # Routine for an attached Codex thread: its UUID also names its shim's
+        # Claude-facing registry record.
+        choices = ["%s:%s" % (i["kind"], i["uuid"]) for i in found]
+        raise ResolveAmbiguousKind(
+            "%r matches both %s; pick one" % (target, " and ".join(choices)),
+            choices,
         )
     if not found:
         raise ResolveError(
@@ -4928,6 +4975,11 @@ def cmd_buddy(args):
             return 2
         try:
             buddy = resolve_typed(args.target)
+        except ResolveAmbiguousKind as exc:
+            sys.stderr.write("error: %s. Retry with one of:\n" % exc)
+            for choice in exc.choices:
+                sys.stderr.write("  %s\n" % _buddy_set_command(choice, args))
+            return 1
         except ResolveError as exc:
             sys.stderr.write("error: %s\n" % exc)
             return 1
@@ -4949,6 +5001,16 @@ def cmd_buddy(args):
         return 1
     _print_buddy(args, rec, buddy_status(rec["buddy"], attach=(action == "ping")))
     return 0
+
+
+def _buddy_set_command(target, args):
+    """The `buddy set` command line for ``target``, keeping the user's options."""
+    argv = ["peers.py", "buddy", "set", target]
+    if getattr(args, "uses", None) is not None:
+        argv += ["--uses", args.uses]
+    if getattr(args, "as_identity", None):
+        argv += ["--as", args.as_identity]
+    return " ".join(shlex.quote(part) for part in argv)
 
 
 def _owner_verified_gone(owner):
@@ -6141,8 +6203,8 @@ def build_parser():
     p_buddy.add_argument("--json", action="store_true", help="machine-readable output")
     buddy_sub = p_buddy.add_subparsers(dest="buddy_cmd")
 
-    def buddy_action(name, help_text):
-        parser = buddy_sub.add_parser(name, help=help_text)
+    def buddy_action(name, help_text, **kwargs):
+        parser = buddy_sub.add_parser(name, help=help_text, **kwargs)
         # SUPPRESS: an option given before the action must survive the subparser.
         parser.add_argument(
             "--as", dest="as_identity", default=argparse.SUPPRESS,
@@ -6155,7 +6217,19 @@ def build_parser():
         return parser
 
     buddy_action("show", "report the buddy's status without attaching")
-    p_buddy_set = buddy_action("set", "bind a buddy by name or UUID")
+    p_buddy_set = buddy_action(
+        "set",
+        "bind a buddy by name or UUID",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "A bare name or UUID that is both a Claude session and a Codex thread\n"
+            "(an attached Codex thread's UUID also names its shim) is refused;\n"
+            "prefix the kind:\n"
+            "  peers.py buddy set codex:<uuid>\n"
+            "  peers.py buddy set cc:<uuid>\n"
+            "  peers.py buddy set codex:my-thread --uses review,brainstorm"
+        ),
+    )
     p_buddy_set.add_argument(
         "target", metavar="[cc:|codex:|@]name|uuid", help="the peer to bind"
     )

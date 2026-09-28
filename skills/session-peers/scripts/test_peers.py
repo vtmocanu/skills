@@ -2395,6 +2395,32 @@ class TestRegistration(Base):
         self.set_holder(live_rollout)
         return live_tid, (dead_a, dead_b)
 
+    def test_up_on_an_unknown_uuid_names_the_evidence_it_checked(self):
+        self.make_state_db([])
+        tid = new_uuid()
+        rc, _out, err = self.cli("up", tid)
+        self.assertEqual(rc, 1)
+        self.assertIn("no Codex thread with id %s" % tid, err)
+        self.assertIn("no row in the threads table", err)
+        self.assertIn("no writer lock at", err)
+        self.assertIn("no rollout under", err)
+        self.assertIn("`peers.py list` and `peers.py doctor`", err)
+        self.assertNotIn("retry", err.lower())
+        self.assertEqual(peers.read_registered(), {})
+
+    def test_up_on_a_locked_thread_without_a_state_row_says_so(self):
+        # Seen on Codex 0.158.0: the writer lock is held before the thread's
+        # state-DB row exists, and discovery reads only the row.
+        self.make_state_db([])
+        tid = new_uuid()
+        self.set_holder(peers.writer_lock_path(tid), pid=4321)
+        rc, _out, err = self.cli("up", tid)
+        self.assertEqual(rc, 1)
+        self.assertIn("held by pid 4321", err)
+        self.assertIn("cannot attach the thread until Codex writes one", err)
+        self.assertIn("`peers.py list` and `peers.py doctor`", err)
+        self.assertNotIn("retry", err.lower())
+
     def test_budget_reset_by_name_picks_the_live_thread_over_past_namesakes(self):
         # Codex reuses thread titles: the live `helper` shared its name with
         # past threads, and resolving across dead ones made it "ambiguous",
@@ -5588,6 +5614,33 @@ class TestBuddyRecords(BuddyBase):
         rc, _out, err = self.buddy(owner, "set", "codex:twin")
         self.assertEqual(rc, 0, err)
 
+    def test_a_uuid_naming_a_codex_thread_and_its_shim_prints_retry_commands(self):
+        # An attached Codex thread's UUID also names its shim's registry record.
+        tid, _rollout = self.one_thread(name="fail-codex")
+        self.add_listener(name="fail-codex", session_id=tid)
+        owner = "cc:%s" % new_uuid()
+        rc, _out, err = self.buddy(owner, "set", tid, "--uses", "review,brainstorm")
+        self.assertEqual(rc, 1)
+        self.assertIn("matches both cc:%s and codex:%s" % (tid, tid), err)
+        for kind in ("cc", "codex"):
+            self.assertIn(
+                "  peers.py buddy set %s:%s --uses review,brainstorm --as %s"
+                % (kind, tid, owner),
+                err,
+            )
+        self.assertFalse(self.record_path(owner).exists())
+        rc, _out, err = self.buddy(
+            owner, "set", "codex:%s" % tid, "--uses", "review,brainstorm"
+        )
+        self.assertEqual(rc, 0, err)
+
+    def test_buddy_set_help_shows_the_prefix_forms(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit):
+            peers.main(["buddy", "set", "--help"])
+        self.assertIn("peers.py buddy set codex:<uuid>", out.getvalue())
+        self.assertIn("peers.py buddy set cc:<uuid>", out.getvalue())
+
     def test_a_bare_name_is_refused_when_codex_discovery_is_unavailable(self):
         # No state DB: a Codex thread by that name cannot be ruled out.
         sid = new_uuid()
@@ -5595,7 +5648,9 @@ class TestBuddyRecords(BuddyBase):
         owner = "codex:%s" % new_uuid()
         rc, _out, err = self.buddy(owner, "set", "cc-other")
         self.assertEqual(rc, 1)
-        self.assertIn("pass cc:cc-other or codex:cc-other", err)
+        self.assertIn("pick the kind", err)
+        self.assertIn("peers.py buddy set cc:cc-other --as %s" % owner, err)
+        self.assertIn("peers.py buddy set codex:cc-other --as %s" % owner, err)
         rc, _out, err = self.buddy(owner, "set", "cc:cc-other")
         self.assertEqual(rc, 0, err)
 

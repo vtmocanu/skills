@@ -110,6 +110,12 @@ Partial live check: 2026-09-09, Claude Code 2.1.266, Codex CLI 0.153.4.
       request and intermediate output before the first turn completed. The old
       claim that the file appears only after completion was too strong;
       liveness must tolerate an absent file without assuming when it appears.
+    - 2026-09-28, Codex 0.158.0 app-server daemon: a thread's writer lock was
+      held with NO `threads` row and no rollout, so discovery (which reads the
+      DB) cannot see it and `up <uuid>` fails "no Codex thread with id". A
+      field report saw the same thread register minutes later with no other
+      change. The lock proves liveness only for a thread that already has a
+      row; when the row appears is unmeasured.
 16. **SessionStart identity.** Install the auto-attach hook, start a new unnamed
     root thread, and verify the hook attaches the exact `session_id` under its
     `codex-<uuid prefix>` fallback. Rename it to a valid peer name and verify the
