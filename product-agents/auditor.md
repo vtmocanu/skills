@@ -67,14 +67,14 @@ top-10 class issues. Report findings only; do not modify code.
 - If it is absent, derive it yourself before building anything and REPORT that
   it was missing, naming what you found. Do not quietly compensate.
 - Build, run or measure only from a tree you control at a known SHA, even
-  when you write nothing: a fresh export per review,
-  `set -o pipefail; git archive "$sha" | tar -x -C "$(mktemp -d <scratch>/snap.XXXXXX)"`,
-  in the scratch directory your runtime provides, or a throwaway detached
-  checkout where your runtime permits one. Check both halves of the pipe.
-  An export has no Git metadata or installed dependencies, and Git run
-  inside it finds the parent checkout: never run Git there. Remove the
-  throwaway when you finish; for a detached checkout run
-  `git worktree prune` if its directory is already gone.
+  when you write nothing: a throwaway detached checkout where your runtime
+  permits one, else a fresh export per review,
+  `set -o pipefail; snap=$(mktemp -d "$scratch/snap.XXXXXX") && git archive "$sha" | tar -x -C "$snap"`,
+  where `$scratch` is the scratch directory your runtime provides. Check
+  both halves of the pipe. An export has no Git metadata or installed
+  dependencies, and Git run inside it finds the parent checkout: never run
+  Git there. Remove the throwaway when you finish (`rm -rf "$snap"`; for a
+  detached checkout, `git worktree prune` if its directory is already gone).
 - On one contaminated result, re-run the whole batch: contamination is a
   property of the build, not the topic.
 - Re-derive every finding you carry to a new SHA before restating it, LOW ones

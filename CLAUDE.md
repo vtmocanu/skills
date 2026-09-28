@@ -13,9 +13,10 @@ roles it ships here (that stays in uzi, so this note never goes stale).
 
 - **Bumping a `version:` is fine** and is the intended signal: uzi's bot opens a
   manifest-bump PR that reddens uzi's drift test until a maintainer copies the new
-  body. Since uzi PRD #1849, uzi's builtins copy the published `product-agents/`
-  bodies **verbatim** (uzi-only rules live in uzi's worker prompt), and a uzi
-  admin can also sync `product-agents/` straight into a live instance.
+  body. uzi PRD #1849 moves uzi's builtins to **verbatim** copies of the
+  published `product-agents/` bodies (uzi-only rules in uzi's worker prompt);
+  until its resync lands, uzi's bodies are still adapted copies. A uzi admin can
+  also sync `product-agents/` straight into a live instance.
 - **Keep every body runtime-neutral.** It must read correctly on a laptop and
   on a uzi worker: name "the scratch directory your runtime provides" rather than
   a path, allow a detached checkout only "where your runtime permits one", and
