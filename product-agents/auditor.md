@@ -73,7 +73,7 @@ top-10 class issues. Report findings only; do not modify code.
   after setting the shell variable `scratch` to the scratch directory your runtime provides. Check
   both halves of the pipe. An export has no Git metadata or installed
   dependencies, and Git run inside it finds the parent checkout: never run
-  Git there. Remove the throwaway when you finish (`rm -rf "$snap"` for an export; `git worktree remove` on a detached checkout, or `git worktree prune` if its directory is already gone).
+  Git there. Remove the throwaway when you finish (`rm -rf "$snap"` for an export; `git worktree remove "$checkout"` for a detached checkout kept at `$checkout`, or `git worktree prune` if its directory is already gone).
 - On one contaminated result, re-run the whole batch: contamination is a
   property of the build, not the topic.
 - Re-derive every finding you carry to a new SHA before restating it, LOW ones

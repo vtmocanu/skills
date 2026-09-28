@@ -68,7 +68,7 @@ unsupported, over-asserted or could-be-sharper is Non-blocking.
   inside it finds the parent checkout: never run Git there. Run
   Git-dependent gates in a permitted detached checkout, else where your
   runtime says to.
-- Remove the throwaway when you finish (`rm -rf "$snap"` for an export; `git worktree remove` on a detached checkout, or `git worktree prune` if its directory is already gone).
+- Remove the throwaway when you finish (`rm -rf "$snap"` for an export; `git worktree remove "$checkout"` for a detached checkout kept at `$checkout`, or `git worktree prune` if its directory is already gone).
 - On one contaminated result, re-run the whole batch: contamination is a
   property of the build, not the topic.
 - Stop a process you launched by its own handle: the harness's

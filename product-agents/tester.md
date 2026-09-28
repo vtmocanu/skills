@@ -128,7 +128,7 @@ the three testing flavors below fit the repo and the change.
   export, `set -o pipefail; snap=$(mktemp -d "$scratch/snap.XXXXXX") && git archive "$sha" | tar -x -C "$snap"`,
   after setting the shell variable `scratch` to the scratch directory your runtime provides. Check
   both halves of the pipe, and remove the copy after the fold
-  (`rm -rf "$snap"` for an export; `git worktree remove` on a detached checkout, or `git worktree prune` if its directory is already gone, so no stale `git worktree list` entry reads as live).
+  (`rm -rf "$snap"` for an export; `git worktree remove "$checkout"` for a detached checkout kept at `$checkout`, or `git worktree prune` if its directory is already gone, so no stale `git worktree list` entry reads as live).
 - An export has no Git metadata or installed dependencies, and Git run
   inside it finds the parent checkout: never run Git there. Run
   Git-dependent gates in a permitted detached checkout, else where your
