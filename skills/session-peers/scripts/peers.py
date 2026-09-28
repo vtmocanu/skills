@@ -78,6 +78,10 @@ MAX_TEXT_CHARS = 1048576
 REPLY_BUDGET = 3
 # `budget allow` may raise one requester's cap to at most this many replies.
 BUDGET_ALLOW_MAX = 20
+# What a running shim's code supports, saved in its own state file (never the
+# vendor-read registry record). A shim keeps the code it started with, so a
+# command whose marker only newer shims consume checks this first.
+SHIM_FEATURES = ["budget_allow"]
 REPLY_BUDGET_WINDOW_DEFAULT = 30 * 60.0
 REQUEST_TIMEOUT_DEFAULT = 10 * 60.0
 REQUEST_TIMEOUT_MAX = 60 * 60.0
@@ -2447,6 +2451,7 @@ class Shim:
                 "thread_name": self.thread_name,
                 "name_since": int(self.name_since * 1000),
                 "shim_pid": os.getpid(),
+                "shim_features": list(SHIM_FEATURES),
                 "tail": self.tail.state(),
                 "processed_turns": list(self.processed_turns),
                 "budgets": self._bound(self.budgets),
@@ -4583,6 +4588,16 @@ def cmd_budget_allow(args):
     if failure:
         sys.stderr.write("error: %s\n" % failure[1])
         return failure[0]
+    pid = shim_pid(tid)
+    if pid and not shim_supports(tid, pid, "budget_allow"):
+        sys.stderr.write(
+            "error: cannot verify the running shim for %s (pid %d) supports "
+            "allowances; a shim started from an older peers.py never reads the "
+            "grant, so the cap would stay %d. Restart it: `peers.py down %s && "
+            "peers.py up %s` (a fresh `up` also resets the budget), then grant "
+            "again\n" % (tid, pid, REPLY_BUDGET, tid, tid)
+        )
+        return 1
     path = budget_allow_path(tid)
     total = args.replies
     pending = read_json(path, None)
@@ -4610,9 +4625,22 @@ def cmd_budget_allow(args):
         "(a total for this sequence; replies already delivered still count)"
         % (tid, max(REPLY_BUDGET, total), sid)
     )
-    if not shim_pid(tid):
+    if not pid:
         print("no shim is running for %s; the grant applies once one starts" % tid)
     return 0
+
+
+def shim_supports(thread_id, pid, feature):
+    """True only when the state file proves shim ``pid`` has ``feature``.
+
+    A shim saves its state, pid included, before it serves. Missing state, or
+    state naming another pid, proves nothing about the running code, so it
+    counts as unsupported rather than risking a grant nothing reads.
+    """
+    state = read_json(thread_state_path(thread_id), None)
+    if not isinstance(state, dict) or state.get("shim_pid") != pid:
+        return False
+    return feature in (state.get("shim_features") or [])
 
 
 # --------------------------------------------------------------------------

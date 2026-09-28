@@ -73,8 +73,16 @@ buddy, raise the reply cap instead of resetting it every round:
 ```
 
 `N` is the total for the current sequence (maximum 20); repeating a grant does
-not replenish it, and the allowance ends with the sequence. Raising it may
-deliver a held reply at once.
+not replenish it. Raising it may deliver a held reply at once.
+
+- The allowance ends with the sequence: another peer's request, a direct Codex
+  turn, a reply more than 30 minutes after the previous one, `budget reset`, or
+  `up`.
+- Reset before granting, never after: a reset drops the grant. `budget reset`
+  then `budget allow` back to back is safe.
+- `allow` exits 1 unless the running shim's state proves it reads grants (a
+  shim keeps the code it started with). Run `peers.py down <uuid>`, then
+  `peers.py up <uuid>`, then grant again.
 
 ## If you are Claude Code
 
@@ -147,16 +155,17 @@ it does not bypass the busy thread's queue.
   When messages cross, match it before acting on the reply. Strip that first
   line before parsing a reply body as exact text or JSON. Correlated
   `ask`/`await` replies and `@name` replies to another session carry no header.
-- **Reply budget**: the shim delivers at most 3 consecutive replies to one peer
-  inside a 30-minute idle window. Your new message does NOT reset it: an
-  unattended loop also sends one every round, so that is the pattern the guard
-  stops. A direct Codex turn, a request from another peer, the idle window,
+- **Reply budget**: the shim delivers at most 3 consecutive replies to one peer,
+  each within 30 minutes of the previous one (turn time counts). Your new
+  message does NOT reset it: an unattended loop also sends one every round, so
+  that is the pattern the guard stops. A direct Codex turn, a request from
+  another peer, a reply more than 30 minutes after the previous one,
   `peers.py budget reset <name|uuid>`, or a fresh `up` resets the sequence.
   A blocked reply is HELD, not lost: the latest one per peer is kept (mode-0600
   state, never the log) and `budget reset` releases it, marked
   `[held reply, in reply to message <msg_id>]`, once the shim is up. Any other
-  reset discards it, and the shim purges it from its state once the idle window
-  passes. The shim emits a correlated `failed` status
+  reset discards it, and the shim purges it from its state 30 minutes after
+  holding it. The shim emits a correlated `failed` status
   (surfaced only when the requester tracks the originating message) and one
   plain, non-replyable notice per sequence naming the reset command.
 - **Supervised multi-round work** (a user-requested review loop): first run
