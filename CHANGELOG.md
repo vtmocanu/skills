@@ -21,6 +21,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- `agent-team` roles: scratch, gate-log and review-snapshot guidance is
+  runtime-neutral (use the scratch directory your runtime provides; a detached
+  checkout only where the runtime permits one; stage ignored files by explicit
+  path), and every "tell the lead" line names the reachable recipient
+  (`SendMessage` to `main`). Bumps architect, auditor, coder, documenter,
+  fact-checker, reviewer, spec-keeper, tester, tui-ux, ux-designer and web-ux.
 - `session-peers`: when `SendMessage` cannot reach a Codex peer or `ListAgents`
   omits it, check `peers.py list` for a live thread with no active shim and
   re-attach it with `peers.py up <uuid>`.
