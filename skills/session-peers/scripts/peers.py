@@ -5767,28 +5767,96 @@ def topic_prune_all():
             _topic_state(item["topic"], log_path, meta_path, time.time())
 
 
+def process_ancestors(pid=None, limit=64):
+    """Ancestor pids of ``pid`` (default: this process), nearest first, or
+    None when the process table cannot be read."""
+    rc, out, _err = run_cmd(["ps", "-axo", "pid=,ppid="])
+    if rc != 0:
+        return None
+    parent = {}
+    for line in out.splitlines():
+        fields = line.split()
+        if len(fields) == 2 and fields[0].isdigit() and fields[1].isdigit():
+            parent[int(fields[0])] = int(fields[1])
+    current = os.getpid() if pid is None else pid
+    if current not in parent:
+        return None
+    chain = []
+    while len(chain) < limit:
+        current = parent.get(current)
+        if not current or current in chain:
+            break
+        chain.append(current)
+    return chain
+
+
+def _codex_holder_pid(thread_id):
+    threads, _schema_ok = codex_threads()
+    for thread in threads:
+        if thread.get("id") == thread_id:
+            return thread.get("holder_pid")
+    return None
+
+
 def topic_sender(args):
     """This session's identity for a post, or None (anonymous).
 
     The same sources `send` uses: the Claude messaging socket or session id,
-    then the Codex thread id. ``--as`` overrides when detection cannot work.
+    and the Codex thread id. Either agent can inherit the other's variables
+    when started from its shell, so with both present the nearer ancestor
+    process owns the post; unverifiable means refused. ``--as`` overrides.
     """
     explicit = getattr(args, "as_identity", None)
     if explicit:
         ident = parse_typed(explicit)
+        return _topic_named(ident)
+    claude = None
+    sock = os.environ.get("CLAUDE_CODE_MESSAGING_SOCKET")
+    rec = claude_record_by_socket(sock) if sock else None
+    if rec and is_uuid(rec.get("sessionId")):
+        claude = {"kind": "cc", "uuid": rec["sessionId"], "name": rec.get("name"),
+                  "pid": rec.get("pid")}
     else:
-        sock = os.environ.get("CLAUDE_CODE_MESSAGING_SOCKET")
-        rec = claude_record_by_socket(sock) if sock else None
-        if rec and is_uuid(rec.get("sessionId")):
-            return {"kind": "cc", "uuid": rec["sessionId"], "name": rec.get("name")}
         sid = os.environ.get("CLAUDE_CODE_SESSION_ID")
-        tid = _thread_from_args(args)
         if is_uuid(sid):
-            ident = {"kind": "cc", "uuid": sid}
-        elif tid:
-            ident = {"kind": "codex", "uuid": tid}
-        else:
-            return None
+            matches = claude_record_by_target(sid)
+            only = matches[0] if len(matches) == 1 else {}
+            claude = {"kind": "cc", "uuid": sid, "name": only.get("name"),
+                      "pid": only.get("pid")}
+    tid = _thread_from_args(args)
+    codex = _topic_named({"kind": "codex", "uuid": tid}) if tid else None
+    if claude and codex:
+        owner = _nearest_owner(claude.get("pid"), _codex_holder_pid(tid))
+        if owner is None:
+            raise TopicError(
+                "this environment names both Claude session %s and Codex thread "
+                "%s, and which one runs this command cannot be verified; pass "
+                "--as cc:%s or --as codex:%s" % (claude["uuid"], tid, claude["uuid"], tid),
+                2,
+            )
+        chosen = claude if owner == "cc" else codex
+    else:
+        chosen = claude or codex
+    if chosen is None:
+        return None
+    chosen.pop("pid", None)
+    return chosen
+
+
+def _nearest_owner(claude_pid, codex_pid):
+    """``cc`` or ``codex``: whose process is the nearer ancestor, else None."""
+    ancestors = process_ancestors()
+    if not ancestors:
+        return None
+    for pid in ancestors:
+        if claude_pid and pid == claude_pid:
+            return "cc"
+        if codex_pid and pid == codex_pid:
+            return "codex"
+    return None
+
+
+def _topic_named(ident):
     if ident["kind"] == "cc":
         matches = claude_record_by_target(ident["uuid"])
         ident["name"] = matches[0].get("name") if len(matches) == 1 else None

@@ -6437,6 +6437,56 @@ class TestTopics(Base):
         )
         self.assertEqual(entries[0]["from_name"], "cc-poster")
 
+    def both_identities(self, pid):
+        """A live Claude session (record pid ``pid``) and a Codex thread, both
+        named in this environment."""
+        sid, tid = new_uuid(), new_uuid()
+        listener, _rec = self.add_listener(name="cc-poster", session_id=sid, pid=pid)
+        os.environ["CLAUDE_CODE_MESSAGING_SOCKET"] = listener.path
+        os.environ["CODEX_THREAD_ID"] = tid
+        return sid, tid
+
+    def process_view(self, ancestors, holder):
+        for name, fake in (
+            ("process_ancestors", lambda pid=None, limit=64: ancestors),
+            ("_codex_holder_pid", lambda _tid: holder),
+        ):
+            self.addCleanup(setattr, peers, name, getattr(peers, name, None))
+            setattr(peers, name, fake)
+
+    def test_with_both_identities_the_nearer_ancestor_posts(self):
+        claude_pid = os.getpid()
+        sid, tid = self.both_identities(claude_pid)
+        self.process_view([100, claude_pid, 7777, 1], holder=7777)
+        self.assertEqual(self.post("--message", "claude is nearer")[0], 0)
+        self.process_view([100, 7777, claude_pid, 1], holder=7777)
+        self.assertEqual(self.post("--message", "codex is nearer")[0], 0)
+        entries = self.tail()["entries"]
+        self.assertEqual(
+            [(e["from_kind"], e["from_sid"]) for e in entries],
+            [("cc", sid), ("codex", tid)],
+        )
+
+    def test_with_both_identities_an_unverifiable_owner_is_refused(self):
+        sid, tid = self.both_identities(os.getpid())
+        for ancestors, holder in (([100, 1], 7777), (None, 7777), ([], None)):
+            self.process_view(ancestors, holder)
+            rc, _out, err = self.post("--message", "who am I")
+            self.assertEqual(rc, 2, (ancestors, holder))
+            self.assertIn("cannot be verified", err)
+            self.assertIn("--as cc:%s or --as codex:%s" % (sid, tid), err)
+        self.assertEqual(self.tail()["entries"], [])
+        rc, _out, err = self.post("--message", "explicit", "--as", "codex:%s" % tid)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self.tail()["entries"][0]["from_sid"], tid)
+
+    def test_process_ancestors_walks_the_ps_table(self):
+        me = os.getpid()
+        self._write_fake("ps", "print('  1 0\\n  50 1\\n  60 50\\n %d 60')\n" % me)
+        self.assertEqual(peers.process_ancestors(), [60, 50, 1])
+        self._write_fake("ps", "raise SystemExit(1)\n")
+        self.assertIsNone(peers.process_ancestors())
+
     def test_json_file_is_stored_as_data(self):
         path = self.root / "payload.json"
         path.write_text(json.dumps({"state": "merged", "n": 3}))

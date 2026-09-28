@@ -391,6 +391,9 @@ $S topic list [--json]
 
 - `post` records `seq`, `ts`, the sender (resolved like `send`; anonymous warns),
   `kind`, and `text` or JSON `data`. Entries share the message size cap.
+- With both Claude and Codex identities in the environment, the nearer ancestor
+  process posts; if that cannot be verified, `post` exits 2: pass
+  `--as cc:<uuid>` or `--as codex:<uuid>`.
 - `tail --since SEQ` prints entries after `SEQ` in order and ends with
   `next: --since N`; keep `N` as the cursor. Without `--since` it prints the
   last `N` (default 20).
