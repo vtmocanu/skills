@@ -61,8 +61,8 @@ unsupported, over-asserted or could-be-sharper is Non-blocking.
 - Build, run or measure only from a tree you control at a known SHA, even
   when you write nothing: a throwaway detached checkout where your runtime
   permits one, else a fresh export per review,
-  `set -o pipefail; snap=$(mktemp -d "$scratch/snap.XXXXXX") && git archive "$sha" | tar -x -C "$snap"`,
-  after setting the shell variable `scratch` to the scratch directory your runtime provides. Check
+  `set -o pipefail; snap=$(mktemp -d "${scratch:?}/snap.XXXXXX") && git archive "$sha" | tar -x -C "$snap"`,
+  after setting the shell variable `scratch` to the scratch directory your runtime provides, else to a directory inside the worktree that the repo ignores or a temporary directory your sandbox allows. Check
   both halves of the pipe.
 - An export has no Git metadata or installed dependencies, and Git run
   inside it finds the parent checkout: never run Git there. Run

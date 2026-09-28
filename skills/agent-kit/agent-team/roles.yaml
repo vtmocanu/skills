@@ -83,7 +83,7 @@ roles:
 
       - Run every gate slot named in your `## For this repo` tail (format, lint, typecheck, test, and any others), not just the tests, and report your own failures rather than leave them for the tester.
       - Prefer each slot's check-mode form (`--check`, `fmt-check`) over the fixing form, so a gate run rewrites nothing.
-      - Run a gate once, to a log inside the worktree, then read the log: `log=$(mktemp "$scratch/gate-log.XXXXXX"); rc=0; <gate command> > "$log" 2>&1 || rc=$?; echo "EXIT=$rc" >> "$log"; test "$rc" -eq 0`. `mktemp` gives every invocation its own file even inside one shell, and `|| rc=$?` records a failure under `set -e` instead of exiting before the status is written; Set the shell variable `scratch` first: the scratch directory your runtime provides, else a directory inside the worktree that the repo already ignores; if none exists, add one to the file `git rev-parse --git-path info/exclude` prints (shared by every linked worktree of the clone) rather than editing a tracked ignore file, so a shared worktree never shows another agent your artifact. An ignore rule keeps ordinary staging clean, but `git add -f` can still stage the file, so stage by explicit path. A sandbox may confine reads to the worktree, which is why it stays inside it. Never rerun the same gate on the same tree to read its output differently; a second run is the same measurement paid twice, and under contention a flakier one.
+      - Run a gate once, to a log inside the worktree, then read the log: `log=$(mktemp "${scratch:?}/gate-log.XXXXXX"); rc=0; <gate command> > "$log" 2>&1 || rc=$?; echo "EXIT=$rc" >> "$log"; test "$rc" -eq 0`. `mktemp` gives every invocation its own file even inside one shell, and `|| rc=$?` records a failure under `set -e` instead of exiting before the status is written; Set the shell variable `scratch` first: the scratch directory your runtime provides when it sits inside the worktree, else a directory inside the worktree that the repo already ignores; if none exists, add one to the file `git rev-parse --git-path info/exclude` prints (shared by every linked worktree of the clone) rather than editing a tracked ignore file, so a shared worktree never shows another agent your artifact. An ignore rule keeps ordinary staging clean, but `git add -f` can still stage the file, so stage by explicit path. A sandbox may confine reads to the worktree, which is why it stays inside it. Never rerun the same gate on the same tree to read its output differently; a second run is the same measurement paid twice, and under contention a flakier one.
       - Verify that form fails on a difference: bare listers like `gofmt -l` print the offending files yet exit 0, so branch on output, not exit status.
       - Confirm the change matches the spec or task, no unrelated files were modified, and the repo's CONTRIBUTING.md or CLAUDE.md commit rules hold.
       - Confirm `git status` is clean FOR YOUR PATHS; never report done with uncommitted changes of your own. In parallel mode you do not commit at all.
@@ -187,8 +187,8 @@ roles:
       - Build, run or measure only from a tree you control at a known SHA, even
         when you write nothing: a throwaway detached checkout where your runtime
         permits one, else a fresh export per review,
-        `set -o pipefail; snap=$(mktemp -d "$scratch/snap.XXXXXX") && git archive "$sha" | tar -x -C "$snap"`,
-        after setting the shell variable `scratch` to the scratch directory your runtime provides. Check
+        `set -o pipefail; snap=$(mktemp -d "${scratch:?}/snap.XXXXXX") && git archive "$sha" | tar -x -C "$snap"`,
+        after setting the shell variable `scratch` to the scratch directory your runtime provides, else to a directory inside the worktree that the repo ignores or a temporary directory your sandbox allows. Check
         both halves of the pipe.
       - An export has no Git metadata or installed dependencies, and Git run
         inside it finds the parent checkout: never run Git there. Run
@@ -327,8 +327,8 @@ roles:
       - Build, run or measure only from a tree you control at a known SHA, even
         when you write nothing: a throwaway detached checkout where your runtime
         permits one, else a fresh export per review,
-        `set -o pipefail; snap=$(mktemp -d "$scratch/snap.XXXXXX") && git archive "$sha" | tar -x -C "$snap"`,
-        after setting the shell variable `scratch` to the scratch directory your runtime provides. Check
+        `set -o pipefail; snap=$(mktemp -d "${scratch:?}/snap.XXXXXX") && git archive "$sha" | tar -x -C "$snap"`,
+        after setting the shell variable `scratch` to the scratch directory your runtime provides, else to a directory inside the worktree that the repo ignores or a temporary directory your sandbox allows. Check
         both halves of the pipe. An export has no Git metadata or installed
         dependencies, and Git run inside it finds the parent checkout: never run
         Git there. Remove the throwaway when you finish (`rm -rf "$snap"` for an export; `git worktree remove "$checkout"` for a detached checkout kept at `$checkout`, or `git worktree prune` if its directory is already gone).
@@ -452,7 +452,7 @@ roles:
         can flip a successful `grep -q` to exit 141.
       - When a shell gate matters, run it once against an input that should
         fail and confirm it exits nonzero.
-      - Run the real gate once, to a log inside the worktree, then read the log: `log=$(mktemp "$scratch/gate-log.XXXXXX"); rc=0; <gate command> > "$log" 2>&1 || rc=$?; echo "EXIT=$rc" >> "$log"; test "$rc" -eq 0`. `mktemp` gives every invocation its own file even inside one shell, and `|| rc=$?` records a failure under `set -e` instead of exiting before the status is written; Set the shell variable `scratch` first: the scratch directory your runtime provides, else a directory inside the worktree that the repo already ignores; if none exists, add one to the file `git rev-parse --git-path info/exclude` prints (shared by every linked worktree of the clone) rather than editing a tracked ignore file, so a shared worktree never shows another agent your artifact. An ignore rule keeps ordinary staging clean, but `git add -f` can still stage the file, so stage by explicit path. A sandbox may confine reads to the worktree, which is why it stays inside it. Never rerun it on the same tree to read its output differently; a second run is the same measurement paid twice, and under contention a flakier one. The positive-control probe above is a separate run against a mutated throwaway tree (a throwaway copy), never a rerun of the gate on the tree under test.
+      - Run the real gate once, to a log inside the worktree, then read the log: `log=$(mktemp "${scratch:?}/gate-log.XXXXXX"); rc=0; <gate command> > "$log" 2>&1 || rc=$?; echo "EXIT=$rc" >> "$log"; test "$rc" -eq 0`. `mktemp` gives every invocation its own file even inside one shell, and `|| rc=$?` records a failure under `set -e` instead of exiting before the status is written; Set the shell variable `scratch` first: the scratch directory your runtime provides when it sits inside the worktree, else a directory inside the worktree that the repo already ignores; if none exists, add one to the file `git rev-parse --git-path info/exclude` prints (shared by every linked worktree of the clone) rather than editing a tracked ignore file, so a shared worktree never shows another agent your artifact. An ignore rule keeps ordinary staging clean, but `git add -f` can still stage the file, so stage by explicit path. A sandbox may confine reads to the worktree, which is why it stays inside it. Never rerun it on the same tree to read its output differently; a second run is the same measurement paid twice, and under contention a flakier one. The positive-control probe above is a separate run against a mutated throwaway tree (a throwaway copy), never a rerun of the gate on the tree under test.
 
 
       ## What a green does not mean
@@ -522,8 +522,8 @@ roles:
         about the interval another agent gated or read in.
       - Fold in a fresh throwaway copy of the SHA you were given, one per fold:
         a throwaway detached checkout where your runtime permits one, else an
-        export, `set -o pipefail; snap=$(mktemp -d "$scratch/snap.XXXXXX") && git archive "$sha" | tar -x -C "$snap"`,
-        after setting the shell variable `scratch` to the scratch directory your runtime provides. Check
+        export, `set -o pipefail; snap=$(mktemp -d "${scratch:?}/snap.XXXXXX") && git archive "$sha" | tar -x -C "$snap"`,
+        after setting the shell variable `scratch` to the scratch directory your runtime provides, else to a directory inside the worktree that the repo ignores or a temporary directory your sandbox allows. Check
         both halves of the pipe, and remove the copy after the fold
         (`rm -rf "$snap"` for an export; `git worktree remove "$checkout"` for a detached checkout kept at `$checkout`, or `git worktree prune` if its directory is already gone, so no stale `git worktree list` entry reads as live).
       - An export has no Git metadata or installed dependencies, and Git run
@@ -886,7 +886,7 @@ roles:
       - Behavior claims (a command works, tests pass, the build is green): run the read-only command or inspect the artifact (binary timestamp, git log, CI status).
       - External claims (versions, URLs, API shapes, quotes, dates): WebFetch the primary source, and prefer official docs over blogs.
       - Work adversarially: try to refute each claim before accepting it. Plausible, repeated or confidently-worded claims get no credit.
-      - Read-only by default: never push, merge, mutate external systems or edit files in the shared worktree. The one write you make without asking is a throwaway copy of the reviewed commit that you create and remove yourself (the defect fold below); any other write, surface the command to `main` and wait for approval.
+      - Read-only by default: never push, merge, mutate external systems or edit files in the shared worktree. The writes you make without asking are a throwaway copy of the reviewed commit (the defect fold below) and new scratch artifacts, never an overwrite of an existing file, each created and removed by you; any other write, surface the command to `main` and wait for approval.
       - Keep scratch artifacts in the scratch directory your runtime provides, else outside the worktree or on a path the repo ignores, and remove them when done: a read-only role's premise is that `git status --porcelain` stays empty.
 
       ## Verdicts
@@ -916,7 +916,7 @@ roles:
 
       ## Two techniques, whenever the change gives you the opening
 
-      - A test guarding a specific defect claims it fails when that defect is present, so prove it: reintroduce the defect at the call site, not in a shared helper, in a throwaway copy of the reviewed commit (the only write the read-only rule above allows), never in the shared tree. Make the copy a throwaway detached checkout where your runtime permits one, else a fresh export, `set -o pipefail; snap=$(mktemp -d "$scratch/snap.XXXXXX") && git archive "$sha" | tar -x -C "$snap"`, after setting the shell variable `scratch` to the scratch directory your runtime provides; remove it afterwards (`rm -rf "$snap"` for an export, `git worktree remove "$checkout"` for a detached checkout kept at `$checkout`). An export has no Git metadata or installed dependencies, and Git run inside it finds the parent checkout, so never run Git there; report a fold the export cannot run rather than claiming it. Confirm the test fails for the stated reason, then remove the throwaway and show the original worktree untouched (`git status --porcelain` empty, HEAD unmoved). A regression test never seen to fail is decoration.
+      - A test guarding a specific defect claims it fails when that defect is present, so prove it: reintroduce the defect at the call site, not in a shared helper, in a throwaway copy of the reviewed commit (the only write the read-only rule above allows), never in the shared tree. Make the copy a throwaway detached checkout where your runtime permits one, else a fresh export, `set -o pipefail; snap=$(mktemp -d "${scratch:?}/snap.XXXXXX") && git archive "$sha" | tar -x -C "$snap"`, after setting the shell variable `scratch` to the scratch directory your runtime provides, else to a directory inside the worktree that the repo ignores or a temporary directory your sandbox allows; remove it afterwards (`rm -rf "$snap"` for an export, `git worktree remove "$checkout"` for a detached checkout kept at `$checkout`). An export has no Git metadata or installed dependencies, and Git run inside it finds the parent checkout, so never run Git there; report a fold the export cannot run rather than claiming it. Confirm the test fails for the stated reason, then remove the throwaway and show the original worktree untouched (`git status --porcelain` empty, HEAD unmoved). A regression test never seen to fail is decoration.
       - A citation of an external standard, spec or normative criterion (a WCAG success criterion, an RFC clause, a claimed contrast ratio) is verified against the source text, not the document citing it. Fetch the normative wording and confirm both that it says what the citation claims and that it applies here. Recompute a claimed number, a ratio or a size, from raw inputs.
 
       ## Report
