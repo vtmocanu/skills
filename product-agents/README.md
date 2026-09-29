@@ -14,8 +14,8 @@ This is the publishing half of an integration with a downstream runtime (uzi,
 PRD #602): uzi points a configurable agent-source folder at `product-agents/`
 (the agreed default) and reads these files into its agent store. uzi runs none
 of the tooling here; it only reads the emitted `.md`. The uzi-side wiring (the
-source-folder setting and how the generic roster reconciles with uzi's own
-adapted roles) is coordinated separately in PRD #602, not by this repo.
+source-folder setting and the builtin sync) is coordinated in uzi, not by this
+repo.
 
 Each file is frontmatter (`name`, `version`, `description`, `tools`, `model` in
 that order; `tools`/`model` omitted when empty, `version` omitted when absent)
