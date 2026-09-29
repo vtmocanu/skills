@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- `session-peers`: every review request and verdict names its SHA (a verdict covers nothing newer), messages to a busy Codex buddy are batched, and a Codex peer replies through its forwarded final message only, never also via `send`.
+
 ## [0.42.0] - 2026-09-29
 
 ### Changed

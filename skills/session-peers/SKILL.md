@@ -67,6 +67,13 @@ and issue drafts; `brainstorm`; `second-opinion`; `co-steer`; `ping`;
   earlier message; ping and wait instead. A busy Codex buddy's replies arrive
   late, crossed or repeated: match the `[in reply to message <id>]` header and
   treat a turn answering an older message as stale.
+- **Pin every review to a SHA.** A request names the head it asks about; a
+  verdict names the SHA it covers, and covers nothing newer. A reviewer
+  working through several queued requests answers against the live head and
+  says which requests that reply supersedes.
+- **Batch while the buddy is busy.** Each message to a busy Codex thread
+  becomes its own later turn and its own reply. Check `peers.py list` first,
+  and fold what you would send into one message rather than several.
 - **Name the owed action and its owner** in every gate message ("your APPROVE
   of this text, then I label it"). When the reviewer edits the artifact
   itself, the author's APPROVE of the edited text is the final sign-off, so
@@ -300,7 +307,9 @@ reaches Claude:
    user message starts with a `[session-peers from=@<name> ...]` line), your
    final message is forwarded after the turn completes, subject to the checks
    above. Write the answer as your last message; keep it self-contained. Do
-   not claim it was sent before the delivery log confirms the send.
+   not claim it was sent before the delivery log confirms the send. Reply
+   through that final message only: also running `send` with the same answer
+   delivers it twice.
 2. **Address a session**: put `@<claude-session-name>` as the very first line of
    your final message. Delivery is allowed only to a session that has messaged
    this thread before (prior contact), unless the user set
