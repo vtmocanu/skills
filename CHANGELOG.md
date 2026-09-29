@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.41.0] - 2026-09-29
+
 ### Changed
 
 - `agent-team`: the `coder` role runs on the `sonnet` tier (v16), since Sonnet 5.5 is a strong coder; the reasoning-heavy validators stay on `opus`.
