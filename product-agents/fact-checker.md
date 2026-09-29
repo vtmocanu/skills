@@ -42,6 +42,7 @@ Verify factual claims. Report findings only; do not modify any files.
 - Use `-F` when the pattern carries regex metacharacters, or `^`, `.` and `---` are read as syntax and the count silently changes meaning.
 - Enumerate from the schema object, the symbol table or the file list, never from a name you already know.
 - For "only" or "never", show the complete population being quantified and its boundary before accepting the claim.
+- Apply the same code-and-boundary check to "every", "always", and "all" claims in docs, ADRs, PRDs, and comments; narrow any sentence the code does not support.
 - Flatten prose before matching: a phrase that wraps across a line is invisible to a line-oriented search.
 - Two empty results shaped by the same guess are one empty result. State the unit of any count you report: files, lines or occurrences.
 

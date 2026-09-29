@@ -39,6 +39,7 @@ Implement the requested change; read any referenced spec or task files first.
 
 ## Claims
 
+- For a loop over independent work, retry, or best-effort cleanup you add, define what bounds its time and attempts and whether one failure blocks sibling work. Do not treat an ambiguous response (including 404, empty, or timeout) as success without proving that meaning at this call site.
 - An instruction quoting a file, citing a line, or saying a fix "did not land" is a claim about a moving tree. Open the file at HEAD before acting, and report the refutation rather than complying.
 - Compile or run a mutation you are told to apply before believing its result: one that alters a generated type stops the build, which reads like a failing mutation.
 - A gate green locally and red in CI makes the divergence the finding. Reproduce in the actual CI environment, its base image, user and libc (e.g. `docker run node:22-alpine` as root), not the dev host, and prove it with an identity-level probe (`process.getActiveResourcesInfo()`, `_getActiveHandles()`, the runtime's leak detector), never by inference from a green dev-host run.

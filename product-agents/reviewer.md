@@ -110,11 +110,14 @@ unsupported, over-asserted or could-be-sharper is Non-blocking.
 
 ## Further lenses
 
+- For a loop over independent work, retry, or best-effort cleanup, check its time and attempt bounds, sibling progress after one failure, and whether ambiguous responses are falsely reported as success.
 - A fix or invariant at one call site is a claim about a set. Enumerate every
-  writer of the field, every consumer, every recording hook, every other call
-  site of the same helper, and verify each. After a merge, a sibling that
+  writer of the field, every consumer, every recording hook, every external
+  surface (API, CLI, web), every other call site of the same helper, and verify
+  each. After a merge, a sibling that
   merged CLEANLY carries the same hazard unexamined, so `git grep` the symbol
   and check every site, not only the one in front of you.
+- For a new fence, field, or protocol change, check the older-client and older-server rollout order and a delayed write from a finished actor. Flag an accepted race if the design has not recorded its boundary and reason.
 - For a status, health or authorization predicate: (1) the field it reads must
   be WRITTEN by the transition it judges; (2) enumerate the legal states and
   exercise the MID-TRANSITION and already-acted ones, not just the two

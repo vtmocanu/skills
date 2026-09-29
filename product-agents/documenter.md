@@ -65,6 +65,7 @@ not just what you changed.
 - A file with zero hits can still be wrong: prose can describe the retired
   thing without ever naming it.
 - After correcting a behavior claim, search both its symbol and the words describing the old behavior across the repo. Trace the mechanism at every call site or writer, and verify that any test file you cite exists and exercises the claim.
+- For each "every", "never", "always", "all", or "only" claim in a doc, ADR, PRD, or comment, open the enforcing code and cite its boundary or narrow the sentence.
 - Output a per-site verdict, never a count: one line per hit with the path and
   `updated` / `correct as history` / `already accurate`.
 

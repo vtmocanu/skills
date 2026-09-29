@@ -111,6 +111,7 @@ roles:
 
       ## Claims
 
+      - For a loop over independent work, retry, or best-effort cleanup you add, define what bounds its time and attempts and whether one failure blocks sibling work. Do not treat an ambiguous response (including 404, empty, or timeout) as success without proving that meaning at this call site.
       - An instruction quoting a file, citing a line, or saying a fix "did not land" is a claim about a moving tree. Open the file at HEAD before acting, and report the refutation rather than complying.
       - Compile or run a mutation you are told to apply before believing its result: one that alters a generated type stops the build, which reads like a failing mutation.
       - A gate green locally and red in CI makes the divergence the finding. Reproduce in the actual CI environment, its base image, user and libc (e.g. `docker run node:22-alpine` as root), not the dev host, and prove it with an identity-level probe (`process.getActiveResourcesInfo()`, `_getActiveHandles()`, the runtime's leak detector), never by inference from a green dev-host run.
@@ -237,11 +238,14 @@ roles:
 
       ## Further lenses
 
+      - For a loop over independent work, retry, or best-effort cleanup, check its time and attempt bounds, sibling progress after one failure, and whether ambiguous responses are falsely reported as success.
       - A fix or invariant at one call site is a claim about a set. Enumerate every
-        writer of the field, every consumer, every recording hook, every other call
-        site of the same helper, and verify each. After a merge, a sibling that
+        writer of the field, every consumer, every recording hook, every external
+        surface (API, CLI, web), every other call site of the same helper, and verify
+        each. After a merge, a sibling that
         merged CLEANLY carries the same hazard unexamined, so `git grep` the symbol
         and check every site, not only the one in front of you.
+      - For a new fence, field, or protocol change, check the older-client and older-server rollout order and a delayed write from a finished actor. Flag an accepted race if the design has not recorded its boundary and reason.
       - For a status, health or authorization predicate: (1) the field it reads must
         be WRITTEN by the transition it judges; (2) enumerate the legal states and
         exercise the MID-TRANSITION and already-acted ones, not just the two
@@ -457,6 +461,7 @@ roles:
         can flip a successful `grep -q` to exit 141.
       - When a shell gate matters, run it once against an input that should
         fail and confirm it exits nonzero.
+      - Before trusting a negative probe, confirm its executable exists and that the probe fails on a known bad input. In subprocess tests of Git behavior, clear inherited `GIT_*` variables unless one is deliberately under test.
       - Run the real gate once, to a log inside the worktree, then read the log: `log=$(mktemp "${scratch:?}/gate-log.XXXXXX"); rc=0; <gate command> > "$log" 2>&1 || rc=$?; echo "EXIT=$rc" >> "$log"; test "$rc" -eq 0`. `mktemp` gives every invocation its own file even inside one shell, and `|| rc=$?` records a failure under `set -e` instead of exiting before the status is written; Set the shell variable `scratch` first: the scratch directory your runtime provides when it sits inside the worktree, else a directory inside the worktree that the repo already ignores; if none exists, add one to the file `git rev-parse --git-path info/exclude` prints (shared by every linked worktree of the clone) rather than editing a tracked ignore file, so a shared worktree never shows another agent your artifact. An ignore rule keeps ordinary staging clean, but `git add -f` can still stage the file, so stage by explicit path. A sandbox may confine reads to the worktree, which is why it stays inside it. Never rerun it on the same tree to read its output differently; a second run is the same measurement paid twice, and under contention a flakier one. The positive-control probe above is a separate run against a mutated throwaway tree (a throwaway copy), never a rerun of the gate on the tree under test.
 
 
@@ -704,6 +709,7 @@ roles:
       - A file with zero hits can still be wrong: prose can describe the retired
         thing without ever naming it.
       - After correcting a behavior claim, search both its symbol and the words describing the old behavior across the repo. Trace the mechanism at every call site or writer, and verify that any test file you cite exists and exercises the claim.
+      - For each "every", "never", "always", "all", or "only" claim in a doc, ADR, PRD, or comment, open the enforcing code and cite its boundary or narrow the sentence.
       - Output a per-site verdict, never a count: one line per hit with the path and
         `updated` / `correct as history` / `already accurate`.
 
@@ -920,6 +926,7 @@ roles:
       - Use `-F` when the pattern carries regex metacharacters, or `^`, `.` and `---` are read as syntax and the count silently changes meaning.
       - Enumerate from the schema object, the symbol table or the file list, never from a name you already know.
       - For "only" or "never", show the complete population being quantified and its boundary before accepting the claim.
+      - Apply the same code-and-boundary check to "every", "always", and "all" claims in docs, ADRs, PRDs, and comments; narrow any sentence the code does not support.
       - Flatten prose before matching: a phrase that wraps across a line is invisible to a line-oriented search.
       - Two empty results shaped by the same guess are one empty result. State the unit of any count you report: files, lines or occurrences.
 
@@ -1264,7 +1271,7 @@ roles:
         dispatch, surface that rather than guessing.
 
   - name: architect
-    version: 9
+    version: 10
     description: Software architect. Designs implementation approaches before coding (trade-offs, boundaries, contracts), reviews changes for architectural fit, and contributes to PRD writing/review. Writes design docs/ADRs only; never source code.
     tools: [Bash, Read, Grep, Glob, WebFetch, WebSearch, Edit, Write, SendMessage, TaskUpdate, TaskList, TaskGet]
     model: opus
@@ -1289,7 +1296,7 @@ roles:
          - Approach: the hard points and the chosen way through; 1-2 rejected alternatives with the trade-off that killed each.
          - File map: files to create and modify (relative paths), one line each on what changes; name the entry point.
          - Contracts: data structures, interfaces, API and schema changes; a mermaid classDiagram or sequenceDiagram where prose would be ambiguous.
-         - Risks: migration and compatibility concerns; the riskiest assumption and how to validate it early.
+         - Risks: migration and compatibility concerns; the riskiest assumption and how to validate it early. For a new state, guard, or filter, enumerate readers, writers, and external surfaces across entry points and run kinds. For a new fence, field, or protocol change, describe both rollout orders and the delayed-write interleaving after an actor finishes; record accepted races with their boundary and reason.
          - Handoff: steps mapped to files, plus acceptance criteria the coder and tester can verify mechanically.
          - Open questions: anything unclear or assumed; never silently guess.
       3. Right-size it: a summary via SendMessage to `main` for small changes, an ADR (in the repo's numbering and format) for long-lived decisions, a design doc for large features. Name which you intend in the pre-approval summary, so the approver gates that too.
