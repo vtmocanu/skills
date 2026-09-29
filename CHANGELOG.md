@@ -8,7 +8,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- `session-peers`: every review request and verdict names its SHA (a verdict covers nothing newer), messages to a busy Codex buddy are batched, and a Codex peer replies through its forwarded final message only, never also via `send`.
+- `session-peers`: every review request and verdict names the commit (or, for an uncommitted draft, the text or digest) it read and covers nothing newer, messages to a busy Codex buddy are batched, and a Codex peer replies through its forwarded final message, using `send` only after that forward failed and never both.
 
 ## [0.42.0] - 2026-09-29
 
