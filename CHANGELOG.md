@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- `agent-team`: the `coder` role runs on the `sonnet` tier (v16), since Sonnet 5.5 is a strong coder; the reasoning-heavy validators stay on `opus`.
+
 ### Fixed
 
 - `agent-team`: the update-mode docs said `sync.py apply` exits 3 when it drops body lines; it exits 0 and warns, and a backup that already exists gets a numbered `.pre-sync.N` sibling, so the `.gitignore` pattern is `*.md.pre-sync*`.
