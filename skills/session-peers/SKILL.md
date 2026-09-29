@@ -69,7 +69,8 @@ and issue drafts; `brainstorm`; `second-opinion`; `co-steer`; `ping`;
   treat a turn answering an older message as stale.
 - **Pin every review to what it read.** A request names the commit it asks
   about (an uncommitted draft: its exact text or a digest); a verdict names
-  the same, and covers nothing newer. A reviewer
+  the exact commit or draft it actually reviewed, which may be newer than the
+  request, and covers nothing newer than that. A reviewer
   working through several queued requests answers against the live head and
   says which requests that reply supersedes.
 - **Batch while the buddy is busy.** Each message to a busy Codex thread
