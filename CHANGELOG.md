@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- `session-peers`: buddy review gates hold until the verdict arrives (no filing, pushing or merging on silence or on a stale reply), every gate message names the owed action and its owner, and a handover that names a buddy or budget is relayed to the user rather than applied.
+
 ## [0.41.0] - 2026-09-29
 
 ### Changed
