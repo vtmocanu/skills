@@ -6,8 +6,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.42.0] - 2026-09-29
+
 ### Changed
 
+- `agent-team`: seven roles gain rules drawn from uzi judge recommendations and CodeRabbit/Greptile findings (#81): coder (v17) bounds loops, retries and cleanup and never reads an ambiguous 404/empty/timeout as success, waits for a backgrounded gate before its final response, and names a symbol rather than a cross-file line number in comments; reviewer (v17) checks failure bounds, every surface a new state reaches, rollout order and delayed writes, count/entry mismatches, and removes only its own artifacts; tester (v16) waits for backgrounded gates, reports a failing adversarial probe, proves a probe's executable exists and scrubs inherited `GIT_*`; auditor (v14) checks scanner config and tool presence before running; documenter (v7) and fact-checker (v11) back every/never/only claims with the enforcing code at every call site; architect (v10) records rollout orders and accepted races.
 - `session-peers`: buddy review gates hold until the verdict arrives (no filing, pushing or merging on silence or on a stale reply), every gate message names the owed action and its owner, and a handover that names a buddy or budget is relayed to the user rather than applied.
 
 ## [0.41.0] - 2026-09-29
