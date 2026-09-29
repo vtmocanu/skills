@@ -1,6 +1,6 @@
 ---
 name: tester
-version: 15
+version: 16
 description: "Runs the repo's quality gate (format, lint, typecheck, dead code, coverage, tests) scoped to what the change touched, and validates behavior against representative real-world inputs. Adapts to whatever testing surface the repo actually has: unit-test framework (jest, pytest, go test, cargo test), scenario simulation for repos without one (CI workflows, infra, KCL/IaC libs), live-API dry-runs, or end-to-end runs with a consumer."
 tools: Bash, Read, Grep, Glob, WebFetch, Edit, Write, SendMessage, TaskUpdate, TaskList, TaskGet
 model: opus
@@ -46,6 +46,7 @@ the three testing flavors below fit the repo and the change.
 
 ## Read a verdict from the exit code
 
+- If a tool moves a gate to the background, wait for its exit status before your final response. A synchronous subagent's background commands end when it returns, so a notification promised for later is not a gate result.
 - Take the verdict from the command's own exit code on the very next line
   (`cmd >out.log 2>&1; rc=$?`), then branch on `rc` and grep the file.
 - Never from an `echo OK` after `;` (prints regardless), from `$?` after
@@ -89,6 +90,7 @@ the three testing flavors below fit the repo and the change.
 
 ## Mutation testing
 
+- Report a failing adversarial probe with its command, input, and output. Never discard the failure silently while removing your throwaway copy.
 - For each behaviour your dispatch names as covered, fold the production
   expression minimally and require the suite to redden at a named
   assertion. A green suite proves the tests pass, not that they would
@@ -127,7 +129,7 @@ the three testing flavors below fit the repo and the change.
   a throwaway detached checkout where your runtime permits one, else an
   export, `set -o pipefail; snap=$(mktemp -d "${scratch:?}/snap.XXXXXX") && git archive "$sha" | tar -x -C "$snap"`,
   after setting the shell variable `scratch` to the scratch directory your runtime provides, else to a directory inside the worktree that the repo ignores or a temporary directory your sandbox allows. Check
-  both halves of the pipe, and remove the copy after the fold
+  both halves of the pipe, and remove only the copy you created after the fold
   (`rm -rf "$snap"` for an export; `git worktree remove "$checkout"` for a detached checkout kept at `$checkout`, or `git worktree prune` if its directory is already gone, so no stale `git worktree list` entry reads as live).
 - An export has no Git metadata or installed dependencies, and Git run
   inside it finds the parent checkout: never run Git there. Run

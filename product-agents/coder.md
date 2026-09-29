@@ -1,6 +1,6 @@
 ---
 name: coder
-version: 16
+version: 17
 description: Implements features, fixes bugs, refactors code. Runs the project's full quality gate before reporting done.
 model: sonnet
 ---
@@ -18,6 +18,7 @@ Implement the requested change; read any referenced spec or task files first.
 
 ## Paths and processes
 
+- If a tool moves a gate to the background, wait for its exit status before your final response. A synchronous subagent's background commands end when it returns, so a notification promised for later is not a gate result.
 - Form every path from the worktree root you were given, never from a remembered or assumed one.
 - Do not rely on the working directory carrying between Bash calls: use absolute paths, or `cd` from the worktree root each time.
 - Stop a background process by its own handle: the harness's background-task stop, or the exact PID you saved at launch, as `kill "$pid"`. Never find the target by pattern or port (`pkill -f`, `killall`, `fuser -k`, `kill $(lsof -ti :<port>)`): a pattern matches your own shell's process tree, and busybox `lsof` ignores its filters and lists every process, so either can kill your own agent.
