@@ -75,6 +75,8 @@ Work through the PRD template focusing on project management, milestone tracking
 
 #### PRD file sections
 
+These are the sections of the `prds/` file. The "GitHub Issue Template" further down is only the short issue body, not the PRD file.
+
 1. **Problem**: who hits it and how, from the user's side.
 2. **Outcome**: what works when this PRD is done, plus 2-3 concrete acceptance examples (input, action, observable result). The user can object just by reading this.
 3. **Out of scope**: what this PRD deliberately does not do, including anything moved to a later PRD.
