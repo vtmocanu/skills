@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.43.0] - 2026-09-30
+
 ### Changed
 
 - `prd-create`: scope gate before anything is created (one PRD issue is one independently valuable outcome, one run and one PR; a milestone that needs an unfinished PRD is an error; split efforts get an umbrella index issue), milestones are vertical slices with `Blocked by` edges instead of 5-10 layer-shaped ones, a new section template (outcome with acceptance examples, out of scope, modules and seams, testing decisions, Decision Log), no user interview (agents decide technical matters, at most one batched product-intent question), and live acceptance moves to an optional linked `acceptance` issue so a PRD is done at merge. Slicing ideas adapted from mattpocock/skills (MIT).
