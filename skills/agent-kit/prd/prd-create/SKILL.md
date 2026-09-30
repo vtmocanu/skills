@@ -3,7 +3,7 @@ name: prd-create
 description: Creates documentation-first PRDs (a short forge issue plus a detailed prds/ file with milestones), then offers to start work, commit for later, or send the PRD to uzi. Use when the user wants to create a PRD, spec out a new feature, write a product requirements document, or turn a feature idea into a tracked GitHub/GitLab/Forgejo issue. Triggers include "create a PRD", "new PRD", "/prd-create", "write a PRD for", "spec this feature".
 ---
 
-> Vendored from [vfarcic/dot-ai](https://github.com/vfarcic/dot-ai) `shared-prompts/prd-create.md` (MIT, Copyright (c) 2025 Viktor Farcic). Original author: Viktor Farcic.
+> Adapted from [vfarcic/dot-ai](https://github.com/vfarcic/dot-ai) `shared-prompts/prd-create.md` (MIT, Copyright (c) 2025 Viktor Farcic). Original author: Viktor Farcic. The scoping and slicing rules draw on ideas from Matt Pocock's [mattpocock/skills](https://github.com/mattpocock/skills) (MIT): tracer-bullet vertical slices, blocking edges, and deep modules.
 
 # PRD Creation Slash Command
 
@@ -16,8 +16,22 @@ You are helping create a Product Requirements Document (PRD) for a new feature. 
 
 ## Process
 
-### Step 1: Understand the Feature Concept
-Ask the user to describe the feature idea to understand the core concept and scope.
+### Step 1: Understand the outcome (no interview)
+Take the user's description and work out the outcome yourself. Do not run an interview, and never ask the user how code should be written or structured: technical choices are yours, recorded with their reason in the Decision Log.
+
+- **Look facts up, never ask for them.** Read the code, docs, issues and existing PRDs. Check first whether the capability already exists or was proposed and rejected before (closed issues, `prds/done/`, Decision Logs).
+- **Ask at most one batched question**, only for unresolved product intent or a fork whose options change what the user gets. Give a recommended answer for each. Skip it when the request is clear.
+- **Existing escalations still apply unchanged**: external API contract changes, schema changes affecting existing data, auth or security-model changes, irreversible actions. Work that merely touches security code goes to the design-critique wave (agent-team), not to the user.
+- **Bug PRDs** name a reproduction signal (a failing test, command or captured trace) that shows the bug, or say why none exists yet.
+
+### Step 1.2: Scope gate (before creating anything)
+**One PRD issue is one implementation run and one PR** (a uzi run, or one `/prd-full` loop). Milestone reshaping inside a PRD does not shrink that PR; only a smaller issue does. So size the issue, not just its milestones:
+
+- **One PRD = one independently valuable outcome.** A slice earns its own PRD only if it is useful on its own; otherwise it stays a milestone inside a PRD.
+- **Scope-review alarms** (not automatic splits): more than one independently valuable outcome, or an expected large PR (many components or a long file map). When one fires, propose a split into independently valuable PRDs with their order, as one yes/no for the user.
+- **Hard error: a milestone that needs an unfinished PRD.** Move it to that later PRD or redraw the boundary; never leave it waiting inside this one.
+- **A split effort gets an umbrella issue** that only indexes its child PRDs, their order and their blocking edges; each child is a normal PRD created by this skill. When the children go to uzi, default them to the `Auto` or `Seed & ship` mode so the user approves the split once, not every child plan.
+- **Existing open PRDs** get the same scope review before they are dispatched.
 
 ### Step 1.5: Capture the post-PRD workflow up front (before creating anything)
 Before creating the issue or PRD, detect whether **uzi** is available (`command -v uzi` succeeds, **or** the `uzi-cli` skill is installed at `~/.claude/skills/uzi-cli/`). When uzi is available, also run `uzi schedule list --json` once to learn whether any **sweep** schedule exists and its label(s) — this gates the `Commit & push + queue for uzi sweep` option and its label choice below. Then gather **every** downstream choice now, back to back, so nothing interrupts the PRD writing later:
@@ -52,30 +66,38 @@ Work through the PRD template focusing on project management, milestone tracking
 > - **Prefer an offline-resolvable form** where one exists: an empirical measurement from the product's own data or logs, or a codebase read, beats an external lookup — and it lets the worker re-verify without egress. State such a check as offline in the milestone.
 > - **If a load-bearing fact genuinely cannot be settled without the internet**, settle it yourself before sending, or the PRD is not ready for uzi. Flag any you could not resolve rather than shipping a milestone that silently depends on it.
 
-**Key Principle**: Focus on 5-10 major milestones rather than exhaustive task lists. Each milestone should represent meaningful progress that can be clearly validated.
+#### PRD file sections
 
-**Consider Including** (when applicable to the project/feature):
-- **Tests** - If the project has tests, include a milestone for test coverage of new functionality
-- **Documentation** - If the feature is user-facing, include a milestone for docs following existing project patterns
+1. **Problem**: who hits it and how, from the user's side.
+2. **Outcome**: what works when this PRD is done, plus 2-3 concrete acceptance examples (input, action, observable result). The user can object just by reading this.
+3. **Out of scope**: what this PRD deliberately does not do, including anything moved to a later PRD.
+4. **Modules and seams**: only the consequential ones. For each, the caller-facing interface (inputs, outputs, invariants, error behaviour), what complexity it hides, and where tests exercise it. Prefer existing seams and interfaces; add a new one only for a demonstrated need.
+5. **Testing decisions**: which behaviours are tested at which seam, and similar existing tests to follow.
+6. **Milestones**: vertical slices, per the rules below.
+7. **Decision Log**: every technical decision with its reason and the alternative rejected.
 
-**Good Milestones Examples:**
-- [ ] Core functionality implemented and working
-- [ ] Tests passing for new functionality (if project has test suite)
-- [ ] Documentation complete following existing patterns (if user-facing feature)
-- [ ] Integration with existing systems working
-- [ ] Feature ready for user testing
+#### Milestones are vertical slices
 
-**Avoid Micro-Tasks:**
-- ❌ Update README.md file
-- ❌ Write test for function X
-- ❌ Fix typo in documentation
-- ❌ Individual file modifications
+- **Each milestone is one complete behaviour** that can be verified on its own, cutting through every layer it needs (schema, logic, API, UI, tests, docs). One fresh implementation run must be able to build and verify it.
+- **Never a standalone layer milestone**: no "schema", "service layer", "tests" or "docs" milestone that only prepares a later one. Tests and docs ride inside the slice they cover.
+- **Each milestone lists `Blocked by`** (only milestones that genuinely gate it, or "none") and its acceptance criteria.
+- **Prefactor first.** If a refactor makes the feature easy, it is the first milestone.
+- **Wide refactors are the exception.** A mechanical change with a codebase-wide blast radius (rename, retype) goes expand-contract: add the new form beside the old, migrate callers in batches, then remove the old form.
+- **Migrations ride in the first slice that needs them.**
+- **Every merged slice is safe on its own**: security-complete, or dark behind a default-off flag only when every reachable entry point checks the flag and migrations keep existing data and behaviour unchanged while it is off.
+- **No fixed milestone count.** Size is governed by the scope gate (Step 1.2), not by a number.
 
-**Milestone Characteristics:**
-- **Meaningful**: Represents significant progress toward completion
-- **Testable**: Clear success criteria that can be validated
-- **User-focused**: Relates to user value or feature capability
-- **Manageable**: Can be completed in reasonable timeframe
+Example (layer-shaped vs vertical, for "users earn points for completed lessons"):
+- ❌ M1 schema; M2 points service; M3 dashboard widget; M4 tests
+- ✅ M1 completing a lesson awards points and the dashboard shows the total (schema, service, widget, tests); M2 streaks extend the award and show on the dashboard (blocked by M1); M3 backfill points for past completions (blocked by M1)
+
+#### Parallelism
+
+Milestones whose blockers are done are **candidates** for parallel work, never a guarantee. Run two in parallel only when they own disjoint files and state; otherwise sequence them. The lead integrates, runs the gates on the combined tree and renumbers migrations where the repo requires it.
+
+#### Acceptance is not a milestone
+
+A PRD is done when its code is merged. When the feature has behaviour only a live environment can show (a cluster, network policy, an external service), file a linked **`acceptance` issue** with the live checklist, owned by the user, with no deadline and never a uzi sweep label. It does not block merge or close. A later PRD references it, and blocks on it only when the user decides that case needs proven live behaviour.
 
 ## GitHub Issue Template (Keep Short & Stable)
 
@@ -107,28 +129,16 @@ Work through the PRD template focusing on project management, milestone tracking
 **Priority**: [High/Medium/Low]
 ```
 
-## Discussion Guidelines
+## Working Through the PRD
 
-### PRD Planning Questions
-1. **Problem Understanding**: "What specific problem does this feature solve for users?"
-2. **User Impact**: "Walk me through the complete user journey — what will change for them?"
-3. **Technical Scope**: "What are the core technical changes required?"
-4. **Documentation Impact**: "Which existing docs need updates? What new docs are needed?"
-5. **Integration Points**: "How does this feature integrate with existing systems?"
-6. **Success Criteria**: "How will we know this feature is working well?"
-7. **Implementation Phases**: "How can we deliver value incrementally?"
-8. **Risk Assessment**: "What are the main risks and how do we mitigate them?"
-9. **Dependencies**: "What other systems or features does this depend on?"
-10. **Validation Strategy**: "How will we test and validate the implementation?"
+Answer these yourself from the code and context; they are a checklist for the author, not questions for the user (see Step 1):
 
-### Discussion Tips:
-- **Clarify ambiguity**: If something isn't clear, ask follow-up questions until you understand
-- **Challenge assumptions**: Help the user think through edge cases, alternatives, and unintended consequences
-- **Prioritize ruthlessly**: Help distinguish between must-have and nice-to-have based on user impact
-- **Think about users**: Always bring the conversation back to user value, experience, and outcomes
-- **Consider feasibility**: While not diving into implementation details, ensure scope is realistic
-- **Focus on major milestones**: Create 5-10 meaningful milestones rather than exhaustive micro-tasks
-- **Think cross-functionally**: Consider impact on different teams, systems, and stakeholders
+- **Problem and outcome**: who is affected, and what observably changes for them.
+- **Existing work**: does it already exist, partly exist, or was it rejected before?
+- **Seams**: which interfaces the feature crosses, and where it is tested.
+- **Risks and dependencies**: what could break, what this needs from other systems, and whether any dependency is an unfinished PRD (a scope-gate error).
+- **Slices**: the smallest end-to-end behaviour that proves the approach, then the slices that extend it.
+- **Must-have vs nice-to-have**: nice-to-haves go to Out of scope or a later PRD.
 
 **Forge-agnostic**: The `gh` commands below are GitHub examples. Detect the forge from `git remote get-url origin` and use the matching CLI, mapping each verb to its equivalent: **GitHub** → `gh`; **GitLab** → `glab` (a PR is a *merge request*, `glab mr …`); **Forgejo/Gitea** → `tea`. If the needed CLI is missing, tell the user and link its install page.
 
@@ -140,8 +150,8 @@ Work through the PRD template focusing on project management, milestone tracking
 2. **Create GitHub Issue FIRST**: Short, stable concept description to get issue ID
 3. **Create PRD File**: Detailed document using actual issue ID: `prds/[issue-id]-[feature-name].md`
 4. **Update GitHub Issue**: Add link to PRD file now that filename is known
-5. **Section-by-Section Discussion**: Work through each template section systematically
-6. **Milestone Definition**: Define 5-10 major milestones that represent meaningful progress
+5. **Write the sections**: fill each PRD file section yourself (see "Working Through the PRD")
+6. **Milestone Definition**: vertical slices with `Blocked by` edges and acceptance criteria; the scope gate (Step 1.2), not a count, bounds the PRD
 7. **Review & Validation**: Ensure completeness and clarity
 
 **CRITICAL**: Steps 2-4 must happen in this exact order to avoid the chicken-and-egg problem of needing the issue ID for the filename.
@@ -170,7 +180,7 @@ The **next step** and **PRD review** choices were captured up front (Step 1.5, v
 
 ### PRD Review (if requested)
 
-If the user asked for review, spawn reviewer agent(s) with the **Agent** tool (`subagent_type: Explore` or `general-purpose`) to read `prds/[issue-id]-[feature-name].md` and critique it: milestone sizing (5-10 meaningful milestones, not micro-tasks), testability, clarity, missing risks and dependencies, and scope realism.
+If the user asked for review, spawn reviewer agent(s) with the **Agent** tool (`subagent_type: Explore` or `general-purpose`) to read `prds/[issue-id]-[feature-name].md` and critique it: scope (one independently valuable outcome; no milestone that needs an unfinished PRD), vertical slicing (no standalone layer milestones; real `Blocked by` edges; each slice fits one fresh run), testability at the named seams, clarity, missing risks and dependencies. When the repo has an agent-team `architect` role, make it one of the reviewers.
 
 - **One reviewer**: a single agent.
 - **Let the skill decide**: pick the count from the PRD's size and complexity: 1 for a small single-component PRD, 2-3 for a large or multi-component one, each agent taking a distinct lens (scope/feasibility, milestones/testability, risks/dependencies). Run them in parallel.
