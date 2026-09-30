@@ -8,7 +8,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- `session-peers`: SKILL.md documents the #84 behaviour (a turn with no final message sends the requester a `failed` status and one notice; prior contact includes a verified requester of a direct send) and says to restart a running shim after an upgrade, between review loops.
+- `session-peers`: SKILL.md documents the #84 behaviour (a turn with no final message attempts one notice, plus a correlated `failed` status when the message has an id, to a verified live requester; prior contact includes a verified requester of a direct send) and says to restart a running shim after an upgrade, between review loops.
 
 ## [0.43.1] - 2026-09-30
 

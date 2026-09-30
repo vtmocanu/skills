@@ -227,8 +227,11 @@ it does not bypass the busy thread's queue.
 - **Status frames** you may receive about a message: `held` (queued, thread
   paused), `failed` (queue error, dead thread, exhausted loop guard, or a turn
   that finished with no final message), and `truncated` (delivered, but cut to
-  the argv budget). A turn with no final message also sends the requester one
-  plain notice, so a missing reply is never silent.
+  the argv budget). For a turn with no final message, the shim attempts one
+  plain notice to the requester when its tag verifies against a live session,
+  plus the correlated `failed` status when the message has an id. An unverified
+  tag, or a requester that has gone away, still gets nothing: check the
+  delivery log (Diagnostics).
 
 ### Replying to a waiting Codex request
 
@@ -513,8 +516,8 @@ corrected on 2026-09-08; see the startup checks in the spike checklist.
   requires the Claude peer to run the included `reply` command.
 - One reply per turn: a `Stop`-hook continuation or an interrupted turn
   (`turn_aborted`) delivers nothing; a completed turn with no final text
-  delivers no reply, only a `failed` status and one notice to a verified
-  requester.
+  delivers no reply; the shim only attempts a notice (and a `failed` status
+  when the message has an id) to a verified live requester.
 - First startup retains the active request and skips completed history.
   Delivery across a restart from saved state is bounded: a tagged turn that
   completed while no shim ran is delivered only if it finished within 15
