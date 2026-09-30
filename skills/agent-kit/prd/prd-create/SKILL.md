@@ -133,7 +133,7 @@ A PRD is done when its code is merged (a documentation-only PRD: when its docs c
 
 **Solution**: [1-2 sentence solution overview]
 
-**Detailed PRD**: See [prds/[actual-issue-id]-[feature-name].md]([repo-web-url]/[forge-file-path]/prds/[actual-issue-id]-[feature-name].md)
+**Detailed PRD**: See [prds/[actual-issue-id]-[feature-name].md]([repo-web-url][forge-file-path]prds/[actual-issue-id]-[feature-name].md)
 
 **Priority**: [High/Medium/Low]
 ```
