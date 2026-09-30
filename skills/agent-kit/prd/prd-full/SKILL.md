@@ -28,9 +28,9 @@ Standard harness guardrails for genuinely destructive actions still apply.
 
 ## Flow
 
-0. **Scope preflight:** before creating any branch or worktree, run `/prd-start`'s Scope Check on PRD #$1. If it stops (a milestone that needs an unfinished PRD, or a proposed split), output that and stop here, so no unused branch or worktree is left behind.
+0. **Scope preflight (read-only):** before creating any branch or worktree, evaluate `/prd-start`'s Scope Check on PRD #$1 without writing anything. If it stops (a milestone that needs an unfinished PRD, or a proposed split), output that and stop here, so no unused branch or worktree is left behind. If it continues on a reasoned no-split, keep the reason for Step 2.
 1. **Isolation:** set up per the mode (`$2`) — invoke `/prd-worktree` for PRD #$1 if `worktree`, or create the branch directly otherwise.
-2. **Start:** run `/prd-start $1`. Skip its branch-creation step (Step 1 already handled it) and its Scope Check (Step 0 already ran it).
+2. **Start:** run `/prd-start $1`. Skip its branch-creation step (Step 1 already handled it) and its Scope Check evaluation (Step 0 already ran it); record any no-split reason from Step 0 in the PRD's Decision Log now, inside the isolated branch or worktree.
 3. **Iterate** without resetting conversation context:
    - run `/prd-next`, including implementing the recommended task in the same turn,
    - run `/prd-update-progress`,
