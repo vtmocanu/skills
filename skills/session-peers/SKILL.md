@@ -225,8 +225,13 @@ it does not bypass the busy thread's queue.
   on macOS); `send` refuses an oversized text, the shim trims it on a UTF-8
   boundary and reports status `truncated` with the trimmed length.
 - **Status frames** you may receive about a message: `held` (queued, thread
-  paused), `failed` (queue error, dead thread, or exhausted loop guard), and
-  `truncated` (delivered, but cut to the argv budget).
+  paused), `failed` (queue error, dead thread, exhausted loop guard, or a turn
+  that finished with no final message), and `truncated` (delivered, but cut to
+  the argv budget). For a turn with no final message, the shim attempts one
+  plain notice to the requester when its tag verifies against a live session,
+  plus the correlated `failed` status when the message has an id. An unverified
+  tag, or a requester that has gone away, still gets nothing: check the
+  delivery log (Diagnostics).
 
 ### Replying to a waiting Codex request
 
@@ -290,6 +295,11 @@ saved state delivers a reply that completed while it was down only if that
 turn finished within the last 15 minutes. An unnamed thread
 registered by UUID appears as `codex-<first 8 hex of the uuid>`.
 
+A running shim keeps the code it started with, so a session-peers upgrade reaches
+an attached thread only after its shim restarts: `peers.py down <uuid>`, then
+`peers.py up <uuid>`. The restart also resets that peer's reply budget and drops
+any grant, so do it between review loops, not in the middle of one.
+
 ## If you are Codex
 
 The default sandbox can block Unix sockets, the Claude-side `ps` probe, and the
@@ -315,8 +325,10 @@ reaches Claude:
    twice.
 2. **Address a session**: put `@<claude-session-name>` as the very first line of
    your final message. Delivery is allowed only to a session that has messaged
-   this thread before (prior contact), unless the user set
-   `SESSION_PEERS_ALLOW_UNSOLICITED=1` for the shim.
+   this thread before (prior contact: through the shim, or as a verified
+   requester of a tagged turn, which covers a direct `peers.py send`), unless the
+   user set `SESSION_PEERS_ALLOW_UNSOLICITED=1` for the shim. Addressing the
+   session that sent the current turn is just the normal reply, delivered once.
 
 Both count toward the reply budget above; a held reply is still shown to the
 user in your TUI. To see live Claude sessions, mutable names, and stable UUIDs:
@@ -504,7 +516,8 @@ corrected on 2026-09-08; see the startup checks in the spike checklist.
   requires the Claude peer to run the included `reply` command.
 - One reply per turn: a `Stop`-hook continuation or an interrupted turn
   (`turn_aborted`) delivers nothing; a completed turn with no final text
-  delivers nothing.
+  delivers no reply; the shim only attempts a notice (and a `failed` status
+  when the message has an id) to a verified live requester.
 - First startup retains the active request and skips completed history.
   Delivery across a restart from saved state is bounded: a tagged turn that
   completed while no shim ran is delivered only if it finished within 15
