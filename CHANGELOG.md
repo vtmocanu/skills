@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.43.1] - 2026-09-30
+
 ### Fixed
 
 - `session-peers`: a Codex reply addressed `@name` to a session that messaged it by direct `peers.py send` is no longer dropped as "no prior contact" (a verified requester is recorded as a contact), a reply addressed to its own requester no longer logs a false "unsolicited" drop, and a turn that finishes with no final message now sends the requester one correlated `failed` status plus one non-replyable notice instead of silence.
