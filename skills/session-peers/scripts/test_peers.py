@@ -2977,16 +2977,62 @@ class TestShimReplies(ShimBase):
         time.sleep(0.2)
         self.assertEqual(listener.of_type("user"), [])
 
-    def test_a_null_completion_delivers_nothing(self):
+    def test_a_null_completion_sends_the_requester_one_nonreplyable_notice(self):
         shim, _tid, _rollout = self.make_shim()
         listener, _rec = self.add_listener(session_id="s1")
         turn = peers.Turn("t1", "ping",
-                          {"from": "cc-main", "sid": "s1", "reply": listener.path},
+                          {"from": "cc-main", "sid": "s1", "mid": "m-9",
+                           "reply": listener.path},
+                          "complete", None)
+        with contextlib.redirect_stderr(io.StringIO()):
+            shim._handle_turn_end(turn)
+        wait_for(lambda: self._notice_frames(listener))
+        time.sleep(0.2)
+        self.assertEqual(self._reply_frames(listener), [])
+        notices = self._notice_frames(listener)
+        self.assertEqual(len(notices), 1)
+        body, _attrs = peers.unwrap_message(notices[0]["message"]["content"])
+        self.assertIn("no final message", body)
+        self.assertIn("m-9", body)
+        statuses = [f for f in listener.of_type("control")
+                    if f.get("action") == "peer_message_status"]
+        self.assertEqual([(s["orig_msg_id"], s["status"]) for s in statuses],
+                         [("m-9", "failed")])
+
+    def test_a_null_completion_from_an_unverified_tag_stays_silent(self):
+        shim, _tid, _rollout = self.make_shim()
+        listener, _rec = self.add_listener(session_id="s-new")
+        turn = peers.Turn("t1", "ping",
+                          {"from": "cc-main", "sid": "s-old", "reply": listener.path},
                           "complete", None)
         with contextlib.redirect_stderr(io.StringIO()):
             shim._handle_turn_end(turn)
         time.sleep(0.2)
         self.assertEqual(listener.of_type("user"), [])
+
+    def test_a_verified_requester_becomes_a_contact(self):
+        shim, _tid, _rollout = self.make_shim()
+        listener, _rec = self.add_listener(name="cc-main", session_id="s1")
+        self.assertNotIn("s1", shim.contacts)
+        shim._handle_turn_end(self._turn(listener.path))
+        wait_for(lambda: listener.of_type("user"))
+        self.assertIn("s1", shim.contacts)
+        # A later untagged turn (a direct Codex turn) may now address it.
+        shim._handle_turn_end(
+            peers.Turn("t2", "ping", None, "complete", "@cc-main follow-up"))
+        wait_for(lambda: len(self._reply_frames(listener)) == 2 or None)
+        self.assertEqual(len(self._reply_frames(listener)), 2)
+
+    def test_an_at_name_to_the_reply_target_logs_no_false_drop(self):
+        shim, _tid, _rollout = self.make_shim()
+        listener, _rec = self.add_listener(name="cc-main", session_id="s1")
+        tag = {"from": "cc-main", "sid": "s1", "reply": listener.path}
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            shim._handle_turn_end(
+                peers.Turn("t1", "ping", tag, "complete", "@cc-main done"))
+            wait_for(lambda: listener.of_type("user"))
+        self.assertNotIn("unsolicited", err.getvalue())
 
     def test_a_session_id_that_changed_under_the_socket_is_refused(self):
         shim, _tid, _rollout = self.make_shim()
