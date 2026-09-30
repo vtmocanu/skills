@@ -207,35 +207,17 @@ Present findings in this focused format:
 
 **Do you want to work on this task?** 
 
-If yes, I'll help you design the implementation approach. If no, let me know what you'd prefer to work on instead.
+If yes, I'll plan and implement it. If no, let me know what you'd prefer to work on instead.
 ```
 
-## Step 7: Design Discussion (If Confirmed)
+## Step 7: Plan the Task (If Confirmed)
 
-If the user confirms they want to work on the recommended task, then dive into:
+If the user confirms, plan the task yourself; do not turn it into a design discussion with the user. Technical choices are yours: make them and record each with its reason in the PRD's Decision Log.
 
-### Implementation Planning
-- **Architecture approach**: How this fits into existing codebase
-- **Key components**: What needs to be built/modified
-- **Integration points**: How it connects with existing code
-- **Testing strategy**: How to validate the implementation
-
-### Design Decisions
-- **Technical choices**: Framework/library decisions to make
-- **Interface design**: APIs, data structures, user interfaces
-- **Error handling**: How to handle failure cases
-- **Performance considerations**: Scalability and optimization needs
-
-### Implementation Steps
-- **Step-by-step breakdown**: Logical sequence of implementation
-- **Quick wins**: Parts that can be completed first for validation
-- **Risk mitigation**: Addressing the biggest uncertainties first
-- **Testing checkpoints**: When and how to validate progress
-
-### Questions to Resolve
-- **Open decisions**: Design choices that need to be made
-- **Clarifications needed**: Requirements that need more detail
-- **Assumptions to validate**: Things we're assuming that should be confirmed
+- **Approach**: how the task fits the existing code, the modules and interfaces it touches, and the seam where it is tested.
+- **Order**: the smallest end-to-end step first, so the slice is verifiable early; the riskiest assumption checked as soon as possible.
+- **Technical choices**: libraries, interfaces, error handling and performance trade-offs, decided and logged, not asked.
+- **Escalate only** what the existing rules escalate (external API contract changes, schema changes affecting existing data, auth or security-model changes, irreversible actions) or unresolved product intent, as one batched question with a recommended answer.
 
 ## Success Criteria
 

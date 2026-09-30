@@ -97,6 +97,8 @@ Identify different types of changes:
    - **Launch Activities** (training, deployment, rollout)
    - **Success Metrics** (adoption, analytics, support impact)
 
+   PRDs written by the current `prd-create` keep live acceptance in a linked `acceptance` issue, not as PRD checkboxes; a PRD is done when its implementation milestones are merged. In an older PRD that still carries live-acceptance checkboxes, move them to a linked `acceptance` issue (never with a sweep label) before counting completion, so `/prd-full` and `/prd-done` do not wait on them; list them under **User Acceptance** as tracked there.
+
 3. **Map git changes to appropriate categories only**
 4. **Be conservative** - only mark items complete with direct evidence
 
@@ -209,7 +211,7 @@ Present proposed changes clearly with complete transparency:
 5. **Honest progress assessment**: Give realistic completion percentage
 
 **Critical Requirements:**
-- **Never claim "everything is done"** unless literally ALL checkboxes are complete
+- **Never claim "everything is done"** unless literally ALL checkboxes are complete (live-acceptance items tracked in a linked `acceptance` issue are not PRD checkboxes)
 - **Be explicit about limitations** of git-based analysis
 - **Acknowledge validation gaps** when you can't verify functionality works
 - **Separate implementation from validation/rollout**

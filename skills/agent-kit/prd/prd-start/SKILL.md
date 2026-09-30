@@ -125,6 +125,12 @@ For documentation-first PRDs:
 
 **If PRD is not ready:** Inform the user what's missing and suggest they complete PRD planning first.
 
+### Scope Check (every PRD, before any implementation or dispatch)
+Apply `/prd-create`'s scope gate (Step 1.2) to the PRD as written:
+- **Hard stop**: a milestone that needs an unfinished PRD. Report it and propose moving the milestone to that PRD or redrawing the boundary; do not start.
+- **Scope-review alarm**: more than one independently valuable outcome, or an expected large PR. Propose a concrete split (the child outcomes, their order and blockers) as one yes/no. If you judge that no split yields independently valuable pieces (for example tightly coupled security work that must land complete), say so with the reason, record it in the PRD's Decision Log, and continue. Under `/prd-full`, a proposed split is the one place its no-pause rule does not apply: stop and output the split proposal instead of implementing.
+- **Live-acceptance checkboxes** in the milestones: propose moving them to a linked `acceptance` issue so completion counts implementation only.
+
 ## Step 3: Implementation Context Setup
 
 **⚠️ MANDATORY: Complete this step BEFORE proceeding to Step 4**
