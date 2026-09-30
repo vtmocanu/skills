@@ -31,7 +31,7 @@ Complete the PRD implementation workflow including branch management, pull reque
 - → **Use Full Workflow** (Steps 1-6)
 
 ### 1. Pre-Completion Validation
-- [ ] **All PRD checkboxes completed**: Verify every requirement is implemented and tested
+- [ ] **All PRD checkboxes completed**: Verify every requirement is implemented and tested. Live-acceptance checks are not PRD checkboxes: move any left in the PRD to a linked `acceptance` issue (never with a sweep label) before counting. The PRD is done at merge, or for a documentation-only completion when its docs change lands; live acceptance never holds it open.
 - [ ] **Documentation updated**: All user-facing docs reflect implemented functionality
 - [ ] **No outstanding blockers**: All dependencies resolved and technical debt addressed
 - [ ] **Update PRD status**: Mark PRD as "Complete" with completion date

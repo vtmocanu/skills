@@ -31,7 +31,14 @@ Take the user's description and work out the outcome yourself. Do not run an int
 - **Scope-review alarms** (not automatic splits): more than one independently valuable outcome, or an expected large PR (many components or a long file map). When one fires, propose a split into independently valuable PRDs with their order, as one yes/no for the user.
 - **Hard error: a milestone that needs an unfinished PRD.** Move it to that later PRD or redraw the boundary; never leave it waiting inside this one.
 - **A split effort gets an umbrella issue** that only indexes its child PRDs, their order and their blocking edges; each child is a normal PRD created by this skill. When the children go to uzi, default them to the `Auto` or `Seed & ship` mode so the user approves the split once, not every child plan.
-- **Existing open PRDs** get the same scope review before they are dispatched.
+- **Existing open PRDs** get the same scope review before they are dispatched (`/prd-start` runs it).
+
+#### Split path (when the user accepts a split)
+
+1. Create the **umbrella issue** first: a plain issue with no `PRD` label and no sweep label. Its body lists the child outcomes in order with their blocking edges; it holds no milestones.
+2. Ask Step 1.5's next-step and review questions **once** for the whole set, and reuse the answers (including any uzi mode) for every child.
+3. Create each child with Steps 2-5 as a normal PRD (its own issue with the `PRD` label and its own `prds/` file), in dependency order, then add each child's link to the umbrella.
+4. Act on the next step per child; for uzi, a child whose blockers are unfinished is committed and pushed but not sent yet.
 
 ### Step 1.5: Capture the post-PRD workflow up front (before creating anything)
 Before creating the issue or PRD, detect whether **uzi** is available (`command -v uzi` succeeds, **or** the `uzi-cli` skill is installed at `~/.claude/skills/uzi-cli/`). When uzi is available, also run `uzi schedule list --json` once to learn whether any **sweep** schedule exists and its label(s) — this gates the `Commit & push + queue for uzi sweep` option and its label choice below. Then gather **every** downstream choice now, back to back, so nothing interrupts the PRD writing later:
@@ -124,7 +131,7 @@ A PRD is done when its code is merged. When the feature has behaviour only a liv
 
 **Solution**: [1-2 sentence solution overview]
 
-**Detailed PRD**: See [prds/[actual-issue-id]-[feature-name].md](https://github.com/vfarcic/dot-ai/blob/main/prds/[actual-issue-id]-[feature-name].md)
+**Detailed PRD**: See [prds/[actual-issue-id]-[feature-name].md]([repo-web-url]/blob/[default-branch]/prds/[actual-issue-id]-[feature-name].md)
 
 **Priority**: [High/Medium/Low]
 ```
@@ -140,7 +147,7 @@ Answer these yourself from the code and context; they are a checklist for the au
 - **Slices**: the smallest end-to-end behaviour that proves the approach, then the slices that extend it.
 - **Must-have vs nice-to-have**: nice-to-haves go to Out of scope or a later PRD.
 
-**Forge-agnostic**: The `gh` commands below are GitHub examples. Detect the forge from `git remote get-url origin` and use the matching CLI, mapping each verb to its equivalent: **GitHub** → `gh`; **GitLab** → `glab` (a PR is a *merge request*, `glab mr …`); **Forgejo/Gitea** → `tea`. If the needed CLI is missing, tell the user and link its install page.
+**Forge-agnostic**: The `gh` commands below are GitHub examples. Detect the forge from `git remote get-url origin` and use the matching CLI, mapping each verb to its equivalent: **GitHub** → `gh`; **GitLab** → `glab` (a PR is a *merge request*, `glab mr …`); **Forgejo/Gitea** → `tea`. If the needed CLI is missing, tell the user and link its install page. Build `[repo-web-url]` from that same remote (strip `.git`, turn an SSH `git@host:org/repo` into `https://host/org/repo`) and `[default-branch]` from the remote's HEAD; GitLab file links use `/-/blob/` instead of `/blob/`.
 
 **Note**: If creating the GitHub issue fails because the "PRD" label does not exist, create the label first (`gh label create "PRD" --description "Product Requirements Document" --color 0052CC`) and then retry creating the issue.
 

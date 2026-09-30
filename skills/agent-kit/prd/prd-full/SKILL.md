@@ -33,6 +33,6 @@ Standard harness guardrails for genuinely destructive actions still apply.
 3. **Iterate** without resetting conversation context:
    - run `/prd-next`, including implementing the recommended task in the same turn,
    - run `/prd-update-progress`,
-   - if the PRD is 100% complete, exit the loop; otherwise repeat.
+   - if the PRD is 100% complete, exit the loop; otherwise repeat. Live-acceptance checkboxes do not count: move any to a linked `acceptance` issue instead of waiting on them.
 4. **Finish:** run `/prd-done` **only up to and including PR creation**. Do not run its review/merge, issue-closure, or branch-cleanup steps.
 5. Output the PR URL and branch name, then stop.
