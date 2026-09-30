@@ -3245,13 +3245,11 @@ class Shim:
         tag = turn.tag or {}
         self._advance_budget_sequence(tag)
         text = strip_tag(turn.last_agent_message or "").strip()
-        if not text:
-            log("turn %s finished with no agent message" % turn.turn_id)
-            return
 
         records = live_claude_records()
         targets = []
 
+        requester = None
         reply_socket = tag.get("reply")
         if reply_socket:
             if not socket_path_ok(reply_socket):
@@ -3272,7 +3270,44 @@ class Shim:
                     # Claude's own sender guards do not run here.
                     log("session id at %s changed; not delivering" % reply_socket)
                 else:
-                    targets.append(rec)
+                    requester = rec
+
+        if requester is not None:
+            # A verified requester is a contact, however its message arrived: a
+            # direct `peers.py send` queues straight into Codex and never passes
+            # _handle_user, so without this a later @-addressed turn to that
+            # same session was dropped as "no prior contact".
+            rsid = requester.get("sessionId")
+            self.contacts.pop(rsid, None)
+            self.contacts[rsid] = {
+                "name": requester.get("name") or tag.get("from"),
+                "socket": reply_socket,
+                "last_seen": now_iso(),
+            }
+            self._bound(self.contacts)
+
+        if not text:
+            log("turn %s finished with no agent message" % turn.turn_id)
+            if requester is not None:
+                # The requester otherwise waits for a reply that never comes.
+                # One correlated status plus one plain notice with no reply
+                # route, so the notice cannot start a loop.
+                detail = "the Codex turn finished with no final message; nothing to deliver"
+                self._status_to_record(requester, tag.get("mid"), "failed", detail)
+                notice = "[session-peers] %s answered your message%s with no final message, so no reply was delivered. Ask again or check its TUI." % (
+                    self.name or self.thread_id,
+                    " %s" % tag.get("mid") if tag.get("mid") else "",
+                )
+                deliver_to_record(
+                    requester,
+                    build_user_frame(
+                        build_cc_body(notice, self.thread_id, self.name, None), None
+                    ),
+                )
+            return
+
+        if requester is not None:
+            targets.append(requester)
 
         addressed = AT_NAME_RE.match(text.lstrip())
         if addressed:
@@ -3282,6 +3317,11 @@ class Shim:
                 log("no live Claude session named %r" % name)
             elif len(matches) > 1:
                 log("%r names %d live sessions; not delivering" % (name, len(matches)))
+            elif any(t.get("sessionId") == matches[0].get("sessionId") for t in targets):
+                # Addressed to the session the reply already goes to: the
+                # reply path delivers it once, so there is nothing to check or
+                # drop here (this used to log a false "unsolicited" drop).
+                pass
             else:
                 rec = matches[0]
                 sid = rec.get("sessionId")
