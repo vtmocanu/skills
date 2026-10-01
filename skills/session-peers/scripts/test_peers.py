@@ -6338,7 +6338,7 @@ class TestBudgetAllow(BuddyBase):
         )
         self.assertEqual(rc, 1)
         self.assertIn("cannot verify the running shim for %s (pid %d)" % (self.tid, pid), err)
-        self.assertIn("peers.py down %s && peers.py up %s" % (self.tid, self.tid), err)
+        self.assertIn("peers.py restart %s" % self.tid, err)
         self.assertFalse(os.path.exists(peers.budget_allow_path(self.tid)))
 
     def test_a_shim_without_the_feature_refuses_the_grant(self):
@@ -6704,6 +6704,244 @@ class TestTopics(Base):
         self.assertEqual([(t["topic"], t["last_seq"]) for t in listed], [("t1", 2), ("t2", 1)])
         self.assertTrue(all(t["last_ts"] for t in listed))
         self.assertEqual(self.cli("topic", "list")[0], 0)
+
+
+class TestRestartAndBuddyReplies(BuddyBase):
+    """`restart` keeps the sequence; `buddy set --replies` is a finite total."""
+
+    def setUp(self):
+        super().setUp()
+        self.tid, self.tid2 = self.two_threads("codex-one", "codex-two")
+        self.shim = peers.Shim(peers.resolve_thread(self.tid))
+        self.shim.codex_version = "0.153.4"
+        self.sid_a, self.sid_b = new_uuid(), new_uuid()
+        self.listener_a, _ = self.add_listener(name="cc-a", session_id=self.sid_a)
+        self.listener_b, _ = self.add_listener(
+            name="cc-b", session_id=self.sid_b, pid=os.getppid()
+        )
+        self.owner = "cc:%s" % self.sid_a
+
+    def new_shim(self, tid=None):
+        shim = peers.Shim(peers.resolve_thread(tid or self.tid))
+        shim.codex_version = "0.153.4"
+        return shim
+
+    def turn(self, sid, listener, turn_id):
+        tag = {"from": "cc", "sid": sid, "mid": "m-" + turn_id, "reply": listener.path}
+        return peers.Turn(turn_id, "ping", tag, "complete", "answer")
+
+    @staticmethod
+    def replies(listener):
+        return [f for f in listener.of_type("user") if f.get("from")]
+
+    def deliver(self, shim, sid, listener, count, prefix="t"):
+        with contextlib.redirect_stderr(io.StringIO()):
+            for i in range(count):
+                shim._handle_turn_end(self.turn(sid, listener, "%s%d" % (prefix, i)))
+
+    def consume(self, shim):
+        with contextlib.redirect_stderr(io.StringIO()):
+            shim._consume_budget_allow_marker()
+            shim._consume_budget_binding_marker()
+
+    def grant(self, replies):
+        rc, _out, err = self.cli(
+            "budget", "allow", self.tid, "--replies", str(replies),
+            "--for-session", self.sid_a,
+        )
+        self.assertEqual(rc, 0, err)
+        self.consume(self.shim)
+
+    def bind(self, *extra, target=None):
+        return self.buddy(self.owner, "set", target or "codex:%s" % self.tid, *extra)
+
+    # -- A2: restart ----------------------------------------------------
+
+    def test_restart_does_not_write_a_reset_or_unregister(self):
+        peers.write_json_atomic(
+            peers.thread_state_path(self.tid), {"thread_id": self.tid, "budgets": {"s": 2}}
+        )
+        before = pathlib.Path(peers.thread_state_path(self.tid)).read_bytes()
+        calls = []
+        saved = (peers.stop_shim, peers.attach_thread)
+        peers.stop_shim = lambda tid: calls.append(("stop", tid)) or True
+        peers.attach_thread = lambda tid, verbose=True: calls.append(("start", tid)) or 4242
+        try:
+            rc, out, err = self.cli("restart", self.tid)
+        finally:
+            peers.stop_shim, peers.attach_thread = saved
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(calls, [("stop", self.tid), ("start", self.tid)])
+        self.assertIn("kept", out)
+        self.assertFalse(os.path.exists(peers.budget_reset_path(self.tid)))
+        self.assertEqual(pathlib.Path(peers.thread_state_path(self.tid)).read_bytes(), before)
+
+    def test_a_restarted_shim_keeps_a_valid_grant_and_the_replies_spent(self):
+        self.grant(5)
+        self.deliver(self.shim, self.sid_a, self.listener_a, 2)
+        wait_for(lambda: len(self.replies(self.listener_a)) >= 2)
+        restarted = self.new_shim()
+        self.assertEqual(restarted.allowance["total"], 5)
+        self.assertEqual(restarted.budgets[self.sid_a], 2)
+        self.assertEqual(restarted._cap_for(self.sid_a), 5)
+        self.deliver(restarted, self.sid_a, self.listener_a, 4, prefix="r")
+        wait_for(lambda: len(self.replies(self.listener_a)) >= 5)
+        time.sleep(0.2)
+        # 2 before the restart + 3 after: the total was never replenished.
+        self.assertEqual(len(self.replies(self.listener_a)), 5)
+        self.assertEqual(sorted(restarted.held), [self.sid_a])
+
+    def test_a_restart_does_not_resurrect_an_expired_grant(self):
+        window = self.shim.reply_budget_window
+        self.shim.budgets[self.sid_a] = 2
+        self.shim.budget_sender_sid = self.sid_a
+        self.shim.budget_last_at = time.time()
+        self.grant(5)
+        self.shim.budget_last_at = time.time() - window - 5
+        self.shim._save_state()
+        self.assertEqual(self.shim.allowance["bound"], True)
+        restarted = self.new_shim()
+        self.assertIsNone(restarted.allowance)
+        self.assertEqual(restarted._cap_for(self.sid_a), peers.REPLY_BUDGET)
+        # A grant that never saw its sequence expires from its grant time.
+        self.shim.allowance = {
+            "sid": self.sid_a, "total": 5, "bound": False,
+            "at": time.time() - window - 5,
+        }
+        self.shim.budget_last_at = None
+        self.shim._save_state()
+        self.assertIsNone(self.new_shim().allowance)
+
+    def test_an_explicit_reset_or_up_still_clears_the_grant(self):
+        self.grant(5)
+        self.shim.budgets[self.sid_a] = 2
+        self.shim.budget_sender_sid = self.sid_a
+        self.shim.budget_last_at = time.time()
+        self.shim._save_state()
+        restarted = self.new_shim()
+        self.assertEqual(restarted.allowance["total"], 5)
+        self.assertEqual(self.cli("budget", "reset", self.tid)[0], 0)
+        with contextlib.redirect_stderr(io.StringIO()):
+            restarted._consume_budget_marker()
+        self.assertIsNone(restarted.allowance)
+        self.assertEqual(restarted.budgets, {})
+        # `up` writes the same marker, so a shim that starts after it drops it.
+        self.grant(5)
+        self.shim._save_state()
+        saved = peers.reconcile
+        peers.reconcile = lambda verbose=True: 0
+        try:
+            self.assertEqual(self.cli("up", self.tid)[0], 0)
+        finally:
+            peers.reconcile = saved
+        self.assertTrue(os.path.exists(peers.budget_reset_path(self.tid)))
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.new_shim()._consume_budget_marker(initial=True)
+
+    # -- A5: buddy set --replies ----------------------------------------
+
+    def test_binding_without_replies_grants_nothing(self):
+        rc, out, err = self.bind()
+        self.assertEqual(rc, 0, err)
+        self.assertNotIn("replies left", out)
+        self.assertFalse(os.path.exists(peers.budget_binding_path(self.tid)))
+        self.assertNotIn("replies", json.loads(self.record_path(self.owner).read_text()))
+        self.assertEqual(self.shim._cap_for(self.sid_a), peers.REPLY_BUDGET)
+
+    def test_a_bound_total_survives_sequences_and_a_restart_without_replenishing(self):
+        rc, out, err = self.bind("--replies", "6")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("replies left: 6 of 6", out)
+        self.consume(self.shim)
+        self.assertEqual(self.shim._cap_for(self.sid_a), 6)
+        self.assertEqual(self.shim._cap_for(self.sid_b), peers.REPLY_BUDGET)
+        self.deliver(self.shim, self.sid_a, self.listener_a, 2, prefix="a")
+        self.deliver(self.shim, self.sid_b, self.listener_b, 1, prefix="b")  # new sequence
+        self.assertEqual(self.shim.binding["spent"], 2)  # B's reply spent nothing
+        restarted = self.new_shim()
+        self.assertEqual(restarted.binding["spent"], 2)
+        self.deliver(restarted, self.sid_a, self.listener_a, 6, prefix="c")
+        wait_for(lambda: len(self.replies(self.listener_a)) >= 6)
+        time.sleep(0.2)
+        self.assertEqual(len(self.replies(self.listener_a)), 6)
+        self.assertEqual(restarted.binding["spent"], 6)
+        self.assertEqual(sorted(restarted.held), [self.sid_a])
+        # A later sequence gets only the default cap: nothing is replenished.
+        restarted._advance_budget_sequence({"sid": self.sid_b})
+        self.assertEqual(restarted._cap_for(self.sid_a), peers.REPLY_BUDGET)
+        # Re-binding the same buddy keeps the spent count and the higher total.
+        for again in ("6", "3"):
+            self.assertEqual(self.bind("--replies", again)[0], 0)
+            self.consume(restarted)
+        self.assertEqual((restarted.binding["total"], restarted.binding["spent"]), (6, 6))
+        # An explicit reset and `up` leave the bound total alone.
+        self.assertEqual(self.cli("budget", "reset", self.tid)[0], 0)
+        with contextlib.redirect_stderr(io.StringIO()):
+            restarted._consume_budget_marker()
+        self.assertEqual(restarted.binding["spent"], 6)
+        rc, out, _err = self.buddy(self.owner, "show")
+        self.assertIn("replies left: 0 of 6", out)
+
+    def test_clear_revokes_the_total_even_before_the_shim_read_it(self):
+        self.assertEqual(self.bind("--replies", "6")[0], 0)
+        self.consume(self.shim)
+        self.assertEqual(self.buddy(self.owner, "clear")[0], 0)
+        self.consume(self.shim)
+        self.assertIsNone(self.shim.binding)
+        self.assertEqual(self.shim._cap_for(self.sid_a), peers.REPLY_BUDGET)
+        self.assertIsNone(self.new_shim().binding)
+        # Cleared before the shim ever polled: the revoke replaces the grant.
+        self.assertEqual(self.bind("--replies", "4")[0], 0)
+        self.assertEqual(self.buddy(self.owner, "clear")[0], 0)
+        self.consume(self.shim)
+        self.assertIsNone(self.shim.binding)
+
+    def test_binding_another_buddy_revokes_and_a_new_binding_starts_fresh(self):
+        self.assertEqual(self.bind("--replies", "6")[0], 0)
+        self.consume(self.shim)
+        self.deliver(self.shim, self.sid_a, self.listener_a, 1)
+        self.assertEqual(self.bind(target="codex:%s" % self.tid2)[0], 0)
+        self.consume(self.shim)
+        self.assertIsNone(self.shim.binding)
+        other = self.new_shim(self.tid2)
+        self.consume(other)
+        self.assertIsNone(other.binding)
+        # Binding the first buddy again is a new binding: nothing carried over.
+        self.assertEqual(self.bind("--replies", "6")[0], 0)
+        self.consume(self.shim)
+        self.assertEqual((self.shim.binding["total"], self.shim.binding["spent"]), (6, 0))
+
+    def test_it_is_refused_when_the_running_shim_cannot_read_it(self):
+        self.hold_pidfile(self.tid)
+        rc, _out, err = self.bind("--replies", "6")
+        self.assertEqual(rc, 1)
+        self.assertIn("peers.py restart %s" % self.tid, err)
+        self.assertFalse(self.record_path(self.owner).exists())
+        self.assertFalse(os.path.exists(peers.budget_binding_path(self.tid)))
+        pid = os.getppid()
+        peers.write_json_atomic(
+            peers.thread_state_path(self.tid),
+            {"thread_id": self.tid, "shim_pid": pid, "shim_features": ["budget_allow"]},
+        )
+        self.assertEqual(self.bind("--replies", "6")[0], 1)
+        peers.write_json_atomic(
+            peers.thread_state_path(self.tid),
+            {"thread_id": self.tid, "shim_pid": pid,
+             "shim_features": list(peers.SHIM_FEATURES)},
+        )
+        self.assertEqual(self.bind("--replies", "6")[0], 0)
+
+    def test_bad_replies_are_rejected(self):
+        for value in ("0", str(peers.BUDGET_ALLOW_MAX + 1)):
+            rc, _out, err = self.bind("--replies", value)
+            self.assertEqual(rc, 2, err)
+        rc, _out, err = self.bind("--replies", "5", target="cc:%s" % self.sid_b)
+        self.assertEqual(rc, 2)
+        self.assertIn("Codex buddy", err)
+        self.assertFalse(self.record_path(self.owner).exists())
+        rc, _out, err = self.buddy("codex:%s" % new_uuid(), "set", "codex:%s" % self.tid,
+                                   "--replies", "5")
+        self.assertEqual(rc, 2)
 
 
 if __name__ == "__main__":
