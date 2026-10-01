@@ -1,6 +1,6 @@
 ---
 name: clodex
-description: Runbook for clodex (@bman654/clodex), which bridges Claude Code to OpenAI ChatGPT/Codex-plan and other OpenAI-compatible models and patches the Claude Code binary so those models appear in /model and work as subagents. Covers install, version checks and upgrades, provider sign-in, adding or removing a model (refresh catalog, favorite, alias, context window, patch), re-patching after a Claude Code or clodex update, restore and uninstall, and coexistence with tweakcc. Use when adding a new model to Claude Code via clodex, upgrading clodex, or re-patching after a Claude Code update. Invoke explicitly with /clodex, optionally followed by a model id or a task such as "upgrade".
+description: Runbook for clodex (@bman654/clodex), which bridges Claude Code to OpenAI ChatGPT/Codex-plan and other OpenAI-compatible models and patches the Claude Code binary so those models appear in /model and work as subagents. Covers install, version checks and upgrades, provider sign-in, adding or removing a model (refresh catalog, favorite, alias, context window, patch), re-patching after a Claude Code or clodex update, restore and uninstall. Use when adding a new model to Claude Code via clodex, upgrading clodex, or re-patching after a Claude Code update. Invoke explicitly (/clodex in Claude Code, $clodex in Codex), optionally followed by a model id or a task such as "upgrade".
 disable-model-invocation: true
 ---
 
@@ -14,14 +14,19 @@ Claude Code binary so clodex favorites pass model validation, appear in
 `/model`, report their real context window, and work as Agent-tool subagents
 and in skill or agent `model:` frontmatter.
 
+Invocation: `/clodex [ARGS]` in Claude Code, `$clodex [ARGS]` in Codex.
+
 ## What to do on invocation
 
 - **A model id** (for example `gpt-6.1-sol`): run [Add a model](#add-a-model).
-- **`upgrade`, `update`, `check`**: run [Install, check, upgrade](#install-check-upgrade).
-- **`remove <model>`**: run [Remove a model](#remove-a-model).
-- **Nothing**: report status (below), then ask what to do.
+- **`check`**: run [Check](#check) and stop.
+- **`install`, `upgrade`, `update`**: run [Install or upgrade](#install-or-upgrade).
+- **`remove MODEL`**: run [Remove a model](#remove-a-model).
+- **Nothing**: run [Status](#status), then ask what to do.
 
-Status:
+## Status
+
+Read-only.
 
 ```bash
 clodex --version
@@ -31,23 +36,30 @@ jq '{claudeVersion, patchedAt}' ~/.clodex/patch-state.json
 claude --version              # differs from claudeVersion -> re-patch needed
 ```
 
-## Install, check, upgrade
+## Check
 
-Requires Node 22 or newer. There is no self-update or update-check command;
-npm is the channel.
+Read-only. Report the installed and latest versions, then stop.
 
 ```bash
-command -v clodex && clodex --version            # installed version
-npm view @bman654/clodex version                 # latest published
-npm install -g @bman654/clodex@latest            # install or upgrade
+command -v clodex && clodex --version    # no output -> report "not installed"
+npm view @bman654/clodex version         # latest published
 ```
 
-- A global npm install changes the user's machine. Ask before running it,
-  unless the user's request already asked for the install or upgrade.
-- After any install or upgrade, run `clodex patch` (see [Patch](#patch)): the
-  new version may patch different sites.
-- Before upgrading across a major version, read the release notes at
-  `https://github.com/bman654/clodex/releases`.
+## Install or upgrade
+
+Requires Node 22 or newer. clodex has no self-update; npm is the channel.
+
+1. Run [Check](#check). Before crossing a major version, read
+   `https://github.com/bman654/clodex/releases`.
+2. A global npm install changes the user's machine. Ask first, unless the
+   user's request already asked for the install or upgrade.
+
+   ```bash
+   npm install -g @bman654/clodex@latest
+   ```
+
+3. Run `clodex patch` (see [Patch](#patch)); a new version may patch
+   different sites. Then restart Claude Code.
 
 First-time provider sign-in (ChatGPT/Codex plan):
 
@@ -59,30 +71,57 @@ clodex providers list                    # confirm "auth: ... (OAuth)"
 Use `clodex providers add` for an API key, OpenCode Go, or a custom
 OpenAI-compatible server.
 
+## Interactive commands
+
+`clodex models` (favorites manager) and `clodex providers auth` need a TTY.
+In Claude Code, suggest `! clodex models` so it runs in this session. In Codex,
+or wherever tool execution lacks a TTY, ask the user to run it in their own
+terminal and say when done.
+
 ## Add a model
 
-Model ids are provider model ids such as `gpt-6.1-sol`; the provider for the
-ChatGPT plan is `openai-oauth`. Substitute the requested id for `MODEL` and the
-provider for `PROVIDER` below.
+Substitute the requested model id for `MODEL`, its provider id for `PROVIDER`
+(`openai-oauth` for the ChatGPT plan; `clodex providers list` shows ids), and
+the chosen context stop for `STOP`.
 
 1. **Refresh the catalog.** `clodex models` reads a cached catalog, and
    upgrading clodex does not refresh it, so a new model is missing until this
-   runs:
+   runs. Read the refresh output: on a discovery failure clodex keeps the old
+   cache or a seed list, which is not proof of what the account offers.
 
    ```bash
    clodex providers refresh-models PROVIDER
-   jq --arg m MODEL '.. | objects | select(.id? == $m)' ~/.clodex/providers.json
+   jq --arg p PROVIDER --arg m MODEL \
+     '.providers[] | select(.id == $p) | {fetchedAt: .modelsCache.fetchedAt,
+      found: any(.modelsCache.models[]?; .id == $m)}' ~/.clodex/providers.json
    ```
 
-   Empty output means the provider does not offer that model to this account.
-   Report that and stop.
+   `providers.json` is clodex-internal. `found: false` after a successful
+   refresh means the provider's catalog does not list `MODEL` for this
+   account; after a failed refresh, report the refresh error instead. Stop
+   either way.
 
-2. **Add it as a favorite** (max 20). The supported path is interactive:
-   the user runs `clodex models`, searches the id, and adds it. Suggest
-   `! clodex models` so it runs in this session. Without a TTY, back up
-   `~/.clodex/config.json` and append `{"providerId": "PROVIDER", "modelId":
-   "MODEL"}` to its `favoriteModels` array with `jq`. This file format is
-   clodex-internal. Confirm with step 5 that clodex accepted the edit.
+2. **Add it as a favorite** (max 20). Supported path: the user runs
+   `clodex models`, searches the id, and adds it (see
+   [Interactive commands](#interactive-commands)).
+
+   Fallback when no one can run it interactively: edit the clodex-internal
+   `~/.clodex/config.json`. The edit validates the schema, skips a duplicate,
+   enforces the 20 limit, keeps unrelated fields, and replaces the file only
+   on success:
+
+   ```bash
+   cp ~/.clodex/config.json ~/.clodex/config.json.bak
+   jq --arg p PROVIDER --arg m MODEL '
+     if (.favoriteModels | type) != "array" then error("unexpected config schema")
+     elif any(.favoriteModels[]; .providerId == $p and .modelId == $m) then .
+     elif (.favoriteModels | length) >= 20 then error("already 20 favorites")
+     else .favoriteModels += [{providerId: $p, modelId: $m}] end
+   ' ~/.clodex/config.json > ~/.clodex/config.json.tmp \
+     && mv ~/.clodex/config.json.tmp ~/.clodex/config.json
+   ```
+
+   On a `jq` error, delete `config.json.tmp`, report it, and stop.
 
 3. **Alias** it so Claude Code and agent frontmatter can use the bare id:
 
@@ -90,21 +129,31 @@ provider for `PROVIDER` below.
    clodex models --alias MODEL=clodex:PROVIDER:MODEL
    ```
 
-4. **Context window.** Stops are `standard` (provider default), `max`
-   (ceiling), `default` (clear), or a token count such as `500k`. Read the
-   model's `pricingBoundary` from `clodex models --json`: above it the provider
-   may bill the whole request at a higher rate (on the ChatGPT plan, likely
-   faster quota use). `standard` stays under it; `max` crosses it. Match the
-   stop already used by the user's other favorites unless they say otherwise.
+4. **Context window.** Stops: `standard` (provider default), `max`
+   (ceiling), `default` (clear a saved stop), or a token count such as
+   `250k`. Read the resolved metadata first:
 
    ```bash
-   clodex models --context MODEL=max --save
+   clodex models --json | jq --arg p PROVIDER --arg m MODEL \
+     '.[] | select(.providerId == $p and .modelId == $m) | {context, pricingBoundary}'
    ```
 
-5. **Verify, then patch:**
+   When `pricingBoundary` is set, a window above it lets the provider bill
+   the whole request at a higher rate; `clodex models --context` warns when
+   the chosen stop crosses it. Whether `standard` or `max` crosses it depends
+   on the model and provider (API-key models may cross it at `standard`).
+   Default to the stop the user's other favorites use; tell the user when it
+   crosses the boundary.
 
    ```bash
-   clodex models --json | jq --arg m MODEL '.[] | select(.modelId == $m) | {id, alias, context}'
+   clodex models --context MODEL=STOP --save
+   ```
+
+5. **Verify** (exits non-zero unless every value matches), then patch:
+
+   ```bash
+   clodex models --json | jq -e --arg p PROVIDER --arg m MODEL --arg s STOP \
+     'any(.[]; .providerId == $p and .modelId == $m and .alias == $m and .context.stop == $s)'
    clodex patch
    ```
 
@@ -114,10 +163,16 @@ provider for `PROVIDER` below.
 
 ## Remove a model
 
-Remove the favorite interactively (`clodex models`), drop its alias with
-`clodex models --unalias NAME`, clear a saved context stop with
-`clodex models --context MODEL=default --save`, then `clodex patch` and
-restart Claude Code.
+Clear the context stop **before** dropping the alias (a bare name resolves
+through the alias):
+
+```bash
+clodex models --context MODEL=default --save
+clodex models --unalias MODEL
+```
+
+Then remove the favorite interactively (`clodex models`), run `clodex patch`,
+and restart Claude Code.
 
 ## Patch
 
@@ -132,12 +187,19 @@ clodex patch --restore  # put back the pristine Claude Code binary
   Code.
 - Success line: `clodex patch: N applied, 0 skipped, 0 failed`. A `FAIL` or
   `SKIP` usually means this clodex does not support the installed Claude Code
-  build yet: check for a clodex upgrade before anything else.
+  build yet: run [Check](#check) for a newer clodex first.
 - **Editor extension mismatch.** When an editor's Claude Code extension is a
   different build than the patched CLI, `clodex patch` warns and prints
   alignment commands (for example `claude install <version>`). Relay them to
   the user; running them changes the installed Claude Code version, so ask
   first. Updating the extension instead is usually the better fix.
+- **Other binary patchers** (for example tweakcc) restore their own backup
+  before patching. clodex writes its pristine backup into tweakcc's backup
+  path, so a later `tweakcc --apply` restores pristine and drops the clodex
+  patches, and a later `clodex patch` drops tweakcc's. Running both is not a
+  supported combination. For extra edits on top of clodex, use clodex local
+  patches (`clodex patch --enable-local-patches`, `~/.clodex/local-patches.mjs`,
+  trusted JavaScript run with full user permissions; see the clodex README).
 
 ## Launch modes
 
@@ -150,19 +212,6 @@ clodex claude --endpoint # local Anthropic-format gateway via ANTHROPIC_BASE_URL
   keeps its own Anthropic login, and only `clodex:` models are rerouted.
 - **Endpoint**: all traffic goes through the local gateway.
 - `--save-mode` persists the mode; `--trace` logs to `~/.clodex/logs/`.
-
-## tweakcc coexistence
-
-[tweakcc](https://github.com/Piebald-AI/tweakcc) also patches the Claude Code
-binary in place. Each tool restores its own pristine backup before patching, and
-neither knows about the other.
-
-- Order: `clodex patch` first, then `tweakcc --apply`. tweakcc then snapshots
-  the clodex-patched binary as its baseline. The reverse order wipes clodex.
-- After every Claude Code update, re-run both in that order and confirm both
-  patch sets survived.
-- Let only clodex own the context window; do not also set tweakcc's context
-  limit.
 
 ## Uninstall
 

@@ -8,7 +8,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- `clodex`: user-invoked runbook for clodex (`@bman654/clodex`): install, version check and upgrade via npm, provider sign-in, adding a model by id (refresh the cached catalog, favorite, alias, context stop with its pricing boundary, `clodex patch`, restart), removing one, re-patching after Claude Code or clodex updates, editor-extension version mismatch, proxy versus endpoint mode, tweakcc patch order, and uninstall. `disable-model-invocation: true` for Claude Code and `agents/openai.yaml` `allow_implicit_invocation: false` for Codex keep it out of auto-invocation.
+- `clodex`: user-invoked runbook for clodex (`@bman654/clodex`): install, version check and upgrade via npm, provider sign-in, adding a model by id (refresh the cached catalog, favorite, alias, context stop with its pricing boundary, `clodex patch`, restart), removing one, re-patching after Claude Code or clodex updates, editor-extension version mismatch, proxy versus endpoint mode, why other binary patchers such as tweakcc do not coexist (clodex local patches instead), and uninstall. A read-only `check` is separate from install/upgrade; the non-TTY favorites fallback validates the config schema, skips duplicates and enforces the 20 limit; Codex invocation is `$clodex`. `disable-model-invocation: true` for Claude Code and `agents/openai.yaml` `allow_implicit_invocation: false` for Codex keep it out of auto-invocation.
 
 ### Removed
 

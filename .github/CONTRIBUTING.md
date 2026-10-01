@@ -67,7 +67,7 @@ Include in your pull request description: **what** changed, **why**, and any rel
 
 ## Skill Authoring Standards
 
-- `name`: lowercase letters, digits, and hyphens; 64 characters or fewer. It must match the skill's folder name. Do not use the reserved substrings `anthropic` or `claude`.
+- `name`: lowercase letters, digits, and hyphens; 64 characters or fewer. It must match the skill's folder name. Avoid the substrings `anthropic` and `claude` in new names: the Anthropic Skills API rejects them, though the `skills` CLI installs them (as with the existing `claude-permissions`).
 - `description`: a single line (no multi-line YAML scalars), 1024 characters or fewer, written in the third person, with explicit "Use when ..." triggers so agents auto-invoke correctly.
 - Keep the body concise and imperative. Put the detail an agent needs in the body; keep the always-loaded description tight.
 - No private hosts, internal paths, secrets, or tokens. These skills are public.
