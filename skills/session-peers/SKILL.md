@@ -104,6 +104,36 @@ and issue drafts; `brainstorm`; `second-opinion`; `co-steer`; `ping`;
   Report both answers together so the user can close the pair at once. Closing
   this session is still the user's decision.
 
+**Delegated work (steer and execute).** When the user has the buddy do the
+work while this session steers and reviews:
+
+- A Codex worker sees queued messages only between turns, so corrections sent
+  during a long turn pile up and its replies answer superseded instructions.
+  Steer through check-ins instead of a message stream.
+- **The worker checks in** at each gate, about every 15 minutes while actively
+  working, and before any push, apply or other outward step: done (with SHAs),
+  next, blockers, questions. A routine check-in uses `dispatch`, so work
+  continues, and the worker briefly `await`s that request at its next
+  check-in; set `dispatch --timeout` longer than the interval, since expiry
+  discards even an unread reply. A pending `await` (exit 124) stays resumable. A gate
+  check-in uses `ask`, which blocks until the reply or its timeout; a timeout
+  (exit 124) deletes the mailbox, so a late reply is lost, and permits only
+  independent, already-authorized work. The gate stays closed.
+- **The steerer answers in that reply**, folding in everything it would have
+  sent: verdicts, user decisions, corrections. Between check-ins it sends only
+  what cannot wait, and marks a message that replaces an earlier one
+  `supersedes <msg_id>`.
+- Relay user decisions verbatim and say they came from the user; the worker
+  cannot see this session's conversation.
+- A sandboxed worker may lack host network (forge HTTPS, state backends, LAN
+  hosts, secret stores). It sends the exact command; the steerer runs it only
+  if the user authorized that action for this work, and returns the output.
+  Never run an action the worker was denied permission for.
+- Correlated `ask`/`dispatch` replies bypass the shim reply budget; asynchronous
+  replies do not. When the user's message gives a number, grant it as the
+  delegation starts (`peers.py buddy set NAME --replies N`), not after a reply
+  is held.
+
 **Longer loops.** For a user-requested review or brainstorm loop with a Codex
 buddy, raise the reply cap instead of resetting it every round:
 
