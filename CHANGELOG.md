@@ -10,7 +10,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - `clodex`: user-invoked runbook for clodex (`@bman654/clodex`): install, version check and upgrade via npm, provider sign-in, adding a model by id (refresh the cached catalog, favorite, alias, context stop with its pricing boundary, `clodex patch`, restart), removing one, re-patching after Claude Code or clodex updates, editor-extension version mismatch, proxy versus endpoint mode, tweakcc patch order, and uninstall. `disable-model-invocation: true` for Claude Code and `agents/openai.yaml` `allow_implicit_invocation: false` for Codex keep it out of auto-invocation.
 
+### Removed
+
+- README "Legacy: dot-ai" install section; dot-ai no longer distributes these skills. Vendored-from-dot-ai provenance and credits stay.
+
 ### Changed
+
+- `reflect`: finds a skill's source repository from the skills lockfile (`~/.agents/.skill-lock.json` or `skills-lock.json`) instead of dot-ai `source:` frontmatter.
+- `skill-maker`: drops the dot-ai parser comparison from the colon-space description rule.
+- CONTRIBUTING: skills live in `skills/<name>/SKILL.md` (folder only), not at the repository root; lists the README row and CHANGELOG steps.
 
 - `session-peers`: SKILL.md adds "Delegated work (steer and execute)" for a buddy that does the work while this session steers: the Codex worker checks in at each gate, about every 15 minutes while working and before any outward step (done, next, blockers, questions), routine check-ins via `dispatch`/`await` and gate check-ins via blocking `ask`, whose timeout keeps the gate closed, the steerer folds its corrections into that reply and marks replacing messages `supersedes <msg_id>`, user decisions are relayed verbatim, a sandboxed worker hands host-network commands to the steerer only for user-authorized actions, and a user-given reply allowance for asynchronous replies is granted when the delegation starts (correlated replies bypass the budget).
 - `session-peers`: `peers.py restart <uuid>` restarts a shim keeping its registration, reply budget, spent replies and any still-valid grant (`down` then `up` stays the deliberate reset); `buddy set NAME --replies N` binds a finite total of replies (max 20, every delivered reply counts, the default cap of 3 returns once spent) that survives sequence changes, `budget reset`, `up` and restarts, is never replenished, is held by one owner per Codex thread, needs a shim proven to read it, and is revoked by `buddy clear` or binding another buddy (which fail, keeping the binding, if the revoke cannot be written); SKILL.md defines the handback message (information only, never a binding, allowance or approval) and says a reply to an older message cannot satisfy the current gate.

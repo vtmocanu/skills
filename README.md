@@ -123,21 +123,6 @@ Plus the 11 [agent-kit](skills/agent-kit/) skills from the table above.
 
 Issues and PRs welcome. See [CONTRIBUTING](.github/CONTRIBUTING.md), the [Code of Conduct](.github/CODE_OF_CONDUCT.md), and the [Security Policy](.github/SECURITY.md).
 
-## Legacy: dot-ai
-
-Before the `skills` CLI, these were served by the [dot-ai](https://github.com/vfarcic/dot-ai) generator, which cloned the repo server-side and prefixed every skill as `/dot-ai-<name>`. It still works, but the rolling CLI above is the recommended path.
-
-<details>
-<summary>dot-ai install</summary>
-
-```sh
-dot-ai skills generate --agent claude-code --path ~/.claude/commands --repo https://github.com/vtmocanu/skills
-```
-
-`--repo` composes alongside other sources: each invocation tags its skills with `source:` frontmatter and rewrites only its own slice, so skills from several repos coexist without clobbering each other. Do not run both dot-ai and npx for this repo, or you get duplicate skills (`/dot-ai-reflect` from dot-ai and `/reflect` from npx); to switch, remove the `dot-ai skills generate … --repo …` line from your `SessionStart` hook and keep the npx hook above.
-
-</details>
-
 ## Credits
 
 The `prd-*`, `cicd-expert`, and `generate-dockerfile` skills draw on work vendored from [vfarcic/dot-ai](https://github.com/vfarcic/dot-ai), created by **Viktor Farcic** and used under the MIT License (Copyright (c) 2025 Viktor Farcic). Most come from its `shared-prompts/` directory; `prd-worktree` comes from `.claude/skills/dot-ai-worktree-prd/` (renamed from `worktree-prd`, with its bundled `create.sh`). The `prd-*` and `generate-dockerfile` skills are copied largely verbatim, converted to the folder `SKILL.md` layout with the dot-ai `category` frontmatter dropped; `cicd-expert` keeps Viktor's interactive generator (formerly the `generate-cicd` skill) and substantially expands it with a security and speed reference set. Each keeps a provenance line pointing back to its source. Thank you to Viktor for the excellent PRD workflow and project generators.
