@@ -149,13 +149,26 @@ the chosen context stop for `STOP`.
    clodex models --context MODEL=STOP --save
    ```
 
-5. **Verify** (exits non-zero unless every value matches), then patch:
+5. **Verify, then patch only on a match.** The filter normalizes `STOP` the
+   way clodex stores it (`250k` becomes `250000`, `default` becomes
+   `standard`):
 
    ```bash
-   clodex models --json | jq -e --arg p PROVIDER --arg m MODEL --arg s STOP \
-     'any(.[]; .providerId == $p and .modelId == $m and .alias == $m and .context.stop == $s)'
-   clodex patch
+   set -o pipefail
+   if clodex models --json | jq -e --arg p PROVIDER --arg m MODEL --arg s STOP '
+     ($s | ascii_downcase) as $s
+     | (if ($s | IN("default", "reset", "unset")) then "standard"
+        elif ($s | test("^[0-9]+k$")) then ($s[:-1] | tonumber * 1000)
+        elif ($s | test("^[0-9]+$")) then ($s | tonumber)
+        else $s end) as $want
+     | any(.[]; .providerId == $p and .modelId == $m and .alias == $m and .context.stop == $want)'
+   then clodex patch
+   else echo "clodex config does not match; not patching" >&2; false
+   fi
    ```
+
+   On a mismatch, report what `clodex models --json` shows for the model and
+   stop.
 
 6. Tell the user to **restart Claude Code**; the running process keeps the
    old binary. The model is then in `/model` and usable as `model: MODEL` in
