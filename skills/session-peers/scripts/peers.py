@@ -673,6 +673,55 @@ def budget_binding_path(thread_id):
     return os.path.join(state_dir(), "%s.budget-binding" % thread_id)
 
 
+BINDING_LOCK_TIMEOUT = 10.0
+
+
+class BindingLockTimeout(Exception):
+    """The per-thread binding lock stayed busy for the whole bounded wait."""
+
+
+@contextlib.contextmanager
+def binding_lock(thread_id, timeout=None):
+    """Exclusive per-thread lock over the binding marker and its conflict check.
+
+    Held by `buddy set --replies`, `buddy clear`, a rebind's revoke and the
+    shim's marker consumption, so a write is never lost to a concurrent read
+    or unlink. flock on a mode-0600 file, polled without blocking until
+    ``timeout`` seconds (default BINDING_LOCK_TIMEOUT), then BindingLockTimeout.
+    """
+    timeout = BINDING_LOCK_TIMEOUT if timeout is None else timeout
+    path = os.path.join(state_dir(), "%s.binding-lock" % thread_id)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError as exc:
+                if exc.errno not in (errno.EAGAIN, errno.EACCES, errno.EWOULDBLOCK):
+                    raise
+                if time.monotonic() >= deadline:
+                    raise BindingLockTimeout(
+                        "another peers.py command holds the reply-total lock "
+                        "for %s" % thread_id
+                    )
+                time.sleep(0.05)
+        yield
+    finally:
+        os.close(fd)
+
+
+@contextlib.contextmanager
+def _binding_locks(*thread_ids):
+    """Take several binding locks in sorted order, so two commands cannot deadlock."""
+    with contextlib.ExitStack() as stack:
+        for tid in sorted(set(thread_ids)):
+            if tid:
+                stack.enter_context(binding_lock(tid))
+        yield
+
+
 def buddies_dir():
     path = os.path.join(state_dir(), "buddies")
     os.makedirs(path, mode=0o700, exist_ok=True)
@@ -3157,10 +3206,17 @@ class Shim:
         path = budget_binding_path(self.thread_id)
         if not os.path.exists(path):
             return
-        marker = read_json(path, None)
+        # Read and unlink under the lock: a marker written between the two
+        # would be deleted unread. A busy lock waits for the next poll.
         try:
-            os.unlink(path)
-        except OSError:
+            with binding_lock(self.thread_id, timeout=2.0):
+                marker = read_json(path, None)
+                try:
+                    os.unlink(path)
+                except OSError:
+                    return
+        except BindingLockTimeout:
+            log("binding marker for thread %s is locked; retrying" % self.thread_id)
             return
         if isinstance(marker, dict) and marker.get("revoke") is True:
             binding = self.binding
@@ -5173,20 +5229,27 @@ def cmd_buddy(args):
     path = buddy_path(owner)
     if action == "clear":
         old = read_buddy(owner)
-        # Revoke first: a failed revoke keeps the record, so clear can be retried.
         try:
-            _revoke_binding(owner, old)
-        except OSError as exc:
-            sys.stderr.write(
-                "error: could not revoke the reply total on %s (%s); the buddy "
-                "is still bound, retry `buddy clear`\n" % (old["buddy"]["uuid"], exc)
-            )
+            with _binding_locks(_revocable_thread(owner, old)):
+                # Revoke first: a failed revoke keeps the record, so clear can
+                # be retried.
+                try:
+                    _revoke_binding(owner, old)
+                except OSError as exc:
+                    sys.stderr.write(
+                        "error: could not revoke the reply total on %s (%s); the "
+                        "buddy is still bound, retry `buddy clear`\n"
+                        % (old["buddy"]["uuid"], exc)
+                    )
+                    return 1
+                try:
+                    os.unlink(path)
+                except FileNotFoundError:
+                    print("no buddy was set")
+                    return 0
+        except BindingLockTimeout as exc:
+            sys.stderr.write("error: %s; the buddy is still bound, retry\n" % exc)
             return 1
-        try:
-            os.unlink(path)
-        except FileNotFoundError:
-            print("no buddy was set")
-            return 0
         print("buddy cleared")
         return 0
     if action == "set":
@@ -5233,27 +5296,45 @@ def cmd_buddy(args):
         if replies is not None:
             rec["replies"] = replies
             rec["bind_id"] = bind_id
-        if not same:
-            try:
-                _revoke_binding(owner, old)
-            except OSError as exc:
-                sys.stderr.write(
-                    "error: could not revoke the reply total on %s (%s); the "
-                    "old buddy is still bound, retry\n" % (old["buddy"]["uuid"], exc)
-                )
-                return 1
+        locked = set()
         if args.replies is not None:
-            write_json_atomic(
-                budget_binding_path(buddy["uuid"]),
-                {
-                    "sid": owner["uuid"],
-                    "bind_id": bind_id,
-                    "total": replies,
-                    "at": now_iso(),
-                },
-                mode=0o600,
-            )
-        write_json_atomic(path, rec, mode=0o600)
+            locked.add(buddy["uuid"])
+        if not same and _revocable_thread(owner, old):
+            locked.add(old["buddy"]["uuid"])
+        try:
+            with _binding_locks(*locked):
+                # The conflict check and every write below share the locks, so
+                # a competing owner cannot slip between check and publish.
+                if args.replies is not None:
+                    conflict = _binding_conflict(owner, buddy)
+                    if conflict:
+                        sys.stderr.write("error: %s\n" % conflict)
+                        return 1
+                if not same:
+                    try:
+                        _revoke_binding(owner, old)
+                    except OSError as exc:
+                        sys.stderr.write(
+                            "error: could not revoke the reply total on %s (%s); "
+                            "the old buddy is still bound, retry\n"
+                            % (old["buddy"]["uuid"], exc)
+                        )
+                        return 1
+                if args.replies is not None:
+                    write_json_atomic(
+                        budget_binding_path(buddy["uuid"]),
+                        {
+                            "sid": owner["uuid"],
+                            "bind_id": bind_id,
+                            "total": replies,
+                            "at": now_iso(),
+                        },
+                        mode=0o600,
+                    )
+                write_json_atomic(path, rec, mode=0o600)
+        except BindingLockTimeout as exc:
+            sys.stderr.write("error: %s; nothing was changed, retry\n" % exc)
+            return 1
         _print_buddy(args, rec, buddy_status(buddy, attach=True))
         return 0
     rec = read_buddy(owner)
@@ -5273,9 +5354,8 @@ def _check_buddy_replies(replies, owner, buddy):
             "--replies applies to a Claude session's Codex buddy only: the "
             "reply budget belongs to a Codex thread's shim"
         )
-    conflict = _binding_conflict(owner, buddy)
-    if conflict:
-        return 1, conflict
+    # The shim is attached here, outside the binding lock: a shim takes that
+    # lock itself when it reads a marker.
     pid = shim_pid(buddy["uuid"]) or attach_thread(buddy["uuid"], verbose=False)
     if not pid:
         return 1, (
@@ -5335,18 +5415,25 @@ def _binding_conflict(owner, buddy):
     return None
 
 
-def _revoke_binding(owner, old):
-    """Revoke the reply total a replaced or cleared binding granted.
-
-    Raises OSError when the revoke marker cannot be written, so the caller
-    keeps the record and the revocation can be retried.
-    """
+def _revocable_thread(owner, old):
+    """The Codex thread holding ``old``'s reply total, or None when it has none."""
     if (
         old is None
         or not old.get("bind_id")
         or old["buddy"]["kind"] != "codex"
         or owner["kind"] != "cc"
     ):
+        return None
+    return old["buddy"]["uuid"]
+
+
+def _revoke_binding(owner, old):
+    """Revoke the reply total a replaced or cleared binding granted.
+
+    Raises OSError when the revoke marker cannot be written, so the caller
+    keeps the record and the revocation can be retried.
+    """
+    if _revocable_thread(owner, old) is None:
         return
     write_json_atomic(
         budget_binding_path(old["buddy"]["uuid"]),

@@ -17,6 +17,7 @@ the filename.
 
 from __future__ import annotations
 
+import argparse
 import contextlib
 import importlib.util
 import io
@@ -6969,6 +6970,78 @@ class TestRestartAndBuddyReplies(BuddyBase):
         self.consume(self.shim)
         self.assertIsNone(self.shim.binding)
         self.assertEqual(self.bind("--replies", "5", owner=other)[0], 0)
+
+    def run_buddy_set(self, owner, results):
+        args = argparse.Namespace(
+            buddy_cmd="set", as_identity=owner, target="codex:%s" % self.tid,
+            uses=None, replies=5, json=False,
+        )
+        results[owner] = peers.cmd_buddy(args)
+
+    def test_two_owners_binding_at_once_yield_exactly_one_binding(self):
+        import threading
+
+        self.prove()
+        other = "cc:%s" % self.sid_b
+        checked, go = threading.Event(), threading.Event()
+        calls = []
+        real = peers._binding_conflict
+
+        def paused(owner, buddy):
+            result = real(owner, buddy)
+            calls.append(owner["uuid"])
+            if len(calls) == 1:
+                checked.set()  # the first binder has checked, not yet published
+                go.wait(10)
+            return result
+
+        peers._binding_conflict = paused
+        results = {}
+        out, err = sys.stdout, sys.stderr
+        sys.stdout = sys.stderr = io.StringIO()
+        try:
+            first = threading.Thread(target=self.run_buddy_set, args=(self.owner, results))
+            first.start()
+            self.assertTrue(checked.wait(10))
+            second = threading.Thread(target=self.run_buddy_set, args=(other, results))
+            second.start()
+            time.sleep(0.5)  # the second binder runs its check now, or waits on the lock
+            go.set()
+            first.join(30)
+            second.join(30)
+        finally:
+            peers._binding_conflict = real
+            sys.stdout, sys.stderr = out, err
+        self.assertEqual(sorted(results.values()), [0, 1], results)
+        self.assertEqual(results[self.owner], 0)  # the paused binder published first
+        marker = peers.read_json(peers.budget_binding_path(self.tid))
+        self.assertEqual(marker["sid"], self.sid_a)
+        self.assertFalse(self.record_path(other).exists())
+
+    def test_a_busy_binding_lock_fails_visibly_and_changes_nothing(self):
+        self.prove()
+        saved = peers.BINDING_LOCK_TIMEOUT
+        peers.BINDING_LOCK_TIMEOUT = 0.2
+        try:
+            with peers.binding_lock(self.tid):
+                rc, _out, err = self.bind("--replies", "5")
+                self.assertEqual(rc, 1)
+                self.assertIn("lock", err)
+                self.assertFalse(self.record_path(self.owner).exists())
+                self.assertFalse(os.path.exists(peers.budget_binding_path(self.tid)))
+                # The shim leaves a marker it cannot lock for its next poll.
+                peers.write_json_atomic(
+                    peers.budget_binding_path(self.tid),
+                    {"sid": self.sid_a, "bind_id": "b", "total": 3, "at": peers.now_iso()},
+                )
+                with contextlib.redirect_stderr(io.StringIO()):
+                    self.shim._consume_budget_binding_marker()
+                self.assertIsNone(self.shim.binding)
+                self.assertTrue(os.path.exists(peers.budget_binding_path(self.tid)))
+        finally:
+            peers.BINDING_LOCK_TIMEOUT = saved
+        self.consume(self.shim)
+        self.assertEqual(self.shim.binding["total"], 3)
 
     def test_a_failed_revoke_fails_the_command_and_keeps_the_record(self):
         self.assertEqual(self.bind("--replies", "6")[0], 0)
