@@ -81,6 +81,8 @@ These are the sections of the `prds/` file. The "GitHub Issue Template" further 
 2. **Outcome**: what works when this PRD is done, plus 2-3 concrete acceptance examples (input, action, observable result). The user can object just by reading this.
 3. **Out of scope**: what this PRD deliberately does not do, including anything moved to a later PRD.
 4. **Modules and seams**: only the consequential ones. For each, the caller-facing interface (inputs, outputs, invariants, error behaviour), what complexity it hides, and where tests exercise it. Prefer existing seams and interfaces; add a new one only for a demonstrated need.
+   - **A module that takes untrusted input states its resource bounds**: for each resource it lets a caller spend (stored bytes, memory after decompression, database connections and concurrency, background work, wall time), the bound and where it is enforced. Nothing irreversible that affects another owner (deleting, reclaiming, charging) happens on a declared value before it is verified.
+   - **Reusing an existing component's safety story** (a clone path, an upload pattern, a limiter) states whether its accepted risks still hold for this PRD's callers; a risk accepted for admin-controlled input does not carry over to input a user or product controls.
 5. **Testing decisions**: which behaviours are tested at which seam, and similar existing tests to follow.
 6. **Milestones**: vertical slices, per the rules below.
 7. **Decision Log**: every technical decision with its reason and the alternative rejected.
@@ -189,7 +191,7 @@ The **next step** and **PRD review** choices were captured up front (Step 1.5, v
 
 ### PRD Review (if requested)
 
-If the user asked for review, spawn reviewer agent(s) with the **Agent** tool (`subagent_type: Explore` or `general-purpose`) to read `prds/[issue-id]-[feature-name].md` and critique it: scope (one independently valuable outcome; no milestone that needs an unfinished PRD), vertical slicing (no standalone layer milestones; real `Blocked by` edges; each slice fits one fresh run), testability at the named seams, clarity, missing risks and dependencies. When the repo has an agent-team `architect` role, make it one of the reviewers.
+If the user asked for review, spawn reviewer agent(s) with the **Agent** tool (`subagent_type: Explore` or `general-purpose`) to read `prds/[issue-id]-[feature-name].md` and critique it: scope (one independently valuable outcome; no milestone that needs an unfinished PRD), vertical slicing (no standalone layer milestones; real `Blocked by` edges; each slice fits one fresh run), testability at the named seams, for untrusted input, resource bounds, declared-value verification before any irreversible cross-owner action, and reused safety stories (Modules and seams), clarity, missing risks and dependencies. When the repo has an agent-team `architect` role, make it one of the reviewers.
 
 - **One reviewer**: a single agent.
 - **Let the skill decide**: pick the count from the PRD's size and complexity: 1 for a small single-component PRD, 2-3 for a large or multi-component one, each agent taking a distinct lens (scope/feasibility, milestones/testability, risks/dependencies). Run them in parallel.
