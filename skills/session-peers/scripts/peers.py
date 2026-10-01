@@ -5416,8 +5416,8 @@ def _binding_conflict(owner, buddy):
 
     A shim keeps one binding per thread, so a second owner would overwrite the
     first one's spent count or revoke. Checked from the pending marker, the
-    shim's saved binding and the other owners' buddy records; two owners
-    binding in the same instant can still race.
+    shim's saved binding and the other owners' buddy records. The caller holds
+    the target thread's binding lock through this check and publication.
     """
     tid = buddy["uuid"]
     holders = set()
