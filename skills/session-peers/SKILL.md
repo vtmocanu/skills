@@ -104,6 +104,29 @@ and issue drafts; `brainstorm`; `second-opinion`; `co-steer`; `ping`;
   Report both answers together so the user can close the pair at once. Closing
   this session is still the user's decision.
 
+**Delegated work (steer and execute).** When the user has the buddy do the
+work while this session steers and reviews:
+
+- A Codex worker sees queued messages only between turns, so corrections sent
+  during a long turn pile up and its replies answer superseded instructions.
+  Steer through check-ins instead of a message stream.
+- **The worker checks in** with `peers.py ask --to cc:<steerer>` at each gate,
+  about every 15 minutes, and before any push, apply or other outward step:
+  done (with SHAs), next, blockers, questions. It waits for the answer only
+  before an outward step; otherwise it continues after a timeout.
+- **The steerer answers in that reply**, folding in everything it would have
+  sent: verdicts, user decisions, corrections. Between check-ins it sends only
+  what cannot wait, and marks a message that replaces an earlier one
+  `supersedes <msg_id>`.
+- Relay user decisions verbatim and say they came from the user; the worker
+  cannot see this session's conversation.
+- A sandboxed worker may lack host network (forge HTTPS, state backends, LAN
+  hosts, secret stores). It sends the exact command; the steerer runs it only
+  if the user authorized that action for this work, and returns the output.
+  Never run an action the worker was denied permission for.
+- Grant the reply allowance (`buddy set --replies N`) when the delegation
+  starts, not after a reply is held.
+
 **Longer loops.** For a user-requested review or brainstorm loop with a Codex
 buddy, raise the reply cap instead of resetting it every round:
 
