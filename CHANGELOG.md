@@ -8,6 +8,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- `prd-create`: a module that takes untrusted input states its resource bounds and verifies declared values before any irreversible cross-owner action; reusing a component's safety story states whether its accepted risks still hold; PRD review checks both.
 - `session-peers`: SKILL.md documents the #84 behaviour (a turn with no final message attempts one notice, plus a correlated `failed` status when the message has an id, to a verified live requester; prior contact includes a verified requester of a direct send) and says to restart a running shim after an upgrade, between review loops.
 
 ## [0.43.1] - 2026-09-30
