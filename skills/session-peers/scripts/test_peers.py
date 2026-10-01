@@ -6752,8 +6752,17 @@ class TestRestartAndBuddyReplies(BuddyBase):
         self.assertEqual(rc, 0, err)
         self.consume(self.shim)
 
-    def bind(self, *extra, target=None):
-        return self.buddy(self.owner, "set", target or "codex:%s" % self.tid, *extra)
+    def prove(self):
+        """Stand in for a running shim that provably reads binding allowances."""
+        if not getattr(self, "_proved", False):
+            self.hold_pidfile(self.tid, pid=os.getpid())
+            self._proved = True
+        self.shim._save_state()
+
+    def bind(self, *extra, target=None, owner=None, prove=True):
+        if prove:
+            self.prove()
+        return self.buddy(owner or self.owner, "set", target or "codex:%s" % self.tid, *extra)
 
     # -- A2: restart ----------------------------------------------------
 
@@ -6913,7 +6922,7 @@ class TestRestartAndBuddyReplies(BuddyBase):
 
     def test_it_is_refused_when_the_running_shim_cannot_read_it(self):
         self.hold_pidfile(self.tid)
-        rc, _out, err = self.bind("--replies", "6")
+        rc, _out, err = self.bind("--replies", "6", prove=False)
         self.assertEqual(rc, 1)
         self.assertIn("peers.py restart %s" % self.tid, err)
         self.assertFalse(self.record_path(self.owner).exists())
@@ -6923,13 +6932,72 @@ class TestRestartAndBuddyReplies(BuddyBase):
             peers.thread_state_path(self.tid),
             {"thread_id": self.tid, "shim_pid": pid, "shim_features": ["budget_allow"]},
         )
-        self.assertEqual(self.bind("--replies", "6")[0], 1)
+        self.assertEqual(self.bind("--replies", "6", prove=False)[0], 1)
         peers.write_json_atomic(
             peers.thread_state_path(self.tid),
             {"thread_id": self.tid, "shim_pid": pid,
              "shim_features": list(peers.SHIM_FEATURES)},
         )
+        self.assertEqual(self.bind("--replies", "6", prove=False)[0], 0)
+
+    def test_it_is_refused_when_no_shim_is_running_or_attachable(self):
+        rc, _out, err = self.bind("--replies", "6", prove=False)
+        self.assertEqual(rc, 1)
+        self.assertIn("no running shim", err)
+        self.assertFalse(self.record_path(self.owner).exists())
+        self.assertFalse(os.path.exists(peers.budget_binding_path(self.tid)))
+
+    def test_a_second_owner_cannot_overwrite_a_shared_buddys_binding(self):
+        other = "cc:%s" % self.sid_b
         self.assertEqual(self.bind("--replies", "6")[0], 0)
+        self.consume(self.shim)
+        self.deliver(self.shim, self.sid_a, self.listener_a, 4)
+        self.assertEqual(self.shim.binding["spent"], 4)
+        marker_before = peers.budget_binding_path(self.tid)
+        rc, _out, err = self.bind("--replies", "5", owner=other)
+        self.assertEqual(rc, 1)
+        self.assertIn("already holds a reply total", err)
+        self.assertFalse(os.path.exists(marker_before))
+        self.assertFalse(self.record_path(other).exists())
+        # The first owner repeating its binding keeps its spent count.
+        self.assertEqual(self.bind("--replies", "6")[0], 0)
+        self.consume(self.shim)
+        self.assertEqual((self.shim.binding["total"], self.shim.binding["spent"]), (6, 4))
+        # Its pending revoke cannot be overwritten by the other owner either.
+        self.assertEqual(self.buddy(self.owner, "clear")[0], 0)
+        self.assertEqual(self.bind("--replies", "5", owner=other)[0], 1)
+        self.consume(self.shim)
+        self.assertIsNone(self.shim.binding)
+        self.assertEqual(self.bind("--replies", "5", owner=other)[0], 0)
+
+    def test_a_failed_revoke_fails_the_command_and_keeps_the_record(self):
+        self.assertEqual(self.bind("--replies", "6")[0], 0)
+        self.consume(self.shim)
+        real = peers.write_json_atomic
+
+        def failing(path, *args, **kwargs):
+            if str(path).endswith(".budget-binding"):
+                raise OSError("disk full")
+            return real(path, *args, **kwargs)
+
+        peers.write_json_atomic = failing
+        try:
+            rc, out, err = self.buddy(self.owner, "clear")
+            self.assertEqual(rc, 1)
+            self.assertIn("still bound", err)
+            self.assertNotIn("buddy cleared", out)
+            self.assertTrue(self.record_path(self.owner).exists())
+            rc, _out, err = self.bind(target="codex:%s" % self.tid2)
+            self.assertEqual(rc, 1)
+            self.assertIn("still bound", err)
+            record = json.loads(self.record_path(self.owner).read_text())
+            self.assertEqual(record["buddy"]["uuid"], self.tid)
+        finally:
+            peers.write_json_atomic = real
+        self.assertIsNotNone(self.shim.binding)
+        self.assertEqual(self.buddy(self.owner, "clear")[0], 0)
+        self.consume(self.shim)
+        self.assertIsNone(self.shim.binding)
 
     def test_bad_replies_are_rejected(self):
         for value in ("0", str(peers.BUDGET_ALLOW_MAX + 1)):

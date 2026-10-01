@@ -5173,12 +5173,20 @@ def cmd_buddy(args):
     path = buddy_path(owner)
     if action == "clear":
         old = read_buddy(owner)
+        # Revoke first: a failed revoke keeps the record, so clear can be retried.
+        try:
+            _revoke_binding(owner, old)
+        except OSError as exc:
+            sys.stderr.write(
+                "error: could not revoke the reply total on %s (%s); the buddy "
+                "is still bound, retry `buddy clear`\n" % (old["buddy"]["uuid"], exc)
+            )
+            return 1
         try:
             os.unlink(path)
         except FileNotFoundError:
             print("no buddy was set")
             return 0
-        _revoke_binding(owner, old)
         print("buddy cleared")
         return 0
     if action == "set":
@@ -5226,7 +5234,14 @@ def cmd_buddy(args):
             rec["replies"] = replies
             rec["bind_id"] = bind_id
         if not same:
-            _revoke_binding(owner, old)
+            try:
+                _revoke_binding(owner, old)
+            except OSError as exc:
+                sys.stderr.write(
+                    "error: could not revoke the reply total on %s (%s); the "
+                    "old buddy is still bound, retry\n" % (old["buddy"]["uuid"], exc)
+                )
+                return 1
         if args.replies is not None:
             write_json_atomic(
                 budget_binding_path(buddy["uuid"]),
@@ -5258,8 +5273,16 @@ def _check_buddy_replies(replies, owner, buddy):
             "--replies applies to a Claude session's Codex buddy only: the "
             "reply budget belongs to a Codex thread's shim"
         )
-    pid = shim_pid(buddy["uuid"])
-    if pid and not shim_supports(buddy["uuid"], pid, "binding_allowance"):
+    conflict = _binding_conflict(owner, buddy)
+    if conflict:
+        return 1, conflict
+    pid = shim_pid(buddy["uuid"]) or attach_thread(buddy["uuid"], verbose=False)
+    if not pid:
+        return 1, (
+            "no running shim for %s, so a reply total cannot be granted; start "
+            "it (`peers.py buddy ping`) and bind again" % buddy["uuid"]
+        )
+    if not shim_supports(buddy["uuid"], pid, "binding_allowance"):
         return 1, (
             "cannot verify the running shim for %s (pid %d) supports buddy "
             "allowances; a shim started from an older peers.py never reads the "
@@ -5269,8 +5292,55 @@ def _check_buddy_replies(replies, owner, buddy):
     return None
 
 
+def _binding_conflict(owner, buddy):
+    """A message when another session already holds a reply total on this thread.
+
+    A shim keeps one binding per thread, so a second owner would overwrite the
+    first one's spent count or revoke. Checked from the pending marker, the
+    shim's saved binding and the other owners' buddy records; two owners
+    binding in the same instant can still race.
+    """
+    tid = buddy["uuid"]
+    holders = set()
+    marker = read_json(budget_binding_path(tid), None)
+    if isinstance(marker, dict) and isinstance(marker.get("sid"), str):
+        holders.add(marker["sid"])
+    state = read_json(thread_state_path(tid), None)
+    binding = state.get("binding") if isinstance(state, dict) else None
+    if isinstance(binding, dict) and isinstance(binding.get("sid"), str):
+        holders.add(binding["sid"])
+    try:
+        names = os.listdir(buddies_dir())
+    except OSError:
+        names = []
+    for name in names:
+        rec = read_json(os.path.join(buddies_dir(), name), None)
+        if not isinstance(rec, dict) or not rec.get("bind_id"):
+            continue
+        rec_buddy, rec_owner = rec.get("buddy"), rec.get("owner")
+        if (
+            isinstance(rec_buddy, dict)
+            and rec_buddy.get("uuid") == tid
+            and isinstance(rec_owner, dict)
+            and isinstance(rec_owner.get("uuid"), str)
+        ):
+            holders.add(rec_owner["uuid"])
+    holders.discard(owner["uuid"])
+    if holders:
+        return (
+            "another session (%s) already holds a reply total on this Codex "
+            "thread; a thread carries one at a time. It must `buddy clear` (or "
+            "bind another buddy) first" % sorted(holders)[0]
+        )
+    return None
+
+
 def _revoke_binding(owner, old):
-    """Revoke the reply total a replaced or cleared binding granted."""
+    """Revoke the reply total a replaced or cleared binding granted.
+
+    Raises OSError when the revoke marker cannot be written, so the caller
+    keeps the record and the revocation can be retried.
+    """
     if (
         old is None
         or not old.get("bind_id")
@@ -5278,22 +5348,16 @@ def _revoke_binding(owner, old):
         or owner["kind"] != "cc"
     ):
         return
-    try:
-        write_json_atomic(
-            budget_binding_path(old["buddy"]["uuid"]),
-            {
-                "sid": owner["uuid"],
-                "bind_id": old["bind_id"],
-                "revoke": True,
-                "at": now_iso(),
-            },
-            mode=0o600,
-        )
-    except OSError as exc:
-        sys.stderr.write(
-            "warning: could not revoke the reply total on %s: %s\n"
-            % (old["buddy"]["uuid"], exc)
-        )
+    write_json_atomic(
+        budget_binding_path(old["buddy"]["uuid"]),
+        {
+            "sid": owner["uuid"],
+            "bind_id": old["bind_id"],
+            "revoke": True,
+            "at": now_iso(),
+        },
+        mode=0o600,
+    )
 
 
 def _buddy_set_command(target, args):

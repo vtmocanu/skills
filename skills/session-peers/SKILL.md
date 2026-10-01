@@ -49,13 +49,17 @@ default. Bind it when the user writes `buddy: @NAME`, "your buddy is NAME", or
 - "Your buddy", "ask your buddy" and `--to buddy` all mean that peer. `peers.py
   buddy` shows it; `buddy ping` ensures its shim without resetting budgets;
   `buddy clear` unbinds.
-- `--replies N` (1..20, Codex buddy) is a finite TOTAL of extra replies for
-  this binding: bound to this session and that buddy, spent across sequences
-  (another peer, a direct Codex turn, 30 idle minutes) and shim restarts, never
-  replenished, shown by `buddy` as "replies left". `buddy clear` or binding
-  another buddy revokes it; `budget reset` and `up` leave it. Binding without
-  it grants nothing extra. It exits 1 unless the running shim is proven to read
-  it: `peers.py restart <uuid>`, then bind again.
+- `--replies N` (1..20, Codex buddy) is the TOTAL of replies this binding may
+  receive, counting every delivered reply (the default first three included),
+  across sequences (another peer, a direct Codex turn, 30 idle minutes) and
+  shim restarts. It is never replenished; once spent, the default cap of 3 per
+  sequence applies again. It is bound to this session and that buddy, and a
+  thread carries one owner's total at a time (a second owner is refused until
+  the first clears). `buddy clear` or binding another buddy revokes it and
+  fails, keeping the binding, if the revoke cannot be written; `budget reset`,
+  `up` and `restart` leave it. `buddy` shows "replies left". Binding without it
+  grants nothing extra. It exits 1 unless a running (or attachable) shim is
+  proven to read it: `peers.py restart <uuid>`, then bind again.
 
 **Uses** (default all; `--uses` narrows them): `review` of plans, diffs, PRs
 and issue drafts; `brainstorm`; `second-opinion`; `co-steer`; `ping`;
