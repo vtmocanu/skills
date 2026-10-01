@@ -7018,6 +7018,63 @@ class TestRestartAndBuddyReplies(BuddyBase):
         self.assertEqual(marker["sid"], self.sid_a)
         self.assertFalse(self.record_path(other).exists())
 
+    def test_a_clear_paused_after_its_record_read_cannot_orphan_a_rebind(self):
+        self.prove()
+        shim2 = self.new_shim(self.tid2)
+        self.hold_pidfile(self.tid2, pid=os.getpid())
+        shim2._save_state()
+        self.assertEqual(self.bind("--replies", "6")[0], 0)
+        self.consume(self.shim)
+        checked, go = threading.Event(), threading.Event()
+        me = []
+        real = peers.read_buddy
+
+        def paused(owner):
+            result = real(owner)
+            if not me:
+                me.append(threading.get_ident())
+                checked.set()  # clear has read the binding to thread A
+                go.wait(10)
+            return result
+
+        peers.read_buddy = paused
+        results = {}
+        out, err = sys.stdout, sys.stderr
+        sys.stdout = sys.stderr = io.StringIO()
+        try:
+            def clear():
+                results["clear"] = peers.cmd_buddy(argparse.Namespace(
+                    buddy_cmd="clear", as_identity=self.owner, json=False))
+
+            def rebind():
+                results["rebind"] = peers.cmd_buddy(argparse.Namespace(
+                    buddy_cmd="set", as_identity=self.owner, json=False, uses=None,
+                    target="codex:%s" % self.tid2, replies=5))
+
+            first = threading.Thread(target=clear)
+            first.start()
+            self.assertTrue(checked.wait(10))
+            second = threading.Thread(target=rebind)
+            second.start()
+            time.sleep(0.5)  # the rebind runs now, or waits on the owner lock
+            go.set()
+            first.join(30)
+            second.join(30)
+        finally:
+            peers.read_buddy = real
+            sys.stdout, sys.stderr = out, err
+        self.assertEqual(results["clear"], 0, results)
+        # Never an allowance on thread B without the owner record that can clear it.
+        marker = peers.read_json(peers.budget_binding_path(self.tid2))
+        if self.record_path(self.owner).exists():
+            record = json.loads(self.record_path(self.owner).read_text())
+            self.assertEqual(record["buddy"]["uuid"], self.tid2)
+            self.assertEqual(marker["bind_id"], record["bind_id"])
+        else:
+            self.assertIsNone(marker)
+        self.consume(self.shim)
+        self.assertIsNone(self.shim.binding)  # A was revoked
+
     def test_a_busy_binding_lock_fails_visibly_and_changes_nothing(self):
         self.prove()
         saved = peers.BINDING_LOCK_TIMEOUT
