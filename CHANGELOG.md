@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `clodex`: user-invoked runbook for clodex (`@bman654/clodex`): install, version check and upgrade via npm, provider sign-in, adding a model by id (refresh the cached catalog, favorite, alias, context stop with its pricing boundary, `clodex patch`, restart), removing one, re-patching after Claude Code or clodex updates, editor-extension version mismatch, proxy versus endpoint mode, tweakcc patch order, and uninstall. `disable-model-invocation: true` for Claude Code and `agents/openai.yaml` `allow_implicit_invocation: false` for Codex keep it out of auto-invocation.
+
 ### Changed
 
 - `session-peers`: SKILL.md adds "Delegated work (steer and execute)" for a buddy that does the work while this session steers: the Codex worker checks in at each gate, about every 15 minutes while working and before any outward step (done, next, blockers, questions), routine check-ins via `dispatch`/`await` and gate check-ins via blocking `ask`, whose timeout keeps the gate closed, the steerer folds its corrections into that reply and marks replacing messages `supersedes <msg_id>`, user decisions are relayed verbatim, a sandboxed worker hands host-network commands to the steerer only for user-authorized actions, and a user-given reply allowance for asynchronous replies is granted when the delegation starts (correlated replies bypass the budget).
