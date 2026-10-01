@@ -7075,6 +7075,72 @@ class TestRestartAndBuddyReplies(BuddyBase):
         self.consume(self.shim)
         self.assertIsNone(self.shim.binding)  # A was revoked
 
+    def fail_writes(self, suffix):
+        real = peers.write_json_atomic
+
+        def failing(path, *args, **kwargs):
+            if str(path).endswith(suffix):
+                raise OSError("disk full")
+            return real(path, *args, **kwargs)
+
+        peers.write_json_atomic = failing
+        self.addCleanup(setattr, peers, "write_json_atomic", real)
+        return lambda: setattr(peers, "write_json_atomic", real)
+
+    def assert_revocable(self):
+        """A grant, if any, has an owner record that `buddy clear` can revoke."""
+        marker = peers.read_json(peers.budget_binding_path(self.tid))
+        if marker is not None:
+            record = json.loads(self.record_path(self.owner).read_text())
+            self.assertEqual(record["bind_id"], marker["bind_id"])
+
+    def test_a_failed_record_write_leaves_no_grant_and_a_retry_keeps_spent(self):
+        restore = self.fail_writes("cc-%s.json" % self.sid_a)
+        rc, _out, err = self.bind("--replies", "6")
+        self.assertEqual(rc, 1)
+        self.assertIn("retry", err)
+        self.assertFalse(os.path.exists(peers.budget_binding_path(self.tid)))
+        self.assertFalse(self.record_path(self.owner).exists())
+        restore()
+        self.assertEqual(self.bind("--replies", "6")[0], 0)
+        self.consume(self.shim)
+        self.deliver(self.shim, self.sid_a, self.listener_a, 3)
+        self.assertEqual(self.shim.binding["spent"], 3)
+        # The same failure on a re-bind: nothing published, spent untouched.
+        restore = self.fail_writes("cc-%s.json" % self.sid_a)
+        self.assertEqual(self.bind("--replies", "6")[0], 1)
+        restore()
+        self.consume(self.shim)
+        self.assertEqual(self.shim.binding["spent"], 3)
+
+    def test_a_failed_grant_write_leaves_a_record_that_clear_and_a_retry_use(self):
+        restore = self.fail_writes(".budget-binding")
+        rc, _out, err = self.bind("--replies", "6")
+        self.assertEqual(rc, 1)
+        self.assertIn("retry", err)
+        self.assert_revocable()
+        self.assertTrue(self.record_path(self.owner).exists())
+        restore()
+        # A retry reuses the record's bind_id and publishes the grant.
+        before = json.loads(self.record_path(self.owner).read_text())["bind_id"]
+        self.assertEqual(self.bind("--replies", "6")[0], 0)
+        self.assertEqual(
+            json.loads(self.record_path(self.owner).read_text())["bind_id"], before
+        )
+        self.consume(self.shim)
+        self.deliver(self.shim, self.sid_a, self.listener_a, 2)
+        self.assertEqual(self.shim.binding["spent"], 2)
+        # Failing again keeps the live grant and its spent count revocable.
+        restore = self.fail_writes(".budget-binding")
+        self.assertEqual(self.bind("--replies", "6")[0], 1)
+        restore()
+        self.assert_revocable()
+        self.consume(self.shim)
+        self.assertEqual(self.shim.binding["spent"], 2)
+        self.assertEqual(self.buddy(self.owner, "clear")[0], 0)
+        self.consume(self.shim)
+        self.assertIsNone(self.shim.binding)
+
     def test_a_busy_binding_lock_fails_visibly_and_changes_nothing(self):
         self.prove()
         saved = peers.BINDING_LOCK_TIMEOUT

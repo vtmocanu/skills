@@ -5347,18 +5347,30 @@ def cmd_buddy(args):
                                 % (old["buddy"]["uuid"], exc)
                             )
                             return 1
-                    if args.replies is not None:
-                        write_json_atomic(
-                            budget_binding_path(buddy["uuid"]),
-                            {
-                                "sid": owner["uuid"],
-                                "bind_id": bind_id,
-                                "total": replies,
-                                "at": now_iso(),
-                            },
-                            mode=0o600,
+                    # Record first, grant second: whatever fails in between,
+                    # no grant exists without a record that can revoke it, and
+                    # a retried set reuses the record's bind_id (so the shim
+                    # keeps the spent count).
+                    try:
+                        write_json_atomic(path, rec, mode=0o600)
+                        if args.replies is not None:
+                            write_json_atomic(
+                                budget_binding_path(buddy["uuid"]),
+                                {
+                                    "sid": owner["uuid"],
+                                    "bind_id": bind_id,
+                                    "total": replies,
+                                    "at": now_iso(),
+                                },
+                                mode=0o600,
+                            )
+                    except OSError as exc:
+                        sys.stderr.write(
+                            "error: could not bind the buddy (%s); retry "
+                            "`buddy set` (a retry keeps replies already spent)\n"
+                            % exc
                         )
-                    write_json_atomic(path, rec, mode=0o600)
+                        return 1
         except BindingLockTimeout as exc:
             sys.stderr.write("error: %s; nothing was changed, retry\n" % exc)
             return 1
