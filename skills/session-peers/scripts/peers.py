@@ -21,11 +21,12 @@ Subcommands::
     peers.py shim --thread <uuid>
     peers.py up [<name|uuid>]
     peers.py down [<name|uuid>]
+    peers.py restart <name|uuid>
     peers.py budget reset <name|uuid|buddy>
     peers.py budget allow <name|uuid|buddy> --replies N [--for-session <uuid>]
                           [--as cc:<uuid>|codex:<uuid>]
     peers.py buddy [show|ping|clear] [--as cc:<uuid>|codex:<uuid>] [--json]
-    peers.py buddy set [cc:|codex:|@]<name|uuid> [--uses a,b]
+    peers.py buddy set [cc:|codex:|@]<name|uuid> [--uses a,b] [--replies N]
                        [--as cc:<uuid>|codex:<uuid>] [--json]
     peers.py session-hook
     peers.py install-hook [--auto-attach]
@@ -86,7 +87,7 @@ BUDGET_ALLOW_MAX = 20
 # What a running shim's code supports, saved in its own state file (never the
 # vendor-read registry record). A shim keeps the code it started with, so a
 # command whose marker only newer shims consume checks this first.
-SHIM_FEATURES = ["budget_allow"]
+SHIM_FEATURES = ["budget_allow", "binding_allowance"]
 REPLY_BUDGET_WINDOW_DEFAULT = 30 * 60.0
 REQUEST_TIMEOUT_DEFAULT = 10 * 60.0
 REQUEST_TIMEOUT_MAX = 60 * 60.0
@@ -666,6 +667,81 @@ def budget_reset_path(thread_id):
 
 def budget_allow_path(thread_id):
     return os.path.join(state_dir(), "%s.budget-allow" % thread_id)
+
+
+def budget_binding_path(thread_id):
+    return os.path.join(state_dir(), "%s.budget-binding" % thread_id)
+
+
+BINDING_LOCK_TIMEOUT = 10.0
+
+
+class BindingLockTimeout(Exception):
+    """The per-thread binding lock stayed busy for the whole bounded wait."""
+
+
+@contextlib.contextmanager
+def _flock_file(path, timeout, what):
+    """Exclusive flock on a mode-0600 file, polled without blocking.
+
+    Waits at most ``timeout`` seconds (default BINDING_LOCK_TIMEOUT), then
+    raises BindingLockTimeout naming ``what``.
+    """
+    timeout = BINDING_LOCK_TIMEOUT if timeout is None else timeout
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError as exc:
+                if exc.errno not in (errno.EAGAIN, errno.EACCES, errno.EWOULDBLOCK):
+                    raise
+                if time.monotonic() >= deadline:
+                    raise BindingLockTimeout(
+                        "another peers.py command holds the reply-total lock "
+                        "for %s" % what
+                    )
+                time.sleep(0.05)
+        yield
+    finally:
+        os.close(fd)
+
+
+def binding_lock(thread_id, timeout=None):
+    """Exclusive per-thread lock over the binding marker and its conflict check.
+
+    Held by `buddy set --replies`, `buddy clear`, a rebind's revoke and the
+    shim's marker consumption, so a write is never lost to a concurrent read
+    or unlink.
+    """
+    return _flock_file(
+        os.path.join(state_dir(), "%s.binding-lock" % thread_id), timeout, thread_id
+    )
+
+
+def owner_lock(owner_uuid, timeout=None):
+    """Exclusive per-owner-session lock over its whole buddy record operation.
+
+    `buddy set` and `buddy clear` read the owner's record and act on it under
+    this lock. Lock order everywhere: the owner lock first, then thread locks
+    in sorted order; the shim only ever takes a thread lock.
+    """
+    return _flock_file(
+        os.path.join(state_dir(), "%s.owner-lock" % owner_uuid), timeout,
+        "session " + owner_uuid,
+    )
+
+
+@contextlib.contextmanager
+def _binding_locks(*thread_ids):
+    """Take several binding locks in sorted order, so two commands cannot deadlock."""
+    with contextlib.ExitStack() as stack:
+        for tid in sorted(set(thread_ids)):
+            if tid:
+                stack.enter_context(binding_lock(tid))
+        yield
 
 
 def buddies_dir():
@@ -2253,6 +2329,11 @@ class Shim:
         # for the current sequence. Dropped whenever the sequence resets.
         allowance = state.get("allowance")
         self.allowance = allowance if self._valid_allowance(allowance) else None
+        # `buddy set --replies N`: a finite TOTAL for one owner session on this
+        # thread, spent across sequences, never replenished. Only `buddy clear`
+        # or binding another buddy revokes it (a revoke marker).
+        binding = state.get("binding")
+        self.binding = binding if self._valid_binding(binding) else None
         # Set when a startup reset leaves held replies to release: the release
         # waits until this shim is bound and registered, so the reply's `from`
         # route names a socket that exists.
@@ -2295,6 +2376,18 @@ class Shim:
         )
         if self.reply_budget_window <= 0:
             self.reply_budget_window = REPLY_BUDGET_WINDOW_DEFAULT
+        if self.allowance and not (
+            self._allowance_waiting(time.time())
+            or (
+                self.allowance.get("bound", True)
+                and self.budget_last_at is not None
+                and not self._sequence_expired(time.time())
+            )
+        ):
+            # A restart keeps a grant only while it would still apply.
+            log("reply allowance for %s expired while the shim was down"
+                % self.allowance.get("sid"))
+            self.allowance = None
         self._proc_start = None
         self.idle_subs = []
         self.record_rewrites = 0
@@ -2348,6 +2441,7 @@ class Shim:
         signal.signal(signal.SIGINT, self._on_signal)
         try:
             self._consume_budget_marker(initial=True)
+            self._consume_budget_binding_marker(initial=True)
             # Save recovered requests only after taking ownership, but before
             # advertising readiness. A crash followed by completion while down
             # must resume this cursor, not treat the answer as old history.
@@ -2508,6 +2602,7 @@ class Shim:
                 "budget_notified": sorted(self.budget_notified),
                 "held": self._bound(self.held),
                 "allowance": self.allowance,
+                "binding": self.binding,
                 "contacts": self._bound(self.contacts),
                 "updated_at": now_iso(),
             },
@@ -2846,6 +2941,7 @@ class Shim:
             self._consume_budget_marker()
             # Never at startup: a release it triggers needs the bound socket.
             self._consume_budget_allow_marker()
+            self._consume_budget_binding_marker()
             self._expire_held()
             try:
                 events = self.tail.poll()
@@ -3061,6 +3157,7 @@ class Shim:
         # An explicit reset opens a new sequence; an allowance continues the
         # current one, so the release counts toward its usage.
         self.budgets[sid] = 1 if new_sequence else self.budgets.get(sid, 0) + 1
+        self._spend_binding(sid)
         self.budget_sender_sid = sid
         self.budget_last_at = now
         log(
@@ -3093,9 +3190,105 @@ class Shim:
 
     def _cap_for(self, sid):
         """The consecutive-reply cap for one requesting session."""
+        cap = REPLY_BUDGET
         if self.allowance and self.allowance.get("sid") == sid:
-            return max(REPLY_BUDGET, self.allowance["total"])
-        return REPLY_BUDGET
+            cap = max(cap, self.allowance["total"])
+        binding = self.binding
+        if binding and binding["sid"] == sid:
+            remaining = binding["total"] - binding["spent"]
+            if remaining > 0:
+                # Replies already sent this sequence were counted in `spent`,
+                # so the cap sits `remaining` above them, whichever sequence.
+                cap = max(cap, self.budgets.get(sid, 0) + remaining)
+        return cap
+
+    @staticmethod
+    def _valid_binding(value):
+        if not isinstance(value, dict):
+            return False
+        if not isinstance(value.get("sid"), str) or not value.get("sid"):
+            return False
+        if not isinstance(value.get("bind_id"), str) or not value.get("bind_id"):
+            return False
+        for key, low in (("total", 1), ("spent", 0)):
+            number = value.get(key)
+            if isinstance(number, bool) or not isinstance(number, int):
+                return False
+            if not low <= number <= BUDGET_ALLOW_MAX:
+                return False
+        return True
+
+    def _spend_binding(self, sid):
+        binding = self.binding
+        if binding and binding["sid"] == sid and binding["spent"] < binding["total"]:
+            binding["spent"] += 1
+
+    def _consume_budget_binding_marker(self, initial=False):
+        """Apply a `buddy set --replies` grant, or a `buddy clear`/rebind revoke."""
+        path = budget_binding_path(self.thread_id)
+        if not os.path.exists(path):
+            return
+        # Read and unlink under the lock: a marker written between the two
+        # would be deleted unread. A busy lock waits for the next poll.
+        try:
+            with binding_lock(self.thread_id, timeout=2.0):
+                marker = read_json(path, None)
+                try:
+                    os.unlink(path)
+                except OSError:
+                    return
+        except BindingLockTimeout:
+            log("binding marker for thread %s is locked; retrying" % self.thread_id)
+            return
+        if isinstance(marker, dict) and marker.get("revoke") is True:
+            binding = self.binding
+            if (
+                binding
+                and binding["sid"] == marker.get("sid")
+                and binding["bind_id"] == marker.get("bind_id")
+            ):
+                log("buddy reply allowance for %s revoked" % binding["sid"])
+                self.binding = None
+                self._save_state()
+            return
+        grant = None
+        if isinstance(marker, dict):
+            grant = {
+                "sid": marker.get("sid"),
+                "bind_id": marker.get("bind_id"),
+                "total": marker.get("total"),
+                "spent": 0,
+            }
+        if not self._valid_binding(grant):
+            log("ignoring a malformed buddy reply allowance for thread %s"
+                % self.thread_id)
+            return
+        current = self.binding
+        if (
+            current
+            and current["sid"] == grant["sid"]
+            and current["bind_id"] == grant["bind_id"]
+        ):
+            # The same binding again: never a replenishment.
+            grant["total"] = max(current["total"], grant["total"])
+            grant["spent"] = min(current["spent"], grant["total"])
+        sid = grant["sid"]
+        old_cap = self._cap_for(sid)
+        self.binding = grant
+        new_cap = self._cap_for(sid)
+        log(
+            "buddy reply allowance for %s set to %d total (%d spent)"
+            % (sid, grant["total"], grant["spent"])
+        )
+        if new_cap > old_cap:
+            self.budget_notified.discard(sid)
+            if (
+                not initial
+                and self.budgets.get(sid, 0) < new_cap
+                and sid in self.held
+            ):
+                self._release_one(sid, "allow", live_claude_records())
+        self._save_state()
 
     def _consume_budget_allow_marker(self):
         """Apply a `budget allow` grant: a total, never additive or replenishing."""
@@ -3421,6 +3614,7 @@ class Shim:
                 break
             if deliver_to_record(rec, build_user_frame(body, self.sock_path)):
                 self.budgets[sid] = spent + 1
+                self._spend_binding(sid)
                 # Deliberately no body text: the log is a delivery record, not
                 # a transcript, and it lands in a file the user may share.
                 log(
@@ -4542,6 +4736,35 @@ def cmd_up(args):
     return 0
 
 
+def cmd_restart(args):
+    """Restart one thread's shim on the current code, keeping its state.
+
+    Unlike `down <uuid>` then `up <uuid>`, this neither unregisters the thread
+    nor writes the budget-reset marker, so the shim comes back with the reply
+    sequence it had: spent replies and any still-valid grant included.
+    """
+    try:
+        thread = resolve_thread_prefer_live(args.target)
+    except ResolveError as exc:
+        sys.stderr.write("error: %s\n" % exc)
+        return 1
+    tid = thread["id"]
+    with reconcile_lock():
+        stopped = stop_shim(tid)
+    pid = attach_thread(tid, verbose=False)
+    if pid is None:
+        sys.stderr.write(
+            "error: the shim for %s did not start (see its log)%s\n"
+            % (tid, "; the old shim was stopped" if stopped else "")
+        )
+        return 1
+    print(
+        "%s the shim for %s (pid %d); reply budget, spent replies and valid "
+        "grants kept" % ("restarted" if stopped else "started", tid, pid)
+    )
+    return 0
+
+
 def cmd_down(args):
     if args.target:
         try:
@@ -4681,9 +4904,9 @@ def cmd_budget_allow(args):
         sys.stderr.write(
             "error: cannot verify the running shim for %s (pid %d) supports "
             "allowances; a shim started from an older peers.py never reads the "
-            "grant, so the cap would stay %d. Restart it: `peers.py down %s && "
-            "peers.py up %s` (a fresh `up` also resets the budget), then grant "
-            "again\n" % (tid, pid, REPLY_BUDGET, tid, tid)
+            "grant, so the cap would stay %d. Restart it: `"
+            "peers.py restart %s` (keeps the budget and its spent replies), then "
+            "grant again\n" % (tid, pid, REPLY_BUDGET, tid)
         )
         return 1
     path = budget_allow_path(tid)
@@ -4972,7 +5195,7 @@ def _buddy_line(rec, status):
         parts.append("paused")
     route = status.get("route") or "unavailable: unknown"
     route_text = "route available" if route == "available" else "route %s" % route
-    return "buddy = %s (%s, %s) %s; %s; uses: %s" % (
+    line = "buddy = %s (%s, %s) %s; %s; uses: %s" % (
         name,
         status["kind"],
         status["uuid"][:8],
@@ -4980,12 +5203,39 @@ def _buddy_line(rec, status):
         route_text,
         ", ".join(rec.get("uses") or []),
     )
+    left = _replies_left(rec)
+    if left is not None:
+        line += "; replies left: %d of %d" % (left, rec["replies"])
+    return line
+
+
+def _replies_left(rec):
+    """Replies remaining on a binding's total, or None when it has none.
+
+    Read from the shim's saved state once it has applied the grant; until then
+    the whole total is pending.
+    """
+    total = rec.get("replies")
+    if isinstance(total, bool) or not isinstance(total, int) or total < 1:
+        return None
+    state = read_json(thread_state_path(rec["buddy"]["uuid"]), None)
+    binding = state.get("binding") if isinstance(state, dict) else None
+    if (
+        isinstance(binding, dict)
+        and binding.get("bind_id") == rec.get("bind_id")
+        and isinstance(binding.get("spent"), int)
+    ):
+        return max(0, binding.get("total", total) - binding["spent"])
+    return total
 
 
 def _print_buddy(args, rec, status):
     if getattr(args, "json", False):
         payload = dict(rec)
         payload["status"] = status
+        left = _replies_left(rec)
+        if left is not None:
+            payload["replies_left"] = left
         print(json.dumps(payload, indent=2, sort_keys=True))
     else:
         print(_buddy_line(rec, status))
@@ -5001,10 +5251,28 @@ def cmd_buddy(args):
     path = buddy_path(owner)
     if action == "clear":
         try:
-            os.unlink(path)
-        except FileNotFoundError:
-            print("no buddy was set")
-            return 0
+            with owner_lock(owner["uuid"]):
+                old = read_buddy(owner)
+                with _binding_locks(_revocable_thread(owner, old)):
+                    # Revoke first: a failed revoke keeps the record, so clear
+                    # can be retried.
+                    try:
+                        _revoke_binding(owner, old)
+                    except OSError as exc:
+                        sys.stderr.write(
+                            "error: could not revoke the reply total on %s (%s); "
+                            "the buddy is still bound, retry `buddy clear`\n"
+                            % (old["buddy"]["uuid"], exc)
+                        )
+                        return 1
+                    try:
+                        os.unlink(path)
+                    except FileNotFoundError:
+                        print("no buddy was set")
+                        return 0
+        except BindingLockTimeout as exc:
+            sys.stderr.write("error: %s; the buddy is still bound, retry\n" % exc)
+            return 1
         print("buddy cleared")
         return 0
     if action == "set":
@@ -5026,13 +5294,86 @@ def cmd_buddy(args):
         if buddy["kind"] == owner["kind"] and buddy["uuid"] == owner["uuid"]:
             sys.stderr.write("error: a session cannot be its own buddy\n")
             return 2
-        rec = {
-            "owner": owner,
-            "buddy": buddy,
-            "uses": uses,
-            "set_at": now_iso(),
-        }
-        write_json_atomic(path, rec, mode=0o600)
+        if args.replies is not None:
+            # Attaches the shim when needed, so it runs outside every lock.
+            refusal = _check_buddy_replies(args.replies, owner, buddy)
+            if refusal:
+                sys.stderr.write("error: %s\n" % refusal[1])
+                return refusal[0]
+        try:
+            with owner_lock(owner["uuid"]):
+                old = read_buddy(owner)
+                same = (
+                    old is not None
+                    and old["buddy"]["kind"] == buddy["kind"]
+                    and old["buddy"]["uuid"] == buddy["uuid"]
+                )
+                replies, bind_id = None, None
+                if same and old.get("bind_id") and isinstance(old.get("replies"), int):
+                    replies, bind_id = old["replies"], old["bind_id"]
+                if args.replies is not None:
+                    replies = max(args.replies, replies or 0)
+                    bind_id = bind_id or uuidlib.uuid4().hex
+                rec = {
+                    "owner": owner,
+                    "buddy": buddy,
+                    "uses": uses,
+                    "set_at": now_iso(),
+                }
+                if replies is not None:
+                    rec["replies"] = replies
+                    rec["bind_id"] = bind_id
+                locked = set()
+                if args.replies is not None:
+                    locked.add(buddy["uuid"])
+                if not same and _revocable_thread(owner, old):
+                    locked.add(old["buddy"]["uuid"])
+                with _binding_locks(*locked):
+                    # The conflict check and every write below share the
+                    # locks, so a competing owner cannot slip between check
+                    # and publish.
+                    if args.replies is not None:
+                        conflict = _binding_conflict(owner, buddy)
+                        if conflict:
+                            sys.stderr.write("error: %s\n" % conflict)
+                            return 1
+                    if not same:
+                        try:
+                            _revoke_binding(owner, old)
+                        except OSError as exc:
+                            sys.stderr.write(
+                                "error: could not revoke the reply total on %s "
+                                "(%s); the old buddy is still bound, retry\n"
+                                % (old["buddy"]["uuid"], exc)
+                            )
+                            return 1
+                    # Record first, grant second: whatever fails in between,
+                    # no grant exists without a record that can revoke it, and
+                    # a retried set reuses the record's bind_id (so the shim
+                    # keeps the spent count).
+                    try:
+                        write_json_atomic(path, rec, mode=0o600)
+                        if args.replies is not None:
+                            write_json_atomic(
+                                budget_binding_path(buddy["uuid"]),
+                                {
+                                    "sid": owner["uuid"],
+                                    "bind_id": bind_id,
+                                    "total": replies,
+                                    "at": now_iso(),
+                                },
+                                mode=0o600,
+                            )
+                    except OSError as exc:
+                        sys.stderr.write(
+                            "error: could not bind the buddy (%s); retry "
+                            "`buddy set` (a retry keeps replies already spent)\n"
+                            % exc
+                        )
+                        return 1
+        except BindingLockTimeout as exc:
+            sys.stderr.write("error: %s; nothing was changed, retry\n" % exc)
+            return 1
         _print_buddy(args, rec, buddy_status(buddy, attach=True))
         return 0
     rec = read_buddy(owner)
@@ -5043,11 +5384,115 @@ def cmd_buddy(args):
     return 0
 
 
+def _check_buddy_replies(replies, owner, buddy):
+    """None when ``buddy set --replies`` can be honoured, else (code, message)."""
+    if not 1 <= replies <= BUDGET_ALLOW_MAX:
+        return 2, "--replies must be between 1 and %d" % BUDGET_ALLOW_MAX
+    if owner["kind"] != "cc" or buddy["kind"] != "codex":
+        return 2, (
+            "--replies applies to a Claude session's Codex buddy only: the "
+            "reply budget belongs to a Codex thread's shim"
+        )
+    # The shim is attached here, outside the binding lock: a shim takes that
+    # lock itself when it reads a marker.
+    pid = shim_pid(buddy["uuid"]) or attach_thread(buddy["uuid"], verbose=False)
+    if not pid:
+        return 1, (
+            "no running shim for %s, so a reply total cannot be granted; start "
+            "it (`peers.py buddy ping`) and bind again" % buddy["uuid"]
+        )
+    if not shim_supports(buddy["uuid"], pid, "binding_allowance"):
+        return 1, (
+            "cannot verify the running shim for %s (pid %d) supports buddy "
+            "allowances; a shim started from an older peers.py never reads the "
+            "grant, so the cap would stay %d. Restart it: `peers.py restart %s`, "
+            "then bind again" % (buddy["uuid"], pid, REPLY_BUDGET, buddy["uuid"])
+        )
+    return None
+
+
+def _binding_conflict(owner, buddy):
+    """A message when another session already holds a reply total on this thread.
+
+    A shim keeps one binding per thread, so a second owner would overwrite the
+    first one's spent count or revoke. Checked from the pending marker, the
+    shim's saved binding and the other owners' buddy records. The caller holds
+    the target thread's binding lock through this check and publication.
+    """
+    tid = buddy["uuid"]
+    holders = set()
+    marker = read_json(budget_binding_path(tid), None)
+    if isinstance(marker, dict) and isinstance(marker.get("sid"), str):
+        holders.add(marker["sid"])
+    state = read_json(thread_state_path(tid), None)
+    binding = state.get("binding") if isinstance(state, dict) else None
+    if isinstance(binding, dict) and isinstance(binding.get("sid"), str):
+        holders.add(binding["sid"])
+    try:
+        names = os.listdir(buddies_dir())
+    except OSError:
+        names = []
+    for name in names:
+        rec = read_json(os.path.join(buddies_dir(), name), None)
+        if not isinstance(rec, dict) or not rec.get("bind_id"):
+            continue
+        rec_buddy, rec_owner = rec.get("buddy"), rec.get("owner")
+        if (
+            isinstance(rec_buddy, dict)
+            and rec_buddy.get("uuid") == tid
+            and isinstance(rec_owner, dict)
+            and isinstance(rec_owner.get("uuid"), str)
+        ):
+            holders.add(rec_owner["uuid"])
+    holders.discard(owner["uuid"])
+    if holders:
+        return (
+            "another session (%s) already holds a reply total on this Codex "
+            "thread; a thread carries one at a time. It must `buddy clear` (or "
+            "bind another buddy) first" % sorted(holders)[0]
+        )
+    return None
+
+
+def _revocable_thread(owner, old):
+    """The Codex thread holding ``old``'s reply total, or None when it has none."""
+    if (
+        old is None
+        or not old.get("bind_id")
+        or old["buddy"]["kind"] != "codex"
+        or owner["kind"] != "cc"
+    ):
+        return None
+    return old["buddy"]["uuid"]
+
+
+def _revoke_binding(owner, old):
+    """Revoke the reply total a replaced or cleared binding granted.
+
+    Raises OSError when the revoke marker cannot be written, so the caller
+    keeps the record and the revocation can be retried.
+    """
+    if _revocable_thread(owner, old) is None:
+        return
+    write_json_atomic(
+        budget_binding_path(old["buddy"]["uuid"]),
+        {
+            "sid": owner["uuid"],
+            "bind_id": old["bind_id"],
+            "revoke": True,
+            "at": now_iso(),
+        },
+        mode=0o600,
+    )
+
+
 def _buddy_set_command(target, args):
     """The `buddy set` command line for ``target``, keeping the user's options."""
     argv = ["peers.py", "buddy", "set", target]
     if getattr(args, "uses", None) is not None:
         argv += ["--uses", args.uses]
+    if getattr(args, "replies", None) is not None:
+        argv += ["--replies", str(args.replies)]
     if getattr(args, "as_identity", None):
         argv += ["--as", args.as_identity]
     return " ".join(shlex.quote(part) for part in argv)
@@ -6207,6 +6652,13 @@ def build_parser():
     p_down.add_argument("target", nargs="?", metavar="name|uuid")
     p_down.set_defaults(func=cmd_down)
 
+    p_restart = sub.add_parser(
+        "restart",
+        help="restart a shim on the current code, keeping its reply budget and grants",
+    )
+    p_restart.add_argument("target", metavar="name|uuid")
+    p_restart.set_defaults(func=cmd_restart)
+
     p_budget = sub.add_parser("budget", help="reply budget maintenance")
     bsub = p_budget.add_subparsers(dest="budget_cmd")
     p_reset = bsub.add_parser("reset", help="clear a thread's reply budget")
@@ -6277,6 +6729,14 @@ def build_parser():
         "--uses",
         metavar="a,b",
         help="advisory scope (default: all of %s)" % ", ".join(BUDDY_USES),
+    )
+    p_buddy_set.add_argument(
+        "--replies",
+        type=int,
+        metavar="N",
+        help="a finite TOTAL of replies (1..%d) this Codex buddy may send "
+        "beyond the per-sequence cap, across sequences and shim restarts; "
+        "revoked by `buddy clear` or binding another buddy" % BUDGET_ALLOW_MAX,
     )
     buddy_action("ping", "report status, attaching a Codex buddy's shim if needed")
     buddy_action("clear", "unbind the buddy")
