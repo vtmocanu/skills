@@ -191,7 +191,7 @@ The **next step** and **PRD review** choices were captured up front (Step 1.5, v
 
 ### PRD Review (if requested)
 
-If the user asked for review, spawn reviewer agent(s) with the **Agent** tool (`subagent_type: Explore` or `general-purpose`) to read `prds/[issue-id]-[feature-name].md` and critique it: scope (one independently valuable outcome; no milestone that needs an unfinished PRD), vertical slicing (no standalone layer milestones; real `Blocked by` edges; each slice fits one fresh run), testability at the named seams, resource bounds for untrusted input (Modules and seams), clarity, missing risks and dependencies. When the repo has an agent-team `architect` role, make it one of the reviewers.
+If the user asked for review, spawn reviewer agent(s) with the **Agent** tool (`subagent_type: Explore` or `general-purpose`) to read `prds/[issue-id]-[feature-name].md` and critique it: scope (one independently valuable outcome; no milestone that needs an unfinished PRD), vertical slicing (no standalone layer milestones; real `Blocked by` edges; each slice fits one fresh run), testability at the named seams, for untrusted input, resource bounds, declared-value verification before any irreversible cross-owner action, and reused safety stories (Modules and seams), clarity, missing risks and dependencies. When the repo has an agent-team `architect` role, make it one of the reviewers.
 
 - **One reviewer**: a single agent.
 - **Let the skill decide**: pick the count from the PRD's size and complexity: 1 for a small single-component PRD, 2-3 for a large or multi-component one, each agent taking a distinct lens (scope/feasibility, milestones/testability, risks/dependencies). Run them in parallel.
