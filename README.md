@@ -92,6 +92,7 @@ npx -y skills@latest add https://github.com/vtmocanu/skills -a claude-code codex
 |---|---|
 | [cicd-expert](skills/cicd-expert/SKILL.md) | The CI/CD expert. Generate a repo's pipelines through an interactive analyze-then-confirm conversation, or review, harden, debug, and speed up existing CI (supply-chain security, caching, path filters, job DAG, Renovate tool pins). |
 | [claude-permissions](skills/claude-permissions/SKILL.md) | Manage Claude Code permissions via Dippy (Bash/MCP allow/ask/deny plus the auto-mode `[ASK]` fallback wrapper, bundled) and settings.json (Read/WebFetch/Skill). |
+| [clodex](skills/clodex/SKILL.md) | Runbook for [clodex](https://github.com/bman654/clodex), which runs ChatGPT/Codex-plan and other OpenAI-compatible models inside Claude Code: install and upgrade, sign in, add or remove a model (`/clodex <model-id>`), re-patch after updates. User-invoked only. |
 | [done](skills/done/SKILL.md) | End-of-session wrap-up: check git state across the directories touched this session, review for loose ends, and give a plain verdict on whether the session can be closed. |
 | [generate-dockerfile](skills/generate-dockerfile/SKILL.md) | Generate a production-ready, secure, multi-stage Dockerfile and `.dockerignore` for the project. |
 | [session-peers](skills/session-peers/SKILL.md) | Make Claude Code sessions and Codex CLI threads on one machine message each other. Async `send` supports handoffs; correlated `ask`/`reply` returns multi-round peer work to the current Codex turn without a stale queued reply; `wait` observes peer state. Codex threads can auto-attach as real peers and aliases follow renames. Auto-attachment requires running `~/.agents/skills/session-peers/scripts/peers.py install-hook --auto-attach` once, then trusting the entry through Codex `/hooks`; see [setup](skills/session-peers/SKILL.md#automatic-attachment-recommended). |
@@ -121,21 +122,6 @@ Plus the 11 [agent-kit](skills/agent-kit/) skills from the table above.
 ## Contributing
 
 Issues and PRs welcome. See [CONTRIBUTING](.github/CONTRIBUTING.md), the [Code of Conduct](.github/CODE_OF_CONDUCT.md), and the [Security Policy](.github/SECURITY.md).
-
-## Legacy: dot-ai
-
-Before the `skills` CLI, these were served by the [dot-ai](https://github.com/vfarcic/dot-ai) generator, which cloned the repo server-side and prefixed every skill as `/dot-ai-<name>`. It still works, but the rolling CLI above is the recommended path.
-
-<details>
-<summary>dot-ai install</summary>
-
-```sh
-dot-ai skills generate --agent claude-code --path ~/.claude/commands --repo https://github.com/vtmocanu/skills
-```
-
-`--repo` composes alongside other sources: each invocation tags its skills with `source:` frontmatter and rewrites only its own slice, so skills from several repos coexist without clobbering each other. Do not run both dot-ai and npx for this repo, or you get duplicate skills (`/dot-ai-reflect` from dot-ai and `/reflect` from npx); to switch, remove the `dot-ai skills generate … --repo …` line from your `SessionStart` hook and keep the npx hook above.
-
-</details>
 
 ## Credits
 

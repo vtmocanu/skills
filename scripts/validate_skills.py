@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate agent skill files for dot-ai / Claude Code.
+"""Validate agent skill files for the ``skills`` CLI / Claude Code / Codex.
 
 Skills live under the ``skills/`` container as ``skills/<name>/SKILL.md`` (the
 ``agent-team`` skill under ``skills/agent-kit/`` and the ``prd-*`` skills nested

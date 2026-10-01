@@ -25,12 +25,9 @@ This project adheres to a [Code of Conduct](CODE_OF_CONDUCT.md). By participatin
 
 ## Adding or Editing a Skill
 
-Each skill is a single Markdown file at the **repository root** (dot-ai's `?repo=` override reads prompts from the root):
+Each skill is a folder under `skills/` with a `SKILL.md` inside: `skills/<name>/SKILL.md`, plus optional supporting files (`scripts/`, `references/`, `agents/openai.yaml`). The [`skills`](https://github.com/vercel-labs/skills) CLI discovers only folder skills, never a bare `<name>.md`. The `agent-kit` bundle nests its skills under `skills/agent-kit/`; see `scripts/check_bundle_coverage.py`.
 
-- **Flat skill**: `<name>.md`
-- **Folder skill** (with supporting files): `<name>/SKILL.md`
-
-Every skill starts with YAML frontmatter:
+Every `SKILL.md` starts with YAML frontmatter:
 
 ```yaml
 ---
@@ -40,9 +37,10 @@ description: <one line: what it does and when to use it>
 ```
 
 1. Fork the repository and create a branch: `git checkout -b add-<skill>`.
-2. Add or edit the skill file at the repository root.
-3. Run the validator (below).
-4. Open a pull request.
+2. Add or edit `skills/<name>/SKILL.md`, and for a new skill add a row to the README table.
+3. Add a `CHANGELOG.md` entry under `[Unreleased]`.
+4. Run the validator (below).
+5. Open a pull request.
 
 ## Product Requirements Documents
 
@@ -69,7 +67,7 @@ Include in your pull request description: **what** changed, **why**, and any rel
 
 ## Skill Authoring Standards
 
-- `name`: lowercase letters, digits, and hyphens; 64 characters or fewer. It must match the filename for flat skills. Do not use the reserved substrings `anthropic` or `claude`.
+- `name`: lowercase letters, digits, and hyphens; 64 characters or fewer. It must match the skill's folder name. Avoid the substrings `anthropic` and `claude` in new names: the Anthropic Skills API rejects them, though the `skills` CLI installs them (as with the existing `claude-permissions`).
 - `description`: a single line (no multi-line YAML scalars), 1024 characters or fewer, written in the third person, with explicit "Use when ..." triggers so agents auto-invoke correctly.
 - Keep the body concise and imperative. Put the detail an agent needs in the body; keep the always-loaded description tight.
 - No private hosts, internal paths, secrets, or tokens. These skills are public.
