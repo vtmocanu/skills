@@ -113,7 +113,9 @@ work while this session steers and reviews:
 - **The worker checks in** at each gate, about every 15 minutes while actively
   working, and before any push, apply or other outward step: done (with SHAs),
   next, blockers, questions. A routine check-in uses `dispatch`, so work
-  continues, and the worker `await`s that request at its next check-in. A gate
+  continues, and the worker briefly `await`s that request at its next
+  check-in; set `dispatch --timeout` longer than the interval, since expiry
+  discards even an unread reply. A pending `await` (exit 124) stays resumable. A gate
   check-in uses `ask`, which blocks until the reply or its timeout; a timeout
   (exit 124) deletes the mailbox, so a late reply is lost, and permits only
   independent, already-authorized work. The gate stays closed.
