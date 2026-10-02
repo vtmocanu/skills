@@ -8,6 +8,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- `session-peers`: split regression tests into domain modules with shared isolated fixtures, preserving the aggregate runner, class selectors, all 482 tests, and installed-copy support.
+
 - `session-peers`: split buddy command actions and binding publication, share correlated-request setup/transmission while keeping cleanup policies distinct, and isolate doctor probes and CLI registration without changing command output or behavior.
 - `session-peers`: finish bundled command modules behind the stable 59-line launcher, preserve help/hook output, expose public reply-budget boundary operations, and clarify topic-name versus payload limits.
 - `session-peers`: move shim ownership and delivery into its runtime module, compose reply-budget policy through shim-owned callbacks, and split inbound/turn-delivery orchestration while preserving existing locks, saved state, verification, deduplication, and successful-delivery accounting.
@@ -17,6 +19,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `session-peers`: run the regression suite in CI on Python 3.9 through 3.14, exercising the declared minimum and both stdlib TOML reader paths with real interpreters.
 - `session-peers`: keep common messaging, buddy, review, and reply safety rules in a shorter core skill; move lifecycle, budgets, delegated work, detailed messaging, topics, and diagnostics to task-specific references. Correct stale title, command synopsis, and TOML parser documentation without changing runtime behavior.
 - `session-peers`: a Claude session binding a Codex buddy whose shim is running now gets a reply total of 100 by default, and `buddy set --replies N` accepts up to 500 (was 20), so a supervised co-steer no longer hits the cap and needs a reset every few rounds. A total above 20 needs a shim started from this version (`binding_allowance_max500`; an older shim refuses an explicit total and skips the default with a warning). The default is best-effort: it never attaches a shim, and it is skipped (with a warning) when another owner holds the thread's total. Other peers keep the cap of 3, and `budget allow` keeps its maximum of 20.
+
+### Fixed
+
+- `session-peers`: wait for both reply receipt and saved held-reply cleanup in the installed-upgrade test, avoiding a race between socket delivery and state persistence.
 
 ## [0.44.0] - 2026-10-02
 
