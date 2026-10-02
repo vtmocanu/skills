@@ -46,6 +46,7 @@ PEERS = HERE / "peers.py"
 spec = importlib.util.spec_from_file_location("peers", PEERS)
 peers = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(peers)
+from session_peers import claude as sp_claude, codex as sp_codex, diagnostics as sp_diagnostics, lifecycle as sp_lifecycle, process as sp_process, requests as sp_requests, storage as sp_storage
 from session_peers import config as sp_config, constants as sp_constants, protocol as sp_protocol, rollout as sp_rollout, runtime as sp_runtime
 
 PS_LSTART = "Mon Sep  7 12:00:00 2026"
@@ -192,8 +193,8 @@ def wait_pid_gone(pid, timeout=15.0):
             if reaped == pid:
                 return True
         except (ChildProcessError, OSError):
-            return not peers.pid_alive(pid)
-        if not peers.pid_alive(pid):
+            return not sp_process.pid_alive(pid)
+        if not sp_process.pid_alive(pid):
             return True
         time.sleep(0.05)
     return False
@@ -446,7 +447,7 @@ class Base(unittest.TestCase):
         """Hold the lock `up`, `down` and register/unregister serialise on."""
         import fcntl
 
-        path = os.path.join(peers.state_dir(), "reconcile.lock")
+        path = os.path.join(sp_storage.state_dir(), "reconcile.lock")
         fh = open(path, "a+")
         fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
         self._held_pidfiles.append(fh)
@@ -461,7 +462,7 @@ class Base(unittest.TestCase):
         import fcntl
 
         pid = os.getppid() if pid is None else pid
-        path = peers.thread_pid_path(thread_id)
+        path = sp_storage.thread_pid_path(thread_id)
         fh = open(path, "a+")
         fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         fh.seek(0)
@@ -567,7 +568,7 @@ class TestVersionPin(Base):
         os.environ["FAKE_CODEX_VERSION"] = "codex-cli 9.0.0"
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
-            peers.warn_versions()
+            sp_diagnostics.warn_versions()
         text = err.getvalue()
         self.assertIn("Claude Code 2.9.0", text)
         self.assertIn("codex-cli 9.0.0", text)
@@ -575,21 +576,21 @@ class TestVersionPin(Base):
 
         again = io.StringIO()
         with contextlib.redirect_stderr(again):
-            peers.warn_versions()
+            sp_diagnostics.warn_versions()
         self.assertEqual(again.getvalue(), "")
 
     def test_warn_versions_is_silent_on_the_pinned_versions(self):
         self.add_claude_binary("2.1.263 (Claude Code)")
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
-            peers.warn_versions()
+            sp_diagnostics.warn_versions()
         self.assertEqual(err.getvalue(), "")
 
     def test_missing_binaries_never_fail_a_run(self):
         os.environ["PATH"] = str(self.root / "nothing")
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
-            peers.warn_versions()
+            sp_diagnostics.warn_versions()
         self.assertEqual(err.getvalue(), "")
 
 
@@ -711,8 +712,8 @@ class TestPeerToken(Base):
         (self.sessions / ("%d.%s.key" % (os.getpid(), digest))).write_text(
             json.dumps({"peerToken": "tok-123"})
         )
-        self.assertEqual(peers.peer_token_for(rec), "tok-123")
-        peers.send_frame(
+        self.assertEqual(sp_claude.peer_token_for(rec), "tok-123")
+        sp_claude.send_frame(
             rec["messagingSocketPath"],
             sp_protocol.build_user_frame("x"),
             auth_token="tok-123",
@@ -723,8 +724,8 @@ class TestPeerToken(Base):
 
     def test_no_auth_line_when_the_key_file_is_absent(self):
         listener, rec = self.add_listener()
-        self.assertIsNone(peers.peer_token_for(rec))
-        peers.send_frame(rec["messagingSocketPath"], sp_protocol.build_user_frame("x"))
+        self.assertIsNone(sp_claude.peer_token_for(rec))
+        sp_claude.send_frame(rec["messagingSocketPath"], sp_protocol.build_user_frame("x"))
         wait_for(lambda: listener.frames)
         self.assertEqual(len(listener.frames), 1)
         self.assertEqual(listener.frames[0]["type"], "user")
@@ -732,43 +733,43 @@ class TestPeerToken(Base):
 
 class TestSocketAllowlist(Base):
     def test_macos_shape_carries_both_tmp_spellings(self):
-        dirs = peers.allowlisted_socket_dirs("darwin", 501)
+        dirs = sp_claude.allowlisted_socket_dirs("darwin", 501)
         self.assertIn("/tmp/cc-socks", dirs)
         self.assertIn("/tmp/cc-socks-501", dirs)
         self.assertIn("/private/tmp/cc-socks", dirs)
         self.assertIn("/private/tmp/cc-socks-501", dirs)
 
     def test_linux_shape_is_the_per_user_runtime_dir(self):
-        dirs = peers.allowlisted_socket_dirs("linux", 1000)
+        dirs = sp_claude.allowlisted_socket_dirs("linux", 1000)
         self.assertIn("/run/user/1000/cc-socks", dirs)
         self.assertNotIn("/tmp/cc-socks", dirs)
 
     def test_tmpdir_is_never_allowlisted(self):
         os.environ.pop("SESSION_PEERS_SOCKET_DIR", None)
         os.environ["TMPDIR"] = "/var/folders/zz/T/"
-        dirs = peers.allowlisted_socket_dirs("darwin", 501)
+        dirs = sp_claude.allowlisted_socket_dirs("darwin", 501)
         self.assertFalse([d for d in dirs if "/var/folders" in d])
 
     def test_a_directory_outside_the_allowlist_is_refused(self):
         os.environ.pop("SESSION_PEERS_SOCKET_DIR", None)
-        self.assertFalse(peers.dir_is_allowlisted(str(self.root)))
-        self.assertTrue(peers.dir_is_allowlisted("/tmp/cc-socks", "darwin"))
+        self.assertFalse(sp_claude.dir_is_allowlisted(str(self.root)))
+        self.assertTrue(sp_claude.dir_is_allowlisted("/tmp/cc-socks", "darwin"))
 
     def test_the_override_directory_is_allowlisted_for_tests(self):
-        self.assertTrue(peers.dir_is_allowlisted(str(self.socks)))
+        self.assertTrue(sp_claude.dir_is_allowlisted(str(self.socks)))
 
     def test_a_symlinked_endpoint_is_refused(self):
         real = self.socks / "real.sock"
         real.write_text("")
         link = self.socks / "link.sock"
         link.symlink_to(real)
-        self.assertTrue(peers.socket_path_ok(str(real)))
-        self.assertFalse(peers.socket_path_ok(str(link)))
+        self.assertTrue(sp_claude.socket_path_ok(str(real)))
+        self.assertFalse(sp_claude.socket_path_ok(str(link)))
 
     def test_default_socket_dir_follows_a_live_record(self):
         os.environ.pop("SESSION_PEERS_SOCKET_DIR", None)
         self.write_record(os.getpid(), "cc", "s", str(self.socks / "9.sock"))
-        self.assertEqual(peers.default_socket_dir(), str(self.socks))
+        self.assertEqual(sp_claude.default_socket_dir(), str(self.socks))
 
 
 # ==========================================================================
@@ -779,7 +780,7 @@ class TestSocketAllowlist(Base):
 class TestRegistry(Base):
     def test_live_filter_accepts_a_matching_record(self):
         self.write_record(os.getpid(), "cc-main", "s1", str(self.socks / "1.sock"))
-        live = peers.live_claude_records()
+        live = sp_claude.live_claude_records()
         self.assertEqual([r["name"] for r in live], ["cc-main"])
 
     def test_live_filter_rejects_a_procstart_mismatch(self):
@@ -787,39 +788,39 @@ class TestRegistry(Base):
             os.getpid(), "cc-old", "s1", str(self.socks / "1.sock"),
             procStart="Sun Jan  1 00:00:00 2020",
         )
-        self.assertEqual(peers.live_claude_records(), [])
+        self.assertEqual(sp_claude.live_claude_records(), [])
 
     def test_live_filter_rejects_a_foreign_pid_domain(self):
         self.write_record(
             os.getpid(), "cc-other", "s1", str(self.socks / "1.sock"),
             pidDomain="wsl-something",
         )
-        self.assertEqual(peers.live_claude_records(), [])
+        self.assertEqual(sp_claude.live_claude_records(), [])
 
     def test_live_filter_rejects_a_dead_pid(self):
         dead = self._dead_pid()
         self.write_record(dead, "cc-dead", "s1", str(self.socks / "2.sock"))
-        self.assertEqual(peers.live_claude_records(), [])
+        self.assertEqual(sp_claude.live_claude_records(), [])
 
     def test_a_record_without_procstart_is_unverified(self):
         rec = self.write_record(os.getpid(), "cc-lenient", "s1", str(self.socks / "1.sock"))
         path = self.sessions / ("%d.json" % os.getpid())
         rec.pop("procStart")
         path.write_text(json.dumps(rec))
-        self.assertEqual(peers.live_claude_records(), [])
+        self.assertEqual(sp_claude.live_claude_records(), [])
         self.assertEqual(
-            [r["name"] for r in peers.unverified_claude_records()], ["cc-lenient"]
+            [r["name"] for r in sp_claude.unverified_claude_records()], ["cc-lenient"]
         )
 
     def test_a_blocked_process_probe_is_unverified_not_dead(self):
         self.write_record(os.getpid(), "cc-main", "s1", str(self.socks / "1.sock"))
         os.environ["FAKE_PS_RC"] = "126"
-        self.assertEqual(peers.live_claude_records(), [])
+        self.assertEqual(sp_claude.live_claude_records(), [])
         self.assertEqual(
-            [r["name"] for r in peers.unverified_claude_records()], ["cc-main"]
+            [r["name"] for r in sp_claude.unverified_claude_records()], ["cc-main"]
         )
         self.assertEqual(
-            peers.record_liveness(peers.read_claude_records()[0]), "unverified"
+            sp_claude.record_liveness(sp_claude.read_claude_records()[0]), "unverified"
         )
 
     def test_a_corrupt_record_is_skipped_not_fatal(self):
@@ -827,27 +828,27 @@ class TestRegistry(Base):
         self.write_record(os.getpid(), "cc-main", "s1", str(self.socks / "1.sock"))
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
-            live = peers.live_claude_records()
+            live = sp_claude.live_claude_records()
         self.assertEqual([r["name"] for r in live], ["cc-main"])
 
     def test_a_missing_registry_directory_yields_no_records(self):
         shutil.rmtree(str(self.sessions))
-        self.assertEqual(peers.read_claude_records(), [])
+        self.assertEqual(sp_claude.read_claude_records(), [])
 
     def test_lookup_by_name_and_by_socket(self):
         sock = str(self.socks / "1.sock")
         self.write_record(os.getpid(), "cc-main", "s1", sock)
-        self.assertEqual(len(peers.claude_record_by_name("cc-main")), 1)
-        self.assertEqual(peers.claude_record_by_name("nope"), [])
-        self.assertEqual(peers.claude_record_by_socket(sock)["sessionId"], "s1")
-        self.assertIsNone(peers.claude_record_by_socket(str(self.socks / "x.sock")))
+        self.assertEqual(len(sp_claude.claude_record_by_name("cc-main")), 1)
+        self.assertEqual(sp_claude.claude_record_by_name("nope"), [])
+        self.assertEqual(sp_claude.claude_record_by_socket(sock)["sessionId"], "s1")
+        self.assertIsNone(sp_claude.claude_record_by_socket(str(self.socks / "x.sock")))
 
     def test_the_registry_follows_claude_config_dir(self):
         other = self.root / "elsewhere"
         (other / "sessions").mkdir(parents=True)
         os.environ["CLAUDE_CONFIG_DIR"] = str(other)
-        self.assertEqual(peers.claude_sessions_dir(), str(other / "sessions"))
-        self.assertEqual(peers.read_claude_records(), [])
+        self.assertEqual(sp_storage.claude_sessions_dir(), str(other / "sessions"))
+        self.assertEqual(sp_claude.read_claude_records(), [])
 
     @staticmethod
     def _dead_pid():
@@ -864,11 +865,11 @@ class TestCodexDiscovery(Base):
             [{"id": "t1", "name": "n", "rollout_path": str(rollout)}],
             filename="state_2.sqlite",
         )
-        self.assertEqual(peers.find_state_db(), str(good))
+        self.assertEqual(sp_codex.find_state_db(), str(good))
 
     def test_threads_carry_liveness_registration_and_holder(self):
         tid, rollout = self.one_thread(name="codex-uzi")
-        threads, ok = peers.codex_threads()
+        threads, ok = sp_codex.codex_threads()
         self.assertTrue(ok)
         self.assertEqual(len(threads), 1)
         t = threads[0]
@@ -876,13 +877,13 @@ class TestCodexDiscovery(Base):
         self.assertTrue(t["live"])
         self.assertEqual(t["holder_pid"], os.getpid())
         self.assertFalse(t["registered"])
-        peers.register_thread(t)
-        self.assertTrue(peers.codex_threads()[0][0]["registered"])
+        sp_storage.register_thread(t)
+        self.assertTrue(sp_codex.codex_threads()[0][0]["registered"])
 
     def test_a_rollout_no_process_holds_is_not_live(self):
         self.one_thread()
         self.clear_holders()
-        threads, _ok = peers.codex_threads()
+        threads, _ok = sp_codex.codex_threads()
         self.assertFalse(threads[0]["live"])
         self.assertIsNone(threads[0]["holder_pid"])
 
@@ -890,7 +891,7 @@ class TestCodexDiscovery(Base):
         _tid, rollout = self.one_thread()
         self.clear_holders()
         self.set_holder(rollout, cmd="tail")
-        self.assertFalse(peers.codex_threads()[0][0]["live"])
+        self.assertFalse(sp_codex.codex_threads()[0][0]["live"])
 
     def test_a_thread_live_only_by_its_writer_lock_is_live(self):
         # A just-created Codex thread: the row and the writer lock exist, but
@@ -901,8 +902,8 @@ class TestCodexDiscovery(Base):
         rollout = self.codex_dir / "not-written-yet.jsonl"
         self.make_state_db([{"id": tid, "name": "hi", "rollout_path": str(rollout)}])
         self.assertFalse(rollout.exists())
-        self.set_holder(peers.writer_lock_path(tid))
-        t = peers.codex_threads()[0][0]
+        self.set_holder(sp_codex.writer_lock_path(tid))
+        t = sp_codex.codex_threads()[0][0]
         self.assertTrue(t["live"])
         self.assertEqual(t["holder_pid"], os.getpid())
 
@@ -925,10 +926,10 @@ class TestCodexDiscovery(Base):
                 },
             ]
         )
-        self.set_holder(peers.writer_lock_path(live_id))
-        pathlib.Path(peers.writer_lock_path(stale_id)).touch()
+        self.set_holder(sp_codex.writer_lock_path(live_id))
+        pathlib.Path(sp_codex.writer_lock_path(stale_id)).touch()
 
-        threads, ok = peers.codex_threads()
+        threads, ok = sp_codex.codex_threads()
         by_id = {thread["id"]: thread for thread in threads}
 
         self.assertTrue(ok)
@@ -942,8 +943,8 @@ class TestCodexDiscovery(Base):
         tid = "fresh-thread"
         rollout = self.codex_dir / "not-written-yet.jsonl"
         self.make_state_db([{"id": tid, "name": "hi", "rollout_path": str(rollout)}])
-        self.set_holder(peers.writer_lock_path(tid), cmd="tail")
-        self.assertFalse(peers.codex_threads()[0][0]["live"])
+        self.set_holder(sp_codex.writer_lock_path(tid), cmd="tail")
+        self.assertFalse(sp_codex.codex_threads()[0][0]["live"])
 
     def test_liveness_roots_the_writer_lock_at_codex_home_not_sqlite_home(self):
         # The state DB can live under a separate sqlite_home, but Codex keeps
@@ -967,9 +968,9 @@ class TestCodexDiscovery(Base):
         conn.commit()
         conn.close()
         # writer_lock_path roots at CODEX_HOME, so the holder is set there.
-        self.assertTrue(peers.writer_lock_path(tid).startswith(str(self.codex_dir)))
-        self.set_holder(peers.writer_lock_path(tid))
-        t = peers.codex_threads()[0][0]
+        self.assertTrue(sp_codex.writer_lock_path(tid).startswith(str(self.codex_dir)))
+        self.set_holder(sp_codex.writer_lock_path(tid))
+        t = sp_codex.codex_threads()[0][0]
         self.assertTrue(t["live"])
         self.assertEqual(t["holder_pid"], os.getpid())
 
@@ -1002,7 +1003,7 @@ class TestCodexDiscovery(Base):
         conn.close()
         # The holder lives at the resolved path, exactly as lsof reports it.
         self.set_holder(os.path.realpath(str(rollout)))
-        threads, ok = peers.codex_threads()
+        threads, ok = sp_codex.codex_threads()
         self.assertTrue(ok)
         t = next(x for x in threads if x["id"] == tid)
         self.assertTrue(
@@ -1013,20 +1014,20 @@ class TestCodexDiscovery(Base):
         self.assertEqual(t["holder_pid"], os.getpid())
 
     def test_thread_is_held_via_the_writer_lock_alone(self):
-        lock = peers.writer_lock_path("t")
+        lock = sp_codex.writer_lock_path("t")
         self.set_holder(lock, pid=4321)
         self.assertEqual(
-            peers.thread_is_held("/no/rollout.jsonl", lock_path=lock), (True, 4321)
+            sp_codex.thread_is_held("/no/rollout.jsonl", lock_path=lock), (True, 4321)
         )
 
     def test_thread_is_held_matches_holder_pid_on_the_lock(self):
-        lock = peers.writer_lock_path("t")
+        lock = sp_codex.writer_lock_path("t")
         self.set_holder(lock, pid=4321)
         self.assertEqual(
-            peers.thread_is_held("/no/rollout.jsonl", holder_pid=4321, lock_path=lock),
+            sp_codex.thread_is_held("/no/rollout.jsonl", holder_pid=4321, lock_path=lock),
             (True, 4321),
         )
-        held, _pid = peers.thread_is_held(
+        held, _pid = sp_codex.thread_is_held(
             "/no/rollout.jsonl", holder_pid=9999, lock_path=lock
         )
         self.assertFalse(held)
@@ -1038,7 +1039,7 @@ class TestCodexDiscovery(Base):
             json.dumps({"id": "t-index", "thread_name": "from-index",
                         "updated_at": "2026-09-07"}) + "\n"
         )
-        threads, _ok = peers.codex_threads(check_live=False)
+        threads, _ok = sp_codex.codex_threads(check_live=False)
         self.assertEqual(threads[0]["name"], "from-index")
 
     def test_the_session_index_overrides_a_stale_database_name(self):
@@ -1057,13 +1058,13 @@ class TestCodexDiscovery(Base):
             )
             + "\n"
         )
-        self.assertEqual(peers.codex_threads(check_live=False)[0][0]["name"], "new-name")
+        self.assertEqual(sp_codex.codex_threads(check_live=False)[0][0]["name"], "new-name")
 
     def test_an_unknown_schema_degrades_with_a_warning_not_a_traceback(self):
         self.make_state_db([], filename="state_1.sqlite", good=False)
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
-            threads, ok = peers.codex_threads()
+            threads, ok = sp_codex.codex_threads()
         self.assertEqual(threads, [])
         self.assertFalse(ok)
         self.assertIn("recognised", err.getvalue())
@@ -1072,7 +1073,7 @@ class TestCodexDiscovery(Base):
         os.environ["CODEX_SQLITE_HOME"] = str(self.root / "gone")
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
-            self.assertEqual(peers.codex_threads(), ([], False))
+            self.assertEqual(sp_codex.codex_threads(), ([], False))
 
     def test_configured_sqlite_home_beats_the_environment(self):
         # P6: Codex's own resolver prefers the configured value, so the bridge
@@ -1082,30 +1083,30 @@ class TestCodexDiscovery(Base):
         (self.codex_dir / "config.toml").write_text(
             'model = "gpt-5"\nsqlite_home = "%s"\n' % alt
         )
-        self.assertEqual(peers.codex_sqlite_home(), str(alt))
+        self.assertEqual(sp_storage.codex_sqlite_home(), str(alt))
         os.environ["CODEX_SQLITE_HOME"] = str(self.root / "env-loses")
-        self.assertEqual(peers.codex_sqlite_home(), str(alt))
+        self.assertEqual(sp_storage.codex_sqlite_home(), str(alt))
 
     def test_the_environment_is_used_when_the_config_says_nothing(self):
         (self.codex_dir / "config.toml").write_text('model = "gpt-5"\n')
         os.environ["CODEX_SQLITE_HOME"] = str(self.root / "from-env")
-        self.assertEqual(peers.codex_sqlite_home(), str(self.root / "from-env"))
+        self.assertEqual(sp_storage.codex_sqlite_home(), str(self.root / "from-env"))
         os.environ.pop("CODEX_SQLITE_HOME")
-        self.assertEqual(peers.codex_sqlite_home(), str(self.codex_dir))
+        self.assertEqual(sp_storage.codex_sqlite_home(), str(self.codex_dir))
 
     def test_a_sqlite_home_inside_another_table_is_ignored(self):
         # P6: that key belongs to that table, not to the bridge.
         (self.codex_dir / "config.toml").write_text(
             '[some_tool]\nsqlite_home = "%s"\n' % (self.root / "wrong")
         )
-        self.assertEqual(peers.codex_sqlite_home(), str(self.codex_dir))
+        self.assertEqual(sp_storage.codex_sqlite_home(), str(self.codex_dir))
 
     def test_lsof_missing_from_path_is_reported_not_fatal(self):
         rollout = self.make_rollout()
         os.environ["PATH"] = str(self.root / "empty")
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
-            self.assertEqual(peers.lsof_holders([str(rollout)]), {})
+            self.assertEqual(sp_process.lsof_holders([str(rollout)]), {})
         self.assertIn("lsof", err.getvalue())
 
     def test_a_blocked_lsof_probe_is_unverified_not_dead(self):
@@ -1113,10 +1114,10 @@ class TestCodexDiscovery(Base):
         os.environ["FAKE_LSOF_RC"] = "1"
         os.environ["FAKE_LSOF_STDERR"] = "operation not permitted"
         with contextlib.redirect_stderr(io.StringIO()):
-            thread = peers.codex_threads()[0][0]
-            held = peers.thread_is_held(str(rollout))
-            with self.assertRaises(peers.ResolveError) as ctx:
-                peers.resolve_thread("codex-uzi")
+            thread = sp_codex.codex_threads()[0][0]
+            held = sp_codex.thread_is_held(str(rollout))
+            with self.assertRaises(sp_codex.ResolveError) as ctx:
+                sp_codex.resolve_thread("codex-uzi")
         self.assertEqual(thread["id"], tid)
         self.assertIsNone(thread["live"])
         self.assertIn("operation not permitted", thread["liveness_error"])
@@ -1134,7 +1135,7 @@ class TestCodexDiscovery(Base):
 
         peers.os.stat = denied
         try:
-            holders, verified, error = peers.lsof_holders_checked([str(rollout)])
+            holders, verified, error = sp_process.lsof_holders_checked([str(rollout)])
         finally:
             peers.os.stat = original
 
@@ -1146,17 +1147,17 @@ class TestCodexDiscovery(Base):
 class TestResolveThread(Base):
     def test_a_uuid_resolves_directly(self):
         tid, _r = self.one_thread()
-        self.assertEqual(peers.resolve_thread(tid)["id"], tid)
+        self.assertEqual(sp_codex.resolve_thread(tid)["id"], tid)
 
     def test_a_name_resolves_to_its_live_thread(self):
         tid, _r = self.one_thread(name="codex-uzi")
-        self.assertEqual(peers.resolve_thread("codex-uzi")["id"], tid)
+        self.assertEqual(sp_codex.resolve_thread("codex-uzi")["id"], tid)
 
     def test_a_listed_alias_and_raw_uuid_prefix_resolve(self):
         tid = "1234abcd-1111-2222-3333-444444444444"
         self.one_thread(tid=tid, name="unsafe title with spaces")
-        self.assertEqual(peers.resolve_thread("codex-1234abcd")["id"], tid)
-        self.assertEqual(peers.resolve_thread("1234abcd1111")["id"], tid)
+        self.assertEqual(sp_codex.resolve_thread("codex-1234abcd")["id"], tid)
+        self.assertEqual(sp_codex.resolve_thread("1234abcd1111")["id"], tid)
         rc, _out, _err = self.cli(
             "send", "--to", "codex:codex-1234abcd", "--message", "hi"
         )
@@ -1174,8 +1175,8 @@ class TestResolveThread(Base):
         ])
         self.set_holder(r1)
         self.set_holder(r2)
-        with self.assertRaises(peers.ResolveError) as ctx:
-            peers.resolve_thread("codex-abcd1234")
+        with self.assertRaises(sp_codex.ResolveError) as ctx:
+            sp_codex.resolve_thread("codex-abcd1234")
         self.assertIn(first, str(ctx.exception))
         self.assertIn(second, str(ctx.exception))
         self.assertIn("review", str(ctx.exception))
@@ -1191,7 +1192,7 @@ class TestResolveThread(Base):
             {"id": second, "name": "live", "rollout_path": str(r2)},
         ])
         self.set_holder(r2)
-        self.assertEqual(peers.resolve_thread("codex-abcd1234")["id"], second)
+        self.assertEqual(sp_codex.resolve_thread("codex-abcd1234")["id"], second)
 
     def test_an_alias_colliding_with_an_exact_title_is_refused(self):
         r1 = self.make_rollout("a.jsonl")
@@ -1204,8 +1205,8 @@ class TestResolveThread(Base):
         ])
         self.set_holder(r1)
         self.set_holder(r2)
-        with self.assertRaises(peers.ResolveError) as ctx:
-            peers.resolve_thread("codex-12345678")
+        with self.assertRaises(sp_codex.ResolveError) as ctx:
+            sp_codex.resolve_thread("codex-12345678")
         self.assertIn(first, str(ctx.exception))
         self.assertIn(second, str(ctx.exception))
 
@@ -1220,8 +1221,8 @@ class TestResolveThread(Base):
         )
         self.set_holder(r1)
         self.set_holder(r2)
-        with self.assertRaises(peers.ResolveError) as ctx:
-            peers.resolve_thread("dup")
+        with self.assertRaises(sp_codex.ResolveError) as ctx:
+            sp_codex.resolve_thread("dup")
         self.assertIn("register by UUID", str(ctx.exception))
 
     def test_a_dead_duplicate_does_not_block_the_live_one(self):
@@ -1234,7 +1235,7 @@ class TestResolveThread(Base):
             ]
         )
         self.set_holder(r2)
-        self.assertEqual(peers.resolve_thread("dup")["id"], "bbb")
+        self.assertEqual(sp_codex.resolve_thread("dup")["id"], "bbb")
 
     def test_a_name_resolves_before_its_first_rollout_line(self):
         # Regression: `up hi` on a just-renamed thread must not fail with
@@ -1243,9 +1244,9 @@ class TestResolveThread(Base):
         tid = "fresh-hi"
         rollout = self.codex_dir / "hi.jsonl"
         self.make_state_db([{"id": tid, "name": "hi", "rollout_path": str(rollout)}])
-        self.set_holder(peers.writer_lock_path(tid))
+        self.set_holder(sp_codex.writer_lock_path(tid))
         self.assertFalse(rollout.exists())
-        self.assertEqual(peers.resolve_thread("hi")["id"], tid)
+        self.assertEqual(sp_codex.resolve_thread("hi")["id"], tid)
 
     def test_a_name_resolves_via_our_registration_when_the_db_name_is_stale(self):
         # `up <uuid>` records name->uuid; a later /rename may not have reached
@@ -1258,25 +1259,25 @@ class TestResolveThread(Base):
             [{"id": tid, "name": "old-title", "rollout_path": str(rollout)}]
         )
         self.set_holder(rollout)
-        peers.write_registered(
+        sp_storage.write_registered(
             {tid: {"name": "codex1", "registered_at": "2026-09-08T00:00:00Z"}}
         )
-        self.assertEqual(peers.resolve_thread("codex1")["id"], tid)
+        self.assertEqual(sp_codex.resolve_thread("codex1")["id"], tid)
 
     def test_a_name_whose_thread_has_exited_is_refused_not_guessed(self):
         # Codex's title suggester reuses names, so a dead match is not intent.
         self.one_thread(name="codex-uzi")
         self.clear_holders()
-        with self.assertRaises(peers.ResolveError) as ctx:
-            peers.resolve_thread("codex-uzi")
+        with self.assertRaises(sp_codex.ResolveError) as ctx:
+            sp_codex.resolve_thread("codex-uzi")
         self.assertIn("no live Codex thread", str(ctx.exception))
-        self.assertEqual(peers.resolve_thread("codex-uzi", require_live=False)["name"],
+        self.assertEqual(sp_codex.resolve_thread("codex-uzi", require_live=False)["name"],
                          "codex-uzi")
 
     def test_an_unknown_name_is_refused_with_advice(self):
         self.one_thread(name="codex-uzi")
-        with self.assertRaises(peers.ResolveError) as ctx:
-            peers.resolve_thread("missing")
+        with self.assertRaises(sp_codex.ResolveError) as ctx:
+            sp_codex.resolve_thread("missing")
         self.assertIn("/rename", str(ctx.exception))
         self.assertIn("peers.py list", str(ctx.exception))
 
@@ -1285,10 +1286,10 @@ class TestResolveThread(Base):
         tid = str(uuidlib.uuid4())
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
-            thread = peers.resolve_thread(tid)
+            thread = sp_codex.resolve_thread(tid)
             self.assertTrue(thread["degraded"])
-            with self.assertRaises(peers.ResolveError):
-                peers.resolve_thread("some-name")
+            with self.assertRaises(sp_codex.ResolveError):
+                sp_codex.resolve_thread("some-name")
 
 
 # ==========================================================================
@@ -1693,7 +1694,7 @@ class TestSendToClaude(Base):
         tid = str(uuidlib.uuid4())
         shim_sock = str(self.socks / "shim.sock")
         sp_runtime.write_json_atomic(
-            peers.thread_state_path(tid), {"thread_id": tid, "name": "codex-uzi"}
+            sp_storage.thread_state_path(tid), {"thread_id": tid, "name": "codex-uzi"}
         )
         # A pid that is alive but not this process: add_listener owns our own
         # record file, and a second record on the same pid would overwrite it.
@@ -1719,7 +1720,7 @@ class TestSendToClaude(Base):
         tid = str(uuidlib.uuid4())
         shim_sock = str(self.socks / "shim-auto.sock")
         sp_runtime.write_json_atomic(
-            peers.thread_state_path(tid), {"thread_id": tid, "name": "codex-uzi"}
+            sp_storage.thread_state_path(tid), {"thread_id": tid, "name": "codex-uzi"}
         )
         shim_pid = self.hold_pidfile(tid)
         (self.sessions / ("%d.json" % shim_pid)).write_text(
@@ -1787,8 +1788,8 @@ class TestCorrelatedAskReply(Base):
         output, _unused = proc.communicate(timeout=30)
         self.assertEqual(proc.returncode, 0, output)
         self.assertIn("final answer", output)
-        self.assertFalse(pathlib.Path(peers.request_path(request_id)).exists())
-        self.assertFalse(pathlib.Path(peers.request_reply_path(request_id)).exists())
+        self.assertFalse(pathlib.Path(sp_storage.request_path(request_id)).exists())
+        self.assertFalse(pathlib.Path(sp_storage.request_reply_path(request_id)).exists())
         self.assertEqual(self.queue_calls(), [])
 
     def test_ask_refuses_a_target_without_a_session_id_before_sending(self):
@@ -1807,7 +1808,7 @@ class TestCorrelatedAskReply(Base):
     def test_reply_refuses_the_wrong_claude_session(self):
         request_id = str(uuidlib.uuid4())
         sp_runtime.write_json_atomic(
-            peers.request_path(request_id),
+            sp_storage.request_path(request_id),
             {
                 "request_id": request_id,
                 "target_session_id": "wanted",
@@ -1820,32 +1821,32 @@ class TestCorrelatedAskReply(Base):
         )
         self.assertEqual(rc, 1)
         self.assertIn("belongs to Claude session wanted", err)
-        self.assertFalse(pathlib.Path(peers.request_reply_path(request_id)).exists())
+        self.assertFalse(pathlib.Path(sp_storage.request_reply_path(request_id)).exists())
 
     def test_reply_refuses_and_cleans_an_expired_request(self):
         request_id = str(uuidlib.uuid4())
         sp_runtime.write_json_atomic(
-            peers.request_path(request_id),
+            sp_storage.request_path(request_id),
             {
                 "request_id": request_id,
                 "target_session_id": "s1",
                 "expires_at": time.time() - 1,
             },
         )
-        sp_runtime.write_json_atomic(peers.request_reply_path(request_id), {"partial": True})
+        sp_runtime.write_json_atomic(sp_storage.request_reply_path(request_id), {"partial": True})
         os.environ["CLAUDE_CODE_SESSION_ID"] = "s1"
         rc, _out, err = self.cli(
             "reply", "--request", request_id, "--message", "too late"
         )
         self.assertEqual(rc, 1)
         self.assertIn("unknown or expired", err)
-        self.assertFalse(pathlib.Path(peers.request_path(request_id)).exists())
-        self.assertFalse(pathlib.Path(peers.request_reply_path(request_id)).exists())
+        self.assertFalse(pathlib.Path(sp_storage.request_path(request_id)).exists())
+        self.assertFalse(pathlib.Path(sp_storage.request_reply_path(request_id)).exists())
 
     def test_reply_is_idempotent_only_for_the_same_body(self):
         request_id = str(uuidlib.uuid4())
         sp_runtime.write_json_atomic(
-            peers.request_path(request_id),
+            sp_storage.request_path(request_id),
             {
                 "request_id": request_id,
                 "target_session_id": "s1",
@@ -1870,14 +1871,14 @@ class TestCorrelatedAskReply(Base):
     def test_identical_concurrent_reply_waits_for_the_winner_to_finish(self):
         request_id = str(uuidlib.uuid4())
         sp_runtime.write_json_atomic(
-            peers.request_path(request_id),
+            sp_storage.request_path(request_id),
             {
                 "request_id": request_id,
                 "target_session_id": "s1",
                 "expires_at": time.time() + 30,
             },
         )
-        reply_path = pathlib.Path(peers.request_reply_path(request_id))
+        reply_path = pathlib.Path(sp_storage.request_reply_path(request_id))
         reply_path.write_text("")
         os.environ["CLAUDE_CODE_SESSION_ID"] = "s1"
 
@@ -1911,7 +1912,7 @@ class TestCorrelatedAskReply(Base):
         )
         self.assertEqual(rc, 124)
         self.assertIn("timed out", err)
-        self.assertEqual(list(pathlib.Path(peers.request_dir()).glob("*.json")), [])
+        self.assertEqual(list(pathlib.Path(sp_storage.request_dir()).glob("*.json")), [])
         self.assertEqual(self.queue_calls(), [])
 
     def test_request_content_cannot_close_or_forge_the_envelope(self):
@@ -1931,18 +1932,18 @@ class TestCorrelatedAskReply(Base):
     def test_expired_and_orphaned_request_files_are_reclaimed(self):
         expired = str(uuidlib.uuid4())
         sp_runtime.write_json_atomic(
-            peers.request_path(expired),
+            sp_storage.request_path(expired),
             {"request_id": expired, "expires_at": time.time() - 1},
         )
-        sp_runtime.write_json_atomic(peers.request_reply_path(expired), {"x": 1})
+        sp_runtime.write_json_atomic(sp_storage.request_reply_path(expired), {"x": 1})
         orphan = str(uuidlib.uuid4())
-        orphan_path = pathlib.Path(peers.request_reply_path(orphan))
+        orphan_path = pathlib.Path(sp_storage.request_reply_path(orphan))
         sp_runtime.write_json_atomic(str(orphan_path), {"x": 1})
         old = time.time() - sp_constants.REQUEST_ORPHAN_TTL - 10
         os.utime(orphan_path, (old, old))
-        removed = peers.cleanup_expired_requests()
+        removed = sp_requests.cleanup_expired_requests()
         self.assertEqual(set(removed), {expired, orphan})
-        self.assertEqual(list(pathlib.Path(peers.request_dir()).glob("*.json")), [])
+        self.assertEqual(list(pathlib.Path(sp_storage.request_dir()).glob("*.json")), [])
 
     def test_wait_observes_a_named_idle_peer(self):
         self.add_listener(name="cc-main", session_id="s1")
@@ -2023,7 +2024,7 @@ class TestNonblockingDispatchAwait(Base):
         self.assertEqual(payload["target_session_id"], "s1")
         self.assertIn("expires_at", payload)
         # Unlike `ask`, dispatch must NOT tear the mailbox down on return.
-        self.assertTrue(pathlib.Path(peers.request_path(request_id)).exists())
+        self.assertTrue(pathlib.Path(sp_storage.request_path(request_id)).exists())
         # The request rode the Claude inbox socket, never `codex queue`.
         self.assertEqual(self.queue_calls(), [])
 
@@ -2041,8 +2042,8 @@ class TestNonblockingDispatchAwait(Base):
         self.assertEqual(payload["status"], "replied")
         self.assertEqual(payload["message"], "final answer")
         self.assertEqual(payload["session_id"], "s1")
-        self.assertFalse(pathlib.Path(peers.request_path(request_id)).exists())
-        self.assertFalse(pathlib.Path(peers.request_reply_path(request_id)).exists())
+        self.assertFalse(pathlib.Path(sp_storage.request_path(request_id)).exists())
+        self.assertFalse(pathlib.Path(sp_storage.request_reply_path(request_id)).exists())
         # A second await cannot re-deliver the consumed reply.
         rc, out, err = self.cli(
             "await", "--request", request_id, "--from-thread", tid,
@@ -2062,7 +2063,7 @@ class TestNonblockingDispatchAwait(Base):
         self.assertEqual(rc, 124, err)
         self.assertEqual(json.loads(out)["status"], "pending")
         # The request lives on and is re-awaitable.
-        self.assertTrue(pathlib.Path(peers.request_path(request_id)).exists())
+        self.assertTrue(pathlib.Path(sp_storage.request_path(request_id)).exists())
         self._reply(request_id, "s1", "eventually")
         rc, out, err = self.cli(
             "await", "--request", request_id, "--from-thread", tid,
@@ -2076,9 +2077,9 @@ class TestNonblockingDispatchAwait(Base):
         tid, _rollout = self.one_thread()
         request_id = self._dispatch("cc:cc-main", tid, timeout="30")["request_id"]
         # Age the request past its lifetime without waiting for wall-clock.
-        meta = sp_runtime.read_json(peers.request_path(request_id), {})
+        meta = sp_runtime.read_json(sp_storage.request_path(request_id), {})
         meta["expires_at"] = time.time() - 1
-        sp_runtime.write_json_atomic(peers.request_path(request_id), meta)
+        sp_runtime.write_json_atomic(sp_storage.request_path(request_id), meta)
         rc, out, err = self.cli(
             "await", "--request", request_id, "--from-thread", tid,
             "--timeout", "3", "--json",
@@ -2178,28 +2179,28 @@ class TestNonblockingDispatchAwait(Base):
         self.assertEqual(rc, 1)
         self.assertIn("was dispatched by thread", err)
         # A refused await must not consume the still-live mailbox.
-        self.assertTrue(pathlib.Path(peers.request_path(request_id)).exists())
+        self.assertTrue(pathlib.Path(sp_storage.request_path(request_id)).exists())
 
     def test_dispatch_reports_delivery_failure_and_leaves_no_mailbox(self):
         self.add_listener(name="cc-main", session_id="s1")
         tid, _rollout = self.one_thread()
-        original = peers._deliver_claude
+        original = sp_claude._deliver_claude
 
         def boom(*_a, **_k):
             raise OSError("no listener")
 
-        peers._deliver_claude = boom
+        sp_claude._deliver_claude = boom
         try:
             rc, out, err = self.cli(
                 "dispatch", "--to", "cc:cc-main", "--from-thread", tid,
                 "--message", "will fail", "--timeout", "5", "--json",
             )
         finally:
-            peers._deliver_claude = original
+            sp_claude._deliver_claude = original
         self.assertEqual(rc, 1)
         self.assertEqual(json.loads(out)["status"], "delivery_failed")
         self.assertIn("could not send request", err)
-        self.assertEqual(list(pathlib.Path(peers.request_dir()).glob("*.json")), [])
+        self.assertEqual(list(pathlib.Path(sp_storage.request_dir()).glob("*.json")), [])
         self.assertEqual(self.queue_calls(), [])
 
     def test_dispatch_refuses_a_target_without_a_session_id(self):
@@ -2228,22 +2229,22 @@ class TestNonblockingDispatchAwait(Base):
         self.add_listener(name="cc-main", session_id="s1")
         tid, _rollout = self.one_thread()
         request_id = self._dispatch("cc:cc-main", tid, timeout="30")["request_id"]
-        removed = peers.cleanup_expired_requests()
+        removed = sp_requests.cleanup_expired_requests()
         self.assertNotIn(request_id, removed)
-        self.assertTrue(pathlib.Path(peers.request_path(request_id)).exists())
+        self.assertTrue(pathlib.Path(sp_storage.request_path(request_id)).exists())
 
     def test_claim_reply_gives_the_reply_to_exactly_one_caller(self):
         # The exactly-once invariant two concurrent awaits rely on: whoever
         # wins the atomic rename gets the reply, the loser gets None (and so
         # reports the request as already consumed).
         request_id = str(uuidlib.uuid4())
-        reply_path = peers.request_reply_path(request_id)
+        reply_path = sp_storage.request_reply_path(request_id)
         sp_runtime.write_json_atomic(
             reply_path,
             {"request_id": request_id, "session_id": "s1", "message": "once"},
         )
-        first = peers._claim_reply(reply_path)
-        second = peers._claim_reply(reply_path)
+        first = sp_requests._claim_reply(reply_path)
+        second = sp_requests._claim_reply(reply_path)
         self.assertIsInstance(first, dict)
         self.assertEqual(first["message"], "once")
         self.assertIsNone(second)
@@ -2269,7 +2270,7 @@ class TestNonblockingDispatchAwait(Base):
         self.assertEqual(statuses, ["expired", "replied"])
         winner = [json.loads(o) for o in outs if json.loads(o)["status"] == "replied"][0]
         self.assertEqual(winner["message"], "shared answer")
-        self.assertFalse(pathlib.Path(peers.request_path(request_id)).exists())
+        self.assertFalse(pathlib.Path(sp_storage.request_path(request_id)).exists())
 
 # ==========================================================================
 # M1/M2: registration and list
@@ -2279,32 +2280,32 @@ class TestNonblockingDispatchAwait(Base):
 class TestRegistration(Base):
     def test_registration_persists_the_uuid_not_the_name(self):
         tid, _r = self.one_thread(name="codex-uzi")
-        peers.register_thread(peers.resolve_thread("codex-uzi"))
-        registered = peers.read_registered()
+        sp_storage.register_thread(sp_codex.resolve_thread("codex-uzi"))
+        registered = sp_storage.read_registered()
         self.assertIn(tid, registered)
         self.assertEqual(registered[tid]["name"], "codex-uzi")
 
     def test_unregister_removes_only_that_thread(self):
-        peers.write_registered({"a": {"name": "x"}, "b": {"name": "y"}})
-        self.assertTrue(peers.unregister_thread("a"))
-        self.assertEqual(sorted(peers.read_registered()), ["b"])
-        self.assertFalse(peers.unregister_thread("zzz"))
+        sp_storage.write_registered({"a": {"name": "x"}, "b": {"name": "y"}})
+        self.assertTrue(sp_storage.unregister_thread("a"))
+        self.assertEqual(sorted(sp_storage.read_registered()), ["b"])
+        self.assertFalse(sp_storage.unregister_thread("zzz"))
 
     def test_reconcile_ignores_a_live_thread_that_is_not_registered(self):
         self.one_thread(name="codex-uzi")
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
-            started = peers.reconcile()
+            started = sp_lifecycle.reconcile()
         self.assertEqual(started, 0)
         self.assertIn("no registered threads", out.getvalue())
 
     def test_reconcile_skips_a_registered_thread_that_is_not_live(self):
         tid, _r = self.one_thread()
-        peers.register_thread({"id": tid, "name": "codex-uzi"})
+        sp_storage.register_thread({"id": tid, "name": "codex-uzi"})
         self.clear_holders()
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
-            self.assertEqual(peers.reconcile(), 0)
+            self.assertEqual(sp_lifecycle.reconcile(), 0)
         self.assertIn("not live", out.getvalue())
 
     def test_up_registers_and_starts_exactly_one_shim(self):
@@ -2312,32 +2313,32 @@ class TestRegistration(Base):
         rc, out, _err = self.cli("up", "codex-uzi")
         self.assertEqual(rc, 0)
         self.assertIn("registered", out)
-        pid = wait_for(lambda: peers.shim_pid(tid))
+        pid = wait_for(lambda: sp_lifecycle.shim_pid(tid))
         self.assertIsNotNone(pid, "no shim came up")
         rc, out, _err = self.cli("up")
         self.assertEqual(rc, 0)
         self.assertIn("already running", out)
-        self.assertEqual(peers.shim_pid(tid), pid)
+        self.assertEqual(sp_lifecycle.shim_pid(tid), pid)
 
     def test_down_stops_the_shim_and_unregisters(self):
         tid, _r = self.one_thread(name="codex-uzi")
         self.cli("up", "codex-uzi")
-        pid = wait_for(lambda: peers.shim_pid(tid))
+        pid = wait_for(lambda: sp_lifecycle.shim_pid(tid))
         self.assertIsNotNone(pid)
         rc, out, _err = self.cli("down", "codex-uzi")
         self.assertEqual(rc, 0)
         self.assertIn("unregistered", out)
-        self.assertEqual(peers.read_registered(), {})
+        self.assertEqual(sp_storage.read_registered(), {})
         self.assertTrue(wait_pid_gone(pid), "the shim survived `down`")
 
     def test_bare_down_stops_shims_but_keeps_registrations(self):
         tid, _r = self.one_thread(name="codex-uzi")
         self.cli("up", "codex-uzi")
-        wait_for(lambda: peers.shim_pid(tid))
+        wait_for(lambda: sp_lifecycle.shim_pid(tid))
         rc, out, _err = self.cli("down")
         self.assertEqual(rc, 0)
         self.assertIn("registrations kept", out)
-        self.assertIn(tid, peers.read_registered())
+        self.assertIn(tid, sp_storage.read_registered())
 
     def test_a_pidfile_nothing_holds_is_never_signalled(self):
         # B2: the old code SIGTERMed whatever pid the file named. A pidfile no
@@ -2345,18 +2346,18 @@ class TestRegistration(Base):
         # nothing. Demonstrated against a live, unrelated pid.
         tid, _r = self.one_thread()
         bystander = os.getppid()
-        pathlib.Path(peers.thread_pid_path(tid)).write_text("%d\n" % bystander)
-        self.assertIsNone(peers.shim_pid(tid))
-        self.assertFalse(peers.stop_shim(tid))
-        self.assertTrue(peers.pid_alive(bystander), "a bystander was signalled")
+        pathlib.Path(sp_storage.thread_pid_path(tid)).write_text("%d\n" % bystander)
+        self.assertIsNone(sp_lifecycle.shim_pid(tid))
+        self.assertFalse(sp_lifecycle.stop_shim(tid))
+        self.assertTrue(sp_process.pid_alive(bystander), "a bystander was signalled")
 
     def test_a_probe_never_unlinks_a_pidfile_a_shim_is_about_to_lock(self):
         # Unlinking a lock-free pidfile would race a starting shim between its
         # open() and its flock(), leaving it holding an unlinked inode.
         tid, _r = self.one_thread()
-        path = pathlib.Path(peers.thread_pid_path(tid))
+        path = pathlib.Path(sp_storage.thread_pid_path(tid))
         path.write_text("%d\n" % os.getppid())
-        self.assertIsNone(peers.shim_pid(tid))
+        self.assertIsNone(sp_lifecycle.shim_pid(tid))
         self.assertTrue(path.exists())
 
     def test_a_held_pidfile_whose_record_names_another_thread_is_ignored(self):
@@ -2368,20 +2369,20 @@ class TestRegistration(Base):
         )
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
-            self.assertIsNone(peers.shim_pid(tid))
+            self.assertIsNone(sp_lifecycle.shim_pid(tid))
         self.assertIn("names another thread", err.getvalue())
 
     def test_a_recycled_pid_does_not_block_a_restart(self):
         # B2: a stale pidfile naming a live unrelated pid used to read as "a
         # shim is running", so reconcile refused to start the real one.
         tid, _r = self.one_thread(name="codex-uzi")
-        peers.register_thread({"id": tid, "name": "codex-uzi"})
-        pathlib.Path(peers.thread_pid_path(tid)).write_text("%d\n" % os.getppid())
+        sp_storage.register_thread({"id": tid, "name": "codex-uzi"})
+        pathlib.Path(sp_storage.thread_pid_path(tid)).write_text("%d\n" % os.getppid())
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
-            started = peers.reconcile()
+            started = sp_lifecycle.reconcile()
         self.assertEqual(started, 1, out.getvalue())
-        self.assertIsNotNone(peers.shim_pid(tid))
+        self.assertIsNotNone(sp_lifecycle.shim_pid(tid))
 
     def _live_and_dead_namesakes(self, name="helper"):
         """One live thread and two past threads that carry the same name."""
@@ -2409,14 +2410,14 @@ class TestRegistration(Base):
         self.assertIn("no rollout under", err)
         self.assertIn("`peers.py list` and `peers.py doctor`", err)
         self.assertNotIn("retry", err.lower())
-        self.assertEqual(peers.read_registered(), {})
+        self.assertEqual(sp_storage.read_registered(), {})
 
     def test_up_on_a_locked_thread_without_a_state_row_says_so(self):
         # Seen on Codex 0.158.0: the writer lock is held before the thread's
         # state-DB row exists, and discovery reads only the row.
         self.make_state_db([])
         tid = new_uuid()
-        self.set_holder(peers.writer_lock_path(tid), pid=4321)
+        self.set_holder(sp_codex.writer_lock_path(tid), pid=4321)
         rc, _out, err = self.cli("up", tid)
         self.assertEqual(rc, 1)
         self.assertIn("held by pid 4321", err)
@@ -2432,9 +2433,9 @@ class TestRegistration(Base):
         rc, out, err = self.cli("budget", "reset", "helper")
         self.assertEqual(rc, 0, err)
         self.assertIn(live_tid, out)
-        self.assertTrue(os.path.exists(peers.budget_reset_path(live_tid)))
+        self.assertTrue(os.path.exists(sp_storage.budget_reset_path(live_tid)))
         for tid in dead:
-            self.assertFalse(os.path.exists(peers.budget_reset_path(tid)))
+            self.assertFalse(os.path.exists(sp_storage.budget_reset_path(tid)))
 
     def test_budget_reset_reports_the_real_resolution_error(self):
         self.one_thread(name="someone-else")
@@ -2451,13 +2452,13 @@ class TestRegistration(Base):
     def test_budget_reset_writes_the_marker_and_clears_the_state_file(self):
         tid, _r = self.one_thread()
         sp_runtime.write_json_atomic(
-            peers.thread_state_path(tid), {"thread_id": tid, "budgets": {"s1": 3}}
+            sp_storage.thread_state_path(tid), {"thread_id": tid, "budgets": {"s1": 3}}
         )
         rc, out, _err = self.cli("budget", "reset", tid)
         self.assertEqual(rc, 0)
         self.assertIn("reset", out)
-        self.assertTrue(os.path.exists(peers.budget_reset_path(tid)))
-        state = sp_runtime.read_json(peers.thread_state_path(tid))
+        self.assertTrue(os.path.exists(sp_storage.budget_reset_path(tid)))
+        state = sp_runtime.read_json(sp_storage.thread_state_path(tid))
         self.assertEqual(state["budgets"], {})
 
 
@@ -2478,7 +2479,7 @@ class TestGarbageCollection(Base):
         )
         if live:
             self.set_holder(rollout)
-        peers.write_registered(
+        sp_storage.write_registered(
             {
                 tid: {
                     "name": "old-peer",
@@ -2489,7 +2490,7 @@ class TestGarbageCollection(Base):
             }
         )
         sp_runtime.write_json_atomic(
-            peers.thread_state_path(tid),
+            sp_storage.thread_state_path(tid),
             {
                 "thread_id": tid,
                 "name": "old-peer",
@@ -2497,10 +2498,10 @@ class TestGarbageCollection(Base):
             },
         )
         for path in (
-            peers.thread_state_path(tid),
-            peers.thread_log_path(tid),
-            peers.thread_pid_path(tid),
-            peers.budget_reset_path(tid),
+            sp_storage.thread_state_path(tid),
+            sp_storage.thread_log_path(tid),
+            sp_storage.thread_pid_path(tid),
+            sp_storage.budget_reset_path(tid),
         ):
             pathlib.Path(path).touch()
             os.utime(path, (old, old))
@@ -2510,9 +2511,9 @@ class TestGarbageCollection(Base):
         tid, rollout = self.make_stale_bridge_thread()
         old = time.time() - 8 * 86400
         shared_paths = (
-            peers.registered_path(),
-            os.path.join(peers.state_dir(), "reconcile.lock"),
-            os.path.join(peers.state_dir(), "session-hook.log"),
+            sp_storage.registered_path(),
+            os.path.join(sp_storage.state_dir(), "reconcile.lock"),
+            os.path.join(sp_storage.state_dir(), "session-hook.log"),
         )
         pathlib.Path(shared_paths[1]).write_text("shared lock sentinel")
         pathlib.Path(shared_paths[2]).write_text("shared log sentinel")
@@ -2521,12 +2522,12 @@ class TestGarbageCollection(Base):
 
         removed = peers.gc_bridge_state(days=7, verbose=False)
         self.assertEqual(removed, [tid])
-        self.assertNotIn(tid, peers.read_registered())
+        self.assertNotIn(tid, sp_storage.read_registered())
         for path in (
-            peers.thread_state_path(tid),
-            peers.thread_log_path(tid),
-            peers.thread_pid_path(tid),
-            peers.budget_reset_path(tid),
+            sp_storage.thread_state_path(tid),
+            sp_storage.thread_log_path(tid),
+            sp_storage.thread_pid_path(tid),
+            sp_storage.budget_reset_path(tid),
         ):
             self.assertFalse(os.path.exists(path), path)
         self.assertTrue(rollout.exists(), "GC touched a Codex rollout")
@@ -2543,46 +2544,46 @@ class TestGarbageCollection(Base):
         tid, _rollout = self.make_stale_bridge_thread()
         removed = peers.gc_bridge_state(days=7, dry_run=True, verbose=False)
         self.assertEqual(removed, [tid])
-        self.assertIn(tid, peers.read_registered())
-        self.assertTrue(os.path.exists(peers.thread_state_path(tid)))
+        self.assertIn(tid, sp_storage.read_registered())
+        self.assertTrue(os.path.exists(sp_storage.thread_state_path(tid)))
 
     def test_gc_never_prunes_a_live_thread(self):
         tid, _rollout = self.make_stale_bridge_thread(live=True)
         self.assertEqual(peers.gc_bridge_state(days=7, verbose=False), [])
-        self.assertIn(tid, peers.read_registered())
+        self.assertIn(tid, sp_storage.read_registered())
 
     def test_gc_uses_latest_activity_not_registration_age(self):
         tid, _rollout = self.make_stale_bridge_thread()
-        pathlib.Path(peers.thread_log_path(tid)).touch()
+        pathlib.Path(sp_storage.thread_log_path(tid)).touch()
         self.assertEqual(peers.gc_bridge_state(days=7, verbose=False), [])
-        self.assertIn(tid, peers.read_registered())
+        self.assertIn(tid, sp_storage.read_registered())
 
     def test_gc_rechecks_recency_after_taking_the_lock(self):
         tid, _rollout = self.make_stale_bridge_thread()
-        original = peers.reconcile_lock
+        original = sp_storage.reconcile_lock
 
         @contextlib.contextmanager
         def activity_during_lock(*args, **kwargs):
             with original(*args, **kwargs) as acquired:
-                pathlib.Path(peers.thread_log_path(tid)).touch()
+                pathlib.Path(sp_storage.thread_log_path(tid)).touch()
                 yield acquired
 
-        peers.reconcile_lock = activity_during_lock
+        sp_storage.reconcile_lock = activity_during_lock
         try:
             removed = peers.gc_bridge_state(days=7, verbose=False)
         finally:
-            peers.reconcile_lock = original
+            sp_storage.reconcile_lock = original
         self.assertEqual(removed, [])
-        self.assertIn(tid, peers.read_registered())
+        self.assertIn(tid, sp_storage.read_registered())
 
     def test_gc_fails_closed_when_thread_discovery_is_unknown(self):
         tid = str(uuidlib.uuid4())
-        peers.write_registered(
+        sp_storage.write_registered(
             {tid: {"name": "old", "registered_at": "2020-01-01T00:00:00Z"}}
         )
         self.make_state_db([], filename="state_1.sqlite", good=False)
         self.assertEqual(peers.gc_bridge_state(days=7, verbose=False), [])
-        self.assertIn(tid, peers.read_registered())
+        self.assertIn(tid, sp_storage.read_registered())
 
     def test_gc_fails_closed_when_lsof_is_blocked(self):
         tid, _rollout = self.make_stale_bridge_thread()
@@ -2590,8 +2591,8 @@ class TestGarbageCollection(Base):
         with contextlib.redirect_stderr(io.StringIO()):
             removed = peers.gc_bridge_state(days=7, verbose=False)
         self.assertEqual(removed, [])
-        self.assertIn(tid, peers.read_registered())
-        self.assertTrue(os.path.exists(peers.thread_state_path(tid)))
+        self.assertIn(tid, sp_storage.read_registered())
+        self.assertTrue(os.path.exists(sp_storage.thread_state_path(tid)))
 
     def test_gc_rejects_a_negative_retention(self):
         self.make_state_db([])
@@ -2687,7 +2688,7 @@ class TestDoctorAttachment(Base):
 
     def test_a_registered_live_no_shim_thread_warns_exactly_once(self):
         tid, _r = self.one_thread(name="skills")
-        peers.write_registered({tid: {"name": "skills"}})
+        sp_storage.write_registered({tid: {"name": "skills"}})
         text = self._doctor_text()
         self.assertIn("thread is live but no shim", text)  # existing loop
         self.assertNotIn("not attached", text)             # new pass stays out
@@ -2707,7 +2708,7 @@ class TestDoctorAttachment(Base):
 class ShimBase(Base):
     def make_shim(self, name="codex-uzi", history=True):
         tid, rollout = self.one_thread(name=name, history=history)
-        thread = peers.resolve_thread(tid)
+        thread = sp_codex.resolve_thread(tid)
         shim = peers.Shim(thread)
         shim.codex_version = "0.153.4"
         return shim, tid, rollout
@@ -2885,8 +2886,8 @@ class TestShimInbound(ShimBase):
     def test_a_client_with_a_foreign_uid_is_refused(self):
         shim, _tid, _rollout = self.make_shim()
         listener, _rec = self.add_listener()
-        original = peers.peer_uid
-        peers.peer_uid = lambda _conn: os.getuid() + 1
+        original = sp_process.peer_uid
+        sp_process.peer_uid = lambda _conn: os.getuid() + 1
         try:
             a, b = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
             b.sendall(
@@ -2897,15 +2898,15 @@ class TestShimInbound(ShimBase):
             with contextlib.redirect_stderr(err):
                 shim._handle_connection(a)
         finally:
-            peers.peer_uid = original
+            sp_process.peer_uid = original
         self.assertIn("refusing a client", err.getvalue())
         self.assertEqual(self.queue_calls(), [])
 
     def test_a_client_with_our_uid_is_served(self):
         shim, _tid, _rollout = self.make_shim()
         listener, _rec = self.add_listener()
-        original = peers.peer_uid
-        peers.peer_uid = lambda _conn: os.getuid()
+        original = sp_process.peer_uid
+        sp_process.peer_uid = lambda _conn: os.getuid()
         try:
             a, b = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
             b.sendall(
@@ -2914,7 +2915,7 @@ class TestShimInbound(ShimBase):
             b.close()
             shim._handle_connection(a)
         finally:
-            peers.peer_uid = original
+            sp_process.peer_uid = original
         self.assertEqual(len(self.queue_calls()), 1)
 
     def test_an_unknown_control_action_is_ignored(self):
@@ -3249,7 +3250,7 @@ class TestShimReplies(ShimBase):
         self.assertEqual(len(self._reply_frames(listener)), sp_constants.REPLY_BUDGET)
         self.assertEqual(sorted(shim.held), ["s1"])
         # Persisted, so a shim restart before the reset does not lose it.
-        state = sp_runtime.read_json(peers.thread_state_path(tid), {})
+        state = sp_runtime.read_json(sp_storage.thread_state_path(tid), {})
         self.assertEqual(state["held"]["s1"]["mid"], "m%d" % (sp_constants.REPLY_BUDGET + 1))
         self.cli("budget", "reset", tid)
         with contextlib.redirect_stderr(io.StringIO()):
@@ -3331,13 +3332,13 @@ class TestShimReplies(ShimBase):
         }
         shim._save_state()
         self.assertIn(
-            "secret-ish answer", pathlib.Path(peers.thread_state_path(tid)).read_text()
+            "secret-ish answer", pathlib.Path(sp_storage.thread_state_path(tid)).read_text()
         )
         with contextlib.redirect_stderr(io.StringIO()):
             shim._expire_held()
         self.assertEqual(shim.held, {})
         self.assertNotIn(
-            "secret-ish answer", pathlib.Path(peers.thread_state_path(tid)).read_text()
+            "secret-ish answer", pathlib.Path(sp_storage.thread_state_path(tid)).read_text()
         )
 
     def test_a_fresh_held_reply_survives_the_purge(self):
@@ -3593,7 +3594,7 @@ class TestShimRecord(ShimBase):
 
     def test_a_thread_with_no_name_gets_a_stable_fallback(self):
         tid, rollout = self.one_thread(name=None)
-        shim = peers.Shim(peers.resolve_thread(tid))
+        shim = peers.Shim(sp_codex.resolve_thread(tid))
         self.assertEqual(shim.name, "codex-%s" % tid[:8])
 
     def test_an_unusable_thread_title_gets_a_stable_fallback(self):
@@ -3626,8 +3627,8 @@ class TestShimRecord(ShimBase):
         )
         self.set_holder(first)
         self.set_holder(second)
-        lower_shim = peers.Shim(peers.resolve_thread(lower))
-        higher_shim = peers.Shim(peers.resolve_thread(higher))
+        lower_shim = peers.Shim(sp_codex.resolve_thread(lower))
+        higher_shim = peers.Shim(sp_codex.resolve_thread(higher))
         self.assertEqual(lower_shim.name, "shared")
         self.assertEqual(higher_shim.name, "codex-%s" % higher[:8])
         lower_shim._refresh_name()
@@ -3637,10 +3638,10 @@ class TestShimRecord(ShimBase):
 
     def test_a_rename_refreshes_the_record_state_and_registration(self):
         shim, tid, _rollout = self.make_shim(name="codex-old")
-        peers.register_thread({"id": tid, "name": "codex-old"})
+        sp_storage.register_thread({"id": tid, "name": "codex-old"})
         shim._write_record()
         before = shim.record()["nameSince"]
-        conn = sqlite3.connect(peers.find_state_db())
+        conn = sqlite3.connect(sp_codex.find_state_db())
         conn.execute("UPDATE threads SET name = ? WHERE id = ?", ("codex-new", tid))
         conn.commit()
         conn.close()
@@ -3649,13 +3650,13 @@ class TestShimRecord(ShimBase):
         shim._refresh_name()
 
         rec = sp_runtime.read_json(shim.record_path)
-        state = sp_runtime.read_json(peers.thread_state_path(tid))
+        state = sp_runtime.read_json(sp_storage.thread_state_path(tid))
         self.assertEqual(shim.name, "codex-new")
         self.assertEqual(rec["name"], "codex-new")
         self.assertGreater(rec["nameSince"], before)
         self.assertEqual(state["name"], "codex-new")
         self.assertEqual(state["thread_name"], "codex-new")
-        self.assertEqual(peers.read_registered()[tid]["name"], "codex-new")
+        self.assertEqual(sp_storage.read_registered()[tid]["name"], "codex-new")
 
     def test_alias_refresh_runs_less_often_than_liveness(self):
         shim, _tid, _rollout = self.make_shim()
@@ -3679,10 +3680,10 @@ class TestShimRecord(ShimBase):
         shim, tid, _rollout = self.make_shim()
         self.assertEqual(shim.alias_refresh_interval, 0.6)
         os.environ.pop("SESSION_PEERS_ALIAS_REFRESH_INTERVAL")
-        default = peers.Shim(peers.resolve_thread(tid))
+        default = peers.Shim(sp_codex.resolve_thread(tid))
         self.assertEqual(default.alias_refresh_interval, 30.0)
         os.environ["SESSION_PEERS_ALIAS_REFRESH_INTERVAL"] = "0"
-        fallback = peers.Shim(peers.resolve_thread(tid))
+        fallback = peers.Shim(sp_codex.resolve_thread(tid))
         self.assertEqual(fallback.alias_refresh_interval, 30.0)
 
     def test_a_blocked_lsof_probe_does_not_terminate_a_running_shim(self):
@@ -3745,13 +3746,13 @@ class TestStableCwd(Base):
 
     def test_codex_queue_runs_in_the_threads_own_directory(self):
         thread_dir = pathlib.Path(tempfile.mkdtemp(dir=str(self.root)))
-        peers.codex_queue(str(uuidlib.uuid4()), "hi", cwd=str(thread_dir))
+        sp_codex.codex_queue(str(uuidlib.uuid4()), "hi", cwd=str(thread_dir))
         self.assertEqual(os.path.realpath(self.last_cwd()), os.path.realpath(str(thread_dir)))
 
     def test_codex_queue_falls_back_to_home_when_the_thread_dir_is_gone(self):
         gone = pathlib.Path(tempfile.mkdtemp(dir=str(self.root)))
         gone.rmdir()
-        peers.codex_queue(str(uuidlib.uuid4()), "hi", cwd=str(gone))
+        sp_codex.codex_queue(str(uuidlib.uuid4()), "hi", cwd=str(gone))
         self.assertEqual(
             os.path.realpath(self.last_cwd()),
             os.path.realpath(os.path.expanduser("~")),
@@ -3763,7 +3764,7 @@ class TestStableCwd(Base):
         doomed = pathlib.Path(tempfile.mkdtemp(dir=str(self.root)))
         os.chdir(str(doomed))
         doomed.rmdir()
-        peers.codex_queue(str(uuidlib.uuid4()), "hi")  # raises QueueError if broken
+        sp_codex.codex_queue(str(uuidlib.uuid4()), "hi")  # raises QueueError if broken
         self.assertEqual(
             os.path.realpath(self.last_cwd()),
             os.path.realpath(os.path.expanduser("~")),
@@ -3824,7 +3825,7 @@ class TestShimEndToEnd(Base):
         tid, _rollout = self.one_thread()
         listener, _rec = self.add_listener(name="cc-main", session_id="s1")
         sp_runtime.write_json_atomic(
-            peers.thread_state_path(tid),
+            sp_storage.thread_state_path(tid),
             {
                 "thread_id": tid,
                 "held": {
@@ -3889,7 +3890,7 @@ class TestShimEndToEnd(Base):
         # sender before advertising a ready peer, not only at graceful exit.
         proc.kill()
         proc.wait(timeout=10)
-        state = sp_runtime.read_json(peers.thread_state_path(tid), {})
+        state = sp_runtime.read_json(sp_storage.thread_state_path(tid), {})
         self.assertEqual(state.get("tail", {}).get("open_turn"), "t-live")
         append(rollout, ev("task_complete", turn_id="t-live",
                            last_agent_message="finished while down"))
@@ -3915,7 +3916,7 @@ class TestShimEndToEnd(Base):
         frame = sp_protocol.build_user_frame(
             sp_protocol.build_wrapper("do it", listener.path, "s1", "cc-main"), listener.path
         )
-        peers.send_frame(shim_rec["messagingSocketPath"], frame)
+        sp_claude.send_frame(shim_rec["messagingSocketPath"], frame)
 
         calls = wait_for(lambda: self.queue_calls())
         self.assertIsNotNone(calls, "nothing was queued: %s" % self.shim_log())
@@ -3961,7 +3962,7 @@ class TestShimEndToEnd(Base):
         proc.wait(timeout=10)
         self.assertTrue(wait_for(lambda: not self.shim_records()))
         self.assertFalse(os.path.exists(shim_rec["messagingSocketPath"]))
-        self.assertIsNone(peers.shim_pid(tid))
+        self.assertIsNone(sp_lifecycle.shim_pid(tid))
 
     def test_a_restarted_shim_does_not_resend_a_completed_turn(self):
         tid, rollout = self.one_thread()
@@ -4043,16 +4044,16 @@ class TestSessionHook(Base):
 
     def test_four_sources_start_at_most_one_shim_per_thread(self):
         tid, _rollout = self.one_thread(name="codex-uzi")
-        peers.register_thread({"id": tid, "name": "codex-uzi"})
+        sp_storage.register_thread({"id": tid, "name": "codex-uzi"})
         for source in ("startup", "resume", "clear", "compact"):
             proc = self.spawn("session-hook")
             out, _ = proc.communicate(json.dumps({"source": source}), timeout=20)
             self.assertEqual(out.strip(), "{}")
-        pid = wait_for(lambda: peers.shim_pid(tid))
+        pid = wait_for(lambda: sp_lifecycle.shim_pid(tid))
         self.assertIsNotNone(pid, "the reconcile never started a shim")
         time.sleep(1.0)
         self.assertEqual(len(self.shim_records()), 1, self.shim_records())
-        self.assertEqual(peers.shim_pid(tid), pid)
+        self.assertEqual(sp_lifecycle.shim_pid(tid), pid)
 
     def test_auto_attach_exposes_the_triggering_uuid_without_persisting_it(self):
         tid, _rollout = self.one_thread(name="codex-hook")
@@ -4061,8 +4062,8 @@ class TestSessionHook(Base):
             json.dumps({"source": "startup", "session_id": tid}), timeout=20
         )
         self.assertEqual(out.strip(), "{}")
-        self.assertIsNotNone(wait_for(lambda: peers.shim_pid(tid)))
-        self.assertNotIn(tid, peers.read_registered())
+        self.assertIsNotNone(wait_for(lambda: sp_lifecycle.shim_pid(tid)))
+        self.assertNotIn(tid, sp_storage.read_registered())
 
     def test_auto_attach_ignores_compaction(self):
         tid, _rollout = self.one_thread(name="codex-hook")
@@ -4072,7 +4073,7 @@ class TestSessionHook(Base):
         )
         self.assertEqual(out.strip(), "{}")
         time.sleep(0.5)
-        self.assertIsNone(peers.shim_pid(tid))
+        self.assertIsNone(sp_lifecycle.shim_pid(tid))
 
 
 class TestInstallHook(Base):
@@ -4277,7 +4278,7 @@ class TestDoctor(Base):
 
     def test_doctor_names_a_live_thread_without_a_shim(self):
         tid, _rollout = self.one_thread(name="codex-uzi")
-        peers.register_thread({"id": tid, "name": "codex-uzi"})
+        sp_storage.register_thread({"id": tid, "name": "codex-uzi"})
         _rc, out, _err = self.cli("doctor")
         self.assertIn("thread is live but no shim", out)
 
@@ -4368,20 +4369,20 @@ class TestWrapperInjection(Base):
 
     def test_a_hostile_name_is_refused_at_registration(self):
         with self.assertRaises(sp_protocol.NameError_) as ctx:
-            peers.register_thread({"id": "t1", "name": HOSTILE_NAME})
+            sp_storage.register_thread({"id": "t1", "name": HOSTILE_NAME})
         self.assertIn("/rename", str(ctx.exception))
-        self.assertEqual(peers.read_registered(), {})
+        self.assertEqual(sp_storage.read_registered(), {})
 
     def test_up_refuses_a_hostile_name_with_an_error_not_a_traceback(self):
         self.one_thread(name=HOSTILE_NAME)
         rc, _out, err = self.cli("up", HOSTILE_NAME)
         self.assertEqual(rc, 1)
         self.assertIn("not usable as a peer name", err)
-        self.assertEqual(peers.read_registered(), {})
+        self.assertEqual(sp_storage.read_registered(), {})
 
     def test_a_hostile_title_gets_a_safe_alias_when_the_shim_starts(self):
         tid, _rollout = self.one_thread(name=HOSTILE_NAME)
-        shim = peers.Shim(peers.resolve_thread(tid))
+        shim = peers.Shim(sp_codex.resolve_thread(tid))
         self.assertEqual(shim.name, "codex-%s" % tid[:8])
         self.assertNotIn("from-mode", shim.record()["name"])
 
@@ -4443,18 +4444,18 @@ class TestSocketDirTrust(Base):
         link = self.root / "linksocks"
         link.symlink_to(real)
         with self.assertRaises(SystemExit) as ctx:
-            peers.ensure_socket_dir(str(link))
+            sp_claude.ensure_socket_dir(str(link))
         self.assertIn("symlink", str(ctx.exception))
 
     def test_a_loose_mode_is_tightened_and_verified(self):
         loose = self.root / "loose"
         loose.mkdir(mode=0o755)
-        peers.ensure_socket_dir(str(loose))
+        sp_claude.ensure_socket_dir(str(loose))
         self.assertEqual(stat.S_IMODE(os.stat(str(loose)).st_mode), 0o700)
 
     def test_the_directory_is_created_at_0700(self):
         fresh = self.root / "fresh"
-        peers.ensure_socket_dir(str(fresh))
+        sp_claude.ensure_socket_dir(str(fresh))
         self.assertEqual(stat.S_IMODE(os.stat(str(fresh)).st_mode), 0o700)
 
     def test_the_shim_refuses_to_bind_outside_the_allowlist(self):
@@ -4462,7 +4463,7 @@ class TestSocketDirTrust(Base):
         elsewhere = self.root / "elsewhere"
         elsewhere.mkdir()
         os.environ["SESSION_PEERS_SOCKET_DIR"] = str(elsewhere)
-        shim = peers.Shim(peers.resolve_thread(tid))
+        shim = peers.Shim(sp_codex.resolve_thread(tid))
         # Now take the override away: the directory is no longer allowlisted,
         # which is exactly what a stale or hostile setting looks like.
         os.environ["SESSION_PEERS_SOCKET_DIR"] = str(self.socks)
@@ -4485,7 +4486,7 @@ class TestPeerCredentials(Base):
             client.connect(path)
             conn, _ = srv.accept()
             try:
-                self.assertEqual(peers.peer_uid(conn), os.getuid())
+                self.assertEqual(sp_process.peer_uid(conn), os.getuid())
             finally:
                 conn.close()
         finally:
@@ -4494,10 +4495,10 @@ class TestPeerCredentials(Base):
 
     def test_an_unreadable_peer_uid_is_refused_not_allowed(self):
         tid, rollout = self.one_thread()
-        shim = peers.Shim(peers.resolve_thread(tid))
+        shim = peers.Shim(sp_codex.resolve_thread(tid))
         listener, _rec = self.add_listener()
-        original = peers.peer_uid
-        peers.peer_uid = lambda _conn: None
+        original = sp_process.peer_uid
+        sp_process.peer_uid = lambda _conn: None
         try:
             a, b = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
             frame = sp_protocol.build_user_frame(
@@ -4510,7 +4511,7 @@ class TestPeerCredentials(Base):
             with contextlib.redirect_stderr(err):
                 shim._handle_connection(a)
         finally:
-            peers.peer_uid = original
+            sp_process.peer_uid = original
         self.assertIn("unavailable", err.getvalue())
         self.assertEqual(self.queue_calls(), [])
 
@@ -4520,7 +4521,7 @@ class TestInboundBounds(Base):
 
     def make_shim(self):
         tid, _rollout = self.one_thread()
-        return peers.Shim(peers.resolve_thread(tid))
+        return peers.Shim(sp_codex.resolve_thread(tid))
 
     def test_only_eight_handlers_are_admitted_at_once(self):
         shim = self.make_shim()
@@ -4536,12 +4537,12 @@ class TestInboundBounds(Base):
         self.assertTrue(shim._admit())
         a, b = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
         b.close()
-        original = peers.peer_uid
-        peers.peer_uid = lambda _conn: os.getuid()
+        original = sp_process.peer_uid
+        sp_process.peer_uid = lambda _conn: os.getuid()
         try:
             shim._handle_connection(a)
         finally:
-            peers.peer_uid = original
+            sp_process.peer_uid = original
         self.assertEqual(
             [shim._admit() for _ in range(sp_constants.MAX_CONCURRENT_CLIENTS)].count(True),
             sp_constants.MAX_CONCURRENT_CLIENTS,
@@ -4559,23 +4560,23 @@ class TestInboundBounds(Base):
         ).encode()
         b.sendall((frame + b"\n") * (sp_constants.MAX_FRAMES_PER_CONNECTION + 4))
         b.close()
-        original = peers.peer_uid
-        peers.peer_uid = lambda _conn: os.getuid()
+        original = sp_process.peer_uid
+        sp_process.peer_uid = lambda _conn: os.getuid()
         err = io.StringIO()
         try:
             with contextlib.redirect_stderr(err):
                 shim._handle_connection(a)
         finally:
-            peers.peer_uid = original
+            sp_process.peer_uid = original
         self.assertIn("frames on one connection", err.getvalue())
         self.assertEqual(len(self.queue_calls()), sp_constants.MAX_FRAMES_PER_CONNECTION)
 
     def test_a_client_that_never_sends_a_newline_is_closed_on_one_deadline(self):
         shim = self.make_shim()
         original_timeout = sp_constants.CONN_TIMEOUT
-        original_uid = peers.peer_uid
+        original_uid = sp_process.peer_uid
         sp_constants.CONN_TIMEOUT = 0.4
-        peers.peer_uid = lambda _conn: os.getuid()
+        sp_process.peer_uid = lambda _conn: os.getuid()
         try:
             a, b = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
             stop = threading.Event()
@@ -4601,7 +4602,7 @@ class TestInboundBounds(Base):
             b.close()
         finally:
             sp_constants.CONN_TIMEOUT = original_timeout
-            peers.peer_uid = original_uid
+            sp_process.peer_uid = original_uid
         self.assertIn("no complete line", err.getvalue())
         self.assertLess(elapsed, 3.0, "the deadline did not bound the connection")
 
@@ -4841,7 +4842,7 @@ class TestSessionIndexMerge(Base):
             json.dumps({"id": "b", "thread_name": "from-sqlite",
                         "updated_at": "2026-09-01T00:00:00Z"}) + "\n"
         )
-        index = peers.read_session_index()
+        index = sp_codex.read_session_index()
         self.assertEqual(index, {"a": "from-home", "b": "from-sqlite"})
 
     def test_the_newest_updated_at_wins_for_a_shared_id(self):
@@ -4856,12 +4857,12 @@ class TestSessionIndexMerge(Base):
             json.dumps({"id": "a", "thread_name": "newer",
                         "updated_at": "2026-09-06T00:00:00Z"}) + "\n"
         )
-        self.assertEqual(peers.read_session_index()["a"], "newer")
+        self.assertEqual(sp_codex.read_session_index()["a"], "newer")
         (alt / "session_index.jsonl").write_text(
             json.dumps({"id": "a", "thread_name": "stale",
                         "updated_at": "2026-08-01T00:00:00Z"}) + "\n"
         )
-        self.assertEqual(peers.read_session_index()["a"], "older")
+        self.assertEqual(sp_codex.read_session_index()["a"], "older")
 
 
 class TestInstallHookSafety(Base):
@@ -4933,7 +4934,7 @@ class TestCachedBoundary(ShimBase):
         append(rollout, ev("task_started", turn_id="t1"), ev("turn_aborted", turn_id="t1"))
         shim.tail.poll()
         shim._save_state()
-        restarted = peers.Shim(peers.resolve_thread(tid))
+        restarted = peers.Shim(sp_codex.resolve_thread(tid))
         self.assertEqual(restarted.tail.last_boundary, "aborted")
 
 
@@ -4954,7 +4955,7 @@ class TestBudgetResetPersistence(ShimBase):
         self.assertIsNone(shim.budget_sender_sid)
         self.assertIsNone(shim.budget_last_at)
         self.assertEqual(shim.budget_notified, set())
-        state = sp_runtime.read_json(peers.thread_state_path(tid))
+        state = sp_runtime.read_json(sp_storage.thread_state_path(tid))
         self.assertEqual(state["budgets"], {})
         self.assertIsNone(state["budget_sender_sid"])
         self.assertIsNone(state["budget_last_at"])
@@ -4972,7 +4973,7 @@ class TestShimOwnershipIsExclusive(Base):
     def test_a_second_shim_leaves_the_first_shims_files_untouched(self):
         tid, _rollout = self.one_thread()
         owner = self.hold_pidfile(tid)
-        state_path = peers.thread_state_path(tid)
+        state_path = sp_storage.thread_state_path(tid)
         sp_runtime.write_json_atomic(
             state_path, {"thread_id": tid, "sentinel": "do-not-touch",
                          "budgets": {"s1": 2}}
@@ -4990,7 +4991,7 @@ class TestShimOwnershipIsExclusive(Base):
         self.assertEqual(proc.returncode, 4, out)
         self.assertIn("already owns thread", out)
         self.assertEqual(
-            pathlib.Path(peers.thread_pid_path(tid)).read_text().strip(),
+            pathlib.Path(sp_storage.thread_pid_path(tid)).read_text().strip(),
             str(owner),
         )
         self.assertEqual(pathlib.Path(state_path).read_text(), state_before)
@@ -5008,10 +5009,10 @@ class TestShimOwnershipIsExclusive(Base):
         # Wait for SERVING, not merely for the ownership lock: the lock is
         # taken first, and a shim killed before its handlers are in cannot
         # clean up.
-        self.assertIsNotNone(wait_for(lambda: peers.shim_ready(tid)))
+        self.assertIsNotNone(wait_for(lambda: sp_lifecycle.shim_ready(tid)))
         proc.terminate()
         proc.wait(timeout=10)
-        self.assertFalse(os.path.exists(peers.thread_pid_path(tid)))
+        self.assertFalse(os.path.exists(sp_storage.thread_pid_path(tid)))
         self.assertEqual(self.shim_records(), [])
 
     def test_shim_ready_waits_for_the_record_not_just_the_lock(self):
@@ -5019,8 +5020,8 @@ class TestShimOwnershipIsExclusive(Base):
         self.hold_pidfile(tid)
         # The lock is held but no record exists, which is what a shim looks
         # like between taking ownership and binding its socket.
-        self.assertIsNotNone(peers.shim_pid(tid))
-        self.assertIsNone(peers.shim_ready(tid))
+        self.assertIsNotNone(sp_lifecycle.shim_pid(tid))
+        self.assertIsNone(sp_lifecycle.shim_ready(tid))
 
 
 class TestReplyNeedsASessionId(ShimBase):
@@ -5086,7 +5087,7 @@ class TestByteBudget(Base):
 
     def test_a_multibyte_body_is_trimmed_to_the_byte_budget(self):
         tid, rollout = self.one_thread()
-        shim = peers.Shim(peers.resolve_thread(tid))
+        shim = peers.Shim(sp_codex.resolve_thread(tid))
         listener, _rec = self.add_listener(name="cc-main", session_id="s1")
         # Three bytes per character, so a character-based cap would overshoot
         # the argv budget by a factor of three and the exec would fail.
@@ -5108,8 +5109,8 @@ class TestByteBudget(Base):
 
     def test_the_queue_refuses_a_body_over_the_byte_budget(self):
         tid, _r = self.one_thread()
-        with self.assertRaises(peers.QueueError) as ctx:
-            peers.codex_queue(tid, "\u4e2d" * sp_runtime.argv_text_budget())
+        with self.assertRaises(sp_codex.QueueError) as ctx:
+            sp_codex.codex_queue(tid, "\u4e2d" * sp_runtime.argv_text_budget())
         self.assertIn("bytes", str(ctx.exception))
         self.assertEqual(self.queue_calls(), [])
 
@@ -5151,7 +5152,7 @@ class TestStatusAtStart(Base):
 
     def test_a_shim_starting_during_a_turn_reports_busy(self):
         tid, _rollout = self.mid_turn_thread()
-        shim = peers.Shim(peers.resolve_thread(tid))
+        shim = peers.Shim(sp_codex.resolve_thread(tid))
         self.assertEqual(shim.tail.last_boundary, "started")
         self.assertEqual(shim.status, "busy")
         self.assertEqual(shim.record()["status"], "busy")
@@ -5179,7 +5180,7 @@ class TestStatusAtStart(Base):
 
     def test_an_idle_thread_still_starts_idle(self):
         tid, _rollout = self.one_thread()
-        self.assertEqual(peers.Shim(peers.resolve_thread(tid)).status, "idle")
+        self.assertEqual(peers.Shim(sp_codex.resolve_thread(tid)).status, "idle")
 
 
 class TestStartupReplyRecovery(Base):
@@ -5190,7 +5191,7 @@ class TestStartupReplyRecovery(Base):
         tagged = sp_protocol.build_tag("cc-main", "s1", str(self.socks / "1.sock"))
         append(rollout, ev("task_started", turn_id="t-live"),
                user_item(tagged + "\nreview"), user_item("more context"))
-        shim = peers.Shim(peers.resolve_thread(tid))
+        shim = peers.Shim(sp_codex.resolve_thread(tid))
         append(rollout, ev("task_complete", turn_id="t-live", last_agent_message="verdict"))
         turn = shim.tail.poll_turns()[0]
         self.assertEqual(turn.tag, sp_protocol.parse_tag(tagged)[0])
@@ -5203,7 +5204,7 @@ class TestStartupReplyRecovery(Base):
         line = user_item(tagged + "\nreview")
         with rollout.open("a") as fh:
             fh.write(line[:40])
-        shim = peers.Shim(peers.resolve_thread(tid))
+        shim = peers.Shim(sp_codex.resolve_thread(tid))
         with rollout.open("a") as fh:
             fh.write(line[40:] + "\n")
         append(rollout, ev("task_complete", turn_id="t-live", last_agent_message="verdict"))
@@ -5218,7 +5219,7 @@ class TestStartupReplyRecovery(Base):
                 append(rollout, ev("task_started", turn_id="t-tagged"), user_item(tagged),
                        ev(boundary, turn_id="t-tagged", last_agent_message="old answer"),
                        ev("task_started", turn_id="t-typed"), user_item("typed prompt"))
-                shim = peers.Shim(peers.resolve_thread(tid))
+                shim = peers.Shim(sp_codex.resolve_thread(tid))
                 self.assertEqual(shim.tail.poll_turns(), [])
                 append(rollout, ev("task_complete", turn_id="t-typed", last_agent_message="typed answer"))
                 turns = shim.tail.poll_turns()
@@ -5229,10 +5230,10 @@ class TestStartupReplyRecovery(Base):
         tid, rollout = self.one_thread()
         tail = sp_rollout.RolloutTail(str(rollout))
         tail.poll()
-        sp_runtime.write_json_atomic(peers.thread_state_path(tid), {
+        sp_runtime.write_json_atomic(sp_storage.thread_state_path(tid), {
             "tail": tail.state(), "delivered": ["t-processed"],
         })
-        shim = peers.Shim(peers.resolve_thread(tid))
+        shim = peers.Shim(sp_codex.resolve_thread(tid))
         # A legacy processed turn remains deduplicated, even with no final
         # message. Handling it again would log that missing final message.
         err = io.StringIO()
@@ -5240,7 +5241,7 @@ class TestStartupReplyRecovery(Base):
             shim._handle_turn_end(sp_constants.Turn("t-processed", "", None, "complete", None))
         self.assertEqual(err.getvalue(), "")
         shim._save_state()
-        state = sp_runtime.read_json(peers.thread_state_path(tid))
+        state = sp_runtime.read_json(sp_storage.thread_state_path(tid))
         self.assertEqual(state.get("processed_turns"), ["t-processed"])
         self.assertNotIn("delivered", state)
 
@@ -5283,7 +5284,8 @@ class TestRegistrationIsLocked(Base):
             "spec = importlib.util.spec_from_file_location('peers', %r)\n"
             "peers = importlib.util.module_from_spec(spec)\n"
             "spec.loader.exec_module(peers)\n"
-            "peers.register_thread({'id': sys.argv[1], 'name': sys.argv[2]})\n"
+            "from session_peers import storage\n"
+            "storage.register_thread({'id': sys.argv[1], 'name': sys.argv[2]})\n"
             % (str(HERE), str(PEERS))
         )
         procs = [
@@ -5297,29 +5299,29 @@ class TestRegistrationIsLocked(Base):
         for proc in procs:
             out, _ = proc.communicate(timeout=30)
             self.assertEqual(proc.returncode, 0, out)
-        registered = peers.read_registered()
+        registered = sp_storage.read_registered()
         self.assertEqual(
             sorted(registered), ["thread-%d" % i for i in range(6)]
         )
 
     def test_unregister_is_locked_the_same_way(self):
-        peers.write_registered({"a": {"name": "x"}, "b": {"name": "y"}})
-        self.assertTrue(peers.unregister_thread("a"))
-        self.assertEqual(sorted(peers.read_registered()), ["b"])
+        sp_storage.write_registered({"a": {"name": "x"}, "b": {"name": "y"}})
+        self.assertTrue(sp_storage.unregister_thread("a"))
+        self.assertEqual(sorted(sp_storage.read_registered()), ["b"])
 
     def test_name_refresh_never_waits_behind_shutdown(self):
         tid = str(uuidlib.uuid4())
-        peers.write_registered({tid: {"name": "old"}})
+        sp_storage.write_registered({tid: {"name": "old"}})
         lock = self.hold_reconcile_lock()
         started = time.monotonic()
         try:
-            self.assertFalse(peers.refresh_registered_name(tid, "new"))
+            self.assertFalse(sp_storage.refresh_registered_name(tid, "new"))
         finally:
             lock.close()
         self.assertLess(time.monotonic() - started, 0.5)
-        self.assertEqual(peers.read_registered()[tid]["name"], "old")
-        self.assertTrue(peers.refresh_registered_name(tid, "new"))
-        self.assertEqual(peers.read_registered()[tid]["name"], "new")
+        self.assertEqual(sp_storage.read_registered()[tid]["name"], "old")
+        self.assertTrue(sp_storage.refresh_registered_name(tid, "new"))
+        self.assertEqual(sp_storage.read_registered()[tid]["name"], "new")
 
 
 class TestDownIsSerialised(Base):
@@ -5327,19 +5329,19 @@ class TestDownIsSerialised(Base):
 
     def test_a_reconcile_cannot_restart_the_thread_down_is_removing(self):
         tid, _rollout = self.one_thread(name="codex-uzi")
-        peers.register_thread({"id": tid, "name": "codex-uzi"})
+        sp_storage.register_thread({"id": tid, "name": "codex-uzi"})
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(peers.reconcile(), 1)
-        self.assertIsNotNone(peers.shim_ready(tid))
+            self.assertEqual(sp_lifecycle.reconcile(), 1)
+        self.assertIsNotNone(sp_lifecycle.shim_ready(tid))
 
         lock = self.hold_reconcile_lock()
         proc = self.spawn("down", tid)
         # With the fix, `down` blocks here and the shim is still alive; without
         # it, `down` has already stopped the shim and this reconcile restarts
         # it behind `down`'s back.
-        stopped_early = wait_for(lambda: peers.shim_pid(tid) is None, timeout=2.0)
+        stopped_early = wait_for(lambda: sp_lifecycle.shim_pid(tid) is None, timeout=2.0)
         with contextlib.redirect_stdout(io.StringIO()):
-            peers._reconcile(False)
+            sp_lifecycle._reconcile(False)
         lock.close()
 
         out, _ = proc.communicate(timeout=30)
@@ -5349,30 +5351,30 @@ class TestDownIsSerialised(Base):
             "`down` stopped the shim before taking the lock, so a reconcile "
             "could restart it",
         )
-        self.assertEqual(peers.read_registered(), {})
-        self.assertIsNone(peers.shim_pid(tid), "an unregistered shim is still running")
+        self.assertEqual(sp_storage.read_registered(), {})
+        self.assertIsNone(sp_lifecycle.shim_pid(tid), "an unregistered shim is still running")
 
     def test_down_still_works_with_no_contention(self):
         tid, _rollout = self.one_thread(name="codex-uzi")
-        peers.register_thread({"id": tid, "name": "codex-uzi"})
+        sp_storage.register_thread({"id": tid, "name": "codex-uzi"})
         with contextlib.redirect_stdout(io.StringIO()):
-            peers.reconcile()
+            sp_lifecycle.reconcile()
         rc, out, _err = self.cli("down", tid)
         self.assertEqual(rc, 0)
         self.assertIn("unregistered", out)
-        self.assertEqual(peers.read_registered(), {})
-        self.assertIsNone(peers.shim_pid(tid))
+        self.assertEqual(sp_storage.read_registered(), {})
+        self.assertIsNone(sp_lifecycle.shim_pid(tid))
 
     def test_bare_down_takes_the_lock_once_for_every_thread(self):
         tid, _rollout = self.one_thread(name="codex-uzi")
-        peers.register_thread({"id": tid, "name": "codex-uzi"})
+        sp_storage.register_thread({"id": tid, "name": "codex-uzi"})
         with contextlib.redirect_stdout(io.StringIO()):
-            peers.reconcile()
+            sp_lifecycle.reconcile()
         rc, out, _err = self.cli("down")
         self.assertEqual(rc, 0)
         self.assertIn("registrations kept", out)
-        self.assertIn(tid, peers.read_registered())
-        self.assertIsNone(peers.shim_pid(tid))
+        self.assertIn(tid, sp_storage.read_registered())
+        self.assertIsNone(sp_lifecycle.shim_pid(tid))
 
 
 class TestConfigReaderPaths(Base):
@@ -5428,9 +5430,9 @@ class TestConfigReaderPaths(Base):
         # The bug this pins: reading that example would send every query to a
         # database Codex never writes.
         self.config().write_text(self.MULTILINE)
-        self.assertEqual(peers.codex_sqlite_home(), str(self.codex_dir))
+        self.assertEqual(sp_storage.codex_sqlite_home(), str(self.codex_dir))
         with self.lite_reader_only():
-            self.assertEqual(peers.codex_sqlite_home(), str(self.codex_dir))
+            self.assertEqual(sp_storage.codex_sqlite_home(), str(self.codex_dir))
 
     # -- (b) a quoted header stores its values under the normalised name ---
 
@@ -5504,9 +5506,9 @@ class TestConfigReaderPaths(Base):
         )
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
-            self.assertEqual(peers.codex_sqlite_home(), str(self.codex_dir))
+            self.assertEqual(sp_storage.codex_sqlite_home(), str(self.codex_dir))
             os.environ["CODEX_SQLITE_HOME"] = str(self.root / "from-env")
-            self.assertEqual(peers.codex_sqlite_home(), str(self.root / "from-env"))
+            self.assertEqual(sp_storage.codex_sqlite_home(), str(self.root / "from-env"))
         self.assertIn("does not parse as TOML", err.getvalue())
 
     def test_without_tomllib_an_invalid_file_still_reads_line_by_line(self):
@@ -5522,11 +5524,11 @@ class TestConfigReaderPaths(Base):
         override = str(self.root / "from-env")
         self.config().write_text('sqlite_home = "%s"\nthis line is not toml\n' % configured)
         with self.lite_reader_only():
-            self.assertEqual(peers.codex_sqlite_home(), configured)
+            self.assertEqual(sp_storage.codex_sqlite_home(), configured)
             os.environ["CODEX_SQLITE_HOME"] = override
-            self.assertEqual(peers.codex_sqlite_home(), configured)
+            self.assertEqual(sp_storage.codex_sqlite_home(), configured)
             self.config().write_text("this line is not toml\n")
-            self.assertEqual(peers.codex_sqlite_home(), override)
+            self.assertEqual(sp_storage.codex_sqlite_home(), override)
 
     def test_a_missing_file_is_an_empty_table_on_both_paths(self):
         missing = str(self.root / "nope.toml")
@@ -5587,16 +5589,16 @@ class BuddyBase(ShimBase):
     def setUp(self):
         super().setUp()
         self.attach_calls = []
-        self._saved_attach = peers.attach_thread
+        self._saved_attach = sp_lifecycle.attach_thread
 
         def fake_attach(thread_id, verbose=True):
             self.attach_calls.append((thread_id, verbose))
             return None
 
-        peers.attach_thread = fake_attach
+        sp_lifecycle.attach_thread = fake_attach
 
     def tearDown(self):
-        peers.attach_thread = self._saved_attach
+        sp_lifecycle.attach_thread = self._saved_attach
         super().tearDown()
 
     def two_threads(self, first="fail-codex", second="other-codex"):
@@ -5617,7 +5619,7 @@ class BuddyBase(ShimBase):
 
     def record_path(self, owner):
         kind, _sep, ident = owner.partition(":")
-        return pathlib.Path(peers.buddies_dir()) / ("%s-%s.json" % (kind, ident))
+        return pathlib.Path(sp_storage.buddies_dir()) / ("%s-%s.json" % (kind, ident))
 
 
 class TestBuddyRecords(BuddyBase):
@@ -5942,7 +5944,7 @@ class TestBuddyRouting(BuddyBase):
                 "ask/dispatch/wait need a Claude buddy; use send (asynchronous)", err
             )
         self.assertEqual(self.queue_calls(), [])
-        self.assertEqual(os.listdir(peers.request_dir()), [])
+        self.assertEqual(os.listdir(sp_storage.request_dir()), [])
 
     def test_budget_commands_refuse_a_claude_buddy(self):
         sid = new_uuid()
@@ -5959,7 +5961,7 @@ class TestBuddyRouting(BuddyBase):
         )
         self.assertEqual(rc, 2)
         leftovers = [
-            name for name in os.listdir(peers.state_dir())
+            name for name in os.listdir(sp_storage.state_dir())
             if name.endswith((".budget-reset", ".budget-allow"))
         ]
         self.assertEqual(leftovers, [])
@@ -5971,13 +5973,13 @@ class TestBuddyRouting(BuddyBase):
         os.environ["CLAUDE_CODE_SESSION_ID"] = owner_sid
         rc, _out, err = self.cli("budget", "allow", "buddy", "--replies", "6")
         self.assertEqual(rc, 0, err)
-        marker = sp_runtime.read_json(peers.budget_allow_path(tid))
+        marker = sp_runtime.read_json(sp_storage.budget_allow_path(tid))
         self.assertEqual((marker["sid"], marker["total"]), (owner_sid, 6))
         rc, _out, err = self.cli("budget", "reset", "buddy")
         self.assertEqual(rc, 0, err)
-        self.assertTrue(os.path.exists(peers.budget_reset_path(tid)))
+        self.assertTrue(os.path.exists(sp_storage.budget_reset_path(tid)))
         # An explicit reset drops the grant not yet consumed.
-        self.assertFalse(os.path.exists(peers.budget_allow_path(tid)))
+        self.assertFalse(os.path.exists(sp_storage.budget_allow_path(tid)))
 
     def test_to_buddy_without_a_record_is_a_clear_error(self):
         self.one_thread(name="fail-codex")
@@ -5994,23 +5996,23 @@ class TestBuddyRouting(BuddyBase):
         self.assertEqual(self.buddy(owner, "set", "fail-codex")[0], 0)
         held = {"s1": {"text": "held", "mid": "m", "turn_id": "t", "at": time.time()}}
         sp_runtime.write_json_atomic(
-            peers.thread_state_path(tid),
+            sp_storage.thread_state_path(tid),
             {"thread_id": tid, "budgets": {"s1": 3}, "held": held},
         )
-        before = pathlib.Path(peers.thread_state_path(tid)).read_bytes()
-        saved_up = peers.cmd_up
-        peers.cmd_up = lambda _args: self.fail("ping must not run `up`")
+        before = pathlib.Path(sp_storage.thread_state_path(tid)).read_bytes()
+        saved_up = sp_lifecycle.cmd_up
+        sp_lifecycle.cmd_up = lambda _args: self.fail("ping must not run `up`")
         try:
             for _ in range(3):
                 rc, _out, err = self.buddy(owner, "ping")
                 self.assertEqual(rc, 0, err)
         finally:
-            peers.cmd_up = saved_up
+            sp_lifecycle.cmd_up = saved_up
         self.assertEqual(self.attach_calls, [(tid, False)] * 4)  # set + 3 pings
-        self.assertFalse(os.path.exists(peers.budget_reset_path(tid)))
-        self.assertFalse(os.path.exists(peers.budget_allow_path(tid)))
-        self.assertEqual(pathlib.Path(peers.thread_state_path(tid)).read_bytes(), before)
-        self.assertEqual(peers.read_registered(), {})
+        self.assertFalse(os.path.exists(sp_storage.budget_reset_path(tid)))
+        self.assertFalse(os.path.exists(sp_storage.budget_allow_path(tid)))
+        self.assertEqual(pathlib.Path(sp_storage.thread_state_path(tid)).read_bytes(), before)
+        self.assertEqual(sp_storage.read_registered(), {})
 
     def test_ping_reports_a_running_shim_without_attaching(self):
         tid, _rollout = self.one_thread(name="fail-codex")
@@ -6066,7 +6068,7 @@ class TestBudgetAllow(BuddyBase):
         time.sleep(0.2)
         self.assertEqual(len(self.replies(self.listener_a)), 5)
         self.assertEqual(sorted(self.shim.held), [self.sid_a])
-        state = sp_runtime.read_json(peers.thread_state_path(self.tid))
+        state = sp_runtime.read_json(sp_storage.thread_state_path(self.tid))
         self.assertEqual(state["allowance"]["total"], 5)
 
     def test_a_repeated_or_lower_grant_does_not_replenish(self):
@@ -6174,7 +6176,7 @@ class TestBudgetAllow(BuddyBase):
         self.assertIn("budget allow", status[0]["detail"])
 
     def write_marker(self, grant):
-        path = peers.budget_allow_path(self.tid)
+        path = sp_storage.budget_allow_path(self.tid)
         if isinstance(grant, str):
             pathlib.Path(path).write_text(grant)
         else:
@@ -6190,7 +6192,7 @@ class TestBudgetAllow(BuddyBase):
         path = self.write_marker(
             {"sid": self.sid_a, "total": sp_constants.BUDGET_ALLOW_MAX, "at": self.iso_ago(86400)}
         )
-        late = peers.Shim(peers.resolve_thread(self.tid))
+        late = peers.Shim(sp_codex.resolve_thread(self.tid))
         late.codex_version = "0.153.4"
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
@@ -6249,13 +6251,13 @@ class TestBudgetAllow(BuddyBase):
             "budget", "allow", self.tid, "--replies", "4", "--for-session", self.sid_a
         )
         self.assertEqual(rc, 0, err)
-        marker = sp_runtime.read_json(peers.budget_allow_path(self.tid))
+        marker = sp_runtime.read_json(sp_storage.budget_allow_path(self.tid))
         self.assertEqual(marker["total"], 4)
         self.assertLess(time.time() - sp_runtime.parse_time(marker["at"]), 60)
         # A fresh pending higher grant keeps its own time, not a refreshed one.
         self.write_marker({"sid": self.sid_a, "total": 9, "at": self.iso_ago(120)})
         self.cli("budget", "allow", self.tid, "--replies", "4", "--for-session", self.sid_a)
-        marker = sp_runtime.read_json(peers.budget_allow_path(self.tid))
+        marker = sp_runtime.read_json(sp_storage.budget_allow_path(self.tid))
         self.assertEqual(marker["total"], 9)
         self.assertGreater(time.time() - sp_runtime.parse_time(marker["at"]), 100)
 
@@ -6356,8 +6358,8 @@ class TestBudgetAllow(BuddyBase):
                 self.turn(self.sid_a, self.listener_a, "t-held", text="held answer")
             )
         self.assertEqual(sorted(self.shim.held), [self.sid_a])
-        saved = peers.deliver_to_record
-        peers.deliver_to_record = lambda _rec, _frame: False  # the route is down
+        saved = sp_claude.deliver_to_record
+        sp_claude.deliver_to_record = lambda _rec, _frame: False  # the route is down
         try:
             self.allow(5)
             self.assertEqual(sorted(self.shim.held), [self.sid_a])
@@ -6366,10 +6368,10 @@ class TestBudgetAllow(BuddyBase):
             with contextlib.redirect_stderr(io.StringIO()):
                 self.shim._retry_held()  # still down: kept, uncounted
             self.assertEqual(self.shim.budgets[self.sid_a], sp_constants.REPLY_BUDGET)
-            state = sp_runtime.read_json(peers.thread_state_path(self.tid))
+            state = sp_runtime.read_json(sp_storage.thread_state_path(self.tid))
             self.assertEqual(state["held"][self.sid_a]["release"], "allow")
         finally:
-            peers.deliver_to_record = saved
+            sp_claude.deliver_to_record = saved
         with contextlib.redirect_stderr(io.StringIO()):
             self.shim._retry_held()  # the route recovered
             self.shim._retry_held()
@@ -6386,14 +6388,14 @@ class TestBudgetAllow(BuddyBase):
         self.shim.held = {
             self.sid_a: {"text": "held", "mid": "m", "turn_id": "t", "at": time.time()}
         }
-        saved = peers.deliver_to_record
-        peers.deliver_to_record = lambda _rec, _frame: False
+        saved = sp_claude.deliver_to_record
+        sp_claude.deliver_to_record = lambda _rec, _frame: False
         try:
             self.cli("budget", "reset", self.tid)
             with contextlib.redirect_stderr(io.StringIO()):
                 self.shim._consume_budget_marker()
         finally:
-            peers.deliver_to_record = saved
+            sp_claude.deliver_to_record = saved
         self.assertEqual(self.shim.held[self.sid_a]["release"], "reset")
         with contextlib.redirect_stderr(io.StringIO()):
             self.shim._retry_held()
@@ -6406,7 +6408,7 @@ class TestBudgetAllow(BuddyBase):
         # allow` existed never reads the marker, so the grant silently did
         # nothing and the requester was held after 3 replies (field report).
         pid = self.hold_pidfile(self.tid)
-        path = peers.thread_state_path(self.tid)
+        path = sp_storage.thread_state_path(self.tid)
         if state is None:
             with contextlib.suppress(FileNotFoundError):
                 os.unlink(path)
@@ -6418,7 +6420,7 @@ class TestBudgetAllow(BuddyBase):
         self.assertEqual(rc, 1)
         self.assertIn("cannot verify the running shim for %s (pid %d)" % (self.tid, pid), err)
         self.assertIn("peers.py restart %s" % self.tid, err)
-        self.assertFalse(os.path.exists(peers.budget_allow_path(self.tid)))
+        self.assertFalse(os.path.exists(sp_storage.budget_allow_path(self.tid)))
 
     def test_a_shim_without_the_feature_refuses_the_grant(self):
         self.assert_allow_refused({"shim_pid": os.getppid(), "budgets": {self.sid_a: 1}})
@@ -6433,7 +6435,7 @@ class TestBudgetAllow(BuddyBase):
 
     def test_a_current_shim_advertises_budget_allow_and_takes_the_grant(self):
         self.shim._save_state()
-        state = sp_runtime.read_json(peers.thread_state_path(self.tid))
+        state = sp_runtime.read_json(sp_storage.thread_state_path(self.tid))
         self.assertIn("budget_allow", state["shim_features"])
         pid = self.hold_pidfile(self.tid, pid=state["shim_pid"])
         rc, out, err = self.cli(
@@ -6441,7 +6443,7 @@ class TestBudgetAllow(BuddyBase):
         )
         self.assertEqual(rc, 0, err)
         self.assertNotIn("no shim is running", out)
-        self.assertEqual(sp_runtime.read_json(peers.budget_allow_path(self.tid))["total"], 20)
+        self.assertEqual(sp_runtime.read_json(sp_storage.budget_allow_path(self.tid))["total"], 20)
         self.assertEqual(pid, os.getpid())
 
     def test_out_of_range_replies_are_rejected(self):
@@ -6451,16 +6453,16 @@ class TestBudgetAllow(BuddyBase):
             )
             self.assertEqual(rc, 2, n)
             self.assertIn("between 1 and %d" % sp_constants.BUDGET_ALLOW_MAX, err)
-        self.assertFalse(os.path.exists(peers.budget_allow_path(self.tid)))
+        self.assertFalse(os.path.exists(sp_storage.budget_allow_path(self.tid)))
 
     def test_the_requester_defaults_to_the_calling_claude_session(self):
         rc, _out, err = self.cli(
             "budget", "allow", self.tid, "--replies", "4", "--as", "cc:%s" % self.sid_b
         )
         self.assertEqual(rc, 0, err)
-        marker = sp_runtime.read_json(peers.budget_allow_path(self.tid))
+        marker = sp_runtime.read_json(sp_storage.budget_allow_path(self.tid))
         self.assertEqual(marker["sid"], self.sid_b)
-        self.assertEqual(stat.S_IMODE(os.stat(peers.budget_allow_path(self.tid)).st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE(os.stat(sp_storage.budget_allow_path(self.tid)).st_mode), 0o600)
         rc, _out, err = self.cli(
             "budget", "allow", self.tid, "--replies", "4", "--as", "codex:%s" % new_uuid()
         )
@@ -6472,13 +6474,13 @@ class TestBudgetAllow(BuddyBase):
         self.exhaust(self.sid_a, self.listener_a, 5)
         self.shim.held = {self.sid_a: {"text": "h", "mid": "m", "turn_id": "t", "at": time.time()}}
         self.shim._save_state()
-        before = pathlib.Path(peers.thread_state_path(self.tid)).read_bytes()
+        before = pathlib.Path(sp_storage.thread_state_path(self.tid)).read_bytes()
         owner = "cc:%s" % self.sid_a
         self.assertEqual(self.buddy(owner, "set", self.tid)[0], 0)
         self.assertEqual(self.buddy(owner, "clear")[0], 0)
-        self.assertEqual(pathlib.Path(peers.thread_state_path(self.tid)).read_bytes(), before)
-        self.assertFalse(os.path.exists(peers.budget_reset_path(self.tid)))
-        self.assertFalse(os.path.exists(peers.budget_allow_path(self.tid)))
+        self.assertEqual(pathlib.Path(sp_storage.thread_state_path(self.tid)).read_bytes(), before)
+        self.assertFalse(os.path.exists(sp_storage.budget_reset_path(self.tid)))
+        self.assertFalse(os.path.exists(sp_storage.budget_allow_path(self.tid)))
 
 
 class TestBuddyGarbageCollection(BuddyBase):
@@ -6541,7 +6543,7 @@ class TestBuddyGarbageCollection(BuddyBase):
         old = time.time() - 8 * 86400
         self.make_state_db([{"id": tid, "name": "old", "rollout_path": str(rollout),
                              "updated_at": old}])
-        marker = pathlib.Path(peers.budget_allow_path(tid))
+        marker = pathlib.Path(sp_storage.budget_allow_path(tid))
         marker.write_text("{}")
         os.utime(str(marker), (old, old))
         self.assertEqual(peers.gc_bridge_state(days=7, verbose=False), [tid])
@@ -6627,12 +6629,12 @@ class TestTopics(Base):
         return sid, tid
 
     def process_view(self, ancestors, holder):
-        for name, fake in (
-            ("process_ancestors", lambda pid=None, limit=64: ancestors),
-            ("_codex_holder_pid", lambda _tid: holder),
+        for owner, name, fake in (
+            (sp_process, "process_ancestors", lambda pid=None, limit=64: ancestors),
+            (sp_codex, "_codex_holder_pid", lambda _tid: holder),
         ):
-            self.addCleanup(setattr, peers, name, getattr(peers, name, None))
-            setattr(peers, name, fake)
+            self.addCleanup(setattr, owner, name, getattr(owner, name))
+            setattr(owner, name, fake)
 
     def test_with_both_identities_the_nearer_ancestor_posts(self):
         claude_pid = os.getpid()
@@ -6663,9 +6665,9 @@ class TestTopics(Base):
     def test_process_ancestors_walks_the_ps_table(self):
         me = os.getpid()
         self._write_fake("ps", "print('  1 0\\n  50 1\\n  60 50\\n %d 60')\n" % me)
-        self.assertEqual(peers.process_ancestors(), [60, 50, 1])
+        self.assertEqual(sp_process.process_ancestors(), [60, 50, 1])
         self._write_fake("ps", "raise SystemExit(1)\n")
-        self.assertIsNone(peers.process_ancestors())
+        self.assertIsNone(sp_process.process_ancestors())
 
     def test_json_file_is_stored_as_data(self):
         path = self.root / "payload.json"
@@ -6791,7 +6793,7 @@ class TestRestartAndBuddyReplies(BuddyBase):
     def setUp(self):
         super().setUp()
         self.tid, self.tid2 = self.two_threads("codex-one", "codex-two")
-        self.shim = peers.Shim(peers.resolve_thread(self.tid))
+        self.shim = peers.Shim(sp_codex.resolve_thread(self.tid))
         self.shim.codex_version = "0.153.4"
         self.sid_a, self.sid_b = new_uuid(), new_uuid()
         self.listener_a, _ = self.add_listener(name="cc-a", session_id=self.sid_a)
@@ -6801,7 +6803,7 @@ class TestRestartAndBuddyReplies(BuddyBase):
         self.owner = "cc:%s" % self.sid_a
 
     def new_shim(self, tid=None):
-        shim = peers.Shim(peers.resolve_thread(tid or self.tid))
+        shim = peers.Shim(sp_codex.resolve_thread(tid or self.tid))
         shim.codex_version = "0.153.4"
         return shim
 
@@ -6847,22 +6849,22 @@ class TestRestartAndBuddyReplies(BuddyBase):
 
     def test_restart_does_not_write_a_reset_or_unregister(self):
         sp_runtime.write_json_atomic(
-            peers.thread_state_path(self.tid), {"thread_id": self.tid, "budgets": {"s": 2}}
+            sp_storage.thread_state_path(self.tid), {"thread_id": self.tid, "budgets": {"s": 2}}
         )
-        before = pathlib.Path(peers.thread_state_path(self.tid)).read_bytes()
+        before = pathlib.Path(sp_storage.thread_state_path(self.tid)).read_bytes()
         calls = []
-        saved = (peers.stop_shim, peers.attach_thread)
-        peers.stop_shim = lambda tid: calls.append(("stop", tid)) or True
-        peers.attach_thread = lambda tid, verbose=True: calls.append(("start", tid)) or 4242
+        saved = (sp_lifecycle.stop_shim, sp_lifecycle.attach_thread)
+        sp_lifecycle.stop_shim = lambda tid: calls.append(("stop", tid)) or True
+        sp_lifecycle.attach_thread = lambda tid, verbose=True: calls.append(("start", tid)) or 4242
         try:
             rc, out, err = self.cli("restart", self.tid)
         finally:
-            peers.stop_shim, peers.attach_thread = saved
+            sp_lifecycle.stop_shim, sp_lifecycle.attach_thread = saved
         self.assertEqual(rc, 0, err)
         self.assertEqual(calls, [("stop", self.tid), ("start", self.tid)])
         self.assertIn("kept", out)
-        self.assertFalse(os.path.exists(peers.budget_reset_path(self.tid)))
-        self.assertEqual(pathlib.Path(peers.thread_state_path(self.tid)).read_bytes(), before)
+        self.assertFalse(os.path.exists(sp_storage.budget_reset_path(self.tid)))
+        self.assertEqual(pathlib.Path(sp_storage.thread_state_path(self.tid)).read_bytes(), before)
 
     def test_a_restarted_shim_keeps_a_valid_grant_and_the_replies_spent(self):
         self.grant(5)
@@ -6916,13 +6918,13 @@ class TestRestartAndBuddyReplies(BuddyBase):
         # `up` writes the same marker, so a shim that starts after it drops it.
         self.grant(5)
         self.shim._save_state()
-        saved = peers.reconcile
-        peers.reconcile = lambda verbose=True: 0
+        saved = sp_lifecycle.reconcile
+        sp_lifecycle.reconcile = lambda verbose=True: 0
         try:
             self.assertEqual(self.cli("up", self.tid)[0], 0)
         finally:
-            peers.reconcile = saved
-        self.assertTrue(os.path.exists(peers.budget_reset_path(self.tid)))
+            sp_lifecycle.reconcile = saved
+        self.assertTrue(os.path.exists(sp_storage.budget_reset_path(self.tid)))
         with contextlib.redirect_stderr(io.StringIO()):
             self.new_shim()._consume_budget_marker(initial=True)
 
@@ -6943,25 +6945,25 @@ class TestRestartAndBuddyReplies(BuddyBase):
 
     def test_the_default_total_never_attaches_a_shim_itself(self):
         calls = []
-        saved = peers.attach_thread
-        peers.attach_thread = lambda tid, verbose=True: calls.append(tid) or None
+        saved = sp_lifecycle.attach_thread
+        sp_lifecycle.attach_thread = lambda tid, verbose=True: calls.append(tid) or None
         try:
             rc, out, err = self.bind(prove=False)
         finally:
-            peers.attach_thread = saved
+            sp_lifecycle.attach_thread = saved
         self.assertEqual(rc, 0, err)
         self.assertNotIn("default reply total", err)
         self.assertNotIn("replies left", out)
         # Only the status line's attach, as before; the default grant adds none.
         self.assertEqual(calls, [self.tid])
-        self.assertFalse(os.path.exists(peers.budget_binding_path(self.tid)))
+        self.assertFalse(os.path.exists(sp_storage.budget_binding_path(self.tid)))
         self.assertNotIn("replies", json.loads(self.record_path(self.owner).read_text()))
 
     def test_an_older_shim_takes_a_small_explicit_total_but_not_the_default(self):
         pid = os.getppid()
         self.hold_pidfile(self.tid, pid=pid)
         sp_runtime.write_json_atomic(
-            peers.thread_state_path(self.tid),
+            sp_storage.thread_state_path(self.tid),
             {"thread_id": self.tid, "shim_pid": pid,
              "shim_features": ["budget_allow", "binding_allowance"]},
         )
@@ -6973,7 +6975,7 @@ class TestRestartAndBuddyReplies(BuddyBase):
         self.assertEqual(rc, 0, err)
         self.assertIn("warning: bound without the default reply total", err)
         self.assertNotIn("replies left", out)
-        self.assertFalse(os.path.exists(peers.budget_binding_path(self.tid)))
+        self.assertFalse(os.path.exists(sp_storage.budget_binding_path(self.tid)))
         rc, out, err = self.bind("--replies", str(sp_constants.BUDGET_ALLOW_MAX), prove=False)
         self.assertEqual(rc, 0, err)
         self.assertIn("replies left: %d of %d" % ((sp_constants.BUDGET_ALLOW_MAX,) * 2), out)
@@ -7070,15 +7072,15 @@ class TestRestartAndBuddyReplies(BuddyBase):
         self.assertEqual(rc, 1)
         self.assertIn("peers.py restart %s" % self.tid, err)
         self.assertFalse(self.record_path(self.owner).exists())
-        self.assertFalse(os.path.exists(peers.budget_binding_path(self.tid)))
+        self.assertFalse(os.path.exists(sp_storage.budget_binding_path(self.tid)))
         pid = os.getppid()
         sp_runtime.write_json_atomic(
-            peers.thread_state_path(self.tid),
+            sp_storage.thread_state_path(self.tid),
             {"thread_id": self.tid, "shim_pid": pid, "shim_features": ["budget_allow"]},
         )
         self.assertEqual(self.bind("--replies", "6", prove=False)[0], 1)
         sp_runtime.write_json_atomic(
-            peers.thread_state_path(self.tid),
+            sp_storage.thread_state_path(self.tid),
             {"thread_id": self.tid, "shim_pid": pid,
              "shim_features": list(sp_constants.SHIM_FEATURES)},
         )
@@ -7089,7 +7091,7 @@ class TestRestartAndBuddyReplies(BuddyBase):
         self.assertEqual(rc, 1)
         self.assertIn("no running shim", err)
         self.assertFalse(self.record_path(self.owner).exists())
-        self.assertFalse(os.path.exists(peers.budget_binding_path(self.tid)))
+        self.assertFalse(os.path.exists(sp_storage.budget_binding_path(self.tid)))
 
     def test_a_second_owner_cannot_overwrite_a_shared_buddys_binding(self):
         other = "cc:%s" % self.sid_b
@@ -7097,7 +7099,7 @@ class TestRestartAndBuddyReplies(BuddyBase):
         self.consume(self.shim)
         self.deliver(self.shim, self.sid_a, self.listener_a, 4)
         self.assertEqual(self.shim.binding["spent"], 4)
-        marker_before = peers.budget_binding_path(self.tid)
+        marker_before = sp_storage.budget_binding_path(self.tid)
         rc, _out, err = self.bind("--replies", "5", owner=other)
         self.assertEqual(rc, 1)
         self.assertIn("already holds a reply total", err)
@@ -7157,7 +7159,7 @@ class TestRestartAndBuddyReplies(BuddyBase):
             sys.stdout, sys.stderr = out, err
         self.assertEqual(sorted(results.values()), [0, 1], results)
         self.assertEqual(results[self.owner], 0)  # the paused binder published first
-        marker = sp_runtime.read_json(peers.budget_binding_path(self.tid))
+        marker = sp_runtime.read_json(sp_storage.budget_binding_path(self.tid))
         self.assertEqual(marker["sid"], self.sid_a)
         self.assertFalse(self.record_path(other).exists())
 
@@ -7208,7 +7210,7 @@ class TestRestartAndBuddyReplies(BuddyBase):
             sys.stdout, sys.stderr = out, err
         self.assertEqual(results["clear"], 0, results)
         # Never an allowance on thread B without the owner record that can clear it.
-        marker = sp_runtime.read_json(peers.budget_binding_path(self.tid2))
+        marker = sp_runtime.read_json(sp_storage.budget_binding_path(self.tid2))
         if self.record_path(self.owner).exists():
             record = json.loads(self.record_path(self.owner).read_text())
             self.assertEqual(record["buddy"]["uuid"], self.tid2)
@@ -7232,7 +7234,7 @@ class TestRestartAndBuddyReplies(BuddyBase):
 
     def assert_revocable(self):
         """A grant, if any, has an owner record that `buddy clear` can revoke."""
-        marker = sp_runtime.read_json(peers.budget_binding_path(self.tid))
+        marker = sp_runtime.read_json(sp_storage.budget_binding_path(self.tid))
         if marker is not None:
             record = json.loads(self.record_path(self.owner).read_text())
             self.assertEqual(record["bind_id"], marker["bind_id"])
@@ -7242,7 +7244,7 @@ class TestRestartAndBuddyReplies(BuddyBase):
         rc, _out, err = self.bind("--replies", "6")
         self.assertEqual(rc, 1)
         self.assertIn("retry", err)
-        self.assertFalse(os.path.exists(peers.budget_binding_path(self.tid)))
+        self.assertFalse(os.path.exists(sp_storage.budget_binding_path(self.tid)))
         self.assertFalse(self.record_path(self.owner).exists())
         restore()
         self.assertEqual(self.bind("--replies", "6")[0], 0)
@@ -7289,21 +7291,21 @@ class TestRestartAndBuddyReplies(BuddyBase):
         saved = sp_constants.BINDING_LOCK_TIMEOUT
         sp_constants.BINDING_LOCK_TIMEOUT = 0.2
         try:
-            with peers.binding_lock(self.tid):
+            with sp_storage.binding_lock(self.tid):
                 rc, _out, err = self.bind("--replies", "5")
                 self.assertEqual(rc, 1)
                 self.assertIn("lock", err)
                 self.assertFalse(self.record_path(self.owner).exists())
-                self.assertFalse(os.path.exists(peers.budget_binding_path(self.tid)))
+                self.assertFalse(os.path.exists(sp_storage.budget_binding_path(self.tid)))
                 # The shim leaves a marker it cannot lock for its next poll.
                 sp_runtime.write_json_atomic(
-                    peers.budget_binding_path(self.tid),
+                    sp_storage.budget_binding_path(self.tid),
                     {"sid": self.sid_a, "bind_id": "b", "total": 3, "at": sp_runtime.now_iso()},
                 )
                 with contextlib.redirect_stderr(io.StringIO()):
                     self.shim._consume_budget_binding_marker()
                 self.assertIsNone(self.shim.binding)
-                self.assertTrue(os.path.exists(peers.budget_binding_path(self.tid)))
+                self.assertTrue(os.path.exists(sp_storage.budget_binding_path(self.tid)))
         finally:
             sp_constants.BINDING_LOCK_TIMEOUT = saved
         self.consume(self.shim)
@@ -7379,19 +7381,19 @@ class TestCodeDigest(Base):
         for state in ({}, {"shim_pid": 99, "code_digest": "a" * 64},
                       {"shim_pid": os.getpid()},
                       {"shim_pid": os.getpid(), "code_digest": "invalid"}):
-            sp_runtime.write_json_atomic(peers.thread_state_path(tid), state)
-            self.assertEqual(peers.shim_code_status(tid, os.getpid(), "a" * 64), "unknown")
-        sp_runtime.write_json_atomic(peers.thread_state_path(tid), {"shim_pid": os.getpid(), "code_digest": "a" * 64})
-        self.assertEqual(peers.shim_code_status(tid, os.getpid(), "a" * 64), "current")
-        self.assertEqual(peers.shim_code_status(tid, os.getpid(), "b" * 64), "stale")
-        self.assertEqual(peers.shim_code_status(tid, os.getpid(), None), "unknown")
+            sp_runtime.write_json_atomic(sp_storage.thread_state_path(tid), state)
+            self.assertEqual(sp_lifecycle.shim_code_status(tid, os.getpid(), "a" * 64), "unknown")
+        sp_runtime.write_json_atomic(sp_storage.thread_state_path(tid), {"shim_pid": os.getpid(), "code_digest": "a" * 64})
+        self.assertEqual(sp_lifecycle.shim_code_status(tid, os.getpid(), "a" * 64), "current")
+        self.assertEqual(sp_lifecycle.shim_code_status(tid, os.getpid(), "b" * 64), "stale")
+        self.assertEqual(sp_lifecycle.shim_code_status(tid, os.getpid(), None), "unknown")
 
     def test_list_and_doctor_report_stale_autoattached_code_without_resetting_it(self):
         tid, _ = self.one_thread()
         self.hold_pidfile(tid, pid=os.getpid())
         state = {"shim_pid": os.getpid(), "code_digest": "0" * 64,
                  "budgets": {"owner": 3}, "held": {"owner": {"text": "private"}}}
-        sp_runtime.write_json_atomic(peers.thread_state_path(tid), state)
+        sp_runtime.write_json_atomic(sp_storage.thread_state_path(tid), state)
         rc, out, err = self.cli("list", "--json")
         self.assertEqual(rc, 0, err)
         self.assertEqual(json.loads(out)["codex"][0]["shim_code_status"], "stale")
@@ -7403,8 +7405,8 @@ class TestCodeDigest(Base):
         self.assertEqual(rc, 0, err)
         self.assertIn("code stale", out)
         self.assertIn("peers.py restart " + tid, out)
-        self.assertEqual(sp_runtime.read_json(peers.thread_state_path(tid)), state)
-        self.assertFalse(os.path.exists(peers.budget_reset_path(tid)))
+        self.assertEqual(sp_runtime.read_json(sp_storage.thread_state_path(tid)), state)
+        self.assertFalse(os.path.exists(sp_storage.budget_reset_path(tid)))
 
 
 class TestInstalledShimUpgrade(Base):
@@ -7421,10 +7423,10 @@ class TestInstalledShimUpgrade(Base):
                                     env=dict(os.environ), stdin=subprocess.DEVNULL,
                                     stdout=log, stderr=subprocess.STDOUT)
         self._children.append(proc)
-        path = peers.thread_state_path(tid)
+        path = sp_storage.thread_state_path(tid)
         ready = wait_for(lambda: (sp_runtime.read_json(path, {}) or {}).get("shim_pid") == proc.pid)
         self.assertTrue(ready, log_path.read_text())
-        self.assertTrue(wait_for(lambda: peers.shim_ready(tid) == proc.pid), log_path.read_text())
+        self.assertTrue(wait_for(lambda: sp_lifecycle.shim_ready(tid) == proc.pid), log_path.read_text())
         return proc
 
     def test_upgrade_keeps_loaded_code_budget_held_reply_and_cursor_until_restart(self):
@@ -7462,7 +7464,7 @@ class TestInstalledShimUpgrade(Base):
         sid = str(uuidlib.uuid4())
         listener, _ = self.add_listener(name="reviewer", session_id=sid)
         proc_a = self.start_installed(script_a, tid)
-        state_path = peers.thread_state_path(tid)
+        state_path = sp_storage.thread_state_path(tid)
         self.assertEqual(sp_runtime.read_json(state_path)["code_digest"], digest_a)
         # Replace files under an already-running A, as an installer does, while
         # B remains a separate install through which commands and restart run.
@@ -7507,7 +7509,7 @@ class TestInstalledShimUpgrade(Base):
         self.assertEqual(state_b["code_digest"], digest_b)
         for key in ("budgets", "binding", "held", "processed_turns", "tail"):
             self.assertEqual(state_b[key], state_a[key], key)
-        self.assertTrue(peers.shim_supports(tid, proc_b.pid, "binding_allowance_max500"))
+        self.assertTrue(sp_lifecycle.shim_supports(tid, proc_b.pid, "binding_allowance_max500"))
         rc, out, err = self.installed_cli(script_b, "list", "--json")
         self.assertEqual(rc, 0, err)
         self.assertEqual(json.loads(out)["codex"][0]["shim_code_status"], "current")

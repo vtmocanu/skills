@@ -77,997 +77,14 @@ if sys.path[:1] != [_HERE]:
 
 from session_peers import config as sp_config, constants as sp_constants, protocol as sp_protocol, rollout as sp_rollout, runtime as sp_runtime
 
-
-def warn_versions(kinds=("claude", "codex")) -> None:
-    """D11: warn once per installed/pinned pair per day, never fail a run."""
-    previous = sp_runtime.read_json(version_warning_path(), {}) or {}
-    if not isinstance(previous, dict):
-        previous = {}
-    now = time.time()
-    changed = False
-
-    def warn_once(key, message):
-        nonlocal changed
-        try:
-            last = float(previous.get(key, 0))
-        except (TypeError, ValueError):
-            last = 0
-        if now - last < sp_constants.VERSION_WARNING_WINDOW:
-            return
-        sp_runtime.log(message)
-        previous[key] = now
-        changed = True
-
-    if "claude" in kinds:
-        v = sp_runtime.tool_version("claude")
-        if v and sp_runtime.version_is_newer(v, sp_constants.CLAUDE_CODE_TESTED):
-            warn_once(
-                "claude:%s>%s" % (v.strip(), sp_constants.CLAUDE_CODE_TESTED),
-                "Claude Code %s is newer than the tested %s; if peers stop "
-                "appearing, re-run references/spike-checklist.md"
-                % (v.strip(), sp_constants.CLAUDE_CODE_TESTED)
-            )
-    if "codex" in kinds:
-        v = sp_runtime.tool_version("codex")
-        if v and sp_runtime.version_is_newer(v, sp_constants.CODEX_TESTED):
-            warn_once(
-                "codex:%s>%s" % (v.strip(), sp_constants.CODEX_TESTED),
-                "Codex CLI %s is newer than the tested %s; if discovery breaks, "
-                "re-run references/spike-checklist.md" % (v.strip(), sp_constants.CODEX_TESTED)
-            )
-    if changed:
-        try:
-            sp_runtime.write_json_atomic(version_warning_path(), previous)
-        except OSError:
-            pass
-
-
-# --------------------------------------------------------------------------
-# Roots
-# --------------------------------------------------------------------------
-
-
-def claude_config_dir():
-    return os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
-
-
-def claude_sessions_dir():
-    return os.path.join(claude_config_dir(), "sessions")
-
-
-def codex_home():
-    return os.environ.get("CODEX_HOME") or os.path.expanduser("~/.codex")
-
-
-def codex_config_path():
-    return os.path.join(codex_home(), "config.toml")
-
-
-def codex_sqlite_home():
-    """config.toml `sqlite_home`, else CODEX_SQLITE_HOME, else CODEX_HOME.
-
-    P6: the configured value wins, matching Codex's own resolver, and only a
-    TOP-LEVEL key counts. A `sqlite_home` inside another table belongs to that
-    table, and taking it would point the bridge at the wrong database.
-    """
-    cfg = sp_config.read_toml_lite(codex_config_path())
-    value = cfg.get("", {}).get("sqlite_home")
-    if isinstance(value, str) and value:
-        return os.path.expanduser(value)
-    env = os.environ.get("CODEX_SQLITE_HOME")
-    if env:
-        return os.path.expanduser(env)
-    return codex_home()
-
-
-def state_dir():
-    """Where registration, per-thread state, pidfiles and logs live."""
-    path = os.path.join(codex_home(), "session-peers")
-    os.makedirs(path, exist_ok=True)
-    try:
-        os.chmod(path, 0o700)
-    except OSError:
-        pass
-    return path
-
-
-def registered_path():
-    return os.path.join(state_dir(), "registered.json")
-
-
-def thread_state_path(thread_id):
-    return os.path.join(state_dir(), "%s.json" % thread_id)
-
-
-def thread_pid_path(thread_id):
-    return os.path.join(state_dir(), "%s.pid" % thread_id)
-
-
-def thread_log_path(thread_id):
-    return os.path.join(state_dir(), "%s.log" % thread_id)
-
-
-def budget_reset_path(thread_id):
-    return os.path.join(state_dir(), "%s.budget-reset" % thread_id)
-
-
-def budget_allow_path(thread_id):
-    return os.path.join(state_dir(), "%s.budget-allow" % thread_id)
-
-
-def budget_binding_path(thread_id):
-    return os.path.join(state_dir(), "%s.budget-binding" % thread_id)
-
-
-class BindingLockTimeout(Exception):
-    """The per-thread binding lock stayed busy for the whole bounded wait."""
-
-
-@contextlib.contextmanager
-def _flock_file(path, timeout, what):
-    """Exclusive flock on a mode-0600 file, polled without blocking.
-
-    Waits at most ``timeout`` seconds (default BINDING_LOCK_TIMEOUT), then
-    raises BindingLockTimeout naming ``what``.
-    """
-    timeout = sp_constants.BINDING_LOCK_TIMEOUT if timeout is None else timeout
-    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
-    try:
-        deadline = time.monotonic() + timeout
-        while True:
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                break
-            except OSError as exc:
-                if exc.errno not in (errno.EAGAIN, errno.EACCES, errno.EWOULDBLOCK):
-                    raise
-                if time.monotonic() >= deadline:
-                    raise BindingLockTimeout(
-                        "another peers.py command holds the reply-total lock "
-                        "for %s" % what
-                    )
-                time.sleep(0.05)
-        yield
-    finally:
-        os.close(fd)
-
-
-def binding_lock(thread_id, timeout=None):
-    """Exclusive per-thread lock over the binding marker and its conflict check.
-
-    Held by `buddy set --replies`, `buddy clear`, a rebind's revoke and the
-    shim's marker consumption, so a write is never lost to a concurrent read
-    or unlink.
-    """
-    return _flock_file(
-        os.path.join(state_dir(), "%s.binding-lock" % thread_id), timeout, thread_id
-    )
-
-
-def owner_lock(owner_uuid, timeout=None):
-    """Exclusive per-owner-session lock over its whole buddy record operation.
-
-    `buddy set` and `buddy clear` read the owner's record and act on it under
-    this lock. Lock order everywhere: the owner lock first, then thread locks
-    in sorted order; the shim only ever takes a thread lock.
-    """
-    return _flock_file(
-        os.path.join(state_dir(), "%s.owner-lock" % owner_uuid), timeout,
-        "session " + owner_uuid,
-    )
-
-
-@contextlib.contextmanager
-def _binding_locks(*thread_ids):
-    """Take several binding locks in sorted order, so two commands cannot deadlock."""
-    with contextlib.ExitStack() as stack:
-        for tid in sorted(set(thread_ids)):
-            if tid:
-                stack.enter_context(binding_lock(tid))
-        yield
-
-
-def buddies_dir():
-    path = os.path.join(state_dir(), "buddies")
-    os.makedirs(path, mode=0o700, exist_ok=True)
-    try:
-        os.chmod(path, 0o700)
-    except OSError:
-        pass
-    return path
-
-
-def buddy_path(owner):
-    if owner.get("kind") not in sp_constants.BUDDY_KINDS or not sp_runtime.is_uuid(owner.get("uuid")):
-        raise ValueError("a buddy owner must be cc:<uuid> or codex:<uuid>")
-    return os.path.join(buddies_dir(), "%s-%s.json" % (owner["kind"], owner["uuid"]))
-
-
-def version_warning_path():
-    return os.path.join(state_dir(), "version-warnings.json")
-
-
-def request_dir():
-    path = os.path.join(state_dir(), "requests")
-    os.makedirs(path, mode=0o700, exist_ok=True)
-    try:
-        os.chmod(path, 0o700)
-    except OSError:
-        pass
-    return path
-
-
-def request_path(request_id):
-    if not sp_runtime.is_uuid(request_id):
-        raise ValueError("request id must be a UUID")
-    return os.path.join(request_dir(), "%s.request.json" % request_id)
-
-
-def request_reply_path(request_id):
-    if not sp_runtime.is_uuid(request_id):
-        raise ValueError("request id must be a UUID")
-    return os.path.join(request_dir(), "%s.reply.json" % request_id)
-
-
-# --------------------------------------------------------------------------
-# Claude registry
-# --------------------------------------------------------------------------
-
-
-def pid_domain():
-    """The record field Claude stamps so a pid from another namespace is stale."""
-    return sys.platform
-
-
-def pid_alive(pid) -> bool:
-    try:
-        os.kill(int(pid), 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except (OSError, TypeError, ValueError):
-        return False
-    return True
-
-
-def proc_start_checked(pid):
-    """(`ps` start time, error), distinguishing denial from a dead record."""
-    env = dict(os.environ)
-    env["LC_ALL"] = "C"
-    env["TZ"] = "UTC"
-    rc, out, err = sp_runtime.run_cmd(
-        ["ps", "-o", "lstart=", "-p", str(pid)], timeout=10, env=env
-    )
-    if rc != 0:
-        detail = err.strip() or "ps exited %d" % rc
-        return None, detail
-    value = out.strip()
-    if not value:
-        return None, "ps returned no process start time"
-    return value, None
-
-
-def proc_start(pid):
-    """`ps -o lstart= -p <pid>` under LC_ALL=C TZ=UTC, trimmed."""
-    value, _error = proc_start_checked(pid)
-    return value
-
-
-def read_claude_records():
-    """Every parseable record in the registry, live or not, with its path."""
-    out = []
-    d = claude_sessions_dir()
-    try:
-        names = sorted(os.listdir(d))
-    except (FileNotFoundError, NotADirectoryError):
-        return out
-    except OSError as exc:
-        sp_runtime.log("cannot read %s: %s" % (d, exc))
-        return out
-    for name in names:
-        if not name.endswith(".json"):
-            continue
-        rec = sp_runtime.read_json(os.path.join(d, name))
-        if isinstance(rec, dict):
-            rec = dict(rec)
-            rec["_path"] = os.path.join(d, name)
-            out.append(rec)
-    return out
-
-
-def record_liveness(rec) -> str:
-    """Pid alive, pidDomain equal, procStart equal to `ps -o lstart=`.
-
-    Returns ``live``, ``dead`` or ``unverified``. A sandbox can deny ``ps``
-    while the process and socket are healthy; collapsing that denial into
-    ``dead`` made ``list`` and ``send`` falsely claim no Claude session existed.
-    A missing process-start value is unverified because it cannot rule out PID
-    reuse; a present value must match when the probe is available.
-    """
-    pid = rec.get("pid")
-    if not isinstance(pid, int) or not pid_alive(pid):
-        return "dead"
-    domain = rec.get("pidDomain")
-    if domain is not None and domain != pid_domain():
-        return "dead"
-    recorded = rec.get("procStart")
-    if not recorded:
-        return "unverified"
-    actual, error = proc_start_checked(pid)
-    if error is not None:
-        return "unverified"
-    if actual.strip() != str(recorded).strip():
-        return "dead"
-    return "live"
-
-
-def record_is_live(rec) -> bool:
-    return record_liveness(rec) == "live"
-
-
-def live_claude_records():
-    return [r for r in read_claude_records() if record_is_live(r)]
-
-
-def unverified_claude_records():
-    return [r for r in read_claude_records() if record_liveness(r) == "unverified"]
-
-
-def claude_record_by_name(name, records=None):
-    """Every live record carrying this exact name."""
-    if records is None:
-        records = live_claude_records()
-    return [r for r in records if r.get("name") == name]
-
-
-def claude_record_by_target(target, records=None):
-    """Every record addressed by mutable name or stable session UUID."""
-    if records is None:
-        records = live_claude_records()
-    if sp_runtime.is_uuid(target):
-        return [r for r in records if r.get("sessionId") == target]
-    return [r for r in records if r.get("name") == target]
-
-
-def claude_record_by_socket(sock_path, records=None):
-    """The live record whose messagingSocketPath is this socket, or None."""
-    if records is None:
-        records = live_claude_records()
-    want = os.path.realpath(sock_path)
-    for r in records:
-        p = r.get("messagingSocketPath")
-        if p and os.path.realpath(p) == want:
-            return r
-    return None
-
-
-def peer_token_for(rec):
-    """The optional `<pid>.<sha256(socket)>.key` payload, or None."""
-    pid = rec.get("pid")
-    sock = rec.get("messagingSocketPath")
-    if not pid or not sock:
-        return None
-    digest = hashlib.sha256(sock.encode("utf-8")).hexdigest()
-    path = os.path.join(claude_sessions_dir(), "%s.%s.key" % (pid, digest))
-    try:
-        with open(path, "r", encoding="utf-8", errors="replace") as fh:
-            raw = fh.read().strip()
-    except (FileNotFoundError, OSError):
-        return None
-    if not raw:
-        return None
-    try:
-        parsed = json.loads(raw)
-    except ValueError:
-        return raw
-    if isinstance(parsed, dict):
-        return parsed.get("peerToken") or parsed.get("token")
-    return raw if not isinstance(parsed, str) else parsed
-
-
-# --------------------------------------------------------------------------
-# Socket directory allowlist
-# --------------------------------------------------------------------------
-
-
-def allowlisted_socket_dirs(platform=None, uid=None):
-    """The directories Claude's 2.1.x sender will connect into.
-
-    $TMPDIR is deliberately absent: it is never consulted (PRD Facts).
-    """
-    platform = platform or sys.platform
-    uid = os.getuid() if uid is None else uid
-    dirs = []
-    if platform == "darwin":
-        for base in ("/tmp", "/private/tmp"):
-            dirs.append("%s/cc-socks" % base)
-            dirs.append("%s/cc-socks-%d" % (base, uid))
-    elif platform.startswith("linux"):
-        dirs.append("/run/user/%d/cc-socks" % uid)
-        dirs.append("/data/data/com.termux/files/usr/tmp/cc-socks")
-    override = os.environ.get("SESSION_PEERS_SOCKET_DIR")
-    if override:
-        dirs.append(override)
-    return dirs
-
-
-def dir_is_allowlisted(path, platform=None, uid=None) -> bool:
-    if not path:
-        return False
-    want = os.path.realpath(path)
-    for d in allowlisted_socket_dirs(platform, uid):
-        if os.path.realpath(d) == want:
-            return True
-    return False
-
-
-def socket_path_ok(path) -> bool:
-    """D8: refuse a symlinked endpoint or one outside the allowlisted dirs."""
-    if not path:
-        return False
-    if os.path.islink(path):
-        return False
-    return dir_is_allowlisted(os.path.dirname(path))
-
-
-def ensure_socket_dir(path):
-    """Create and then VERIFY the socket directory (S2).
-
-    Binding in the directory a live record names is the PRD's rule, but the
-    directory is still shared state: a symlink, another user's ownership or a
-    group-writable mode would all widen the same-uid model D8 assumes.
-    """
-    os.makedirs(path, mode=0o700, exist_ok=True)
-    st = os.lstat(path)
-    if stat.S_ISLNK(st.st_mode):
-        raise SystemExit("refusing to bind: %s is a symlink" % path)
-    if not stat.S_ISDIR(st.st_mode):
-        raise SystemExit("refusing to bind: %s is not a directory" % path)
-    if st.st_uid != os.getuid():
-        raise SystemExit(
-            "refusing to bind: %s is owned by uid %d, not %d"
-            % (path, st.st_uid, os.getuid())
-        )
-    if stat.S_IMODE(st.st_mode) != 0o700:
-        os.chmod(path, 0o700)  # an OSError here must surface, not be swallowed
-        st = os.lstat(path)
-        if stat.S_IMODE(st.st_mode) != 0o700:
-            raise SystemExit(
-                "refusing to bind: %s is mode %o, not 700"
-                % (path, stat.S_IMODE(st.st_mode))
-            )
-    return path
-
-
-def default_socket_dir():
-    """The directory of a live record's socket, else the platform default."""
-    override = os.environ.get("SESSION_PEERS_SOCKET_DIR")
-    if override:
-        return override
-    for rec in live_claude_records():
-        p = rec.get("messagingSocketPath")
-        if p:
-            return os.path.dirname(p)
-    dirs = allowlisted_socket_dirs()
-    return dirs[0] if dirs else "/tmp/cc-socks"
-
-
-# --------------------------------------------------------------------------
-# Codex discovery
-# --------------------------------------------------------------------------
-
-
-def find_state_db(sqlite_home=None):
-    """The state_*.sqlite whose `threads` schema we recognise, or None.
-
-    The numeric suffix is a schema version, so the newest file is not always
-    the readable one: pick by schema, never by the largest number.
-    """
-    home = sqlite_home or codex_sqlite_home()
-    for path in sorted(glob.glob(os.path.join(home, "state_*.sqlite"))):
-        try:
-            conn = sqlite3.connect("file:%s?mode=ro" % path, uri=True, timeout=2)
-        except sqlite3.Error:
-            continue
-        try:
-            cols = {row[1] for row in conn.execute("PRAGMA table_info(threads)")}
-        except sqlite3.Error:
-            cols = set()
-        finally:
-            conn.close()
-        if sp_constants.THREADS_COLUMNS <= cols:
-            return path
-    return None
-
-
-def read_session_index():
-    """{thread id: name} merged from every session_index.jsonl (S11).
-
-    CODEX_HOME and sqlite_home can differ, and the first openable file is not
-    necessarily the fuller one, so both are read and the newest `updated_at`
-    wins for an id present in both.
-    """
-    out = {}
-    seen_at = {}
-    candidates = [os.path.join(codex_home(), "session_index.jsonl")]
-    alt = os.path.join(codex_sqlite_home(), "session_index.jsonl")
-    if alt not in candidates:
-        candidates.append(alt)
-    for path in candidates:
-        try:
-            fh = open(path, "r", encoding="utf-8", errors="replace")
-        except (FileNotFoundError, OSError):
-            continue
-        with fh:
-            for line in fh:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    obj = json.loads(line)
-                except ValueError:
-                    continue
-                if not isinstance(obj, dict) or not obj.get("id"):
-                    continue
-                name = obj.get("thread_name")
-                if not name:
-                    continue
-                tid = str(obj["id"])
-                when = sp_runtime.parse_time(obj.get("updated_at"))
-                previous = seen_at.get(tid)
-                if tid in out and previous is not None and when is not None:
-                    if when < previous:
-                        continue
-                out[tid] = name
-                if when is not None:
-                    seen_at[tid] = when
-    return out
-
-
-def canon_path(path):
-    """Canonicalize a path so holder keys and lookup keys agree.
-
-    `lsof` reports the symlink-resolved (real) path in its `n` field, while the
-    paths we probe come from the state DB and from CODEX_HOME unresolved. When
-    CODEX_HOME is a symlink (e.g. a mackup-managed `~/.codex` -> a repo dir), the
-    two never match and EVERY thread reads as dead -- `up`/`send` refuse and no
-    shim starts. Resolving both sides with realpath makes them agree; a
-    missing/None path (or one realpath cannot resolve) is returned unchanged.
-    The socket-dir matching already relies on realpath (see
-    `claude_record_by_socket`, `dir_is_allowlisted`); this applies the same rule
-    to Codex holder matching.
-    """
-    if not path:
-        return path
-    try:
-        return os.path.realpath(path)
-    except OSError:
-        return path
-
-
-def lsof_holders_checked(paths):
-    """(holders, verified, error) for paths a Codex process may hold.
-
-    Keyed by the canonical (realpath) form so a lookup by an unresolved probe
-    path still matches a holder `lsof` reported at its symlink-resolved path.
-
-    `lsof` exits 1 both for a verified no-match and for some failures. It can
-    also exit 1 with valid holder data on stdout when another requested path is
-    absent or has no holder. Remove paths proven absent before the batch, then
-    accept exit 1 only when stderr is empty. A path whose existence cannot be
-    checked remains unverified, never evidence that a thread is dead.
-    """
-    out = {}
-    existing = []
-    seen = set()
-    for path in paths:
-        if not path:
-            continue
-        canonical = canon_path(path)
-        if canonical in seen:
-            continue
-        try:
-            os.stat(path)
-        except FileNotFoundError:
-            continue
-        except OSError as exc:
-            return out, False, "cannot inspect %s: %s" % (path, exc)
-        existing.append(path)
-        seen.add(canonical)
-    paths = existing
-    if not paths:
-        return out, True, None
-    rc, stdout, stderr = sp_runtime.run_cmd(
-        ["lsof", "-F", "pcn", "--"] + list(paths), timeout=20
-    )
-    if rc != 0 and not (rc == 1 and not stderr.strip()):
-        detail = stderr.strip() or stdout.strip() or "lsof exited %d" % rc
-        return out, False, detail
-    pid = None
-    cmd = ""
-    for line in stdout.splitlines():
-        if not line:
-            continue
-        tag, value = line[0], line[1:]
-        if tag == "p":
-            try:
-                pid = int(value)
-            except ValueError:
-                pid = None
-            cmd = ""
-        elif tag == "c":
-            cmd = value
-        elif tag == "n":
-            if pid is None:
-                continue
-            base = os.path.basename(cmd or "")
-            if "codex" not in base.lower():
-                continue
-            out.setdefault(canon_path(value), []).append((pid, cmd))
-    return out, True, None
-
-
-def lsof_holders(paths):
-    """Compatibility wrapper returning only verified holder data."""
-    holders, verified, error = lsof_holders_checked(paths)
-    if not verified:
-        sp_runtime.log("Codex thread liveness is unavailable: %s" % error)
-    return holders
-
-
-def writer_lock_path(thread_id, home=None):
-    """The per-thread writer lock a live Codex process holds, under
-    `<CODEX_HOME>/thread-writer-locks/<uuid>.lock`.
-
-    It is a more reliable liveness signal than the rollout file: Codex writes
-    the rollout lazily, so a just-created or renamed thread can be live with
-    the lock held and no rollout on disk yet. The file can appear DURING its
-    first turn (verified on codex-cli 0.153.4, 2026-09-08). An older
-    Codex that never creates the lock simply contributes no holder here, and
-    the rollout stays the signal.
-
-    Rooted at CODEX_HOME, where Codex keeps both the lock and the session
-    rollouts, NOT at `sqlite_home`: the state DB can be relocated with
-    `sqlite_home` while the locks and rollouts stay under CODEX_HOME, so rooting
-    the lock at `sqlite_home` would probe the wrong directory when they differ.
-    """
-    root = home or codex_home()
-    return os.path.join(root, "thread-writer-locks", "%s.lock" % thread_id)
-
-
-def codex_threads(check_live=True):
-    """(threads, schema_ok). Each thread is a dict; degraded mode returns []."""
-    db = find_state_db()
-    if db is None:
-        sp_runtime.log(
-            "no state_*.sqlite with a recognised `threads` schema under %s; "
-            "Codex discovery is unavailable (send by UUID still works)"
-            % codex_sqlite_home()
-        )
-        return [], False
-    rows = []
-    try:
-        conn = sqlite3.connect("file:%s?mode=ro" % db, uri=True, timeout=2)
-    except sqlite3.Error as exc:
-        sp_runtime.log("cannot open %s: %s" % (db, exc))
-        return [], False
-    try:
-        cur = conn.execute(
-            "SELECT id, name, rollout_path, cwd, updated_at FROM threads"
-        )
-        rows = cur.fetchall()
-    except sqlite3.Error as exc:
-        sp_runtime.log("cannot read threads from %s: %s" % (db, exc))
-        return [], False
-    finally:
-        conn.close()
-
-    index = read_session_index()
-    registered = read_registered()
-    threads = []
-    for row in rows:
-        tid = str(row[0])
-        threads.append(
-            {
-                "id": tid,
-                # session_index.jsonl is title-specific and appends on every
-                # /rename. Prefer it over the threads row, whose name can lag.
-                "name": index.get(tid) or row[1],
-                "rollout_path": row[2],
-                "cwd": row[3],
-                "updated_at": row[4],
-                "registered": tid in registered,
-                "holder_pid": None,
-                "live": False,
-                "liveness_error": None,
-            }
-        )
-    if check_live and threads:
-        # The lock is rooted at CODEX_HOME, not at the state DB's home: the DB
-        # can live under a separate `sqlite_home` while the locks stay put.
-        lock_of = {t["id"]: writer_lock_path(t["id"]) for t in threads}
-        probe = [t["rollout_path"] for t in threads if t["rollout_path"]]
-        probe += list(lock_of.values())
-        holders, verified, liveness_error = lsof_holders_checked(probe)
-        for t in threads:
-            if not verified:
-                t["live"] = None
-                t["liveness_error"] = liveness_error
-                continue
-            # Either handle a live Codex process keeps proves the thread is
-            # live; the lock covers a fresh thread whose rollout is not written
-            # yet, the rollout covers an older Codex with no writer lock.
-            found = (holders.get(canon_path(t["rollout_path"])) or []) or (
-                holders.get(canon_path(lock_of[t["id"]])) or []
-            )
-            if found:
-                t["live"] = True
-                t["holder_pid"] = found[0][0]
-    return threads, True
-
-
-def thread_is_held(rollout_path, holder_pid=None, lock_path=None):
-    """(True/False/None, pid); None means the lsof probe was unavailable.
-
-    Liveness comes from either handle a live Codex process keeps: the rollout
-    file, or the writer lock (`lock_path`). The lock is held from thread
-    creation, while the rollout is written lazily on the first completed turn
-    (measured on codex-cli 0.153.4), so a just-created thread reads as live
-    through the lock alone. With `holder_pid` given, that exact pid must still
-    hold one of them (D2: a live daemon can unload one thread while staying
-    alive).
-    """
-    paths = [p for p in (rollout_path, lock_path) if p]
-    holders, verified, _error = lsof_holders_checked(paths)
-    if not verified:
-        return None, None
-    found = []
-    for p in paths:
-        found += holders.get(canon_path(p)) or []
-    if holder_pid is None:
-        return bool(found), (found[0][0] if found else None)
-    for pid, _cmd in found:
-        if pid == holder_pid:
-            return True, pid
-    return False, (found[0][0] if found else None)
-
-
-class ResolveError(Exception):
-    """A thread target that cannot be turned into exactly one live thread."""
-
-
-class ResolveNotFound(ResolveError):
-    """Nothing carries that name or id (as opposed to ambiguous or unverified)."""
-
-
-class ResolveNoLive(ResolveError):
-    """Only threads whose process is verified gone carry that name."""
-
-
-class ResolveAmbiguousKind(ResolveError):
-    """A bare target that could be either kind; ``choices`` are the typed
-    targets (``cc:x``, ``codex:x``) that would each resolve it."""
-
-    def __init__(self, message, choices):
-        super().__init__(message)
-        self.choices = choices
-
-
-def missing_thread_message(thread_id):
-    """Why discovery found no thread for a UUID, naming what it looked for."""
-    db = find_state_db()
-    evidence = ["no row in the threads table of %s" % (db or "the Codex state DB")]
-    lock = writer_lock_path(thread_id)
-    held = False
-    if not os.path.exists(lock):
-        evidence.append("no writer lock at %s" % lock)
-    else:
-        holders, verified, error = lsof_holders_checked([lock])
-        found = holders.get(canon_path(lock)) or []
-        if found:
-            held = True
-            evidence.append("writer lock %s held by pid %s" % (lock, found[0][0]))
-        elif verified:
-            evidence.append("writer lock %s present but not held" % lock)
-        else:
-            evidence.append("writer lock %s holder unverified (%s)" % (lock, error))
-    pattern = os.path.join(codex_home(), "sessions", "*", "*", "*", "rollout-*%s.jsonl" % thread_id)
-    rollouts = glob.glob(pattern)
-    if rollouts:
-        evidence.append("rollout %s exists" % rollouts[0])
-    else:
-        evidence.append("no rollout under %s" % os.path.join(codex_home(), "sessions"))
-    message = "no Codex thread with id %s: %s." % (thread_id, "; ".join(evidence))
-    if held:
-        message += (
-            " A Codex process holds this thread, but discovery reads the "
-            "state-DB row, so `up` cannot attach the thread until Codex "
-            "writes one."
-        )
-    return message + " Check `peers.py list` and `peers.py doctor`."
-
-
-def resolve_thread(target, require_live=True, exclude=None):
-    """Turn `<name|uuid>` into one thread dict, or raise ResolveError.
-
-    D6/R7: a name held by more than one live thread is refused rather than
-    guessed at; `codex queue`'s own name matching picks a match, so the bridge
-    never delegates the decision. ``exclude`` (a thread UUID) drops that thread
-    from name matching only; a UUID target is never excluded.
-    """
-    threads, schema_ok = codex_threads()
-    if not schema_ok:
-        if sp_runtime.is_uuid(target):
-            # D11 degraded mode: queue by UUID, liveness unverified.
-            return {
-                "id": target,
-                "name": None,
-                "rollout_path": None,
-                "cwd": None,
-                "updated_at": None,
-                "registered": target in read_registered(),
-                "holder_pid": None,
-                "live": None,
-                "degraded": True,
-            }
-        raise ResolveError(
-            "Codex thread discovery is unavailable (unknown state_*.sqlite "
-            "schema); pass the thread UUID instead of a name"
-        )
-    if sp_runtime.is_uuid(target):
-        for t in threads:
-            if t["id"] == target:
-                return t
-        raise ResolveNotFound(missing_thread_message(target))
-    if exclude:
-        threads = [t for t in threads if t["id"] != exclude]
-    # Match the name from the state DB / session index, OR from our own
-    # registration: `up <uuid>` records name->uuid, and a later `/rename` may
-    # not have propagated to the DB's `name` column yet (measured on
-    # codex-cli 0.153.4), so a thread we already registered under this name
-    # must still resolve. Union by id, so a thread matched both ways counts once.
-    reg = read_registered()
-    reg_ids = {
-        tid
-        for tid, meta in reg.items()
-        if isinstance(meta, dict) and meta.get("name") == target
-    }
-    matches = [t for t in threads if t.get("name") == target or t["id"] in reg_ids]
-    # The peer list advertises UUID-derived aliases for unsafe or absent titles.
-    # Check aliases alongside exact names: if they identify different threads,
-    # refuse the collision instead of silently sending to either one.
-    prefix_target = target[6:] if target.startswith("codex-") else target
-    prefix = None
-    if sp_runtime.is_uuid(prefix_target):
-        prefix = prefix_target.replace("-", "").lower()
-    elif re.fullmatch(r"[0-9a-fA-F]{8,32}", prefix_target):
-        prefix = prefix_target.lower()
-    if prefix:
-        prefix_matches = [
-            t for t in threads
-            if t["id"].replace("-", "").lower().startswith(prefix)
-        ]
-        matched_ids = {t["id"] for t in matches}
-        matches.extend(t for t in prefix_matches if t["id"] not in matched_ids)
-    if not matches:
-        raise ResolveNotFound(
-            "no Codex thread named %r or matching that ID prefix; run `peers.py list` "
-            "for current UUIDs, or /rename it in the TUI"
-            % target
-        )
-    if require_live:
-        live = [t for t in matches if t["live"] is True]
-        if not live:
-            unverified = [t for t in matches if t["live"] is None]
-            if unverified:
-                detail = unverified[0].get("liveness_error") or "lsof failed"
-                raise ResolveError(
-                    "Codex thread liveness is unavailable (%s); retry where "
-                    "lsof is permitted" % detail
-                )
-            # Never silently pick a thread whose process is gone: Codex's title
-            # suggester reuses names, so a dead match is not evidence of intent.
-            raise ResolveNoLive(
-                "no live Codex thread named %r (%d past thread(s) carried that "
-                "name); /rename the running one, or pass its UUID"
-                % (target, len(matches))
-            )
-        matches = live
-    if len(matches) > 1:
-        candidates = ", ".join(
-            "%s (%s)" % (t["id"], t.get("name") or "unnamed")
-            for t in matches
-        )
-        raise ResolveError(
-            "%r matches %d %sthreads (%s); register by UUID instead"
-            % (target, len(matches), "live " if require_live else "", candidates)
-        )
-    return matches[0]
-
-
-def resolve_thread_prefer_live(target, exclude=None):
-    """Resolve for commands that also act on a stopped thread (`budget`, `down`).
-
-    Codex's title suggester reuses names, so a bare name usually also matches
-    past threads; resolving across dead threads first made a unique LIVE name
-    ambiguous. Prefer the live match; only when there is none, fall back to any
-    thread with that name. Raises the more specific ResolveError otherwise.
-    """
-    try:
-        return resolve_thread(target, require_live=True, exclude=exclude)
-    except ResolveError as live_error:
-        try:
-            return resolve_thread(target, require_live=False, exclude=exclude)
-        except ResolveError:
-            raise live_error
-
-
-# --------------------------------------------------------------------------
-# Registration (D6)
-# --------------------------------------------------------------------------
-
-
-def read_registered():
-    data = sp_runtime.read_json(registered_path(), {}) or {}
-    threads = data.get("threads")
-    return threads if isinstance(threads, dict) else {}
-
-
-def write_registered(threads):
-    sp_runtime.write_json_atomic(registered_path(), {"threads": threads}, mode=0o600)
-
-
-def register_thread(thread):
-    """Record a thread as opted in. A name that cannot be a peer name is
-    refused here rather than at delivery time, so the failure names the fix."""
-    name = thread.get("name")
-    if name is not None:
-        sp_protocol.require_peer_name(name)
-    # P9: a read-modify-write on one shared file, so it runs under the lock the
-    # reconcile uses. Two `up` calls at once would otherwise lose one.
-    with reconcile_lock():
-        threads = read_registered()
-        threads[thread["id"]] = {"name": name, "registered_at": sp_runtime.now_iso()}
-        write_registered(threads)
-
-
-def refresh_registered_name(thread_id, name):
-    """Refresh the cached alias for a persistently registered UUID."""
-    sp_protocol.require_peer_name(name, "peer alias")
-    with reconcile_lock(blocking=False) as acquired:
-        if not acquired:
-            return False
-        threads = read_registered()
-        meta = threads.get(thread_id)
-        if not isinstance(meta, dict) or meta.get("name") == name:
-            return False
-        meta = dict(meta)
-        meta["name"] = name
-        threads[thread_id] = meta
-        write_registered(threads)
-    return True
-
-
-def _unregister_thread_unlocked(thread_id) -> bool:
-    threads = read_registered()
-    if thread_id in threads:
-        del threads[thread_id]
-        write_registered(threads)
-        return True
-    return False
-
-
-def unregister_thread(thread_id) -> bool:
-    with reconcile_lock():
-        return _unregister_thread_unlocked(thread_id)
+from session_peers import claude as sp_claude, codex as sp_codex, diagnostics as sp_diagnostics, lifecycle as sp_lifecycle, process as sp_process, requests as sp_requests, storage as sp_storage
 
 
 def _bridge_thread_ids():
     """UUIDs represented by registrations or per-thread bridge artifacts."""
-    out = {thread_id for thread_id in read_registered() if sp_runtime.is_uuid(thread_id)}
+    out = {thread_id for thread_id in sp_storage.read_registered() if sp_runtime.is_uuid(thread_id)}
     try:
-        names = os.listdir(state_dir())
+        names = os.listdir(sp_storage.state_dir())
     except OSError:
         return out
     for name in names:
@@ -1090,7 +107,7 @@ def _thread_last_seen(thread_id, registered, threads):
             value = sp_runtime.parse_time(meta.get(key))
             if value is not None:
                 seen.append(value)
-    state = sp_runtime.read_json(thread_state_path(thread_id), {}) or {}
+    state = sp_runtime.read_json(sp_storage.thread_state_path(thread_id), {}) or {}
     value = sp_runtime.parse_time(state.get("updated_at")) if isinstance(state, dict) else None
     if value is not None:
         seen.append(value)
@@ -1100,7 +117,7 @@ def _thread_last_seen(thread_id, registered, threads):
         if value is not None:
             seen.append(value)
     for suffix in sp_constants.THREAD_ARTIFACT_SUFFIXES:
-        path = os.path.join(state_dir(), thread_id + suffix)
+        path = os.path.join(sp_storage.state_dir(), thread_id + suffix)
         try:
             seen.append(os.stat(path).st_mtime)
         except OSError:
@@ -1118,7 +135,7 @@ def gc_bridge_state(days=sp_constants.GC_DAYS_DEFAULT, dry_run=False, verbose=Tr
     """
     if days < 0:
         raise ValueError("retention days must be zero or greater")
-    threads, schema_ok = codex_threads()
+    threads, schema_ok = sp_codex.codex_threads()
     if not schema_ok:
         if verbose:
             print("GC skipped: Codex thread discovery is unavailable")
@@ -1128,14 +145,14 @@ def gc_bridge_state(days=sp_constants.GC_DAYS_DEFAULT, dry_run=False, verbose=Tr
             print("GC skipped: Codex liveness is unverified")
         return []
     by_id = {thread["id"]: thread for thread in threads}
-    registered = read_registered()
+    registered = sp_storage.read_registered()
     cutoff = time.time() - days * 86400.0
     candidates = []
     for thread_id in sorted(_bridge_thread_ids()):
         thread = by_id.get(thread_id)
         if thread is not None and thread.get("live"):
             continue
-        if shim_pid(thread_id):
+        if sp_lifecycle.shim_pid(thread_id):
             continue
         last_seen = _thread_last_seen(thread_id, registered, by_id)
         if last_seen is None or last_seen > cutoff:
@@ -1150,19 +167,19 @@ def gc_bridge_state(days=sp_constants.GC_DAYS_DEFAULT, dry_run=False, verbose=Tr
         return []
 
     removed = []
-    with reconcile_lock():
+    with sp_storage.reconcile_lock():
         # Recheck after taking the same lock used by attach/up/down. A session
         # that resumed while the first scan ran must win over GC.
-        current, current_ok = codex_threads()
+        current, current_ok = sp_codex.codex_threads()
         if not current_ok:
             return []
         if any(thread.get("live") is None for thread in current):
             return []
         current_by_id = {thread["id"]: thread for thread in current}
         live_ids = {thread["id"] for thread in current if thread.get("live")}
-        registrations = read_registered()
+        registrations = sp_storage.read_registered()
         for thread_id in candidates:
-            if thread_id in live_ids or shim_pid(thread_id):
+            if thread_id in live_ids or sp_lifecycle.shim_pid(thread_id):
                 continue
             last_seen = _thread_last_seen(
                 thread_id, registrations, current_by_id
@@ -1171,7 +188,7 @@ def gc_bridge_state(days=sp_constants.GC_DAYS_DEFAULT, dry_run=False, verbose=Tr
                 continue
             failed = False
             for suffix in sp_constants.THREAD_ARTIFACT_SUFFIXES:
-                path = os.path.join(state_dir(), thread_id + suffix)
+                path = os.path.join(sp_storage.state_dir(), thread_id + suffix)
                 try:
                     os.unlink(path)
                 except FileNotFoundError:
@@ -1183,169 +200,11 @@ def gc_bridge_state(days=sp_constants.GC_DAYS_DEFAULT, dry_run=False, verbose=Tr
                 continue
             registrations.pop(thread_id, None)
             removed.append(thread_id)
-        write_registered(registrations)
+        sp_storage.write_registered(registrations)
     if verbose:
         for thread_id in removed:
             print("pruned %s" % thread_id)
     return removed
-
-
-def codex_title_owner(thread_name, threads=None):
-    """Lowest live UUID for a title, providing a stable duplicate tiebreak."""
-    if not sp_protocol.valid_peer_name(thread_name):
-        return None
-    if threads is None:
-        threads, schema_ok = codex_threads()
-        if not schema_ok:
-            return None
-    owners = sorted(
-        thread["id"]
-        for thread in threads
-        if thread.get("live") and thread.get("name") == thread_name
-    )
-    return owners[0] if owners else None
-
-
-def peer_name_for_thread(
-    thread_name, thread_id, records=None, title_owner=None
-):
-    """Choose a safe, unique peer alias for a mutable Codex title.
-
-    A valid title is used verbatim. Unnamed, unsafe or conflicting titles fall
-    back to a UUID-derived alias rather than preventing the SessionStart hook
-    from attaching the thread. The full UUID fallback makes a collision
-    deterministic and vanishingly unlikely without silently slugifying a title.
-    """
-    records = live_claude_records() if records is None else records
-    occupied = {
-        rec.get("name")
-        for rec in records
-        if rec.get("sessionId") != thread_id and rec.get("name")
-    }
-    candidates = []
-    if sp_protocol.valid_peer_name(thread_name) and title_owner in (None, thread_id):
-        candidates.append(str(thread_name))
-    candidates.extend(
-        ["codex-%s" % thread_id[:8], "codex-%s" % thread_id]
-    )
-    for candidate in candidates:
-        if sp_protocol.valid_peer_name(candidate) and candidate not in occupied:
-            return candidate
-    raise sp_protocol.NameError_("no unique peer alias is available for thread %s" % thread_id)
-
-
-def send_frame(sock_path, frame, auth_token=None, timeout=10.0):
-    """One NDJSON frame to a peer socket. Raises OSError on a failed connect."""
-    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    s.settimeout(timeout)
-    try:
-        s.connect(sock_path)
-        if auth_token:
-            s.sendall(
-                json.dumps({"type": "auth", "token": auth_token}).encode("utf-8") + b"\n"
-            )
-        s.sendall(json.dumps(frame).encode("utf-8") + b"\n")
-    finally:
-        try:
-            s.close()
-        except OSError:
-            pass
-
-
-def deliver_to_record(rec, frame):
-    """Send one frame to a Claude session record, with its auth line if any."""
-    sock_path = rec.get("messagingSocketPath")
-    if not socket_path_ok(sock_path):
-        sp_runtime.log("refusing to write to %r: symlink or non-allowlisted directory" % sock_path)
-        return False
-    try:
-        send_frame(sock_path, frame, auth_token=peer_token_for(rec))
-    except OSError as exc:
-        sp_runtime.log("delivery to %s failed: %s" % (rec.get("name") or rec.get("pid"), exc))
-        return False
-    return True
-
-
-# --------------------------------------------------------------------------
-# Queueing into a Codex thread
-# --------------------------------------------------------------------------
-
-
-class QueueError(Exception):
-    pass
-
-
-def codex_queue(thread_id, text, cwd=None):
-    """`codex queue --thread <uuid> --message <text>`, run in `stable_dir(cwd)`.
-
-    rc != 0, or "No active session" on stderr, means the thread is not live.
-    Pass the thread's own cwd; a deleted one falls back to `$HOME`.
-    """
-    budget = sp_runtime.argv_text_budget()
-    size = sp_runtime.utf8_len(text)
-    if size > budget:
-        raise QueueError(
-            "message is %d bytes, over the %d cap this machine can pass to "
-            "`codex queue` (Codex itself stops at %d characters)"
-            % (size, budget, sp_constants.MAX_TEXT_CHARS)
-        )
-    if len(text) > sp_constants.MAX_TEXT_CHARS:
-        raise QueueError(
-            "message is %d characters, over Codex's %d cap"
-            % (len(text), sp_constants.MAX_TEXT_CHARS)
-        )
-    rc, out, err = sp_runtime.run_cmd(
-        ["codex", "queue", "--thread", str(thread_id), "--message", text],
-        timeout=60,
-        cwd=sp_runtime.stable_dir(cwd),
-    )
-    if rc == 127:
-        raise QueueError("codex is not on PATH")
-    blob = "%s\n%s" % (out, err)
-    if rc != 0 or "No active session" in blob:
-        raise QueueError(
-            "codex queue failed (rc %d): %s" % (rc, (err or out).strip() or "no output")
-        )
-    return out.strip()
-
-
-# --------------------------------------------------------------------------
-# The shim (D2, D4, D8)
-# --------------------------------------------------------------------------
-
-
-def peer_uid(conn):
-    """The connecting process's uid, or None when the platform will not say."""
-    try:
-        if sys.platform.startswith("linux"):
-            so_peercred = getattr(socket, "SO_PEERCRED", 17)
-            buf = conn.getsockopt(
-                socket.SOL_SOCKET, so_peercred, struct.calcsize("3i")
-            )
-            _pid, uid, _gid = struct.unpack("3i", buf)
-            return uid
-        if sys.platform == "darwin":
-            sol_local = 0
-            local_peercred = getattr(socket, "LOCAL_PEERCRED", 1)
-            buf = conn.getsockopt(sol_local, local_peercred, 64)
-            if len(buf) < 8:
-                return None
-            _version, uid = struct.unpack("2I", buf[:8])
-            return uid
-    except (OSError, struct.error, ValueError):
-        return None
-    return None
-
-
-def shim_code_status(thread_id, pid, installed_digest):
-    """Unknown old/unreadable state is not evidence of stale running code."""
-    state = sp_runtime.read_json(thread_state_path(thread_id), {})
-    if not isinstance(state, dict) or state.get("shim_pid") != pid:
-        return "unknown"
-    running = state.get("code_digest")
-    if not installed_digest or not isinstance(running, str) or not re.fullmatch(r"[0-9a-f]{64}", running):
-        return "unknown"
-    return "current" if running == installed_digest else "stale"
 
 
 class Shim:
@@ -1361,26 +220,26 @@ class Shim:
         self.thread = thread
         self.thread_id = thread["id"]
         self.rollout_path = thread.get("rollout_path")
-        self.lock_path = writer_lock_path(self.thread_id)
+        self.lock_path = sp_codex.writer_lock_path(self.thread_id)
         self.holder_pid = thread.get("holder_pid")
         self.thread_name = thread.get("name")
         # B1: only a validated alias reaches Claude's wrapper. SessionStart can
         # attach before a title exists, and Codex-generated titles often carry
         # spaces, so an unusable title gets a UUID-derived alias.
-        self.name = peer_name_for_thread(
+        self.name = sp_codex.peer_name_for_thread(
             self.thread_name,
             self.thread_id,
-            title_owner=codex_title_owner(self.thread_name),
+            title_owner=sp_codex.codex_title_owner(self.thread_name),
         )
         self.cwd = thread.get("cwd") or sp_runtime.stable_dir()
 
-        self.sock_dir = default_socket_dir()
+        self.sock_dir = sp_claude.default_socket_dir()
         self.sock_path = os.path.join(self.sock_dir, "%d.sock" % os.getpid())
         self.record_path = os.path.join(
-            claude_sessions_dir(), "%d.json" % os.getpid()
+            sp_storage.claude_sessions_dir(), "%d.json" % os.getpid()
         )
 
-        state = sp_runtime.read_json(thread_state_path(self.thread_id), {}) or {}
+        state = sp_runtime.read_json(sp_storage.thread_state_path(self.thread_id), {}) or {}
         self.tail = sp_rollout.RolloutTail.from_state(self.rollout_path, state.get("tail"))
         # This is an at-most-once processing ledger, including dropped replies,
         # not evidence of delivery. Read the legacy name when upgrading.
@@ -1481,7 +340,7 @@ class Shim:
         if not self.rollout_path:
             sp_runtime.log("thread %s has no rollout path; nothing to tail" % self.thread_id)
             return 2
-        held, pid = thread_is_held(self.rollout_path, self.holder_pid, self.lock_path)
+        held, pid = sp_codex.thread_is_held(self.rollout_path, self.holder_pid, self.lock_path)
         if held is None:
             sp_runtime.log(
                 "thread %s liveness is unverified; not starting a shim"
@@ -1558,7 +417,7 @@ class Shim:
         if self._pidfile_fd is not None:
             # Only the owner removes the pidfile (P2).
             self._save_state()
-            paths.append(thread_pid_path(self.thread_id))
+            paths.append(sp_storage.thread_pid_path(self.thread_id))
         for path in paths:
             try:
                 os.unlink(path)
@@ -1579,8 +438,8 @@ class Shim:
     # -- socket and record -------------------------------------------------
 
     def _bind(self):
-        ensure_socket_dir(self.sock_dir)
-        if not socket_path_ok(self.sock_path):
+        sp_claude.ensure_socket_dir(self.sock_dir)
+        if not sp_claude.socket_path_ok(self.sock_path):
             # S1: the shim held every other endpoint to the allowlist but not
             # its own, so a bad SESSION_PEERS_SOCKET_DIR bound anywhere.
             raise SystemExit(
@@ -1611,7 +470,7 @@ class Shim:
         # a string.
         stamp = sp_runtime.now_ms()
         if self._proc_start is None:
-            self._proc_start = proc_start(os.getpid())
+            self._proc_start = sp_process.proc_start(os.getpid())
         return {
             "pid": os.getpid(),
             "sessionId": self.thread_id,
@@ -1626,7 +485,7 @@ class Shim:
             "peerFeatures": list(sp_constants.PEER_FEATURES),
             "kind": "interactive",
             "entrypoint": "codex",
-            "pidDomain": pid_domain(),
+            "pidDomain": sp_process.pid_domain(),
             "messagingSocketPath": self.sock_path,
             "name": self.name,
             "nameSource": "user",
@@ -1637,7 +496,7 @@ class Shim:
         }
 
     def _write_record(self):
-        d = claude_sessions_dir()
+        d = sp_storage.claude_sessions_dir()
         os.makedirs(d, exist_ok=True)
         try:
             os.chmod(d, 0o700)
@@ -1661,7 +520,7 @@ class Shim:
 
     def _save_state(self):
         sp_runtime.write_json_atomic(
-            thread_state_path(self.thread_id),
+            sp_storage.thread_state_path(self.thread_id),
             {
                 "thread_id": self.thread_id,
                 "name": self.name,
@@ -1692,7 +551,7 @@ class Shim:
         crash included, so nothing else can mistake a recycled pid for us.
         Returns False when another shim holds it, having changed nothing.
         """
-        path = thread_pid_path(self.thread_id)
+        path = sp_storage.thread_pid_path(self.thread_id)
         fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
         for attempt in range(5):
             try:
@@ -1745,7 +604,7 @@ class Shim:
 
     def _handle_connection(self, conn):
         try:
-            uid = peer_uid(conn)
+            uid = sp_process.peer_uid(conn)
             if uid != os.getuid():
                 # S3: an unreadable peer uid is a refusal, not a shrug. Both
                 # supported platforms answer (LOCAL_PEERCRED / SO_PEERCRED),
@@ -1833,8 +692,8 @@ class Shim:
         from_field = frame.get("from") or attrs.get("from") or ""
         sock_path = from_field[4:] if from_field.startswith("uds:") else from_field
         sender = None
-        if sock_path and socket_path_ok(sock_path):
-            sender = claude_record_by_socket(sock_path)
+        if sock_path and sp_claude.socket_path_ok(sock_path):
+            sender = sp_claude.claude_record_by_socket(sock_path)
         elif sock_path:
             sp_runtime.log("ignoring a reply address outside the allowlisted directories")
             sock_path = ""
@@ -1869,7 +728,7 @@ class Shim:
             sp_runtime.log("truncating an inbound body of %d chars to %d" % (trimmed_from, len(body)))
         text = "%s\n%s" % (tag, body)
 
-        held, _pid = thread_is_held(self.rollout_path, self.holder_pid, self.lock_path)
+        held, _pid = sp_codex.thread_is_held(self.rollout_path, self.holder_pid, self.lock_path)
         if held is None:
             sp_runtime.log("thread %s liveness is unverified; not queueing" % self.thread_id)
             self._status_back(
@@ -1892,8 +751,8 @@ class Shim:
         # no longer rescans the whole rollout (194 MiB files exist).
         paused = self.tail.last_boundary == "aborted"
         try:
-            codex_queue(self.thread_id, text, cwd=self.thread.get("cwd"))
-        except QueueError as exc:
+            sp_codex.codex_queue(self.thread_id, text, cwd=self.thread.get("cwd"))
+        except sp_codex.QueueError as exc:
             sp_runtime.log(
                 "queue failed for message %s: %s"
                 % (frame.get("msg_id") or "unknown", exc)
@@ -1907,7 +766,7 @@ class Shim:
                     "[session-peers] your message to %s was not queued: %s"
                     % (self.name or self.thread_id, exc)
                 )
-                deliver_to_record(
+                sp_claude.deliver_to_record(
                     sender,
                     sp_protocol.build_user_frame(
                         sp_protocol.build_cc_body(notice, self.thread_id, self.name, None), None
@@ -1961,7 +820,7 @@ class Shim:
         """Send one correlated status when the original peer message is known."""
         if not sender or not msg_id:
             return False
-        return deliver_to_record(
+        return sp_claude.deliver_to_record(
             sender,
             {
                 "type": "control",
@@ -1989,14 +848,14 @@ class Shim:
 
     def _fire_idle(self, sub, detail):
         msg_id, sock_path = sub
-        if not socket_path_ok(sock_path):
+        if not sp_claude.socket_path_ok(sock_path):
             sp_runtime.log("cannot answer notify_when_idle: %r is not an allowed socket" % sock_path)
             return
-        rec = claude_record_by_socket(sock_path)
+        rec = sp_claude.claude_record_by_socket(sock_path)
         if not rec:
             sp_runtime.log("cannot answer notify_when_idle: no live session at %s" % sock_path)
             return
-        deliver_to_record(
+        sp_claude.deliver_to_record(
             rec,
             {
                 "type": "control",
@@ -2050,7 +909,7 @@ class Shim:
         return last_live, last_alias
 
     def _check_liveness(self):
-        held, _pid = thread_is_held(
+        held, _pid = sp_codex.thread_is_held(
             self.rollout_path, self.holder_pid, self.lock_path
         )
         if held is None:
@@ -2073,7 +932,7 @@ class Shim:
 
     def _refresh_name(self):
         """Converge the advertised alias after a Codex `/rename`."""
-        threads, schema_ok = codex_threads()
+        threads, schema_ok = sp_codex.codex_threads()
         if not schema_ok:
             return
         thread = next(
@@ -2084,22 +943,22 @@ class Shim:
             return
         title = thread.get("name")
         try:
-            desired = peer_name_for_thread(
+            desired = sp_codex.peer_name_for_thread(
                 title,
                 self.thread_id,
-                title_owner=codex_title_owner(title, threads),
+                title_owner=sp_codex.codex_title_owner(title, threads),
             )
         except sp_protocol.NameError_ as exc:
             sp_runtime.log("cannot refresh the peer alias: %s" % exc)
             return
         self.thread_name = title
         if desired == self.name:
-            refresh_registered_name(self.thread_id, desired)
+            sp_storage.refresh_registered_name(self.thread_id, desired)
             return
         previous = self.name
         self.name = desired
         self.name_since = time.time()
-        refresh_registered_name(self.thread_id, desired)
+        sp_storage.refresh_registered_name(self.thread_id, desired)
         if os.path.exists(self.record_path):
             self._write_record()
         self._save_state()
@@ -2118,7 +977,7 @@ class Shim:
         self._write_record()
 
     def _consume_budget_marker(self, initial=False):
-        path = budget_reset_path(self.thread_id)
+        path = sp_storage.budget_reset_path(self.thread_id)
         if not os.path.exists(path):
             return
         try:
@@ -2162,7 +1021,7 @@ class Shim:
         """Deliver each still-fresh held reply once; it opens the new sequence."""
         if not self.held:
             return
-        records = live_claude_records()
+        records = sp_claude.live_claude_records()
         for sid in list(self.held):
             self._release_one(sid, "reset", records)
 
@@ -2190,7 +1049,7 @@ class Shim:
         ]
         if not pending:
             return
-        records = live_claude_records()
+        records = sp_claude.live_claude_records()
         changed = False
         for sid, reason in pending:
             if reason == "allow" and self.budgets.get(sid, 0) >= self._cap_for(sid):
@@ -2218,7 +1077,7 @@ class Shim:
         if rec is None:
             sp_runtime.log("discarding a held reply: session %s is gone" % sid)
             return "discarded"
-        if not socket_path_ok(rec.get("messagingSocketPath")):
+        if not sp_claude.socket_path_ok(rec.get("messagingSocketPath")):
             sp_runtime.log("discarding a held reply: %s listens outside the allowlist" % sid)
             return "discarded"
         text = sp_protocol.reply_text(entry["text"], entry.get("mid"), held_reply=True)
@@ -2227,7 +1086,7 @@ class Shim:
         except ValueError as exc:
             sp_runtime.log("cannot build a held reply for %s: %s" % (sid, exc))
             return "discarded"
-        if not deliver_to_record(rec, sp_protocol.build_user_frame(body, self.sock_path)):
+        if not sp_claude.deliver_to_record(rec, sp_protocol.build_user_frame(body, self.sock_path)):
             sp_runtime.log("keeping the held reply for %s to retry" % sid)
             return "failed"
         # An explicit reset opens a new sequence; an allowance continues the
@@ -2301,19 +1160,19 @@ class Shim:
 
     def _consume_budget_binding_marker(self, initial=False):
         """Apply a `buddy set --replies` grant, or a `buddy clear`/rebind revoke."""
-        path = budget_binding_path(self.thread_id)
+        path = sp_storage.budget_binding_path(self.thread_id)
         if not os.path.exists(path):
             return
         # Read and unlink under the lock: a marker written between the two
         # would be deleted unread. A busy lock waits for the next poll.
         try:
-            with binding_lock(self.thread_id, timeout=2.0):
+            with sp_storage.binding_lock(self.thread_id, timeout=2.0):
                 marker = sp_runtime.read_json(path, None)
                 try:
                     os.unlink(path)
                 except OSError:
                     return
-        except BindingLockTimeout:
+        except sp_storage.BindingLockTimeout:
             sp_runtime.log("binding marker for thread %s is locked; retrying" % self.thread_id)
             return
         if isinstance(marker, dict) and marker.get("revoke") is True:
@@ -2363,12 +1222,12 @@ class Shim:
                 and self.budgets.get(sid, 0) < new_cap
                 and sid in self.held
             ):
-                self._release_one(sid, "allow", live_claude_records())
+                self._release_one(sid, "allow", sp_claude.live_claude_records())
         self._save_state()
 
     def _consume_budget_allow_marker(self):
         """Apply a `budget allow` grant: a total, never additive or replenishing."""
-        path = budget_allow_path(self.thread_id)
+        path = sp_storage.budget_allow_path(self.thread_id)
         if not os.path.exists(path):
             return
         grant = sp_runtime.read_json(path, None)
@@ -2421,7 +1280,7 @@ class Shim:
             # The requester may hit the raised cap later and should hear so.
             self.budget_notified.discard(sid)
             if self.budgets.get(sid, 0) < new_cap and sid in self.held:
-                self._release_one(sid, "allow", live_claude_records())
+                self._release_one(sid, "allow", sp_claude.live_claude_records())
         self._save_state()
 
     def _advance_budget_sequence(self, tag):
@@ -2515,16 +1374,16 @@ class Shim:
         self._advance_budget_sequence(tag)
         text = sp_protocol.strip_tag(turn.last_agent_message or "").strip()
 
-        records = live_claude_records()
+        records = sp_claude.live_claude_records()
         targets = []
 
         requester = None
         reply_socket = tag.get("reply")
         if reply_socket:
-            if not socket_path_ok(reply_socket):
+            if not sp_claude.socket_path_ok(reply_socket):
                 sp_runtime.log("reply address %r is not an allowed socket" % reply_socket)
             else:
-                rec = claude_record_by_socket(reply_socket, records)
+                rec = sp_claude.claude_record_by_socket(reply_socket, records)
                 if rec is None:
                     sp_runtime.log("the session that queued turn %s is gone" % turn.turn_id)
                 elif not tag.get("sid"):
@@ -2567,7 +1426,7 @@ class Shim:
                     self.name or self.thread_id,
                     " %s" % tag.get("mid") if tag.get("mid") else "",
                 )
-                deliver_to_record(
+                sp_claude.deliver_to_record(
                     requester,
                     sp_protocol.build_user_frame(
                         sp_protocol.build_cc_body(notice, self.thread_id, self.name, None), None
@@ -2581,7 +1440,7 @@ class Shim:
         addressed = sp_constants.AT_NAME_RE.match(text.lstrip())
         if addressed:
             name = addressed.group(1)
-            matches = claude_record_by_name(name, records)
+            matches = sp_claude.claude_record_by_name(name, records)
             if not matches:
                 sp_runtime.log("no live Claude session named %r" % name)
             elif len(matches) > 1:
@@ -2677,7 +1536,7 @@ class Shim:
                         )
                     )
                     body = sp_protocol.build_cc_body(notice, self.thread_id, self.name, None)
-                    if deliver_to_record(rec, sp_protocol.build_user_frame(body, None)):
+                    if sp_claude.deliver_to_record(rec, sp_protocol.build_user_frame(body, None)):
                         self.budget_notified.add(sid)
                 continue
             out = (
@@ -2688,7 +1547,7 @@ class Shim:
             except ValueError as exc:
                 sp_runtime.log("cannot build a reply for turn %s: %s" % (turn.turn_id, exc))
                 break
-            if deliver_to_record(rec, sp_protocol.build_user_frame(body, self.sock_path)):
+            if sp_claude.deliver_to_record(rec, sp_protocol.build_user_frame(body, self.sock_path)):
                 self.budgets[sid] = spent + 1
                 self._spend_binding(sid)
                 # Deliberately no body text: the log is a delivery record, not
@@ -2706,16 +1565,16 @@ class Shim:
 
 
 def cmd_list(args):
-    warn_versions()
+    sp_diagnostics.warn_versions()
     installed_digest = sp_runtime.code_digest(sp_runtime.runtime_code_files())
-    all_records = read_claude_records()
-    classified = [(record, record_liveness(record)) for record in all_records]
+    all_records = sp_claude.read_claude_records()
+    classified = [(record, sp_claude.record_liveness(record)) for record in all_records]
     records = [record for record, status in classified if status == "live"]
     unverified = [
         record for record, status in classified if status == "unverified"
     ]
-    threads, schema_ok = codex_threads()
-    registered = read_registered()
+    threads, schema_ok = sp_codex.codex_threads()
+    registered = sp_storage.read_registered()
 
     def claude_view(record):
         return {
@@ -2733,16 +1592,16 @@ def cmd_list(args):
     claude = [claude_view(record) for record in records]
     claude_unverified = [claude_view(record) for record in unverified]
     def codex_view(thread):
-        pid = shim_pid(thread["id"])
-        state = sp_runtime.read_json(thread_state_path(thread["id"]), {}) if pid else {}
+        pid = sp_lifecycle.shim_pid(thread["id"])
+        state = sp_runtime.read_json(sp_storage.thread_state_path(thread["id"]), {}) if pid else {}
         alias = state.get("name") if isinstance(state, dict) else None
         if not alias:
             try:
-                alias = peer_name_for_thread(
+                alias = sp_codex.peer_name_for_thread(
                     thread.get("name"),
                     thread["id"],
                     records=records,
-                    title_owner=codex_title_owner(thread.get("name"), threads),
+                    title_owner=sp_codex.codex_title_owner(thread.get("name"), threads),
                 )
             except sp_protocol.NameError_:
                 alias = None
@@ -2755,7 +1614,7 @@ def cmd_list(args):
             "registered": thread["id"] in registered,
             "holder_pid": thread.get("holder_pid"),
             "shim_pid": pid,
-            "shim_code_status": shim_code_status(thread["id"], pid, installed_digest) if pid else None,
+            "shim_code_status": sp_lifecycle.shim_code_status(thread["id"], pid, installed_digest) if pid else None,
             # Liveness straight off the thread record: `true` for a codex[]
             # entry, `null` for a codex_unverified[] one. codex[] stays
             # live-only, so `false` never appears here (see the module docs).
@@ -2775,7 +1634,7 @@ def cmd_list(args):
         "codex": codex,
         "codex_unverified": codex_unverified,
         "codex_schema_recognised": schema_ok,
-        "socket_dir": default_socket_dir(),
+        "socket_dir": sp_claude.default_socket_dir(),
     }
     if args.json:
         print(json.dumps(payload, indent=2, sort_keys=True))
@@ -2843,60 +1702,6 @@ def _thread_from_args(args, required=False):
     return value
 
 
-def _resolve_claude_record(target, exclude=None):
-    records = read_claude_records()
-    if exclude and not sp_runtime.is_uuid(target):
-        # A shim's record carries its thread's UUID, so this also drops the
-        # excluded Codex thread's own shim.
-        records = [r for r in records if r.get("sessionId") != exclude]
-    candidates = claude_record_by_target(target, records)
-    classified = [(record, record_liveness(record)) for record in candidates]
-    matches = [record for record, status in classified if status == "live"]
-    if any(status == "unverified" for _record, status in classified):
-        raise ResolveError(
-            "cannot verify Claude target %r because the process-start probe is "
-            "unavailable; retry outside the sandbox or with host permission" % target
-        )
-    if not matches:
-        noun = "id" if sp_runtime.is_uuid(target) else "name"
-        raise ResolveNotFound("no live Claude session with %s %r" % (noun, target))
-    if len(matches) > 1:
-        raise ResolveError(
-            "%r names %d live sessions (%s); rename one"
-            % (target, len(matches), ", ".join(str(m.get("pid")) for m in matches))
-        )
-    rec = matches[0]
-    if not socket_path_ok(rec.get("messagingSocketPath")):
-        raise ResolveError(
-            "%s listens on %r, outside the allowlisted socket directories"
-            % (target, rec.get("messagingSocketPath"))
-        )
-    return rec
-
-
-def _deliver_claude(rec, message, thread_id=None, reply_route=True):
-    thread_name = None
-    shim_socket = None
-    if thread_id:
-        state = sp_runtime.read_json(thread_state_path(thread_id), {}) or {}
-        thread_name = state.get("name")
-        pid = shim_pid(thread_id)
-        if pid:
-            rec_path = os.path.join(claude_sessions_dir(), "%d.json" % pid)
-            shim_rec = sp_runtime.read_json(rec_path, {}) or {}
-            shim_socket = shim_rec.get("messagingSocketPath")
-    route = shim_socket if reply_route else None
-    body = sp_protocol.build_cc_body(message, thread_id or "", thread_name, route)
-    if len(body) > sp_constants.MAX_TEXT_CHARS or sp_runtime.utf8_len(body) > sp_constants.MAX_TEXT_CHARS:
-        raise ValueError(
-            "wrapped message exceeds the %d-character/UTF-8-byte peer cap"
-            % sp_constants.MAX_TEXT_CHARS
-        )
-    frame = sp_protocol.build_user_frame(body, route)
-    send_frame(rec["messagingSocketPath"], frame, auth_token=peer_token_for(rec))
-    return frame["msg_id"], bool(route)
-
-
 def _print_send_result(args, payload, human):
     if getattr(args, "json", False):
         print(json.dumps(payload, sort_keys=True))
@@ -2915,7 +1720,7 @@ def _expand_buddy_arg(args, attr, purpose):
 
 
 def cmd_send(args):
-    warn_versions()
+    sp_diagnostics.warn_versions()
     failed = _expand_buddy_arg(args, "to", "send")
     if failed is not None:
         return failed
@@ -2935,16 +1740,16 @@ def cmd_send(args):
 
 def _send_codex(target, args):
     try:
-        thread = resolve_thread(target)
-    except ResolveError as exc:
+        thread = sp_codex.resolve_thread(target)
+    except sp_codex.ResolveError as exc:
         sys.stderr.write("error: %s\n" % exc)
         return 1
     degraded = thread.get("degraded")
     if degraded:
         sp_runtime.log("liveness unverified: the Codex state schema is unknown")
     else:
-        held, _pid = thread_is_held(
-            thread["rollout_path"], lock_path=writer_lock_path(thread["id"])
+        held, _pid = sp_codex.thread_is_held(
+            thread["rollout_path"], lock_path=sp_codex.writer_lock_path(thread["id"])
         )
         if held is None:
             sys.stderr.write(
@@ -2969,13 +1774,13 @@ def _send_codex(target, args):
     )
     env_sid = os.environ.get("CLAUDE_CODE_SESSION_ID")
     if not from_socket and not args.from_sid and sp_runtime.is_uuid(env_sid):
-        matches = claude_record_by_target(env_sid)
+        matches = sp_claude.claude_record_by_target(env_sid)
         if len(matches) == 1:
             from_socket = matches[0].get("messagingSocketPath")
     if from_socket:
         # P3: a reply address without a session id can be delivered to whoever
         # holds that socket next, so the id is resolved here, from the registry.
-        rec = claude_record_by_socket(from_socket)
+        rec = sp_claude.claude_record_by_socket(from_socket)
         if rec is None:
             sys.stderr.write(
                 "error: no live Claude session listens on %s, so --from-socket "
@@ -2994,8 +1799,8 @@ def _send_codex(target, args):
     tag = sp_protocol.build_tag(from_name, from_sid, from_socket, msg_id)
     text = "%s\n%s" % (tag, args.message)
     try:
-        codex_queue(thread["id"], text, cwd=thread.get("cwd"))
-    except QueueError as exc:
+        sp_codex.codex_queue(thread["id"], text, cwd=thread.get("cwd"))
+    except sp_codex.QueueError as exc:
         sys.stderr.write("error: %s\n" % exc)
         return 1
     name = thread.get("name") or thread["id"]
@@ -3015,10 +1820,10 @@ def _send_codex(target, args):
 
 def _send_claude(target, args):
     try:
-        rec = _resolve_claude_record(target)
+        rec = sp_claude._resolve_claude_record(target)
         thread_id = _thread_from_args(args)
-        msg_id, reply_capable = _deliver_claude(rec, args.message, thread_id)
-    except (ResolveError, ValueError) as exc:
+        msg_id, reply_capable = sp_claude._deliver_claude(rec, args.message, thread_id)
+    except (sp_codex.ResolveError, ValueError) as exc:
         sys.stderr.write("error: %s\n" % exc)
         return 1
     except OSError as exc:
@@ -3045,121 +1850,9 @@ def _send_claude(target, args):
     return 0
 
 
-def _bounded_timeout(value):
-    timeout = sp_constants.REQUEST_TIMEOUT_DEFAULT if value is None else float(value)
-    if timeout <= 0 or timeout > sp_constants.REQUEST_TIMEOUT_MAX:
-        raise ValueError(
-            "timeout must be greater than 0 and at most %.0f seconds"
-            % sp_constants.REQUEST_TIMEOUT_MAX
-        )
-    return timeout
-
-
-def _unlink_quiet(path):
-    try:
-        os.unlink(path)
-    except (FileNotFoundError, OSError):
-        pass
-
-
-def cleanup_expired_requests(now=None, dry_run=False):
-    """Remove expired/orphaned request mailboxes; return removed request ids."""
-    now = time.time() if now is None else float(now)
-    removed = []
-    try:
-        names = os.listdir(request_dir())
-    except OSError:
-        return removed
-    suffix = ".request.json"
-    for name in names:
-        if not name.endswith(suffix):
-            continue
-        request_id = name[: -len(suffix)]
-        if not sp_runtime.is_uuid(request_id):
-            continue
-        path = request_path(request_id)
-        data = sp_runtime.read_json(path, {}) or {}
-        try:
-            expires_at = float(data.get("expires_at", 0))
-        except (TypeError, ValueError):
-            expires_at = 0
-        if expires_at > now:
-            continue
-        if not dry_run:
-            _unlink_quiet(path)
-            _unlink_quiet(request_reply_path(request_id))
-        removed.append(request_id)
-    for name in names:
-        if not name.endswith(".reply.json"):
-            continue
-        request_id = name[: -len(".reply.json")]
-        if not sp_runtime.is_uuid(request_id) or os.path.exists(request_path(request_id)):
-            continue
-        path = request_reply_path(request_id)
-        try:
-            stale = os.stat(path).st_mtime <= now - sp_constants.REQUEST_ORPHAN_TTL
-        except OSError:
-            stale = False
-        if stale:
-            if not dry_run:
-                _unlink_quiet(path)
-            if request_id not in removed:
-                removed.append(request_id)
-    return removed
-
-
-def _request_envelope(request_id, message, timeout):
-    script = sp_runtime.entrypoint_path()
-    return (
-        '<session-peers-request id="%s" timeout-seconds="%d">\n'
-        "%s\n"
-        "</session-peers-request>\n\n"
-        "Reply contract: return the result to the waiting Codex turn, not its "
-        "ordinary queue. Write the complete reply to a private temporary file, "
-        "then run:\n"
-        "%s reply --request %s --message-file <absolute-reply-file>\n"
-        "Do not use SendMessage or `send --to codex:` for this request. The "
-        "mailbox is single-use and expires with the timeout."
-        % (
-            request_id,
-            int(timeout),
-            sp_protocol.neutralise_request_markup(message),
-            shlex.quote(script),
-            request_id,
-        )
-    )
-
-
-def _request_meta(request_id, requester_thread_id, rec, expires_at, reply_path):
-    """The single-use mailbox metadata shared by `ask` and `dispatch`.
-
-    Keeping one builder means the two entry points cannot drift in the fields
-    `reply`, `await`, and `cleanup_expired_requests` all read back.
-    """
-    return {
-        "request_id": request_id,
-        "requester_thread_id": requester_thread_id,
-        "target_session_id": rec.get("sessionId"),
-        "target_session_name": rec.get("name"),
-        "created_at": sp_runtime.now_iso(),
-        "expires_at": expires_at,
-        "reply_path": reply_path,
-    }
-
-
-def _reply_matches(response, request_id, target_session_id):
-    """True when a reply file is the intended one and carries a text body."""
-    return (
-        isinstance(response, dict)
-        and response.get("request_id") == request_id
-        and response.get("session_id") == target_session_id
-        and isinstance(response.get("message"), str)
-    )
-
-
 def cmd_ask(args):
     """Send one correlated request to Claude and return its reply on stdout."""
-    warn_versions()
+    sp_diagnostics.warn_versions()
     failed = _expand_buddy_arg(args, "to", "ask")
     if failed is not None:
         return failed
@@ -3168,14 +1861,14 @@ def cmd_ask(args):
         return 2
     try:
         message = sp_runtime.message_from_args(args)
-        timeout = _bounded_timeout(args.timeout)
+        timeout = sp_requests._bounded_timeout(args.timeout)
         thread_id = _thread_from_args(args, required=True)
     except ValueError as exc:
         sys.stderr.write("error: %s\n" % exc)
         return 2
     try:
-        rec = _resolve_claude_record(args.to[len("cc:") :])
-    except ResolveError as exc:
+        rec = sp_claude._resolve_claude_record(args.to[len("cc:") :])
+    except sp_codex.ResolveError as exc:
         sys.stderr.write("error: %s\n" % exc)
         return 1
     if not rec.get("sessionId"):
@@ -3185,20 +1878,20 @@ def cmd_ask(args):
         )
         return 1
 
-    cleanup_expired_requests()
+    sp_requests.cleanup_expired_requests()
     request_id = str(uuidlib.uuid4())
-    meta_path = request_path(request_id)
-    reply_path = request_reply_path(request_id)
+    meta_path = sp_storage.request_path(request_id)
+    reply_path = sp_storage.request_reply_path(request_id)
     expires_at = time.time() + timeout
     sp_runtime.write_json_atomic(
         meta_path,
-        _request_meta(request_id, thread_id, rec, expires_at, reply_path),
+        sp_requests._request_meta(request_id, thread_id, rec, expires_at, reply_path),
     )
     try:
         try:
-            message_id, _reply_capable = _deliver_claude(
+            message_id, _reply_capable = sp_claude._deliver_claude(
                 rec,
-                _request_envelope(request_id, message, timeout),
+                sp_requests._request_envelope(request_id, message, timeout),
                 thread_id,
                 reply_route=False,
             )
@@ -3212,7 +1905,7 @@ def cmd_ask(args):
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             response = sp_runtime.read_json(reply_path, None)
-            if _reply_matches(response, request_id, rec.get("sessionId")):
+            if sp_requests._reply_matches(response, request_id, rec.get("sessionId")):
                 payload = {
                     "status": "replied",
                     "request_id": request_id,
@@ -3235,42 +1928,20 @@ def cmd_ask(args):
         )
         return 124
     finally:
-        _unlink_quiet(meta_path)
-        _unlink_quiet(reply_path)
-
-
-def _current_claude_session_id():
-    sid = os.environ.get("CLAUDE_CODE_SESSION_ID")
-    if sid:
-        return sid
-    sock = os.environ.get("CLAUDE_CODE_MESSAGING_SOCKET")
-    if sock:
-        rec = claude_record_by_socket(sock, read_claude_records())
-        if rec:
-            return rec.get("sessionId")
-    return None
-
-
-def _read_completed_reply(path, attempts=20):
-    """Read a competing reply after its exclusive writer finishes."""
-    for _index in range(attempts):
-        value = sp_runtime.read_json(path, None)
-        if isinstance(value, dict):
-            return value
-        time.sleep(0.01)
-    return {}
+        sp_requests._unlink_quiet(meta_path)
+        sp_requests._unlink_quiet(reply_path)
 
 
 def cmd_reply(args):
     """Complete one pending ask mailbox from its intended Claude session."""
     try:
         message = sp_runtime.message_from_args(args)
-        path = request_path(args.request)
-        reply_path = request_reply_path(args.request)
+        path = sp_storage.request_path(args.request)
+        reply_path = sp_storage.request_reply_path(args.request)
     except ValueError as exc:
         sys.stderr.write("error: %s\n" % exc)
         return 2
-    cleanup_expired_requests()
+    sp_requests.cleanup_expired_requests()
     meta = sp_runtime.read_json(path, None)
     if not isinstance(meta, dict):
         sys.stderr.write("error: request %s is unknown or expired\n" % args.request)
@@ -3280,10 +1951,10 @@ def cmd_reply(args):
     except (TypeError, ValueError):
         expires_at = 0
     if expires_at <= time.time():
-        cleanup_expired_requests()
+        sp_requests.cleanup_expired_requests()
         sys.stderr.write("error: request %s is expired\n" % args.request)
         return 1
-    sid = _current_claude_session_id()
+    sid = sp_claude._current_claude_session_id()
     if not sid:
         sys.stderr.write(
             "error: reply must run inside the target Claude session so its "
@@ -3308,7 +1979,7 @@ def cmd_reply(args):
         sys.stderr.write("error: could not write reply: %s\n" % exc)
         return 1
     if not created:
-        existing = _read_completed_reply(reply_path)
+        existing = sp_requests._read_completed_reply(reply_path)
         if existing.get("session_id") != sid or existing.get("message") != message:
             sys.stderr.write("error: request %s already has a different reply\n" % args.request)
             return 1
@@ -3331,7 +2002,7 @@ def cmd_dispatch(args):
     outlives this invocation so a later `await --request` can consume the
     reply. `--timeout` sets the request lifetime and the mailbox `expires_at`.
     """
-    warn_versions()
+    sp_diagnostics.warn_versions()
     failed = _expand_buddy_arg(args, "to", "dispatch")
     if failed is not None:
         return failed
@@ -3340,14 +2011,14 @@ def cmd_dispatch(args):
         return 2
     try:
         message = sp_runtime.message_from_args(args)
-        timeout = _bounded_timeout(args.timeout)
+        timeout = sp_requests._bounded_timeout(args.timeout)
         thread_id = _thread_from_args(args, required=True)
     except ValueError as exc:
         sys.stderr.write("error: %s\n" % exc)
         return 2
     try:
-        rec = _resolve_claude_record(args.to[len("cc:") :])
-    except ResolveError as exc:
+        rec = sp_claude._resolve_claude_record(args.to[len("cc:") :])
+    except sp_codex.ResolveError as exc:
         sys.stderr.write("error: %s\n" % exc)
         return 1
     if not rec.get("sessionId"):
@@ -3357,25 +2028,25 @@ def cmd_dispatch(args):
         )
         return 1
 
-    cleanup_expired_requests()
+    sp_requests.cleanup_expired_requests()
     request_id = str(uuidlib.uuid4())
-    meta_path = request_path(request_id)
-    reply_path = request_reply_path(request_id)
+    meta_path = sp_storage.request_path(request_id)
+    reply_path = sp_storage.request_reply_path(request_id)
     expires_at = time.time() + timeout
-    meta = _request_meta(request_id, thread_id, rec, expires_at, reply_path)
+    meta = sp_requests._request_meta(request_id, thread_id, rec, expires_at, reply_path)
     sp_runtime.write_json_atomic(meta_path, meta)
     try:
-        message_id, _reply_capable = _deliver_claude(
+        message_id, _reply_capable = sp_claude._deliver_claude(
             rec,
-            _request_envelope(request_id, message, timeout),
+            sp_requests._request_envelope(request_id, message, timeout),
             thread_id,
             reply_route=False,
         )
     except (OSError, ValueError) as exc:
         # Delivery failed, so no reply can ever arrive: do not leave an orphan
         # mailbox that a later `await` would poll until it expired.
-        _unlink_quiet(meta_path)
-        _unlink_quiet(reply_path)
+        sp_requests._unlink_quiet(meta_path)
+        sp_requests._unlink_quiet(reply_path)
         if args.json:
             print(
                 json.dumps(
@@ -3427,25 +2098,6 @@ def _await_expired(args, detail):
     return 1
 
 
-def _claim_reply(reply_path):
-    """Atomically take ownership of a reply file so it is consumed once.
-
-    `os.rename` is atomic, so exactly one caller renames the single reply file
-    away; a racing `await` sees it gone and stands down. Returns the parsed
-    reply for the winner, or None if another consumer already claimed it.
-    """
-    claim_path = "%s.consumed.%d.%s" % (reply_path, os.getpid(), uuidlib.uuid4().hex)
-    try:
-        os.rename(reply_path, claim_path)
-    except OSError:
-        return None
-    try:
-        data = sp_runtime.read_json(claim_path, None)
-    finally:
-        _unlink_quiet(claim_path)
-    return data if isinstance(data, dict) else None
-
-
 def cmd_await(args):
     """Consume the reply to one dispatched request, or report why not.
 
@@ -3455,15 +2107,15 @@ def cmd_await(args):
     its `expires_at` reports `expired`. The reply is consumed exactly once.
     """
     try:
-        meta_path = request_path(args.request)
-        reply_path = request_reply_path(args.request)
-        timeout = _bounded_timeout(args.timeout)
+        meta_path = sp_storage.request_path(args.request)
+        reply_path = sp_storage.request_reply_path(args.request)
+        timeout = sp_requests._bounded_timeout(args.timeout)
         thread_id = _thread_from_args(args, required=True)
     except ValueError as exc:
         sys.stderr.write("error: %s\n" % exc)
         return 2
 
-    cleanup_expired_requests()
+    sp_requests.cleanup_expired_requests()
     meta = sp_runtime.read_json(meta_path, None)
     if not isinstance(meta, dict):
         # Expired-and-collected, already consumed, or never dispatched. Without
@@ -3485,17 +2137,17 @@ def cmd_await(args):
     deadline = time.monotonic() + timeout
     while True:
         if expires_at <= time.time():
-            cleanup_expired_requests()
+            sp_requests.cleanup_expired_requests()
             return _await_expired(args, "expired before a reply arrived")
         if not os.path.exists(meta_path):
             return _await_expired(args, "unknown, already consumed, or expired")
         response = sp_runtime.read_json(reply_path, None)
-        if _reply_matches(response, args.request, target_sid):
-            claimed = _claim_reply(reply_path)
+        if sp_requests._reply_matches(response, args.request, target_sid):
+            claimed = sp_requests._claim_reply(reply_path)
             if claimed is None:
                 # A concurrent await consumed this reply first.
                 return _await_expired(args, "already consumed")
-            _unlink_quiet(meta_path)
+            sp_requests._unlink_quiet(meta_path)
             payload = {
                 "status": "replied",
                 "request_id": args.request,
@@ -3515,7 +2167,7 @@ def cmd_await(args):
         time.sleep(sp_constants.REQUEST_POLL_INTERVAL)
 
     if expires_at <= time.time():
-        cleanup_expired_requests()
+        sp_requests.cleanup_expired_requests()
         return _await_expired(args, "expired before a reply arrived")
     # This call timed out, but the request is still live and re-awaitable.
     payload = {
@@ -3543,13 +2195,13 @@ def cmd_wait_peer(args):
         return 2
     target = args.for_peer[len("cc:") :]
     try:
-        timeout = _bounded_timeout(args.timeout)
+        timeout = sp_requests._bounded_timeout(args.timeout)
     except ValueError as exc:
         sys.stderr.write("error: %s\n" % exc)
         return 2
     try:
-        rec = _resolve_claude_record(target)
-    except ResolveError as exc:
+        rec = sp_claude._resolve_claude_record(target)
+    except sp_codex.ResolveError as exc:
         sys.stderr.write("error: %s\n" % exc)
         return 1
     sid = rec.get("sessionId")
@@ -3561,11 +2213,11 @@ def cmd_wait_peer(args):
         interval = sp_constants.WAIT_POLL_INTERVAL_DEFAULT
     while time.monotonic() < deadline:
         candidates = [
-            item for item in read_claude_records() if item.get("sessionId") == sid
+            item for item in sp_claude.read_claude_records() if item.get("sessionId") == sid
         ]
         if candidates:
             current = candidates[0]
-            if record_liveness(current) == "live" and current.get("status") == args.state:
+            if sp_claude.record_liveness(current) == "live" and current.get("status") == args.state:
                 payload = {
                     "status": args.state,
                     "session_id": sid,
@@ -3584,75 +2236,10 @@ def cmd_wait_peer(args):
     return 124
 
 
-def shim_ready(thread_id):
-    """The pid of a shim that owns the thread AND has written its record.
-
-    The ownership lock is taken before the socket is bound, so `shim_pid`
-    alone answers "starting", not "serving". `up` waits for this.
-    """
-    pid = shim_pid(thread_id)
-    if pid is None:
-        return None
-    rec = sp_runtime.read_json(os.path.join(claude_sessions_dir(), "%d.json" % pid), None)
-    if not isinstance(rec, dict) or rec.get("sessionId") != thread_id:
-        return None
-    sock = rec.get("messagingSocketPath")
-    return pid if sock and os.path.exists(sock) else None
-
-
-def shim_pid(thread_id):
-    """The pid of the shim that PROVABLY owns this thread, or None.
-
-    Ownership is the flock the shim holds on its own pidfile for its whole
-    life, not the pid written in it: the kernel drops that lock when the
-    process dies, however it died, so a recycled pid can neither be signalled
-    by mistake nor block a restart (B2). The registry record is a second,
-    weaker proof and is only used to catch a pidfile naming another thread.
-    """
-    path = thread_pid_path(thread_id)
-    try:
-        fh = open(path, "r+")
-    except (FileNotFoundError, OSError):
-        return None
-    try:
-        try:
-            fcntl.flock(fh.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)
-        except OSError:
-            pass  # somebody holds it: a shim is running
-        else:
-            # Nobody holds it, so no shim is running for this thread. The file
-            # is deliberately LEFT in place: unlinking it here would race a
-            # shim between its open() and its flock(), and the next shim
-            # truncates and rewrites it anyway.
-            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
-            return None
-        try:
-            fh.seek(0)
-            pid = int(fh.read().strip())
-        except (OSError, ValueError):
-            return None
-    finally:
-        try:
-            fh.close()
-        except OSError:
-            pass
-    if not pid_alive(pid):
-        return None
-    rec = sp_runtime.read_json(os.path.join(claude_sessions_dir(), "%d.json" % pid), None)
-    if (
-        isinstance(rec, dict)
-        and rec.get("entrypoint") == "codex"
-        and rec.get("sessionId") != thread_id
-    ):
-        sp_runtime.log("the pidfile for %s names another thread's shim; ignoring" % thread_id)
-        return None
-    return pid
-
-
 def cmd_shim(args):
     try:
-        thread = resolve_thread(args.thread, require_live=False)
-    except ResolveError as exc:
+        thread = sp_codex.resolve_thread(args.thread, require_live=False)
+    except sp_codex.ResolveError as exc:
         sys.stderr.write("error: %s\n" % exc)
         return 1
     try:
@@ -3661,249 +2248,6 @@ def cmd_shim(args):
         sys.stderr.write("error: %s\n" % exc)
         return 1
     return shim.run()
-
-
-def spawn_shim(thread):
-    """Daemonise one shim: new session, no inherited fds, log to a file.
-
-    Codex's hook runner waits for inherited stdout/stderr pipes, so a child
-    started from `session-hook` MUST detach exactly like this (PRD Facts).
-    """
-    script = sp_runtime.entrypoint_path()
-    log_path = thread_log_path(thread["id"])
-    try:
-        daemon_pid = sp_runtime.spawn_detached(
-            [sys.executable, script, "shim", "--thread", thread["id"]],
-            log_path,
-        )
-    except OSError as exc:
-        sp_runtime.log("could not start the shim for %s: %s" % (thread["id"], exc))
-        return None
-    # The SHIM writes and locks the pidfile once it is serving, so the file is
-    # never a claim without a holder. Wait for it so a following reconcile
-    # inside the same lock sees the shim rather than starting a second one.
-    deadline = time.time() + 10.0
-    while time.time() < deadline:
-        pid = shim_ready(thread["id"])
-        if pid:
-            return pid
-        if not pid_alive(daemon_pid):
-            sp_runtime.log("the shim for %s exited; see %s" % (thread["id"], log_path))
-            return None
-        time.sleep(0.05)
-    sp_runtime.log("the shim for %s did not report ready in 10s; see %s" % (thread["id"], log_path))
-    return None
-
-
-@contextlib.contextmanager
-def reconcile_lock(blocking=True):
-    """Serialise concurrent reconciles.
-
-    SessionStart hooks and manual commands can race. Without the lock each
-    would see no pidfile and spawn its own shim for the same thread, and two
-    shims on one thread means two registry records and a doubled reply.
-    """
-    path = os.path.join(state_dir(), "reconcile.lock")
-    fh = open(path, "a+")
-    acquired = False
-    try:
-        flags = fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB)
-        try:
-            fcntl.flock(fh.fileno(), flags)
-        except BlockingIOError:
-            if blocking:
-                raise
-            yield False
-            return
-        acquired = True
-        yield True
-    finally:
-        try:
-            if acquired:
-                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
-        finally:
-            fh.close()
-
-
-def reconcile(verbose=True):
-    """Start one shim per registered, live thread. Idempotent by design."""
-    with reconcile_lock():
-        return _reconcile(verbose)
-
-
-def attach_thread(thread_id, verbose=True):
-    """Start a shim for one live UUID without making it a persistent opt-in."""
-    with reconcile_lock():
-        try:
-            thread = resolve_thread(thread_id)
-        except ResolveError as exc:
-            if verbose:
-                print("  %s: not attachable (%s)" % (thread_id, exc))
-            return None
-        if thread.get("live") is not True:
-            if verbose:
-                state = "unverified" if thread.get("live") is None else "not live"
-                print("  %s: %s, skipped" % (thread_id, state))
-            return None
-        pid = shim_pid(thread_id)
-        if pid:
-            if verbose:
-                print("  %s: shim already running (pid %s)" % (thread_id, pid))
-            return pid
-        pid = spawn_shim(thread)
-        if verbose:
-            if pid is None:
-                print("  %s: shim failed to start (see its log)" % thread_id)
-            else:
-                print("  %s: shim started (pid %d)" % (thread_id, pid))
-        return pid
-
-
-def _reconcile(verbose):
-    registered = read_registered()
-    if not registered:
-        if verbose:
-            print("no registered threads; run `peers.py up <name|uuid>` first")
-        return 0
-    threads, schema_ok = codex_threads()
-    if not schema_ok:
-        if verbose:
-            print("thread discovery is unavailable; no shim can be started")
-        return 0
-    by_id = {t["id"]: t for t in threads}
-    started = 0
-    for tid in sorted(registered):
-        thread = by_id.get(tid)
-        if thread is not None and thread.get("live") is None:
-            if verbose:
-                print("  %s: liveness unverified, skipped" % tid)
-            continue
-        if thread is None or thread.get("live") is not True:
-            if verbose:
-                print("  %s: not live, skipped" % tid)
-            continue
-        if shim_pid(tid):
-            if verbose:
-                print("  %s: shim already running (pid %s)" % (tid, shim_pid(tid)))
-            continue
-        pid = spawn_shim(thread)
-        if pid is None:
-            if verbose:
-                print("  %s: shim failed to start (see its log)" % tid)
-            continue
-        started += 1
-        if verbose:
-            print("  %s: shim started (pid %d)" % (tid, pid))
-    return started
-
-
-def cmd_up(args):
-    warn_versions()
-    if args.target:
-        try:
-            thread = resolve_thread(args.target)
-        except ResolveError as exc:
-            sys.stderr.write("error: %s\n" % exc)
-            return 1
-        try:
-            register_thread(thread)
-        except sp_protocol.NameError_ as exc:
-            sys.stderr.write("error: %s\n" % exc)
-            return 1
-        # D4: an explicit `up` is one of the two things that clears the budget.
-        try:
-            with open(budget_reset_path(thread["id"]), "w", encoding="utf-8") as fh:
-                fh.write(sp_runtime.now_iso() + "\n")
-        except OSError:
-            pass
-        print("registered %s (%s)" % (thread.get("name") or thread["id"], thread["id"]))
-    reconcile()
-    return 0
-
-
-def cmd_restart(args):
-    """Restart one thread's shim on the current code, keeping its state.
-
-    Unlike `down <uuid>` then `up <uuid>`, this neither unregisters the thread
-    nor writes the budget-reset marker, so the shim comes back with the reply
-    sequence it had: spent replies and any still-valid grant included.
-    """
-    try:
-        thread = resolve_thread_prefer_live(args.target)
-    except ResolveError as exc:
-        sys.stderr.write("error: %s\n" % exc)
-        return 1
-    tid = thread["id"]
-    with reconcile_lock():
-        stopped = stop_shim(tid)
-    pid = attach_thread(tid, verbose=False)
-    if pid is None:
-        sys.stderr.write(
-            "error: the shim for %s did not start (see its log)%s\n"
-            % (tid, "; the old shim was stopped" if stopped else "")
-        )
-        return 1
-    print(
-        "%s the shim for %s (pid %d); reply budget, spent replies and valid "
-        "grants kept" % ("restarted" if stopped else "started", tid, pid)
-    )
-    return 0
-
-
-def cmd_down(args):
-    if args.target:
-        try:
-            thread = resolve_thread_prefer_live(args.target)
-            tid = thread["id"]
-        except ResolveError as exc:
-            tid = args.target if sp_runtime.is_uuid(args.target) else None
-            if tid is None:
-                sys.stderr.write("error: %s\n" % exc)
-                return 1
-        # R2: stop and unregister under ONE hold of the reconcile lock. A bare
-        # `up` landing between them would restart the still-registered thread,
-        # leaving an unregistered peer running while `down` reported success.
-        with reconcile_lock():
-            stopped = stop_shim(tid)
-            removed = _unregister_thread_unlocked(tid)
-        if removed:
-            print("unregistered %s%s" % (tid, " and stopped its shim" if stopped else ""))
-        else:
-            print("%s was not registered%s" % (tid, "; shim stopped" if stopped else ""))
-        return 0
-    with reconcile_lock():
-        stopped = [tid for tid in sorted(read_registered()) if stop_shim(tid)]
-    for tid in stopped:
-        print("stopped the shim for %s" % tid)
-    print("registrations kept; `peers.py up` brings them back")
-    return 0
-
-
-def stop_shim(thread_id) -> bool:
-    """SIGTERM the shim for a thread. Never signals an unproven pid (B2)."""
-    pid = shim_pid(thread_id)
-    if pid is None:
-        # shim_pid already dropped a pidfile nothing holds, so there is no
-        # process this bridge can prove it owns. Fail closed.
-        return False
-    try:
-        os.kill(pid, signal.SIGTERM)
-    except OSError:
-        return False
-    for _ in range(30):
-        if not pid_alive(pid):
-            break
-        time.sleep(0.1)
-    if pid_alive(pid):
-        try:
-            os.kill(pid, signal.SIGKILL)
-        except OSError:
-            pass
-    try:
-        os.unlink(thread_pid_path(thread_id))
-    except (FileNotFoundError, OSError):
-        pass
-    return True
 
 
 class BuddyError(Exception):
@@ -3926,8 +2270,8 @@ def _budget_target(value, args):
     if value.startswith("codex:"):
         value = value[len("codex:") :]
     try:
-        return resolve_thread_prefer_live(value)["id"], None
-    except ResolveError as exc:
+        return sp_codex.resolve_thread_prefer_live(value)["id"], None
+    except sp_codex.ResolveError as exc:
         if not sp_runtime.is_uuid(value):
             return None, (1, str(exc))
         return value, None
@@ -3944,10 +2288,10 @@ def cmd_budget(args):
         sys.stderr.write("error: %s\n" % failure[1])
         return failure[0]
     # An explicit reset drops any allowance, including one not yet consumed.
-    _unlink_quiet(budget_allow_path(tid))
-    with open(budget_reset_path(tid), "w", encoding="utf-8") as fh:
+    sp_requests._unlink_quiet(sp_storage.budget_allow_path(tid))
+    with open(sp_storage.budget_reset_path(tid), "w", encoding="utf-8") as fh:
         fh.write(sp_runtime.now_iso() + "\n")
-    state_path = thread_state_path(tid)
+    state_path = sp_storage.thread_state_path(tid)
     state = sp_runtime.read_json(state_path, None)
     if isinstance(state, dict) and (state.get("budgets") or state.get("allowance")):
         state["budgets"] = {}
@@ -3984,8 +2328,8 @@ def cmd_budget_allow(args):
     if failure:
         sys.stderr.write("error: %s\n" % failure[1])
         return failure[0]
-    pid = shim_pid(tid)
-    if pid and not shim_supports(tid, pid, "budget_allow"):
+    pid = sp_lifecycle.shim_pid(tid)
+    if pid and not sp_lifecycle.shim_supports(tid, pid, "budget_allow"):
         sys.stderr.write(
             "error: cannot verify the running shim for %s (pid %d) supports "
             "allowances; a shim started from an older peers.py never reads the "
@@ -3994,7 +2338,7 @@ def cmd_budget_allow(args):
             "grant again\n" % (tid, pid, sp_constants.REPLY_BUDGET, tid)
         )
         return 1
-    path = budget_allow_path(tid)
+    path = sp_storage.budget_allow_path(tid)
     total = args.replies
     pending = sp_runtime.read_json(path, None)
     window = sp_runtime._float_env("SESSION_PEERS_REPLY_BUDGET_WINDOW", sp_constants.REPLY_BUDGET_WINDOW_DEFAULT)
@@ -4026,19 +2370,6 @@ def cmd_budget_allow(args):
     return 0
 
 
-def shim_supports(thread_id, pid, feature):
-    """True only when the state file proves shim ``pid`` has ``feature``.
-
-    A shim saves its state, pid included, before it serves. Missing state, or
-    state naming another pid, proves nothing about the running code, so it
-    counts as unsupported rather than risking a grant nothing reads.
-    """
-    state = sp_runtime.read_json(thread_state_path(thread_id), None)
-    if not isinstance(state, dict) or state.get("shim_pid") != pid:
-        return False
-    return feature in (state.get("shim_features") or [])
-
-
 # --------------------------------------------------------------------------
 # Buddies: one bound peer per session
 # --------------------------------------------------------------------------
@@ -4057,7 +2388,7 @@ def caller_identity(args):
     explicit = getattr(args, "as_identity", None)
     if explicit:
         return parse_typed(explicit)
-    sid = _current_claude_session_id()
+    sid = sp_claude._current_claude_session_id()
     if sid:
         if not sp_runtime.is_uuid(sid):
             raise ValueError("this Claude session's id %r is not a UUID" % sid)
@@ -4070,19 +2401,19 @@ def caller_identity(args):
 
 def _resolve_typed_kind(kind, target, live_only=False, exclude=None):
     if kind == "cc":
-        rec = _resolve_claude_record(target, exclude=exclude)
+        rec = sp_claude._resolve_claude_record(target, exclude=exclude)
         sid = rec.get("sessionId")
         if not sp_runtime.is_uuid(sid):
             # A bound buddy is addressed by UUID only; a non-UUID id would be
             # re-read as a name later.
-            raise ResolveError("Claude session %r has no UUID session id" % target)
+            raise sp_codex.ResolveError("Claude session %r has no UUID session id" % target)
         return {"kind": "cc", "uuid": sid, "name": rec.get("name")}
     # Codex reuses titles, so a live thread usually shares its name with dead
     # ones: the live match wins, and dead threads count only when none is live.
     if live_only:
-        thread = resolve_thread(target, require_live=True, exclude=exclude)
+        thread = sp_codex.resolve_thread(target, require_live=True, exclude=exclude)
     else:
-        thread = resolve_thread_prefer_live(target, exclude=exclude)
+        thread = sp_codex.resolve_thread_prefer_live(target, exclude=exclude)
     return {"kind": "codex", "uuid": thread["id"], "name": thread.get("name")}
 
 
@@ -4102,7 +2433,7 @@ def resolve_typed(target, exclude=None):
                 kind, target[len(kind) + 1 :], exclude=exclude
             )
     if not target:
-        raise ResolveError("an empty target names no session")
+        raise sp_codex.ResolveError("an empty target names no session")
     found, errors, dead_codex = [], [], False
     for kind in sp_constants.BUDDY_KINDS:
         try:
@@ -4111,18 +2442,18 @@ def resolve_typed(target, exclude=None):
             found.append(
                 _resolve_typed_kind(kind, target, live_only=True, exclude=exclude)
             )
-        except ResolveNotFound:
+        except sp_codex.ResolveNotFound:
             pass
-        except ResolveNoLive:
+        except sp_codex.ResolveNoLive:
             dead_codex = True
-        except ResolveError as exc:
+        except sp_codex.ResolveError as exc:
             errors.append(exc)
     if dead_codex and not found and not errors:
         # Nothing live carries the name: bind the dead thread as `codex:` would.
         return _resolve_typed_kind("codex", target, exclude=exclude)
     if errors:
         # An ambiguous or unverifiable side could be the one meant: never guess.
-        raise ResolveAmbiguousKind(
+        raise sp_codex.ResolveAmbiguousKind(
             "%s; pick the kind" % errors[0],
             ["%s:%s" % (kind, target) for kind in sp_constants.BUDDY_KINDS],
         )
@@ -4130,12 +2461,12 @@ def resolve_typed(target, exclude=None):
         # Routine for an attached Codex thread: its UUID also names its shim's
         # Claude-facing registry record.
         choices = ["%s:%s" % (i["kind"], i["uuid"]) for i in found]
-        raise ResolveAmbiguousKind(
+        raise sp_codex.ResolveAmbiguousKind(
             "%r matches both %s; pick one" % (target, " and ".join(choices)),
             choices,
         )
     if not found:
-        raise ResolveNotFound(
+        raise sp_codex.ResolveNotFound(
             "no Claude session or Codex thread named %r; run `peers.py list`" % target
         )
     return found[0]
@@ -4143,7 +2474,7 @@ def resolve_typed(target, exclude=None):
 
 def read_buddy(owner):
     """The owner's buddy record, or None when absent or malformed."""
-    rec = sp_runtime.read_json(buddy_path(owner), None)
+    rec = sp_runtime.read_json(sp_storage.buddy_path(owner), None)
     if not isinstance(rec, dict):
         return None
     buddy = rec.get("buddy")
@@ -4203,13 +2534,13 @@ def expand_buddy(value, args, purpose):
 def _claude_status(uuid):
     status = {"name": None, "live": None, "registered": None, "shim_pid": None,
               "status": None, "paused": None}
-    records = [r for r in read_claude_records() if r.get("sessionId") == uuid]
-    states = [(r, record_liveness(r)) for r in records]
+    records = [r for r in sp_claude.read_claude_records() if r.get("sessionId") == uuid]
+    states = [(r, sp_claude.record_liveness(r)) for r in records]
     live = [r for r, state in states if state == "live"]
     if live:
         rec = live[0]
         status.update(live=True, name=rec.get("name"), status=rec.get("status"))
-        if socket_path_ok(rec.get("messagingSocketPath")):
+        if sp_claude.socket_path_ok(rec.get("messagingSocketPath")):
             status["route"] = "available"
         else:
             status["route"] = "unavailable: its socket is outside the allowlist"
@@ -4226,8 +2557,8 @@ def _codex_status(uuid, attach):
     status = {"name": None, "live": None, "registered": None, "shim_pid": None,
               "status": None, "paused": None}
     try:
-        thread = resolve_thread(uuid, require_live=False)
-    except ResolveError as exc:
+        thread = sp_codex.resolve_thread(uuid, require_live=False)
+    except sp_codex.ResolveError as exc:
         status["route"] = "unavailable: %s" % exc
         return status
     status.update(
@@ -4235,14 +2566,14 @@ def _codex_status(uuid, attach):
         live=thread.get("live"),
         registered=thread.get("registered"),
     )
-    pid = shim_pid(uuid)
+    pid = sp_lifecycle.shim_pid(uuid)
     if attach and pid is None and thread.get("live") is True:
         # Transient attach only: `up` would also reset the reply budget,
         # release held replies and register the thread persistently.
-        pid = attach_thread(uuid, verbose=False)
+        pid = sp_lifecycle.attach_thread(uuid, verbose=False)
     status["shim_pid"] = pid
     if pid:
-        shim_rec = sp_runtime.read_json(os.path.join(claude_sessions_dir(), "%d.json" % pid), None)
+        shim_rec = sp_runtime.read_json(os.path.join(sp_storage.claude_sessions_dir(), "%d.json" % pid), None)
         if isinstance(shim_rec, dict) and shim_rec.get("sessionId") == uuid:
             status["status"] = shim_rec.get("status")
     rollout = thread.get("rollout_path")
@@ -4309,7 +2640,7 @@ def _replies_left(rec):
     total = rec.get("replies")
     if isinstance(total, bool) or not isinstance(total, int) or total < 1:
         return None
-    state = sp_runtime.read_json(thread_state_path(rec["buddy"]["uuid"]), None)
+    state = sp_runtime.read_json(sp_storage.thread_state_path(rec["buddy"]["uuid"]), None)
     binding = state.get("binding") if isinstance(state, dict) else None
     if (
         isinstance(binding, dict)
@@ -4339,12 +2670,12 @@ def cmd_buddy(args):
     except ValueError as exc:
         sys.stderr.write("error: %s\n" % exc)
         return 2
-    path = buddy_path(owner)
+    path = sp_storage.buddy_path(owner)
     if action == "clear":
         try:
-            with owner_lock(owner["uuid"]):
+            with sp_storage.owner_lock(owner["uuid"]):
                 old = read_buddy(owner)
-                with _binding_locks(_revocable_thread(owner, old)):
+                with sp_storage._binding_locks(_revocable_thread(owner, old)):
                     # Revoke first: a failed revoke keeps the record, so clear
                     # can be retried.
                     try:
@@ -4361,7 +2692,7 @@ def cmd_buddy(args):
                     except FileNotFoundError:
                         print("no buddy was set")
                         return 0
-        except BindingLockTimeout as exc:
+        except sp_storage.BindingLockTimeout as exc:
             sys.stderr.write("error: %s; the buddy is still bound, retry\n" % exc)
             return 1
         print("buddy cleared")
@@ -4377,7 +2708,7 @@ def cmd_buddy(args):
             # No name given: look for a peer sharing this session's own name.
             try:
                 target = _resolve_typed_kind(owner["kind"], owner["uuid"]).get("name")
-            except ResolveError:
+            except sp_codex.ResolveError:
                 target = None
             if not target or sp_runtime.is_uuid(target):
                 sys.stderr.write(
@@ -4386,7 +2717,7 @@ def cmd_buddy(args):
                 return 1
         try:
             buddy = resolve_typed(target, exclude=owner["uuid"])
-        except ResolveNotFound as exc:
+        except sp_codex.ResolveNotFound as exc:
             if args.target is None:
                 sys.stderr.write(
                     "error: no other session is named %r; name the buddy\n" % target
@@ -4394,12 +2725,12 @@ def cmd_buddy(args):
             else:
                 sys.stderr.write("error: %s\n" % exc)
             return 1
-        except ResolveAmbiguousKind as exc:
+        except sp_codex.ResolveAmbiguousKind as exc:
             sys.stderr.write("error: %s. Retry with one of:\n" % exc)
             for choice in exc.choices:
                 sys.stderr.write("  %s\n" % _buddy_set_command(choice, args))
             return 1
-        except ResolveError as exc:
+        except sp_codex.ResolveError as exc:
             sys.stderr.write("error: %s\n" % exc)
             return 1
         if buddy["kind"] == owner["kind"] and buddy["uuid"] == owner["uuid"]:
@@ -4413,7 +2744,7 @@ def cmd_buddy(args):
             not explicit
             and owner["kind"] == "cc"
             and buddy["kind"] == "codex"
-            and shim_pid(buddy["uuid"])
+            and sp_lifecycle.shim_pid(buddy["uuid"])
         ):
             grant = sp_constants.BUDDY_REPLIES_DEFAULT
         if grant is not None:
@@ -4429,7 +2760,7 @@ def cmd_buddy(args):
                 )
                 grant = None
         try:
-            with owner_lock(owner["uuid"]):
+            with sp_storage.owner_lock(owner["uuid"]):
                 old = read_buddy(owner)
                 same = (
                     old is not None
@@ -4444,7 +2775,7 @@ def cmd_buddy(args):
                     locked.add(buddy["uuid"])
                 if not same and _revocable_thread(owner, old):
                     locked.add(old["buddy"]["uuid"])
-                with _binding_locks(*locked):
+                with sp_storage._binding_locks(*locked):
                     # The conflict check and every write below share the
                     # locks, so a competing owner cannot slip between check
                     # and publish.
@@ -4490,7 +2821,7 @@ def cmd_buddy(args):
                         sp_runtime.write_json_atomic(path, rec, mode=0o600)
                         if grant is not None:
                             sp_runtime.write_json_atomic(
-                                budget_binding_path(buddy["uuid"]),
+                                sp_storage.budget_binding_path(buddy["uuid"]),
                                 {
                                     "sid": owner["uuid"],
                                     "bind_id": bind_id,
@@ -4506,7 +2837,7 @@ def cmd_buddy(args):
                             % exc
                         )
                         return 1
-        except BindingLockTimeout as exc:
+        except sp_storage.BindingLockTimeout as exc:
             sys.stderr.write("error: %s; nothing was changed, retry\n" % exc)
             return 1
         _print_buddy(args, rec, buddy_status(buddy, attach=True))
@@ -4533,22 +2864,22 @@ def _check_buddy_replies(replies, owner, buddy, attach=True):
         )
     # The shim is attached here, outside the binding lock: a shim takes that
     # lock itself when it reads a marker.
-    pid = shim_pid(buddy["uuid"])
+    pid = sp_lifecycle.shim_pid(buddy["uuid"])
     if not pid and attach:
-        pid = attach_thread(buddy["uuid"], verbose=False)
+        pid = sp_lifecycle.attach_thread(buddy["uuid"], verbose=False)
     if not pid:
         return 1, (
             "no running shim for %s, so a reply total cannot be granted; start "
             "it (`peers.py buddy ping`) and bind again" % buddy["uuid"]
         )
-    if not shim_supports(buddy["uuid"], pid, "binding_allowance"):
+    if not sp_lifecycle.shim_supports(buddy["uuid"], pid, "binding_allowance"):
         return 1, (
             "cannot verify the running shim for %s (pid %d) supports buddy "
             "allowances; a shim started from an older peers.py never reads the "
             "grant, so the cap would stay %d. Restart it: `peers.py restart %s`, "
             "then bind again" % (buddy["uuid"], pid, sp_constants.REPLY_BUDGET, buddy["uuid"])
         )
-    if replies > sp_constants.BUDGET_ALLOW_MAX and not shim_supports(
+    if replies > sp_constants.BUDGET_ALLOW_MAX and not sp_lifecycle.shim_supports(
         buddy["uuid"], pid, "binding_allowance_max500"
     ):
         return 1, (
@@ -4569,19 +2900,19 @@ def _binding_conflict(owner, buddy):
     """
     tid = buddy["uuid"]
     holders = set()
-    marker = sp_runtime.read_json(budget_binding_path(tid), None)
+    marker = sp_runtime.read_json(sp_storage.budget_binding_path(tid), None)
     if isinstance(marker, dict) and isinstance(marker.get("sid"), str):
         holders.add(marker["sid"])
-    state = sp_runtime.read_json(thread_state_path(tid), None)
+    state = sp_runtime.read_json(sp_storage.thread_state_path(tid), None)
     binding = state.get("binding") if isinstance(state, dict) else None
     if isinstance(binding, dict) and isinstance(binding.get("sid"), str):
         holders.add(binding["sid"])
     try:
-        names = os.listdir(buddies_dir())
+        names = os.listdir(sp_storage.buddies_dir())
     except OSError:
         names = []
     for name in names:
-        rec = sp_runtime.read_json(os.path.join(buddies_dir(), name), None)
+        rec = sp_runtime.read_json(os.path.join(sp_storage.buddies_dir(), name), None)
         if not isinstance(rec, dict) or not rec.get("bind_id"):
             continue
         rec_buddy, rec_owner = rec.get("buddy"), rec.get("owner")
@@ -4623,7 +2954,7 @@ def _revoke_binding(owner, old):
     if _revocable_thread(owner, old) is None:
         return
     sp_runtime.write_json_atomic(
-        budget_binding_path(old["buddy"]["uuid"]),
+        sp_storage.budget_binding_path(old["buddy"]["uuid"]),
         {
             "sid": owner["uuid"],
             "bind_id": old["bind_id"],
@@ -4650,20 +2981,20 @@ def _owner_verified_gone(owner):
     """True only when the owner is PROVEN not live; unknown keeps the record."""
     if owner["kind"] == "cc":
         try:
-            os.listdir(claude_sessions_dir())
+            os.listdir(sp_storage.claude_sessions_dir())
         except FileNotFoundError:
             return True
         except OSError:
             return False
         states = [
-            record_liveness(r)
-            for r in read_claude_records()
+            sp_claude.record_liveness(r)
+            for r in sp_claude.read_claude_records()
             if r.get("sessionId") == owner["uuid"]
         ]
         return all(state == "dead" for state in states)
     try:
-        thread = resolve_thread(owner["uuid"], require_live=False)
-    except ResolveError:
+        thread = sp_codex.resolve_thread(owner["uuid"], require_live=False)
+    except sp_codex.ResolveError:
         return False
     return thread.get("live") is False
 
@@ -4674,7 +3005,7 @@ def gc_buddy_records(days=sp_constants.GC_DAYS_DEFAULT, dry_run=False, verbose=T
         raise ValueError("retention days must be zero or greater")
     cutoff = time.time() - days * 86400.0
     try:
-        names = sorted(os.listdir(buddies_dir()))
+        names = sorted(os.listdir(sp_storage.buddies_dir()))
     except OSError:
         return []
     removed = []
@@ -4685,7 +3016,7 @@ def gc_buddy_records(days=sp_constants.GC_DAYS_DEFAULT, dry_run=False, verbose=T
         ident = rest[: -len(".json")]
         if not sp_runtime.is_uuid(ident):
             continue
-        path = os.path.join(buddies_dir(), name)
+        path = os.path.join(sp_storage.buddies_dir(), name)
         try:
             if os.stat(path).st_mtime > cutoff:
                 continue
@@ -4719,7 +3050,7 @@ def cmd_gc(args):
         sys.stderr.write("error: %s\n" % exc)
         return 2
     buddies = gc_buddy_records(days=days, dry_run=args.dry_run)
-    requests = cleanup_expired_requests(dry_run=args.dry_run)
+    requests = sp_requests.cleanup_expired_requests(dry_run=args.dry_run)
     if not args.dry_run:
         topic_prune_all()
     for request_id in requests:
@@ -4743,7 +3074,7 @@ def cmd_session_hook(_args):
     source = payload.get("source", "unknown")
     session_id = payload.get("session_id")
     script = sp_runtime.entrypoint_path()
-    log_path = os.path.join(state_dir(), "session-hook.log")
+    log_path = os.path.join(sp_storage.state_dir(), "session-hook.log")
     try:
         command = [sys.executable, script, "hook-reconcile"]
         if (
@@ -4774,12 +3105,12 @@ def cmd_hook_reconcile(args):
         gc_bridge_state(days=days, verbose=False)
     except ValueError as exc:
         sp_runtime.log("GC skipped: %s" % exc)
-    cleanup_expired_requests()
-    reconcile(verbose=False)
+    sp_requests.cleanup_expired_requests()
+    sp_lifecycle.reconcile(verbose=False)
     if args.thread:
         deadline = time.time() + 10.0
         while time.time() < deadline:
-            if attach_thread(args.thread, verbose=False):
+            if sp_lifecycle.attach_thread(args.thread, verbose=False):
                 break
             time.sleep(0.25)
     return 0
@@ -4839,8 +3170,8 @@ def read_json_strict(path):
 
 
 def cmd_install_hook(args):
-    path = os.path.join(codex_home(), "hooks.json")
-    os.makedirs(codex_home(), exist_ok=True)
+    path = os.path.join(sp_storage.codex_home(), "hooks.json")
+    os.makedirs(sp_storage.codex_home(), exist_ok=True)
     status, data = read_json_strict(path)
     if status == "unreadable":
         # Never overwrite a file we could not read: the user's third-party
@@ -4992,7 +3323,7 @@ def unix_socket_probe(sock_dir):
 
 
 def cmd_doctor(_args):
-    warn_versions()
+    sp_diagnostics.warn_versions()
     installed_digest = sp_runtime.code_digest(sp_runtime.runtime_code_files())
     lines = []
 
@@ -5014,20 +3345,20 @@ def cmd_doctor(_args):
     add("ok" if codex_v else "fail", "codex on PATH")
     rc, _out, _err = sp_runtime.run_cmd(["lsof", "-v"], timeout=10)
     add("ok" if rc != 127 else "fail", "lsof on PATH (thread liveness needs it)")
-    _started, ps_error = proc_start_checked(os.getpid())
+    _started, ps_error = sp_process.proc_start_checked(os.getpid())
     add(
         "fail" if ps_error else "ok",
         "process-start probe%s"
         % (": unavailable (%s)" % ps_error if ps_error else ""),
     )
-    add("ok", "CLAUDE_CONFIG_DIR: %s" % claude_config_dir())
-    add("ok", "CODEX_HOME: %s" % codex_home())
-    if codex_sqlite_home() != codex_home():
-        add("ok", "codex sqlite_home: %s" % codex_sqlite_home())
+    add("ok", "CLAUDE_CONFIG_DIR: %s" % sp_storage.claude_config_dir())
+    add("ok", "CODEX_HOME: %s" % sp_storage.codex_home())
+    if sp_storage.codex_sqlite_home() != sp_storage.codex_home():
+        add("ok", "codex sqlite_home: %s" % sp_storage.codex_sqlite_home())
 
-    sock_dir = default_socket_dir()
+    sock_dir = sp_claude.default_socket_dir()
     add(
-        "ok" if dir_is_allowlisted(sock_dir) else "warn",
+        "ok" if sp_claude.dir_is_allowlisted(sock_dir) else "warn",
         "socket directory: %s%s"
         % (sock_dir, "" if os.path.isdir(sock_dir) else " (does not exist yet)"),
     )
@@ -5041,13 +3372,13 @@ def cmd_doctor(_args):
     else:
         add("warn", "Unix-socket bind not tested; socket directory is absent")
 
-    db = find_state_db()
+    db = sp_codex.find_state_db()
     add(
         "ok" if db else "warn",
         "Codex state database: %s"
         % (db or "none with a recognised `threads` schema (send by UUID only)"),
     )
-    threads, _ok = codex_threads()
+    threads, _ok = sp_codex.codex_threads()
     unverified_threads = [
         thread for thread in threads if thread.get("live") is None
     ]
@@ -5068,18 +3399,18 @@ def cmd_doctor(_args):
         )
 
     def running_shim(name, tid, pid):
-        status = shim_code_status(tid, pid, installed_digest)
+        status = sp_lifecycle.shim_code_status(tid, pid, installed_digest)
         detail = "; code %s" % status
         if status == "stale":
             detail += " (run peers.py restart %s)" % tid
         add("ok" if status == "current" else "warn", "%s: shim running (pid %d)%s" % (name, pid, detail))
 
-    registered = read_registered()
+    registered = sp_storage.read_registered()
     live_ids = {t["id"] for t in threads if t.get("live") is True}
     unknown_ids = {t["id"] for t in threads if t.get("live") is None}
     for tid in sorted(registered):
         name = registered[tid].get("name") or tid
-        pid = shim_pid(tid)
+        pid = sp_lifecycle.shim_pid(tid)
         if pid:
             running_shim(name, tid, pid)
         elif tid in live_ids:
@@ -5090,7 +3421,7 @@ def cmd_doctor(_args):
             add("ok", "%s: registered, thread not running" % name)
     for thread in threads:
         if thread["id"] not in registered:
-            pid = shim_pid(thread["id"])
+            pid = sp_lifecycle.shim_pid(thread["id"])
             if pid:
                 running_shim(thread.get("name") or thread["id"], thread["id"], pid)
     if not registered:
@@ -5107,7 +3438,7 @@ def cmd_doctor(_args):
             for t in threads
             if t.get("live") is True
             and t["id"] not in registered
-            and not shim_pid(t["id"])
+            and not sp_lifecycle.shim_pid(t["id"])
         ),
         key=lambda t: t["id"],
     ):
@@ -5117,14 +3448,14 @@ def cmd_doctor(_args):
             % (thread.get("name") or thread["id"], thread["id"]),
         )
 
-    hooks_path = os.path.join(codex_home(), "hooks.json")
+    hooks_path = os.path.join(sp_storage.codex_home(), "hooks.json")
     data = sp_runtime.read_json(hooks_path, None)
     if data is None:
         add("ok", "no %s (the SessionStart hook is optional)" % hooks_path)
     else:
         events, _root = _hooks_event_map(data)
         entries = events.get("SessionStart") or []
-        cfg = sp_config.read_toml_lite(codex_config_path())
+        cfg = sp_config.read_toml_lite(sp_storage.codex_config_path())
         found = False
         for i, entry in enumerate(entries):
             if not isinstance(entry, dict):
@@ -5187,7 +3518,7 @@ class TopicError(Exception):
 
 
 def topics_dir():
-    path = os.path.join(state_dir(), "topics")
+    path = os.path.join(sp_storage.state_dir(), "topics")
     os.makedirs(path, mode=0o700, exist_ok=True)
     os.chmod(path, 0o700)
     return path
@@ -5393,37 +3724,6 @@ def topic_prune_all():
             _topic_state(item["topic"], log_path, meta_path, time.time())
 
 
-def process_ancestors(pid=None, limit=64):
-    """Ancestor pids of ``pid`` (default: this process), nearest first, or
-    None when the process table cannot be read."""
-    rc, out, _err = sp_runtime.run_cmd(["ps", "-axo", "pid=,ppid="])
-    if rc != 0:
-        return None
-    parent = {}
-    for line in out.splitlines():
-        fields = line.split()
-        if len(fields) == 2 and fields[0].isdigit() and fields[1].isdigit():
-            parent[int(fields[0])] = int(fields[1])
-    current = os.getpid() if pid is None else pid
-    if current not in parent:
-        return None
-    chain = []
-    while len(chain) < limit:
-        current = parent.get(current)
-        if not current or current in chain:
-            break
-        chain.append(current)
-    return chain
-
-
-def _codex_holder_pid(thread_id):
-    threads, _schema_ok = codex_threads()
-    for thread in threads:
-        if thread.get("id") == thread_id:
-            return thread.get("holder_pid")
-    return None
-
-
 def topic_sender(args):
     """This session's identity for a post, or None (anonymous).
 
@@ -5438,21 +3738,21 @@ def topic_sender(args):
         return _topic_named(ident)
     claude = None
     sock = os.environ.get("CLAUDE_CODE_MESSAGING_SOCKET")
-    rec = claude_record_by_socket(sock) if sock else None
+    rec = sp_claude.claude_record_by_socket(sock) if sock else None
     if rec and sp_runtime.is_uuid(rec.get("sessionId")):
         claude = {"kind": "cc", "uuid": rec["sessionId"], "name": rec.get("name"),
                   "pid": rec.get("pid")}
     else:
         sid = os.environ.get("CLAUDE_CODE_SESSION_ID")
         if sp_runtime.is_uuid(sid):
-            matches = claude_record_by_target(sid)
+            matches = sp_claude.claude_record_by_target(sid)
             only = matches[0] if len(matches) == 1 else {}
             claude = {"kind": "cc", "uuid": sid, "name": only.get("name"),
                       "pid": only.get("pid")}
     tid = _thread_from_args(args)
     codex = _topic_named({"kind": "codex", "uuid": tid}) if tid else None
     if claude and codex:
-        owner = _nearest_owner(claude.get("pid"), _codex_holder_pid(tid))
+        owner = sp_process._nearest_owner(claude.get("pid"), sp_codex._codex_holder_pid(tid))
         if owner is None:
             raise TopicError(
                 "this environment names both Claude session %s and Codex thread "
@@ -5469,25 +3769,12 @@ def topic_sender(args):
     return chosen
 
 
-def _nearest_owner(claude_pid, codex_pid):
-    """``cc`` or ``codex``: whose process is the nearer ancestor, else None."""
-    ancestors = process_ancestors()
-    if not ancestors:
-        return None
-    for pid in ancestors:
-        if claude_pid and pid == claude_pid:
-            return "cc"
-        if codex_pid and pid == codex_pid:
-            return "codex"
-    return None
-
-
 def _topic_named(ident):
     if ident["kind"] == "cc":
-        matches = claude_record_by_target(ident["uuid"])
+        matches = sp_claude.claude_record_by_target(ident["uuid"])
         ident["name"] = matches[0].get("name") if len(matches) == 1 else None
     else:
-        entry = read_registered().get(ident["uuid"])
+        entry = sp_storage.read_registered().get(ident["uuid"])
         ident["name"] = entry.get("name") if isinstance(entry, dict) else None
     return ident
 
@@ -5725,18 +4012,18 @@ def build_parser():
 
     p_up = sub.add_parser("up", help="register a thread and start its shim")
     p_up.add_argument("target", nargs="?", metavar="name|uuid")
-    p_up.set_defaults(func=cmd_up)
+    p_up.set_defaults(func=sp_lifecycle.cmd_up)
 
     p_down = sub.add_parser("down", help="stop a shim; with a target, unregister it")
     p_down.add_argument("target", nargs="?", metavar="name|uuid")
-    p_down.set_defaults(func=cmd_down)
+    p_down.set_defaults(func=sp_lifecycle.cmd_down)
 
     p_restart = sub.add_parser(
         "restart",
         help="restart a shim on the current code, keeping its reply budget and grants",
     )
     p_restart.add_argument("target", metavar="name|uuid")
-    p_restart.set_defaults(func=cmd_restart)
+    p_restart.set_defaults(func=sp_lifecycle.cmd_restart)
 
     p_budget = sub.add_parser("budget", help="reply budget maintenance")
     bsub = p_budget.add_subparsers(dest="budget_cmd")
