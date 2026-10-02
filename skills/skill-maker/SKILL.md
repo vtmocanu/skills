@@ -96,7 +96,10 @@ Do not generalize the `.agents/skills` layout to `.agents/agents`. There is no s
 - Codex reads TOML custom-agent definitions from [`.codex/agents/`](https://learn.chatgpt.com/docs/agent-configuration/subagents); each file requires `name`, `description`, and `developer_instructions`.
 - OpenCode reads Markdown agent definitions from [`.opencode/agents/`](https://opencode.ai/docs/agents) with OpenCode-specific frontmatter.
 
-Do not symlink one agent-definition file across those directories. For a cross-agent role catalog, keep neutral source data such as `roles.yaml`, then generate and validate one native projection per runtime. The `agent-team` skill is intentionally Claude Code-native until it has those adapters.
+- [Cursor](https://cursor.com/docs/subagents) reads `.cursor/agents/` and also `.claude/agents/` and `.codex/agents/`, with same-name precedence; whether it shows a role generated into both of the latter twice is unverified.
+- None of Claude Code, Codex, OpenCode, Cursor or Gemini CLI reads `.agents/agents/`.
+
+Do not symlink one agent-definition file across those directories. For a cross-agent role catalog, keep neutral source data such as `roles.yaml`, then generate and validate one native projection per runtime. The `agent-team` skill is Claude Code-native until it has those adapters (vtmocanu/skills#43).
 
 ## Layout: folder skills
 
