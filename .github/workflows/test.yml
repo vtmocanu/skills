@@ -60,4 +60,6 @@ jobs:
       # Stdlib only. Temp roots, fake binaries, and fixture rollouts keep the
       # suite independent of installed agents and exercise each real runtime.
       - name: Test skills/session-peers/scripts/peers.py
-        run: python3 skills/session-peers/scripts/test_peers.py
+        run: |
+          python3 -c 'import sys; print(sys.version)'
+          python3 skills/session-peers/scripts/test_peers.py
