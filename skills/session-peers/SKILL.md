@@ -151,6 +151,9 @@ work while this session steers and reviews:
   `writable_roots`; drop the Xcode and SwiftPM entries for other toolchains.
   - List the worktree explicitly, and the main checkout's `.git` (a
     worktree's git data lives there).
+    Observed: `git update-ref` then worked inside the sandbox, but `git add`
+    could not create the worktree's index lock; the worker committed through
+    an approval-escalated command, staging explicit paths only.
   - Observed: a fork made inside a running Codex window inherits the parent
     thread's working directory, and `codex resume` refused ("open in another
     app") while the shared app-server daemon still held the thread after its
