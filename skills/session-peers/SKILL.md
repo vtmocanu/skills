@@ -133,6 +133,39 @@ work while this session steers and reviews:
   replies do not. When the user's message gives a number, grant it as the
   delegation starts (`peers.py buddy set NAME --replies N`), not after a reply
   is held.
+- **A Codex worker that builds and tests may need a widened sandbox.** On
+  macOS with Codex 0.160.0, the default `workspace-write` blocked loopback
+  sockets, a worktree outside the thread's working directory, and the home
+  build caches. Have the user launch it from a shell (`WT` is the worker's
+  worktree, `MAIN` the main checkout):
+
+  ```bash
+  cd "$WT"
+  codex -C "$WT" -s workspace-write \
+    -c 'sandbox_workspace_write.network_access=true' \
+    -c "sandbox_workspace_write.writable_roots=[\"$WT\", \"$MAIN/.git\", \"$(getconf DARWIN_USER_CACHE_DIR)\", \"$HOME/Library/Developer/Xcode/DerivedData\", \"$HOME/Library/Caches/org.swift.swiftpm\", \"$HOME/Library/org.swift.swiftpm\"]"
+  ```
+
+  To keep an existing thread's history, run `codex fork <thread-uuid>` with
+  the same flags instead of `codex`. Add any project cache to
+  `writable_roots`; drop the Xcode and SwiftPM entries for other toolchains.
+  - List the worktree explicitly, and the main checkout's `.git` (a
+    worktree's git data lives there).
+  - Observed: a fork made inside a running Codex window inherits the parent
+    thread's working directory, and `codex resume` refused ("open in another
+    app") while the shared app-server daemon still held the thread after its
+    window exited. A shell `codex fork` with `-C` avoided both.
+  - Observed: SwiftPM and Xcode package resolution start their own
+    `sandbox-exec`, which failed nested inside Codex's sandbox. The worker
+    passes `--disable-sandbox` (SwiftPM) or
+    `-IDEPackageSupportDisableManifestSandbox=YES
+    -IDEPackageSupportDisablePluginExecutionSandbox=YES` (xcodebuild); the
+    steerer runs wrappers that cannot take those flags outside any sandbox.
+  - Test the settings with `codex sandbox` and the same `-c` flags before the
+    user relaunches. Before any code, the worker probes loopback bind, a
+    write to each root, `git update-ref`, and one build and test, then
+    removes its probe files and refs.
+  - Record the project's exact command in its own tracked agent docs.
 
 **Longer loops.** For a user-requested review or brainstorm loop with a Codex
 buddy, raise the reply cap instead of resetting it every round:
