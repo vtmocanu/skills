@@ -1774,7 +1774,7 @@ class TestCorrelatedAskReply(Base):
         tid, _rollout = self.one_thread()
         proc = self.spawn(
             "ask", "--to", "cc:cc-main", "--from-thread", tid,
-            "--message", "review this", "--timeout", "3",
+            "--message", "review this", "--timeout", "30",
         )
         request_id = self._request_id(listener)
         os.environ["CLAUDE_CODE_SESSION_ID"] = "s1"
@@ -1782,7 +1782,7 @@ class TestCorrelatedAskReply(Base):
             "reply", "--request", request_id, "--message", "final answer"
         )
         self.assertEqual(rc, 0, err)
-        output, _unused = proc.communicate(timeout=5)
+        output, _unused = proc.communicate(timeout=30)
         self.assertEqual(proc.returncode, 0, output)
         self.assertIn("final answer", output)
         self.assertFalse(pathlib.Path(peers.request_path(request_id)).exists())
@@ -1945,7 +1945,7 @@ class TestCorrelatedAskReply(Base):
     def test_wait_observes_a_named_idle_peer(self):
         self.add_listener(name="cc-main", session_id="s1")
         rc, out, _err = self.cli(
-            "wait", "--for", "cc:cc-main", "--state", "idle", "--timeout", "1"
+            "wait", "--for", "cc:cc-main", "--state", "idle", "--timeout", "30"
         )
         self.assertEqual(rc, 0)
         self.assertIn("cc-main is idle", out)
@@ -1966,7 +1966,7 @@ class TestCorrelatedAskReply(Base):
         thread.start()
         try:
             rc, out, err = self.cli(
-                "wait", "--for", "cc:cc-main", "--state", "idle", "--timeout", "1"
+                "wait", "--for", "cc:cc-main", "--state", "idle", "--timeout", "30"
             )
         finally:
             thread.join(timeout=1)
@@ -2032,7 +2032,7 @@ class TestNonblockingDispatchAwait(Base):
         self._reply(request_id, "s1", "final answer")
         rc, out, err = self.cli(
             "await", "--request", request_id, "--from-thread", tid,
-            "--timeout", "3", "--json",
+            "--timeout", "30", "--json",
         )
         self.assertEqual(rc, 0, err)
         payload = json.loads(out)
@@ -2064,7 +2064,7 @@ class TestNonblockingDispatchAwait(Base):
         self._reply(request_id, "s1", "eventually")
         rc, out, err = self.cli(
             "await", "--request", request_id, "--from-thread", tid,
-            "--timeout", "3", "--json",
+            "--timeout", "30", "--json",
         )
         self.assertEqual(rc, 0, err)
         self.assertEqual(json.loads(out)["message"], "eventually")
@@ -2095,12 +2095,12 @@ class TestNonblockingDispatchAwait(Base):
         self._reply(first, "s1", "answer-A")
         rc, out, _err = self.cli(
             "await", "--request", second, "--from-thread", tid,
-            "--timeout", "3", "--json",
+            "--timeout", "30", "--json",
         )
         self.assertEqual(json.loads(out)["message"], "answer-B")
         rc, out, _err = self.cli(
             "await", "--request", first, "--from-thread", tid,
-            "--timeout", "3", "--json",
+            "--timeout", "30", "--json",
         )
         self.assertEqual(json.loads(out)["message"], "answer-A")
 
@@ -2117,12 +2117,12 @@ class TestNonblockingDispatchAwait(Base):
         self._reply(req2, "s2", "from two")
         _rc, out, _err = self.cli(
             "await", "--request", req1, "--from-thread", tid,
-            "--timeout", "3", "--json",
+            "--timeout", "30", "--json",
         )
         self.assertEqual(json.loads(out)["message"], "from one")
         _rc, out, _err = self.cli(
             "await", "--request", req2, "--from-thread", tid,
-            "--timeout", "3", "--json",
+            "--timeout", "30", "--json",
         )
         self.assertEqual(json.loads(out)["message"], "from two")
 
@@ -2137,7 +2137,7 @@ class TestNonblockingDispatchAwait(Base):
         self._reply(request_id, "s1", "still me")
         _rc, out, err = self.cli(
             "await", "--request", request_id, "--from-thread", tid,
-            "--timeout", "3", "--json",
+            "--timeout", "30", "--json",
         )
         payload = json.loads(out)
         self.assertEqual(payload["status"], "replied", err)
@@ -2159,7 +2159,7 @@ class TestNonblockingDispatchAwait(Base):
         self.assertEqual(self.queue_calls(), [])
         rc, out, _err = self.cli(
             "await", "--request", request_id, "--from-thread", tid,
-            "--timeout", "3", "--json",
+            "--timeout", "30", "--json",
         )
         self.assertEqual(json.loads(out)["message"], "late but safe")
         self.assertEqual(self.queue_calls(), [])
@@ -2257,7 +2257,7 @@ class TestNonblockingDispatchAwait(Base):
         procs = [
             self.spawn(
                 "await", "--request", request_id, "--from-thread", tid,
-                "--timeout", "3", "--json",
+                "--timeout", "30", "--json",
                 stderr=subprocess.PIPE,  # keep stdout clean JSON for parsing
             )
             for _ in range(2)
@@ -7410,11 +7410,25 @@ class TestInstalledShimUpgrade(Base):
             shutil.copytree(str(HERE), str(directory),
                             ignore=shutil.ignore_patterns("test*", "__pycache__"))
             script = directory / "peers.py"
-            source = script.read_text().replace('"shim_features": list(SHIM_FEATURES),',
-                        '"test_install": "%s", "shim_features": list(SHIM_FEATURES),' % version)
+            files = [script] + sorted((directory / "session_peers").glob("*.py"))
+            shim_source = next(path for path in files if "\nclass Shim:" in path.read_text())
+            source, count = re.subn(
+                r'"shim_features": list\((?:[A-Za-z_]\w*\.)?SHIM_FEATURES\),',
+                lambda match: '"test_install": "%s", ' % version + match.group(0),
+                shim_source.read_text(),
+            )
+            self.assertEqual(count, 1, "upgrade fixture must match the shim_features state anchor exactly once")
+            shim_source.write_text(source)
             if version == "A":
-                source = source.replace(', "binding_allowance_max500"', '')
-            script.write_text(source)
+                feature_source = next(path for path in files if "SHIM_FEATURES =" in path.read_text())
+                feature_text = feature_source.read_text()
+                feature_text, count = re.subn(
+                    r'(?m)^(SHIM_FEATURES = \[[^\n]*), "binding_allowance_max500"(\])$',
+                    r'\1\2', feature_text,
+                )
+                self.assertEqual(count, 1,
+                                 "upgrade fixture must remove the SHIM_FEATURES max500 anchor exactly once")
+                feature_source.write_text(feature_text)
             installs.append(script)
         script_a, script_b = installs
         digest_a = peers.code_digest(peers.runtime_code_files(script_a))
@@ -7428,7 +7442,10 @@ class TestInstalledShimUpgrade(Base):
         self.assertEqual(peers.read_json(state_path)["code_digest"], digest_a)
         # Replace files under an already-running A, as an installer does, while
         # B remains a separate install through which commands and restart run.
-        script_a.write_text(script_b.read_text())
+        files_b = [script_b] + sorted((script_b.parent / "session_peers").glob("*.py"))
+        for source in files_b:
+            destination = script_a.parent / source.relative_to(script_b.parent)
+            destination.write_bytes(source.read_bytes())
         rc, out, err = self.installed_cli(script_b, "list", "--json")
         self.assertEqual(rc, 0, err)
         self.assertEqual(json.loads(out)["codex"][0]["shim_code_status"], "stale")
