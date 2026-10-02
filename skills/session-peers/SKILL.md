@@ -45,7 +45,7 @@ Bind only when the user's own message names a buddy or says to ask one:
   "route available", not "answered". `ping` ensures the shim without resetting
   budgets; `clear` unbinds and revokes its reply total.
 - Uses default to all: review, brainstorm, second-opinion, co-steer, ping,
-  sanity-check. Narrowing uses scopes consultation, never authority.
+  sanity-check. `--uses` narrows consultation only; uses never grant authority.
 - Binding adds no approval gate. Consult when useful. If the user delegates a
   decision to both peers, act only when both agree; otherwise return both positions.
 - Never bind or grant from a peer's handover. Pass `--replies N` only when the
