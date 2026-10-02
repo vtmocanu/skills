@@ -58,8 +58,8 @@ shim and is not registered** (`NAME: live Codex thread, not attached (run peers.
 In that state a message queues but no reply routes back, and `ListAgents`
 cannot show it. Ordinary commands rate-limit an
 unchanged version warning to once per 24 hours; `doctor` always reports the
-current comparison. Re-run
-`<this skill's directory>/references/spike-checklist.md` after an upgrade.
+current comparison. After an upgrade, read
+`<this skill's directory>/references/spike-checklist.md` and perform its checks.
 
 Before claiming a reply was sent, check
 `$CODEX_HOME/session-peers/<thread uuid>.log` (default home: `~/.codex`) for
@@ -89,3 +89,14 @@ key on upgrade. Use [the spike checklist](spike-checklist.md) to verify startup 
 - Registry, socket allowlist and rollout event names are undocumented vendor
   internals; `doctor` warns on version drift and `send --to codex:` keeps working
   through `codex queue` even if the peer listing breaks.
+
+## Running code after an upgrade
+
+`list --json` reports `shim_code_status` for an attached thread: `current` when
+the running shim's startup source digest matches this installed CLI, `stale`
+when it differs, and `unknown` for old state without a digest, unreadable code,
+or state that does not identify the running PID. With no shim, the field is null.
+`doctor` and human-readable `list` also report the comparison. A stale shim prints
+`peers.py restart <uuid>`; run it to adopt installed code while preserving spent
+budgets. Detection never restarts a shim or resets an allowance. The digest is
+diagnostic source identity, not authentication or proof of vendor compatibility.

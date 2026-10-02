@@ -2286,6 +2286,56 @@ def peer_uid(conn):
     return None
 
 
+def runtime_code_files(script=None):
+    """Launcher and runtime modules, resolving installed skill symlinks."""
+    script = os.path.realpath(script or __file__)
+    root = os.path.dirname(script)
+    files = [script]
+    package = os.path.join(root, "session_peers")
+    if os.path.isdir(package):
+        for directory, subdirs, names in os.walk(package):
+            subdirs[:] = sorted(d for d in subdirs if d != "__pycache__")
+            files.extend(os.path.join(directory, n) for n in sorted(names) if n.endswith(".py"))
+    return files
+
+
+def code_digest(files):
+    """Source identity for diagnostics; None if the runtime cannot be read.
+
+    Relative names make identical installations and symlink projections agree.
+    Call once when a shim starts, never when it saves its state later.
+    """
+    if not files:
+        return None
+    paths = [os.path.realpath(path) for path in files]
+    root = os.path.dirname(paths[0])
+    digest = hashlib.sha256()
+    try:
+        for relative, path in sorted((os.path.relpath(path, root), path) for path in paths):
+            with open(path, "rb") as fh:
+                content = fh.read()
+            digest.update(relative.encode("utf-8") + b"\0")
+            digest.update(len(content).to_bytes(8, "big"))
+            digest.update(content)
+    except OSError:
+        return None
+    return digest.hexdigest()
+
+
+def shim_code_status(thread_id, pid, installed_digest):
+    """Unknown old/unreadable state is not evidence of stale running code."""
+    state = read_json(thread_state_path(thread_id), {})
+    if not isinstance(state, dict) or state.get("shim_pid") != pid:
+        return "unknown"
+    running = state.get("code_digest")
+    if not installed_digest or not isinstance(running, str) or not re.fullmatch(r"[0-9a-f]{64}", running):
+        return "unknown"
+    return "current" if running == installed_digest else "stale"
+
+
+LOADED_CODE_DIGEST = code_digest(runtime_code_files())
+
+
 class Shim:
     """One process standing in for one Codex thread inside Claude's fabric.
 
@@ -2295,6 +2345,7 @@ class Shim:
     """
 
     def __init__(self, thread):
+        self.code_digest = LOADED_CODE_DIGEST
         self.thread = thread
         self.thread_id = thread["id"]
         self.rollout_path = thread.get("rollout_path")
@@ -2606,6 +2657,7 @@ class Shim:
                 "name_since": int(self.name_since * 1000),
                 "shim_pid": os.getpid(),
                 "shim_features": list(SHIM_FEATURES),
+                "code_digest": self.code_digest,
                 "tail": self.tail.state(),
                 "processed_turns": list(self.processed_turns),
                 "budgets": self._bound(self.budgets),
@@ -3643,6 +3695,7 @@ class Shim:
 
 def cmd_list(args):
     warn_versions()
+    installed_digest = code_digest(runtime_code_files())
     all_records = read_claude_records()
     classified = [(record, record_liveness(record)) for record in all_records]
     records = [record for record, status in classified if status == "live"]
@@ -3690,6 +3743,7 @@ def cmd_list(args):
             "registered": thread["id"] in registered,
             "holder_pid": thread.get("holder_pid"),
             "shim_pid": pid,
+            "shim_code_status": shim_code_status(thread["id"], pid, installed_digest) if pid else None,
             # Liveness straight off the thread record: `true` for a codex[]
             # entry, `null` for a codex_unverified[] one. codex[] stays
             # live-only, so `false` never appears here (see the module docs).
@@ -3739,7 +3793,10 @@ def cmd_list(args):
                 t["id"],
                 "registered" if t["registered"] else "not registered",
                 t["holder_pid"],
-                ", shim %s" % t["shim_pid"] if t["shim_pid"] else "",
+                (", shim %s, code %s%s" % (
+                    t["shim_pid"], t["shim_code_status"],
+                    " (run peers.py restart %s)" % t["id"] if t["shim_code_status"] == "stale" else "",
+                )) if t["shim_pid"] else "",
             )
         )
     if codex_unverified:
@@ -5988,6 +6045,7 @@ def unix_socket_probe(sock_dir):
 
 def cmd_doctor(_args):
     warn_versions()
+    installed_digest = code_digest(runtime_code_files())
     lines = []
 
     def add(status, text):
@@ -6061,6 +6119,13 @@ def cmd_doctor(_args):
             % (len(stale), "" if len(stale) == 1 else "s"),
         )
 
+    def running_shim(name, tid, pid):
+        status = shim_code_status(tid, pid, installed_digest)
+        detail = "; code %s" % status
+        if status == "stale":
+            detail += " (run peers.py restart %s)" % tid
+        add("ok" if status == "current" else "warn", "%s: shim running (pid %d)%s" % (name, pid, detail))
+
     registered = read_registered()
     live_ids = {t["id"] for t in threads if t.get("live") is True}
     unknown_ids = {t["id"] for t in threads if t.get("live") is None}
@@ -6068,13 +6133,18 @@ def cmd_doctor(_args):
         name = registered[tid].get("name") or tid
         pid = shim_pid(tid)
         if pid:
-            add("ok", "%s: shim running (pid %d)" % (name, pid))
+            running_shim(name, tid, pid)
         elif tid in live_ids:
             add("warn", "%s: thread is live but no shim (run `peers.py up`)" % name)
         elif tid in unknown_ids:
             add("warn", "%s: thread liveness unverified" % name)
         else:
             add("ok", "%s: registered, thread not running" % name)
+    for thread in threads:
+        if thread["id"] not in registered:
+            pid = shim_pid(thread["id"])
+            if pid:
+                running_shim(thread.get("name") or thread["id"], thread["id"], pid)
     if not registered:
         add("warn", "no registered threads (run `peers.py up <name|uuid>`)")
     # A live thread that is neither registered nor shimmed is invisible to the
