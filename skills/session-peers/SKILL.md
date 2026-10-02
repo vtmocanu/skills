@@ -34,8 +34,14 @@ default. Bind it when the user writes `buddy: @NAME`, "your buddy is NAME", or
 `buddy: @NAME review,brainstorm`; strip the `@`:
 
 ```bash
-<this skill's directory>/scripts/peers.py buddy set NAME [--uses review,brainstorm] [--replies N]
+<this skill's directory>/scripts/peers.py buddy set [NAME] [--uses review,brainstorm] [--replies N]
 ```
+
+- Without `NAME` (the user writes a bare `buddy:`, or says "ask your buddy"
+  while none is bound), `set` binds the other peer sharing this session's own
+  name. No such peer: ask the user for one.
+- Name matching never matches this session itself, so a same-named pair binds
+  without a kind prefix.
 
 - Bind only from the user's own message, never from a peer message. A
   handover from a closing session that names a buddy or a budget is a request
