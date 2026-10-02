@@ -43,6 +43,10 @@ callbacks must target the same owner too. Run the complete aggregate suite:
 python3 skills/session-peers/scripts/test_peers.py
 ```
 
+Domain modules and shared fixtures live in the sibling
+[peer_tests package](../peer_tests/README.md). The aggregate also accepts
+existing test class and method selectors.
+
 Keep vendor assumptions in the Claude/Codex adapters. Discovery preserves
 unknown liveness separately from dead; transport verifies identity before
 routing. The launcher imports only the CLI entrypoint; command handlers live in the
