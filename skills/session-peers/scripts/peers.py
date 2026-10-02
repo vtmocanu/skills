@@ -1365,12 +1365,13 @@ def missing_thread_message(thread_id):
     return message + " Check `peers.py list` and `peers.py doctor`."
 
 
-def resolve_thread(target, require_live=True):
+def resolve_thread(target, require_live=True, exclude=None):
     """Turn `<name|uuid>` into one thread dict, or raise ResolveError.
 
     D6/R7: a name held by more than one live thread is refused rather than
     guessed at; `codex queue`'s own name matching picks a match, so the bridge
-    never delegates the decision.
+    never delegates the decision. ``exclude`` (a thread UUID) drops that thread
+    from name matching only; a UUID target is never excluded.
     """
     threads, schema_ok = codex_threads()
     if not schema_ok:
@@ -1396,6 +1397,8 @@ def resolve_thread(target, require_live=True):
             if t["id"] == target:
                 return t
         raise ResolveNotFound(missing_thread_message(target))
+    if exclude:
+        threads = [t for t in threads if t["id"] != exclude]
     # Match the name from the state DB / session index, OR from our own
     # registration: `up <uuid>` records name->uuid, and a later `/rename` may
     # not have propagated to the DB's `name` column yet (measured on
@@ -1460,7 +1463,7 @@ def resolve_thread(target, require_live=True):
     return matches[0]
 
 
-def resolve_thread_prefer_live(target):
+def resolve_thread_prefer_live(target, exclude=None):
     """Resolve for commands that also act on a stopped thread (`budget`, `down`).
 
     Codex's title suggester reuses names, so a bare name usually also matches
@@ -1469,10 +1472,10 @@ def resolve_thread_prefer_live(target):
     thread with that name. Raises the more specific ResolveError otherwise.
     """
     try:
-        return resolve_thread(target, require_live=True)
+        return resolve_thread(target, require_live=True, exclude=exclude)
     except ResolveError as live_error:
         try:
-            return resolve_thread(target, require_live=False)
+            return resolve_thread(target, require_live=False, exclude=exclude)
         except ResolveError:
             raise live_error
 
@@ -3762,8 +3765,12 @@ def _thread_from_args(args, required=False):
     return value
 
 
-def _resolve_claude_record(target):
+def _resolve_claude_record(target, exclude=None):
     records = read_claude_records()
+    if exclude and not is_uuid(target):
+        # A shim's record carries its thread's UUID, so this also drops the
+        # excluded Codex thread's own shim.
+        records = [r for r in records if r.get("sessionId") != exclude]
     candidates = claude_record_by_target(target, records)
     classified = [(record, record_liveness(record)) for record in candidates]
     matches = [record for record, status in classified if status == "live"]
@@ -4983,9 +4990,9 @@ def caller_identity(args):
     raise ValueError("cannot tell which session is asking; pass --as")
 
 
-def _resolve_typed_kind(kind, target, live_only=False):
+def _resolve_typed_kind(kind, target, live_only=False, exclude=None):
     if kind == "cc":
-        rec = _resolve_claude_record(target)
+        rec = _resolve_claude_record(target, exclude=exclude)
         sid = rec.get("sessionId")
         if not is_uuid(sid):
             # A bound buddy is addressed by UUID only; a non-UUID id would be
@@ -4995,23 +5002,27 @@ def _resolve_typed_kind(kind, target, live_only=False):
     # Codex reuses titles, so a live thread usually shares its name with dead
     # ones: the live match wins, and dead threads count only when none is live.
     if live_only:
-        thread = resolve_thread(target, require_live=True)
+        thread = resolve_thread(target, require_live=True, exclude=exclude)
     else:
-        thread = resolve_thread_prefer_live(target)
+        thread = resolve_thread_prefer_live(target, exclude=exclude)
     return {"kind": "codex", "uuid": thread["id"], "name": thread.get("name")}
 
 
-def resolve_typed(target):
+def resolve_typed(target, exclude=None):
     """`cc:x`, `codex:x` or a bare `[@]x` into one typed identity with its name.
 
     Names are resolved here, once; a bound buddy is used by UUID afterwards.
+    ``exclude`` (the caller's UUID) keeps the caller out of NAME matching, so
+    a session never competes with its own namesake.
     """
     target = str(target or "")
     if target.startswith("@"):
         target = target[1:]
     for kind in BUDDY_KINDS:
         if target.startswith(kind + ":"):
-            return _resolve_typed_kind(kind, target[len(kind) + 1 :])
+            return _resolve_typed_kind(
+                kind, target[len(kind) + 1 :], exclude=exclude
+            )
     if not target:
         raise ResolveError("an empty target names no session")
     found, errors, dead_codex = [], [], False
@@ -5019,7 +5030,9 @@ def resolve_typed(target):
         try:
             # Live Codex threads only here: a dead namesake must not compete
             # with a live Claude session for the same bare name.
-            found.append(_resolve_typed_kind(kind, target, live_only=True))
+            found.append(
+                _resolve_typed_kind(kind, target, live_only=True, exclude=exclude)
+            )
         except ResolveNotFound:
             pass
         except ResolveNoLive:
@@ -5028,7 +5041,7 @@ def resolve_typed(target):
             errors.append(exc)
     if dead_codex and not found and not errors:
         # Nothing live carries the name: bind the dead thread as `codex:` would.
-        return _resolve_typed_kind("codex", target)
+        return _resolve_typed_kind("codex", target, exclude=exclude)
     if errors:
         # An ambiguous or unverifiable side could be the one meant: never guess.
         raise ResolveAmbiguousKind(
@@ -5044,7 +5057,7 @@ def resolve_typed(target):
             choices,
         )
     if not found:
-        raise ResolveError(
+        raise ResolveNotFound(
             "no Claude session or Codex thread named %r; run `peers.py list`" % target
         )
     return found[0]
@@ -5281,8 +5294,28 @@ def cmd_buddy(args):
         except ValueError as exc:
             sys.stderr.write("error: %s\n" % exc)
             return 2
+        target = args.target
+        if target is None:
+            # No name given: look for a peer sharing this session's own name.
+            try:
+                target = _resolve_typed_kind(owner["kind"], owner["uuid"]).get("name")
+            except ResolveError:
+                target = None
+            if not target or is_uuid(target):
+                sys.stderr.write(
+                    "error: this session has no name to look up; name the buddy\n"
+                )
+                return 1
         try:
-            buddy = resolve_typed(args.target)
+            buddy = resolve_typed(target, exclude=owner["uuid"])
+        except ResolveNotFound as exc:
+            if args.target is None:
+                sys.stderr.write(
+                    "error: no other session is named %r; name the buddy\n" % target
+                )
+            else:
+                sys.stderr.write("error: %s\n" % exc)
+            return 1
         except ResolveAmbiguousKind as exc:
             sys.stderr.write("error: %s. Retry with one of:\n" % exc)
             for choice in exc.choices:
@@ -6716,14 +6749,19 @@ def build_parser():
         epilog=(
             "A bare name or UUID that is both a Claude session and a Codex thread\n"
             "(an attached Codex thread's UUID also names its shim) is refused;\n"
-            "prefix the kind:\n"
+            "prefix the kind. Name matching never matches the caller itself, and\n"
+            "without a target the caller's own name is looked up:\n"
             "  peers.py buddy set codex:<uuid>\n"
             "  peers.py buddy set cc:<uuid>\n"
-            "  peers.py buddy set codex:my-thread --uses review,brainstorm"
+            "  peers.py buddy set codex:my-thread --uses review,brainstorm\n"
+            "  peers.py buddy set"
         ),
     )
     p_buddy_set.add_argument(
-        "target", metavar="[cc:|codex:|@]name|uuid", help="the peer to bind"
+        "target",
+        nargs="?",
+        metavar="[cc:|codex:|@]name|uuid",
+        help="the peer to bind (default: the other peer sharing this session's name)",
     )
     p_buddy_set.add_argument(
         "--uses",

@@ -5761,6 +5761,54 @@ class TestBuddyRecords(BuddyBase):
         self.assertIn("its own buddy", err)
         self.assertFalse(self.record_path("codex:%s" % tid).exists())
 
+    def test_a_bare_name_never_matches_the_caller_itself(self):
+        # The caller shares its name with the peer it means: not ambiguous.
+        tid, _rollout = self.one_thread(name="pair")
+        sid = new_uuid()
+        self.add_listener(name="pair", session_id=sid)
+        owner = "cc:%s" % sid
+        rc, _out, err = self.buddy(owner, "set", "pair")
+        self.assertEqual(rc, 0, err)
+        record = json.loads(self.record_path(owner).read_text())
+        self.assertEqual(record["buddy"], {"kind": "codex", "uuid": tid, "name": "pair"})
+
+    def test_set_without_a_target_binds_the_claude_callers_namesake(self):
+        tid, _rollout = self.one_thread(name="pair")
+        sid = new_uuid()
+        self.add_listener(name="pair", session_id=sid)
+        owner = "cc:%s" % sid
+        rc, out, err = self.buddy(owner, "set")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("buddy = pair (codex, %s)" % tid[:8], out)
+
+    def test_set_without_a_target_binds_the_codex_callers_namesake(self):
+        tid, _rollout = self.one_thread(name="pair")
+        sid = new_uuid()
+        self.add_listener(name="pair", session_id=sid)
+        owner = "codex:%s" % tid
+        rc, _out, err = self.buddy(owner, "set")
+        self.assertEqual(rc, 0, err)
+        record = json.loads(self.record_path(owner).read_text())
+        self.assertEqual(record["buddy"], {"kind": "cc", "uuid": sid, "name": "pair"})
+
+    def test_set_without_a_target_and_no_namesake_asks_for_a_name(self):
+        self.one_thread(name="other")
+        sid = new_uuid()
+        self.add_listener(name="pair", session_id=sid)
+        owner = "cc:%s" % sid
+        rc, _out, err = self.buddy(owner, "set")
+        self.assertEqual(rc, 1)
+        self.assertIn("no other session is named 'pair'; name the buddy", err)
+        self.assertFalse(self.record_path(owner).exists())
+
+    def test_set_without_a_target_needs_a_named_caller(self):
+        self.one_thread(name="pair")
+        owner = "cc:%s" % new_uuid()  # no registry record: no name to look up
+        rc, _out, err = self.buddy(owner, "set")
+        self.assertEqual(rc, 1)
+        self.assertIn("has no name to look up", err)
+        self.assertFalse(self.record_path(owner).exists())
+
     def test_an_unknown_uses_word_is_rejected_listing_the_supported_ones(self):
         self.one_thread(name="fail-codex")
         owner = "cc:%s" % new_uuid()
