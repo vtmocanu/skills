@@ -8,6 +8,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- `session-peers`: finish bundled command modules behind the stable 59-line launcher, preserve help/hook output, expose public reply-budget boundary operations, and clarify topic-name versus payload limits.
 - `session-peers`: move shim ownership and delivery into its runtime module, compose reply-budget policy through shim-owned callbacks, and split inbound/turn-delivery orchestration while preserving existing locks, saved state, verification, deduplication, and successful-delivery accounting.
 - `session-peers`: isolate bridge storage, process probes, Claude/Codex discovery and transport, shim lifecycle, version diagnostics, and request mailbox helpers in the bundled runtime package without changing state or wire contracts.
 - `session-peers`: extract protocol, rollout, TOML config, constants, and runtime helpers into an eagerly loaded bundled package; retain the stable CLI and hook path, preserve saved state, and patch owning modules directly in tests. The launcher works with isolated Python import paths; reply envelopes use the canonical skill location when invoked through a symlink.

@@ -45,7 +45,7 @@ class ReplyBudget:
         # route names a socket that exists.
         self.release_after_start = False
 
-    def _configure_window(self):
+    def configure_window(self):
         self.reply_budget_window = sp_runtime._float_env(
             "SESSION_PEERS_REPLY_BUDGET_WINDOW",
             sp_constants.REPLY_BUDGET_WINDOW_DEFAULT,
@@ -66,7 +66,7 @@ class ReplyBudget:
             self.allowance = None
 
 
-    def _consume_budget_marker(self, initial=False):
+    def consume_reset(self, initial=False):
         path = sp_storage.budget_reset_path(self.owner.thread_id)
         if not os.path.exists(path):
             return
@@ -86,11 +86,11 @@ class ReplyBudget:
         sp_runtime.log("reply budget reset for thread %s" % self.owner.thread_id)
         # An explicit reset is the supervision signal the loop guard waits for,
         # so it also releases the reply the guard held back.
-        self._release_held()
+        self.release_held()
         self.owner._save_state()
 
 
-    def _expire_held(self, now=None):
+    def expire_held(self, now=None):
         """Purge held replies past the idle window from memory AND the state file."""
         if not self.held:
             return
@@ -109,7 +109,7 @@ class ReplyBudget:
         self.owner._save_state()
 
 
-    def _release_held(self):
+    def release_held(self):
         """Deliver each still-fresh held reply once; it opens the new sequence."""
         if not self.held:
             return
@@ -134,7 +134,7 @@ class ReplyBudget:
         return outcome
 
 
-    def _retry_held(self):
+    def retry_held(self):
         """Retry held replies whose release failed on a transient write error."""
         pending = [
             (sid, entry.get("release"))
@@ -146,7 +146,7 @@ class ReplyBudget:
         records = self._records()
         changed = False
         for sid, reason in pending:
-            if reason == "allow" and self.budgets.get(sid, 0) >= self._cap_for(sid):
+            if reason == "allow" and self.budgets.get(sid, 0) >= self.cap_for(sid):
                 # The allowance that released it is gone or spent.
                 self.held[sid].pop("release", None)
                 changed = True
@@ -187,7 +187,7 @@ class ReplyBudget:
         # An explicit reset opens a new sequence; an allowance continues the
         # current one, so the release counts toward its usage.
         self.budgets[sid] = 1 if new_sequence else self.budgets.get(sid, 0) + 1
-        self._spend_binding(sid)
+        self.spend_binding(sid)
         self.budget_sender_sid = sid
         self.budget_last_at = now
         sp_runtime.log(
@@ -221,7 +221,7 @@ class ReplyBudget:
         return -60.0 <= now - at <= self.reply_budget_window
 
 
-    def _cap_for(self, sid):
+    def cap_for(self, sid):
         """The consecutive-reply cap for one requesting session."""
         cap = sp_constants.REPLY_BUDGET
         if self.allowance and self.allowance.get("sid") == sid:
@@ -253,13 +253,13 @@ class ReplyBudget:
         return True
 
 
-    def _spend_binding(self, sid):
+    def spend_binding(self, sid):
         binding = self.binding
         if binding and binding["sid"] == sid and binding["spent"] < binding["total"]:
             binding["spent"] += 1
 
 
-    def _consume_budget_binding_marker(self, initial=False):
+    def consume_binding(self, initial=False):
         """Apply a `buddy set --replies` grant, or a `buddy clear`/rebind revoke."""
         path = sp_storage.budget_binding_path(self.owner.thread_id)
         if not os.path.exists(path):
@@ -309,9 +309,9 @@ class ReplyBudget:
             grant["total"] = max(current["total"], grant["total"])
             grant["spent"] = min(current["spent"], grant["total"])
         sid = grant["sid"]
-        old_cap = self._cap_for(sid)
+        old_cap = self.cap_for(sid)
         self.binding = grant
-        new_cap = self._cap_for(sid)
+        new_cap = self.cap_for(sid)
         sp_runtime.log(
             "buddy reply allowance for %s set to %d total (%d spent)"
             % (sid, grant["total"], grant["spent"])
@@ -327,7 +327,7 @@ class ReplyBudget:
         self.owner._save_state()
 
 
-    def _consume_budget_allow_marker(self):
+    def consume_allowance(self):
         """Apply a `budget allow` grant: a total, never additive or replenishing."""
         path = sp_storage.budget_allow_path(self.owner.thread_id)
         if not os.path.exists(path):
@@ -364,7 +364,7 @@ class ReplyBudget:
             )
             self.owner._save_state()  # an idle expiry above may have ended a sequence
             return
-        old_cap = self._cap_for(sid)
+        old_cap = self.cap_for(sid)
         # Bound: the grant continues sid's running sequence and ends with it.
         # Otherwise it waits, while fresh, for sid's next sequence to open it.
         self.allowance = {
@@ -373,7 +373,7 @@ class ReplyBudget:
             "at": granted_at,
             "bound": self.budget_sender_sid == sid,
         }
-        new_cap = self._cap_for(sid)
+        new_cap = self.cap_for(sid)
         sp_runtime.log(
             "reply allowance for %s set to %d (%d spent)"
             % (sid, new_cap, self.budgets.get(sid, 0))
@@ -386,7 +386,7 @@ class ReplyBudget:
         self.owner._save_state()
 
 
-    def _advance_budget_sequence(self, tag):
+    def advance_sequence(self, tag):
         """Reset the loop guard when the peer sequence is genuinely broken."""
         sender_sid = tag.get("sid") if isinstance(tag, dict) else None
         now = time.time()

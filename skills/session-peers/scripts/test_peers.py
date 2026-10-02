@@ -22,6 +22,7 @@ import contextlib
 import importlib.util
 import io
 import json
+import hashlib
 import os
 import pathlib
 import re
@@ -47,6 +48,7 @@ PEERS = HERE / "peers.py"
 spec = importlib.util.spec_from_file_location("peers", PEERS)
 peers = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(peers)
+from session_peers import buddy as sp_buddy, hooks as sp_hooks, maintenance as sp_maintenance, topics as sp_topics
 from session_peers import shim as sp_shim, budgets as sp_budgets
 from session_peers import claude as sp_claude, codex as sp_codex, diagnostics as sp_diagnostics, lifecycle as sp_lifecycle, process as sp_process, requests as sp_requests, storage as sp_storage
 from session_peers import config as sp_config, constants as sp_constants, protocol as sp_protocol, rollout as sp_rollout, runtime as sp_runtime
@@ -708,7 +710,7 @@ class TestFrames(Base):
 class TestPeerToken(Base):
     def test_auth_line_is_sent_when_a_key_file_exists(self):
         listener, rec = self.add_listener()
-        digest = peers.hashlib.sha256(
+        digest = hashlib.sha256(
             rec["messagingSocketPath"].encode("utf-8")
         ).hexdigest()
         (self.sessions / ("%d.%s.key" % (os.getpid(), digest))).write_text(
@@ -2522,7 +2524,7 @@ class TestGarbageCollection(Base):
         for path in shared_paths:
             os.utime(path, (old, old))
 
-        removed = peers.gc_bridge_state(days=7, verbose=False)
+        removed = sp_maintenance.gc_bridge_state(days=7, verbose=False)
         self.assertEqual(removed, [tid])
         self.assertNotIn(tid, sp_storage.read_registered())
         for path in (
@@ -2544,20 +2546,20 @@ class TestGarbageCollection(Base):
 
     def test_gc_dry_run_changes_nothing(self):
         tid, _rollout = self.make_stale_bridge_thread()
-        removed = peers.gc_bridge_state(days=7, dry_run=True, verbose=False)
+        removed = sp_maintenance.gc_bridge_state(days=7, dry_run=True, verbose=False)
         self.assertEqual(removed, [tid])
         self.assertIn(tid, sp_storage.read_registered())
         self.assertTrue(os.path.exists(sp_storage.thread_state_path(tid)))
 
     def test_gc_never_prunes_a_live_thread(self):
         tid, _rollout = self.make_stale_bridge_thread(live=True)
-        self.assertEqual(peers.gc_bridge_state(days=7, verbose=False), [])
+        self.assertEqual(sp_maintenance.gc_bridge_state(days=7, verbose=False), [])
         self.assertIn(tid, sp_storage.read_registered())
 
     def test_gc_uses_latest_activity_not_registration_age(self):
         tid, _rollout = self.make_stale_bridge_thread()
         pathlib.Path(sp_storage.thread_log_path(tid)).touch()
-        self.assertEqual(peers.gc_bridge_state(days=7, verbose=False), [])
+        self.assertEqual(sp_maintenance.gc_bridge_state(days=7, verbose=False), [])
         self.assertIn(tid, sp_storage.read_registered())
 
     def test_gc_rechecks_recency_after_taking_the_lock(self):
@@ -2572,7 +2574,7 @@ class TestGarbageCollection(Base):
 
         sp_storage.reconcile_lock = activity_during_lock
         try:
-            removed = peers.gc_bridge_state(days=7, verbose=False)
+            removed = sp_maintenance.gc_bridge_state(days=7, verbose=False)
         finally:
             sp_storage.reconcile_lock = original
         self.assertEqual(removed, [])
@@ -2584,14 +2586,14 @@ class TestGarbageCollection(Base):
             {tid: {"name": "old", "registered_at": "2020-01-01T00:00:00Z"}}
         )
         self.make_state_db([], filename="state_1.sqlite", good=False)
-        self.assertEqual(peers.gc_bridge_state(days=7, verbose=False), [])
+        self.assertEqual(sp_maintenance.gc_bridge_state(days=7, verbose=False), [])
         self.assertIn(tid, sp_storage.read_registered())
 
     def test_gc_fails_closed_when_lsof_is_blocked(self):
         tid, _rollout = self.make_stale_bridge_thread()
         os.environ["FAKE_LSOF_RC"] = "126"
         with contextlib.redirect_stderr(io.StringIO()):
-            removed = peers.gc_bridge_state(days=7, verbose=False)
+            removed = sp_maintenance.gc_bridge_state(days=7, verbose=False)
         self.assertEqual(removed, [])
         self.assertIn(tid, sp_storage.read_registered())
         self.assertTrue(os.path.exists(sp_storage.thread_state_path(tid)))
@@ -3176,7 +3178,7 @@ class TestShimReplies(ShimBase):
         shim.reply_budget.budget_notified = {"s1"}
         shim.reply_budget.budget_sender_sid = "s1"
         shim.reply_budget.budget_last_at = time.time()
-        shim.reply_budget._advance_budget_sequence({"sid": "s2"})  # an intervening peer
+        shim.reply_budget.advance_sequence({"sid": "s2"})  # an intervening peer
         self.assertEqual(shim.reply_budget.budgets, {})
         self.assertEqual(shim.reply_budget.budget_notified, set())
 
@@ -3218,7 +3220,7 @@ class TestShimReplies(ShimBase):
         time.sleep(0.2)
         self.assertEqual(self._reply_frames(listener), [])  # a notice may appear
         self.cli("budget", "reset", tid)
-        shim.reply_budget._consume_budget_marker()
+        shim.reply_budget.consume_reset()
         shim._handle_turn_end(self._turn(listener.path, turn_id="t-after"))
         self.assertTrue(wait_for(lambda: self._reply_frames(listener)))
 
@@ -3256,7 +3258,7 @@ class TestShimReplies(ShimBase):
         self.assertEqual(state["held"]["s1"]["mid"], "m%d" % (sp_constants.REPLY_BUDGET + 1))
         self.cli("budget", "reset", tid)
         with contextlib.redirect_stderr(io.StringIO()):
-            shim.reply_budget._consume_budget_marker()
+            shim.reply_budget.consume_reset()
         frames = wait_for(
             lambda: self._reply_frames(listener)
             if len(self._reply_frames(listener)) > sp_constants.REPLY_BUDGET
@@ -3282,10 +3284,10 @@ class TestShimReplies(ShimBase):
         with contextlib.redirect_stderr(io.StringIO()):
             shim._handle_turn_end(self._turn(listener.path, turn_id="t-held"))
             self.assertEqual(sorted(shim.reply_budget.held), ["s1"])
-            shim.reply_budget._advance_budget_sequence({"sid": "s2"})  # an intervening peer
+            shim.reply_budget.advance_sequence({"sid": "s2"})  # an intervening peer
             self.assertEqual(shim.reply_budget.held, {})
             self.cli("budget", "reset", tid)
-            shim.reply_budget._consume_budget_marker()
+            shim.reply_budget.consume_reset()
         time.sleep(0.2)
         self.assertEqual(self._reply_frames(listener), [])
 
@@ -3302,7 +3304,7 @@ class TestShimReplies(ShimBase):
         }
         self.cli("budget", "reset", tid)
         with contextlib.redirect_stderr(io.StringIO()):
-            shim.reply_budget._consume_budget_marker()
+            shim.reply_budget.consume_reset()
         time.sleep(0.2)
         self.assertEqual(self._reply_frames(listener), [])
         self.assertEqual(shim.reply_budget.held, {})
@@ -3316,7 +3318,7 @@ class TestShimReplies(ShimBase):
             "s1": {"text": "held answer", "mid": "m-h", "turn_id": "t-h", "at": time.time()}
         }
         self.cli("budget", "reset", tid)
-        shim.reply_budget._consume_budget_marker(initial=True)
+        shim.reply_budget.consume_reset(initial=True)
         time.sleep(0.2)
         self.assertEqual(self._reply_frames(listener), [])
         self.assertEqual(sorted(shim.reply_budget.held), ["s1"])
@@ -3337,7 +3339,7 @@ class TestShimReplies(ShimBase):
             "secret-ish answer", pathlib.Path(sp_storage.thread_state_path(tid)).read_text()
         )
         with contextlib.redirect_stderr(io.StringIO()):
-            shim.reply_budget._expire_held()
+            shim.reply_budget.expire_held()
         self.assertEqual(shim.reply_budget.held, {})
         self.assertNotIn(
             "secret-ish answer", pathlib.Path(sp_storage.thread_state_path(tid)).read_text()
@@ -3346,7 +3348,7 @@ class TestShimReplies(ShimBase):
     def test_a_fresh_held_reply_survives_the_purge(self):
         shim, _tid, _rollout = self.make_shim()
         shim.reply_budget.held = {"s1": {"text": "a", "mid": "m", "turn_id": "t", "at": time.time()}}
-        shim.reply_budget._expire_held()
+        shim.reply_budget.expire_held()
         self.assertEqual(sorted(shim.reply_budget.held), ["s1"])
 
     def test_a_legacy_lifetime_counter_starts_a_fresh_sequence(self):
@@ -4164,7 +4166,7 @@ class TestInstallHook(Base):
                         "hooks": [
                             {
                                 "type": "command",
-                                "command": peers.hook_command(),
+                                "command": sp_hooks.hook_command(),
                                 "timeout": 10,
                             },
                             {"type": "command", "command": "third-party"},
@@ -4180,7 +4182,7 @@ class TestInstallHook(Base):
             hook["command"] for entry in entries for hook in entry["hooks"]
         ]
         self.assertEqual(commands.count("third-party"), 1)
-        self.assertEqual(commands.count(peers.hook_command(auto_attach=True)), 1)
+        self.assertEqual(commands.count(sp_hooks.hook_command(auto_attach=True)), 1)
 
     def test_same_mode_shared_group_is_already_installed(self):
         grouped = {
@@ -4189,7 +4191,7 @@ class TestInstallHook(Base):
                     {
                         "matcher": "startup|resume",
                         "hooks": [
-                            peers.hook_entry()["hooks"][0],
+                            sp_hooks.hook_entry()["hooks"][0],
                             {"type": "command", "command": "third-party"},
                         ],
                     }
@@ -4205,7 +4207,7 @@ class TestInstallHook(Base):
         self.assertEqual(list(self.codex_dir.glob("hooks.json.*bak*")), [])
 
     def test_mode_upgrade_preserves_extra_entry_and_handler_keys(self):
-        entry = peers.hook_entry()
+        entry = sp_hooks.hook_entry()
         entry["description"] = "keep-entry"
         entry["hooks"][0]["statusMessage"] = "keep-handler"
         self.hooks_path().write_text(
@@ -4952,7 +4954,7 @@ class TestBudgetResetPersistence(ShimBase):
         shim._save_state()
         self.cli("budget", "reset", tid)
         with contextlib.redirect_stderr(io.StringIO()):
-            shim.reply_budget._consume_budget_marker()
+            shim.reply_budget.consume_reset()
         self.assertEqual(shim.reply_budget.budgets, {})
         self.assertIsNone(shim.reply_budget.budget_sender_sid)
         self.assertIsNone(shim.reply_budget.budget_last_at)
@@ -5252,7 +5254,7 @@ class TestHookCommandQuoting(Base):
     """P8: a path with a space would split into two arguments."""
 
     def test_a_path_with_a_space_is_quoted(self):
-        command = peers.hook_command("/Users/x/My Skills/peers.py")
+        command = sp_hooks.hook_command("/Users/x/My Skills/peers.py")
         self.assertEqual(
             command, "python3 '/Users/x/My Skills/peers.py' session-hook"
         )
@@ -5264,7 +5266,7 @@ class TestHookCommandQuoting(Base):
 
     def test_an_ordinary_path_is_left_unquoted(self):
         self.assertEqual(
-            peers.hook_command("/Users/x/peers.py"),
+            sp_hooks.hook_command("/Users/x/peers.py"),
             "python3 /Users/x/peers.py session-hook",
         )
 
@@ -5272,7 +5274,7 @@ class TestHookCommandQuoting(Base):
         self.cli("install-hook")
         data = json.loads((self.codex_dir / "hooks.json").read_text())
         command = data["hooks"]["SessionStart"][0]["hooks"][0]["command"]
-        self.assertEqual(command, peers.hook_command())
+        self.assertEqual(command, sp_hooks.hook_command())
 
 
 class TestRegistrationIsLocked(Base):
@@ -6052,7 +6054,7 @@ class TestBudgetAllow(BuddyBase):
         )
         self.assertEqual(rc, 0, err)
         with contextlib.redirect_stderr(io.StringIO()):
-            self.shim.reply_budget._consume_budget_allow_marker()
+            self.shim.reply_budget.consume_allowance()
 
     def exhaust(self, sid, listener, count=sp_constants.REPLY_BUDGET):
         self.shim.reply_budget.budgets[sid] = count
@@ -6061,8 +6063,8 @@ class TestBudgetAllow(BuddyBase):
 
     def test_the_cap_is_raised_for_that_session_only(self):
         self.allow(5)
-        self.assertEqual(self.shim.reply_budget._cap_for(self.sid_a), 5)
-        self.assertEqual(self.shim.reply_budget._cap_for(self.sid_b), sp_constants.REPLY_BUDGET)
+        self.assertEqual(self.shim.reply_budget.cap_for(self.sid_a), 5)
+        self.assertEqual(self.shim.reply_budget.cap_for(self.sid_b), sp_constants.REPLY_BUDGET)
         with contextlib.redirect_stderr(io.StringIO()):
             for i in range(6):
                 self.shim._handle_turn_end(self.turn(self.sid_a, self.listener_a, "t%d" % i))
@@ -6085,7 +6087,7 @@ class TestBudgetAllow(BuddyBase):
         time.sleep(0.2)
         self.assertEqual(self.replies(self.listener_a), [])
         self.allow(8)  # higher: raises the total, usage untouched
-        self.assertEqual(self.shim.reply_budget._cap_for(self.sid_a), 8)
+        self.assertEqual(self.shim.reply_budget.cap_for(self.sid_a), 8)
 
     def test_the_allowance_is_dropped_when_the_sequence_resets(self):
         # Granted during A's running sequence, the grant ends with it.
@@ -6094,25 +6096,25 @@ class TestBudgetAllow(BuddyBase):
             self.allow(5)
             self.assertTrue(self.shim.reply_budget.allowance["bound"])
             with contextlib.redirect_stderr(io.StringIO()):
-                self.shim.reply_budget._advance_budget_sequence(breaker)
+                self.shim.reply_budget.advance_sequence(breaker)
             self.assertIsNone(self.shim.reply_budget.allowance, breaker)
         self.exhaust(self.sid_a, self.listener_a)
         self.allow(5)
         self.shim.reply_budget.budget_last_at = time.time() - self.shim.reply_budget.reply_budget_window - 1
         with contextlib.redirect_stderr(io.StringIO()):
-            self.shim.reply_budget._advance_budget_sequence({"sid": self.sid_a})
+            self.shim.reply_budget.advance_sequence({"sid": self.sid_a})
         self.assertIsNone(self.shim.reply_budget.allowance)
         self.allow(5)
         self.cli("budget", "reset", self.tid)
         with contextlib.redirect_stderr(io.StringIO()):
-            self.shim.reply_budget._consume_budget_marker()
+            self.shim.reply_budget.consume_reset()
         self.assertIsNone(self.shim.reply_budget.allowance)
 
     def test_a_grant_made_before_the_sequence_survives_its_first_reply(self):
         self.allow(4)
         with contextlib.redirect_stderr(io.StringIO()):
-            self.shim.reply_budget._advance_budget_sequence({"sid": self.sid_a})
-        self.assertEqual(self.shim.reply_budget._cap_for(self.sid_a), 4)
+            self.shim.reply_budget.advance_sequence({"sid": self.sid_a})
+        self.assertEqual(self.shim.reply_budget.cap_for(self.sid_a), 4)
 
     def test_a_raising_grant_releases_the_held_reply_once(self):
         self.exhaust(self.sid_a, self.listener_a)
@@ -6198,10 +6200,10 @@ class TestBudgetAllow(BuddyBase):
         late.codex_version = "0.153.4"
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
-            late.reply_budget._consume_budget_allow_marker()
+            late.reply_budget.consume_allowance()
         self.assertFalse(os.path.exists(path))
         self.assertIsNone(late.reply_budget.allowance)
-        self.assertEqual(late.reply_budget._cap_for(self.sid_a), sp_constants.REPLY_BUDGET)
+        self.assertEqual(late.reply_budget.cap_for(self.sid_a), sp_constants.REPLY_BUDGET)
         self.assertIn("stale reply allowance", err.getvalue())
         with contextlib.redirect_stderr(io.StringIO()):
             for i in range(sp_constants.REPLY_BUDGET + 1):
@@ -6214,8 +6216,8 @@ class TestBudgetAllow(BuddyBase):
         granted = time.time() - 60
         self.write_marker({"sid": self.sid_a, "total": 5, "at": self.iso_ago(60)})
         with contextlib.redirect_stderr(io.StringIO()):
-            self.shim.reply_budget._consume_budget_allow_marker()
-        self.assertEqual(self.shim.reply_budget._cap_for(self.sid_a), 5)
+            self.shim.reply_budget.consume_allowance()
+        self.assertEqual(self.shim.reply_budget.cap_for(self.sid_a), 5)
         self.assertAlmostEqual(self.shim.reply_budget.allowance["at"], granted, delta=2)
 
     def test_a_pre_sequence_grant_expires_from_its_grant_time(self):
@@ -6224,11 +6226,11 @@ class TestBudgetAllow(BuddyBase):
         window = self.shim.reply_budget.reply_budget_window
         self.write_marker({"sid": self.sid_a, "total": 5, "at": self.iso_ago(window - 30)})
         with contextlib.redirect_stderr(io.StringIO()):
-            self.shim.reply_budget._consume_budget_allow_marker()
-        self.assertEqual(self.shim.reply_budget._cap_for(self.sid_a), 5)
+            self.shim.reply_budget.consume_allowance()
+        self.assertEqual(self.shim.reply_budget.cap_for(self.sid_a), 5)
         self.shim.reply_budget.allowance["at"] = time.time() - window - 1  # time passes
         with contextlib.redirect_stderr(io.StringIO()):
-            self.shim.reply_budget._advance_budget_sequence({"sid": self.sid_a})
+            self.shim.reply_budget.advance_sequence({"sid": self.sid_a})
         self.assertIsNone(self.shim.reply_budget.allowance)
 
     def test_a_malformed_grant_is_discarded(self):
@@ -6243,7 +6245,7 @@ class TestBudgetAllow(BuddyBase):
         ):
             path = self.write_marker(grant)
             with contextlib.redirect_stderr(io.StringIO()):
-                self.shim.reply_budget._consume_budget_allow_marker()
+                self.shim.reply_budget.consume_allowance()
             self.assertFalse(os.path.exists(path), grant)
             self.assertIsNone(self.shim.reply_budget.allowance, grant)
 
@@ -6276,7 +6278,7 @@ class TestBudgetAllow(BuddyBase):
         wait_for(lambda: len(self.replies(self.listener_a)) >= 5)
         time.sleep(0.2)
         self.assertEqual(len(self.replies(self.listener_a)), 5)
-        self.assertEqual(self.shim.reply_budget._cap_for(self.sid_a), 5)
+        self.assertEqual(self.shim.reply_budget.cap_for(self.sid_a), 5)
         self.assertTrue(self.shim.reply_budget.allowance["bound"])
         self.assertEqual(sorted(self.shim.reply_budget.held), [self.sid_a])
 
@@ -6319,7 +6321,7 @@ class TestBudgetAllow(BuddyBase):
         wait_for(lambda: len(self.replies(self.listener_a)) >= 10)
         time.sleep(0.2)
         self.assertEqual(len(self.replies(self.listener_a)), 10)
-        self.assertEqual(self.shim.reply_budget._cap_for(self.sid_a), 5)
+        self.assertEqual(self.shim.reply_budget.cap_for(self.sid_a), 5)
         self.assertEqual(sorted(self.shim.reply_budget.held), [self.sid_a])
 
     def test_an_expired_sequence_does_not_revive_its_own_grant(self):
@@ -6329,7 +6331,7 @@ class TestBudgetAllow(BuddyBase):
         self.age_sequence()
         self.run_a(1, "new")
         self.assertIsNone(self.shim.reply_budget.allowance)
-        self.assertEqual(self.shim.reply_budget._cap_for(self.sid_a), sp_constants.REPLY_BUDGET)
+        self.assertEqual(self.shim.reply_budget.cap_for(self.sid_a), sp_constants.REPLY_BUDGET)
 
     def test_a_spent_or_stale_waiting_grant_is_not_revived(self):
         # Spent: A's sequence ran under the grant, then ended; A comes back.
@@ -6337,21 +6339,21 @@ class TestBudgetAllow(BuddyBase):
             self.shim._handle_turn_end(self.turn(self.sid_b, self.listener_b, "b1"))
         self.allow(5)
         with contextlib.redirect_stderr(io.StringIO()):
-            self.shim.reply_budget._advance_budget_sequence({"sid": self.sid_a})
-            self.shim.reply_budget._advance_budget_sequence({"sid": self.sid_b})
+            self.shim.reply_budget.advance_sequence({"sid": self.sid_a})
+            self.shim.reply_budget.advance_sequence({"sid": self.sid_b})
             self.assertIsNone(self.shim.reply_budget.allowance)
-            self.shim.reply_budget._advance_budget_sequence({"sid": self.sid_a})
-        self.assertEqual(self.shim.reply_budget._cap_for(self.sid_a), sp_constants.REPLY_BUDGET)
+            self.shim.reply_budget.advance_sequence({"sid": self.sid_a})
+        self.assertEqual(self.shim.reply_budget.cap_for(self.sid_a), sp_constants.REPLY_BUDGET)
         # Stale: granted while B held the sequence, A starts after the window.
         with contextlib.redirect_stderr(io.StringIO()):
-            self.shim.reply_budget._advance_budget_sequence({"sid": self.sid_b})
+            self.shim.reply_budget.advance_sequence({"sid": self.sid_b})
         self.allow(5)
         self.assertFalse(self.shim.reply_budget.allowance["bound"])
         self.shim.reply_budget.allowance["at"] = time.time() - self.shim.reply_budget.reply_budget_window - 1
         with contextlib.redirect_stderr(io.StringIO()):
-            self.shim.reply_budget._advance_budget_sequence({"sid": self.sid_a})
+            self.shim.reply_budget.advance_sequence({"sid": self.sid_a})
         self.assertIsNone(self.shim.reply_budget.allowance)
-        self.assertEqual(self.shim.reply_budget._cap_for(self.sid_a), sp_constants.REPLY_BUDGET)
+        self.assertEqual(self.shim.reply_budget.cap_for(self.sid_a), sp_constants.REPLY_BUDGET)
 
     def test_a_held_reply_survives_a_failed_release_and_is_delivered_once(self):
         self.exhaust(self.sid_a, self.listener_a)
@@ -6368,15 +6370,15 @@ class TestBudgetAllow(BuddyBase):
             self.assertEqual(self.shim.reply_budget.held[self.sid_a]["release"], "allow")
             self.assertEqual(self.shim.reply_budget.budgets[self.sid_a], sp_constants.REPLY_BUDGET)
             with contextlib.redirect_stderr(io.StringIO()):
-                self.shim.reply_budget._retry_held()  # still down: kept, uncounted
+                self.shim.reply_budget.retry_held()  # still down: kept, uncounted
             self.assertEqual(self.shim.reply_budget.budgets[self.sid_a], sp_constants.REPLY_BUDGET)
             state = sp_runtime.read_json(sp_storage.thread_state_path(self.tid))
             self.assertEqual(state["held"][self.sid_a]["release"], "allow")
         finally:
             sp_claude.deliver_to_record = saved
         with contextlib.redirect_stderr(io.StringIO()):
-            self.shim.reply_budget._retry_held()  # the route recovered
-            self.shim.reply_budget._retry_held()
+            self.shim.reply_budget.retry_held()  # the route recovered
+            self.shim.reply_budget.retry_held()
         frames = wait_for(lambda: self.replies(self.listener_a))
         time.sleep(0.2)
         self.assertEqual(len(self.replies(self.listener_a)), 1)
@@ -6395,12 +6397,12 @@ class TestBudgetAllow(BuddyBase):
         try:
             self.cli("budget", "reset", self.tid)
             with contextlib.redirect_stderr(io.StringIO()):
-                self.shim.reply_budget._consume_budget_marker()
+                self.shim.reply_budget.consume_reset()
         finally:
             sp_claude.deliver_to_record = saved
         self.assertEqual(self.shim.reply_budget.held[self.sid_a]["release"], "reset")
         with contextlib.redirect_stderr(io.StringIO()):
-            self.shim.reply_budget._retry_held()
+            self.shim.reply_budget.retry_held()
         self.assertTrue(wait_for(lambda: self.replies(self.listener_a)))
         self.assertEqual(self.shim.reply_budget.held, {})
         self.assertEqual(self.shim.reply_budget.budgets[self.sid_a], 1)
@@ -6512,30 +6514,30 @@ class TestBuddyGarbageCollection(BuddyBase):
 
     def test_a_recent_record_is_kept_even_when_the_owner_is_gone(self):
         path = self.write_buddy("cc:%s" % new_uuid(), age_days=1)
-        self.assertEqual(peers.gc_buddy_records(days=7, verbose=False), [])
+        self.assertEqual(sp_maintenance.gc_buddy_records(days=7, verbose=False), [])
         self.assertTrue(path.exists())
 
     def test_an_unverified_or_live_claude_owner_keeps_its_record(self):
         sid = new_uuid()
         self.add_listener(name="cc-owner", session_id=sid)
         path = self.write_buddy("cc:%s" % sid)
-        self.assertEqual(peers.gc_buddy_records(days=7, verbose=False), [])
+        self.assertEqual(sp_maintenance.gc_buddy_records(days=7, verbose=False), [])
         os.environ["FAKE_PS_RC"] = "126"
-        self.assertEqual(peers.gc_buddy_records(days=7, verbose=False), [])
+        self.assertEqual(sp_maintenance.gc_buddy_records(days=7, verbose=False), [])
         self.assertTrue(path.exists())
 
     def test_a_codex_owner_is_pruned_only_when_verified_not_live(self):
         tid, _rollout = self.one_thread(name="owner-codex")
         path = self.write_buddy("codex:%s" % tid)
-        self.assertEqual(peers.gc_buddy_records(days=7, verbose=False), [])  # live
+        self.assertEqual(sp_maintenance.gc_buddy_records(days=7, verbose=False), [])  # live
         os.environ["FAKE_LSOF_RC"] = "126"
         with contextlib.redirect_stderr(io.StringIO()):
-            self.assertEqual(peers.gc_buddy_records(days=7, verbose=False), [])
+            self.assertEqual(sp_maintenance.gc_buddy_records(days=7, verbose=False), [])
         self.assertTrue(path.exists())
         del os.environ["FAKE_LSOF_RC"]
         unknown = self.write_buddy("codex:%s" % new_uuid())  # not in the DB
         self.clear_holders()
-        removed = peers.gc_buddy_records(days=7, verbose=False)
+        removed = sp_maintenance.gc_buddy_records(days=7, verbose=False)
         self.assertEqual(removed, [path.name])
         self.assertTrue(unknown.exists())
 
@@ -6548,7 +6550,7 @@ class TestBuddyGarbageCollection(BuddyBase):
         marker = pathlib.Path(sp_storage.budget_allow_path(tid))
         marker.write_text("{}")
         os.utime(str(marker), (old, old))
-        self.assertEqual(peers.gc_bridge_state(days=7, verbose=False), [tid])
+        self.assertEqual(sp_maintenance.gc_bridge_state(days=7, verbose=False), [tid])
         self.assertFalse(marker.exists())
 
 
@@ -6690,9 +6692,9 @@ class TestTopics(Base):
     def test_concurrent_posts_from_many_processes_get_unique_monotonic_seqs(self):
         writers, each = 6, 15
         script = (
-            "import sys; sys.path.insert(0, %r); import peers\n"
+            "import sys; sys.path.insert(0, %r); from session_peers import topics\n"
             "for i in range(%d):\n"
-            "    peers.topic_post(%r, {'kind': 'cc', 'uuid': sys.argv[1]}, text=str(i))\n"
+            "    topics.topic_post(%r, {'kind': 'cc', 'uuid': sys.argv[1]}, text=str(i))\n"
             % (str(PEERS.parent), each, self.TOPIC)
         )
         procs = [
@@ -6736,7 +6738,7 @@ class TestTopics(Base):
         self.make_state_db([])
         rc, _out, err = self.cli("gc")
         self.assertEqual(rc, 0, err)
-        log_path, meta_path, _lock = peers._topic_paths(self.TOPIC)
+        log_path, meta_path, _lock = sp_topics._topic_paths(self.TOPIC)
         self.assertEqual(pathlib.Path(log_path).read_text(), "")
         self.assertEqual(sp_runtime.read_json(meta_path)["next_seq"], 2)
 
@@ -6745,7 +6747,7 @@ class TestTopics(Base):
             rc, _out, err = self.post("--message", "x", "--as", "cc:%s" % new_uuid(), topic=topic)
             self.assertEqual(rc, 0, err)
             self.assertEqual(self.tail(topic=topic)["entries"][0]["topic"], topic)
-        topics = pathlib.Path(peers.topics_dir())
+        topics = pathlib.Path(sp_topics.topics_dir())
         for path in self.root.rglob("*"):
             if path.is_file() and path.suffix in (".jsonl", ".lock") or path.name.endswith(".meta.json"):
                 self.assertEqual(path.parent, topics, path)
@@ -6762,7 +6764,7 @@ class TestTopics(Base):
         rc, _out, err = self.post("--message", "x", "--kind", "bad kind", "--as", "cc:%s" % new_uuid())
         self.assertEqual(rc, 2)
         self.assertIn("--kind", err)
-        self.assertFalse(os.listdir(peers.topics_dir()))
+        self.assertFalse(os.listdir(sp_topics.topics_dir()))
 
     def test_oversize_and_invalid_utf8_entries_are_refused(self):
         big = self.root / "big.txt"
@@ -6824,8 +6826,8 @@ class TestRestartAndBuddyReplies(BuddyBase):
 
     def consume(self, shim):
         with contextlib.redirect_stderr(io.StringIO()):
-            shim.reply_budget._consume_budget_allow_marker()
-            shim.reply_budget._consume_budget_binding_marker()
+            shim.reply_budget.consume_allowance()
+            shim.reply_budget.consume_binding()
 
     def grant(self, replies):
         rc, _out, err = self.cli(
@@ -6875,7 +6877,7 @@ class TestRestartAndBuddyReplies(BuddyBase):
         restarted = self.new_shim()
         self.assertEqual(restarted.reply_budget.allowance["total"], 5)
         self.assertEqual(restarted.reply_budget.budgets[self.sid_a], 2)
-        self.assertEqual(restarted.reply_budget._cap_for(self.sid_a), 5)
+        self.assertEqual(restarted.reply_budget.cap_for(self.sid_a), 5)
         self.deliver(restarted, self.sid_a, self.listener_a, 4, prefix="r")
         wait_for(lambda: len(self.replies(self.listener_a)) >= 5)
         time.sleep(0.2)
@@ -6894,7 +6896,7 @@ class TestRestartAndBuddyReplies(BuddyBase):
         self.assertEqual(self.shim.reply_budget.allowance["bound"], True)
         restarted = self.new_shim()
         self.assertIsNone(restarted.reply_budget.allowance)
-        self.assertEqual(restarted.reply_budget._cap_for(self.sid_a), sp_constants.REPLY_BUDGET)
+        self.assertEqual(restarted.reply_budget.cap_for(self.sid_a), sp_constants.REPLY_BUDGET)
         # A grant that never saw its sequence expires from its grant time.
         self.shim.reply_budget.allowance = {
             "sid": self.sid_a, "total": 5, "bound": False,
@@ -6914,7 +6916,7 @@ class TestRestartAndBuddyReplies(BuddyBase):
         self.assertEqual(restarted.reply_budget.allowance["total"], 5)
         self.assertEqual(self.cli("budget", "reset", self.tid)[0], 0)
         with contextlib.redirect_stderr(io.StringIO()):
-            restarted.reply_budget._consume_budget_marker()
+            restarted.reply_budget.consume_reset()
         self.assertIsNone(restarted.reply_budget.allowance)
         self.assertEqual(restarted.reply_budget.budgets, {})
         # `up` writes the same marker, so a shim that starts after it drops it.
@@ -6928,7 +6930,7 @@ class TestRestartAndBuddyReplies(BuddyBase):
             sp_lifecycle.reconcile = saved
         self.assertTrue(os.path.exists(sp_storage.budget_reset_path(self.tid)))
         with contextlib.redirect_stderr(io.StringIO()):
-            self.new_shim().reply_budget._consume_budget_marker(initial=True)
+            self.new_shim().reply_budget.consume_reset(initial=True)
 
     # -- A5: buddy set --replies ----------------------------------------
 
@@ -6942,8 +6944,8 @@ class TestRestartAndBuddyReplies(BuddyBase):
             json.loads(self.record_path(self.owner).read_text())["replies"], default
         )
         self.consume(self.shim)
-        self.assertEqual(self.shim.reply_budget._cap_for(self.sid_a), default)
-        self.assertEqual(self.shim.reply_budget._cap_for(self.sid_b), sp_constants.REPLY_BUDGET)
+        self.assertEqual(self.shim.reply_budget.cap_for(self.sid_a), default)
+        self.assertEqual(self.shim.reply_budget.cap_for(self.sid_b), sp_constants.REPLY_BUDGET)
 
     def test_the_default_total_never_attaches_a_shim_itself(self):
         calls = []
@@ -6989,7 +6991,7 @@ class TestRestartAndBuddyReplies(BuddyBase):
         self.assertIn("replies left: %d of %d" % (top, top), out)
         self.consume(self.shim)
         self.assertEqual(self.shim.reply_budget.binding["total"], top)
-        self.assertEqual(self.shim.reply_budget._cap_for(self.sid_a), top)
+        self.assertEqual(self.shim.reply_budget.cap_for(self.sid_a), top)
         self.assertEqual(self.new_shim().reply_budget.binding["total"], top)
 
     def test_a_default_bind_on_a_buddy_another_owner_holds_warns_and_binds(self):
@@ -7010,8 +7012,8 @@ class TestRestartAndBuddyReplies(BuddyBase):
         self.assertEqual(rc, 0, err)
         self.assertIn("replies left: 6 of 6", out)
         self.consume(self.shim)
-        self.assertEqual(self.shim.reply_budget._cap_for(self.sid_a), 6)
-        self.assertEqual(self.shim.reply_budget._cap_for(self.sid_b), sp_constants.REPLY_BUDGET)
+        self.assertEqual(self.shim.reply_budget.cap_for(self.sid_a), 6)
+        self.assertEqual(self.shim.reply_budget.cap_for(self.sid_b), sp_constants.REPLY_BUDGET)
         self.deliver(self.shim, self.sid_a, self.listener_a, 2, prefix="a")
         self.deliver(self.shim, self.sid_b, self.listener_b, 1, prefix="b")  # new sequence
         self.assertEqual(self.shim.reply_budget.binding["spent"], 2)  # B's reply spent nothing
@@ -7024,8 +7026,8 @@ class TestRestartAndBuddyReplies(BuddyBase):
         self.assertEqual(restarted.reply_budget.binding["spent"], 6)
         self.assertEqual(sorted(restarted.reply_budget.held), [self.sid_a])
         # A later sequence gets only the default cap: nothing is replenished.
-        restarted.reply_budget._advance_budget_sequence({"sid": self.sid_b})
-        self.assertEqual(restarted.reply_budget._cap_for(self.sid_a), sp_constants.REPLY_BUDGET)
+        restarted.reply_budget.advance_sequence({"sid": self.sid_b})
+        self.assertEqual(restarted.reply_budget.cap_for(self.sid_a), sp_constants.REPLY_BUDGET)
         # Re-binding the same buddy keeps the spent count and the higher total.
         for again in ("6", "3"):
             self.assertEqual(self.bind("--replies", again)[0], 0)
@@ -7034,7 +7036,7 @@ class TestRestartAndBuddyReplies(BuddyBase):
         # An explicit reset and `up` leave the bound total alone.
         self.assertEqual(self.cli("budget", "reset", self.tid)[0], 0)
         with contextlib.redirect_stderr(io.StringIO()):
-            restarted.reply_budget._consume_budget_marker()
+            restarted.reply_budget.consume_reset()
         self.assertEqual(restarted.reply_budget.binding["spent"], 6)
         rc, out, _err = self.buddy(self.owner, "show")
         self.assertIn("replies left: 0 of 6", out)
@@ -7045,7 +7047,7 @@ class TestRestartAndBuddyReplies(BuddyBase):
         self.assertEqual(self.buddy(self.owner, "clear")[0], 0)
         self.consume(self.shim)
         self.assertIsNone(self.shim.reply_budget.binding)
-        self.assertEqual(self.shim.reply_budget._cap_for(self.sid_a), sp_constants.REPLY_BUDGET)
+        self.assertEqual(self.shim.reply_budget.cap_for(self.sid_a), sp_constants.REPLY_BUDGET)
         self.assertIsNone(self.new_shim().reply_budget.binding)
         # Cleared before the shim ever polled: the revoke replaces the grant.
         self.assertEqual(self.bind("--replies", "4")[0], 0)
@@ -7123,7 +7125,7 @@ class TestRestartAndBuddyReplies(BuddyBase):
             buddy_cmd="set", as_identity=owner, target="codex:%s" % self.tid,
             uses=None, replies=5, json=False,
         )
-        results[owner] = peers.cmd_buddy(args)
+        results[owner] = sp_buddy.cmd_buddy(args)
 
     def test_two_owners_binding_at_once_yield_exactly_one_binding(self):
         import threading
@@ -7132,7 +7134,7 @@ class TestRestartAndBuddyReplies(BuddyBase):
         other = "cc:%s" % self.sid_b
         checked, go = threading.Event(), threading.Event()
         calls = []
-        real = peers._binding_conflict
+        real = sp_buddy._binding_conflict
 
         def paused(owner, buddy):
             result = real(owner, buddy)
@@ -7142,7 +7144,7 @@ class TestRestartAndBuddyReplies(BuddyBase):
                 go.wait(10)
             return result
 
-        peers._binding_conflict = paused
+        sp_buddy._binding_conflict = paused
         results = {}
         out, err = sys.stdout, sys.stderr
         sys.stdout = sys.stderr = io.StringIO()
@@ -7157,7 +7159,7 @@ class TestRestartAndBuddyReplies(BuddyBase):
             first.join(30)
             second.join(30)
         finally:
-            peers._binding_conflict = real
+            sp_buddy._binding_conflict = real
             sys.stdout, sys.stderr = out, err
         self.assertEqual(sorted(results.values()), [0, 1], results)
         self.assertEqual(results[self.owner], 0)  # the paused binder published first
@@ -7174,7 +7176,7 @@ class TestRestartAndBuddyReplies(BuddyBase):
         self.consume(self.shim)
         checked, go = threading.Event(), threading.Event()
         me = []
-        real = peers.read_buddy
+        real = sp_buddy.read_buddy
 
         def paused(owner):
             result = real(owner)
@@ -7184,17 +7186,17 @@ class TestRestartAndBuddyReplies(BuddyBase):
                 go.wait(10)
             return result
 
-        peers.read_buddy = paused
+        sp_buddy.read_buddy = paused
         results = {}
         out, err = sys.stdout, sys.stderr
         sys.stdout = sys.stderr = io.StringIO()
         try:
             def clear():
-                results["clear"] = peers.cmd_buddy(argparse.Namespace(
+                results["clear"] = sp_buddy.cmd_buddy(argparse.Namespace(
                     buddy_cmd="clear", as_identity=self.owner, json=False))
 
             def rebind():
-                results["rebind"] = peers.cmd_buddy(argparse.Namespace(
+                results["rebind"] = sp_buddy.cmd_buddy(argparse.Namespace(
                     buddy_cmd="set", as_identity=self.owner, json=False, uses=None,
                     target="codex:%s" % self.tid2, replies=5))
 
@@ -7208,7 +7210,7 @@ class TestRestartAndBuddyReplies(BuddyBase):
             first.join(30)
             second.join(30)
         finally:
-            peers.read_buddy = real
+            sp_buddy.read_buddy = real
             sys.stdout, sys.stderr = out, err
         self.assertEqual(results["clear"], 0, results)
         # Never an allowance on thread B without the owner record that can clear it.
@@ -7305,7 +7307,7 @@ class TestRestartAndBuddyReplies(BuddyBase):
                     {"sid": self.sid_a, "bind_id": "b", "total": 3, "at": sp_runtime.now_iso()},
                 )
                 with contextlib.redirect_stderr(io.StringIO()):
-                    self.shim.reply_budget._consume_budget_binding_marker()
+                    self.shim.reply_budget.consume_binding()
                 self.assertIsNone(self.shim.reply_budget.binding)
                 self.assertTrue(os.path.exists(sp_storage.budget_binding_path(self.tid)))
         finally:

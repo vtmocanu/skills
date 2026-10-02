@@ -2,8 +2,8 @@
 
 A topic is a shared, append-only log any Claude or Codex session on this machine
 can post to and read. It is pull-only: nothing is delivered, and readers poll
-with a cursor. Topic names and payloads are opaque strings you choose (up to 256
-printable characters).
+with a cursor. Choose topic names up to 256 printable characters. Payloads are UTF-8 text or
+JSON data within the message size cap.
 
 ```bash
 S=<this skill's directory>/scripts/peers.py
