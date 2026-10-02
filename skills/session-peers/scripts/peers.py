@@ -84,10 +84,14 @@ MAX_TEXT_CHARS = 1048576
 REPLY_BUDGET = 3
 # `budget allow` may raise one requester's cap to at most this many replies.
 BUDGET_ALLOW_MAX = 20
+# A buddy binding's reply total: granted by default when a Claude session binds a
+# Codex buddy, and `buddy set --replies N` may raise it up to the maximum.
+BUDDY_REPLIES_DEFAULT = 100
+BUDDY_REPLIES_MAX = 500
 # What a running shim's code supports, saved in its own state file (never the
 # vendor-read registry record). A shim keeps the code it started with, so a
 # command whose marker only newer shims consume checks this first.
-SHIM_FEATURES = ["budget_allow", "binding_allowance"]
+SHIM_FEATURES = ["budget_allow", "binding_allowance", "binding_allowance_max500"]
 REPLY_BUDGET_WINDOW_DEFAULT = 30 * 60.0
 REQUEST_TIMEOUT_DEFAULT = 10 * 60.0
 REQUEST_TIMEOUT_MAX = 60 * 60.0
@@ -3217,7 +3221,7 @@ class Shim:
             number = value.get(key)
             if isinstance(number, bool) or not isinstance(number, int):
                 return False
-            if not low <= number <= BUDGET_ALLOW_MAX:
+            if not low <= number <= BUDDY_REPLIES_MAX:
                 return False
         return True
 
@@ -5327,12 +5331,29 @@ def cmd_buddy(args):
         if buddy["kind"] == owner["kind"] and buddy["uuid"] == owner["uuid"]:
             sys.stderr.write("error: a session cannot be its own buddy\n")
             return 2
-        if args.replies is not None:
-            # Attaches the shim when needed, so it runs outside every lock.
-            refusal = _check_buddy_replies(args.replies, owner, buddy)
-            if refusal:
+        # An explicit --replies must be honoured or the bind fails; the default
+        # total for a Claude session's Codex buddy is best-effort (a warning).
+        explicit = args.replies is not None
+        grant = args.replies
+        if (
+            not explicit
+            and owner["kind"] == "cc"
+            and buddy["kind"] == "codex"
+            and shim_pid(buddy["uuid"])
+        ):
+            grant = BUDDY_REPLIES_DEFAULT
+        if grant is not None:
+            # An explicit grant attaches the shim when needed, so this runs
+            # outside every lock; the default never attaches one.
+            refusal = _check_buddy_replies(grant, owner, buddy, attach=explicit)
+            if refusal and explicit:
                 sys.stderr.write("error: %s\n" % refusal[1])
                 return refusal[0]
+            if refusal:
+                sys.stderr.write(
+                    "warning: bound without the default reply total: %s\n" % refusal[1]
+                )
+                grant = None
         try:
             with owner_lock(owner["uuid"]):
                 old = read_buddy(owner)
@@ -5341,23 +5362,11 @@ def cmd_buddy(args):
                     and old["buddy"]["kind"] == buddy["kind"]
                     and old["buddy"]["uuid"] == buddy["uuid"]
                 )
-                replies, bind_id = None, None
+                kept, bind_id = None, None
                 if same and old.get("bind_id") and isinstance(old.get("replies"), int):
-                    replies, bind_id = old["replies"], old["bind_id"]
-                if args.replies is not None:
-                    replies = max(args.replies, replies or 0)
-                    bind_id = bind_id or uuidlib.uuid4().hex
-                rec = {
-                    "owner": owner,
-                    "buddy": buddy,
-                    "uses": uses,
-                    "set_at": now_iso(),
-                }
-                if replies is not None:
-                    rec["replies"] = replies
-                    rec["bind_id"] = bind_id
+                    kept, bind_id = old["replies"], old["bind_id"]
                 locked = set()
-                if args.replies is not None:
+                if grant is not None:
                     locked.add(buddy["uuid"])
                 if not same and _revocable_thread(owner, old):
                     locked.add(old["buddy"]["uuid"])
@@ -5365,11 +5374,30 @@ def cmd_buddy(args):
                     # The conflict check and every write below share the
                     # locks, so a competing owner cannot slip between check
                     # and publish.
-                    if args.replies is not None:
+                    if grant is not None:
                         conflict = _binding_conflict(owner, buddy)
-                        if conflict:
+                        if conflict and explicit:
                             sys.stderr.write("error: %s\n" % conflict)
                             return 1
+                        if conflict:
+                            sys.stderr.write(
+                                "warning: bound without the default reply total: %s\n"
+                                % conflict
+                            )
+                            grant = None
+                    replies = kept
+                    if grant is not None:
+                        replies = max(grant, kept or 0)
+                        bind_id = bind_id or uuidlib.uuid4().hex
+                    rec = {
+                        "owner": owner,
+                        "buddy": buddy,
+                        "uses": uses,
+                        "set_at": now_iso(),
+                    }
+                    if replies is not None:
+                        rec["replies"] = replies
+                        rec["bind_id"] = bind_id
                     if not same:
                         try:
                             _revoke_binding(owner, old)
@@ -5386,7 +5414,7 @@ def cmd_buddy(args):
                     # keeps the spent count).
                     try:
                         write_json_atomic(path, rec, mode=0o600)
-                        if args.replies is not None:
+                        if grant is not None:
                             write_json_atomic(
                                 budget_binding_path(buddy["uuid"]),
                                 {
@@ -5417,10 +5445,13 @@ def cmd_buddy(args):
     return 0
 
 
-def _check_buddy_replies(replies, owner, buddy):
-    """None when ``buddy set --replies`` can be honoured, else (code, message)."""
-    if not 1 <= replies <= BUDGET_ALLOW_MAX:
-        return 2, "--replies must be between 1 and %d" % BUDGET_ALLOW_MAX
+def _check_buddy_replies(replies, owner, buddy, attach=True):
+    """None when ``buddy set --replies`` can be honoured, else (code, message).
+
+    ``attach=False`` (the default total) uses only an already running shim.
+    """
+    if not 1 <= replies <= BUDDY_REPLIES_MAX:
+        return 2, "--replies must be between 1 and %d" % BUDDY_REPLIES_MAX
     if owner["kind"] != "cc" or buddy["kind"] != "codex":
         return 2, (
             "--replies applies to a Claude session's Codex buddy only: the "
@@ -5428,7 +5459,9 @@ def _check_buddy_replies(replies, owner, buddy):
         )
     # The shim is attached here, outside the binding lock: a shim takes that
     # lock itself when it reads a marker.
-    pid = shim_pid(buddy["uuid"]) or attach_thread(buddy["uuid"], verbose=False)
+    pid = shim_pid(buddy["uuid"])
+    if not pid and attach:
+        pid = attach_thread(buddy["uuid"], verbose=False)
     if not pid:
         return 1, (
             "no running shim for %s, so a reply total cannot be granted; start "
@@ -5440,6 +5473,14 @@ def _check_buddy_replies(replies, owner, buddy):
             "allowances; a shim started from an older peers.py never reads the "
             "grant, so the cap would stay %d. Restart it: `peers.py restart %s`, "
             "then bind again" % (buddy["uuid"], pid, REPLY_BUDGET, buddy["uuid"])
+        )
+    if replies > BUDGET_ALLOW_MAX and not shim_supports(
+        buddy["uuid"], pid, "binding_allowance_max500"
+    ):
+        return 1, (
+            "the running shim for %s (pid %d) accepts a reply total of at most %d; "
+            "restart it (`peers.py restart %s`) and bind again"
+            % (buddy["uuid"], pid, BUDGET_ALLOW_MAX, buddy["uuid"])
         )
     return None
 
@@ -6772,9 +6813,10 @@ def build_parser():
         "--replies",
         type=int,
         metavar="N",
-        help="a finite TOTAL of replies (1..%d) this Codex buddy may send "
-        "beyond the per-sequence cap, across sequences and shim restarts; "
-        "revoked by `buddy clear` or binding another buddy" % BUDGET_ALLOW_MAX,
+        help="a finite TOTAL of replies (1..%d, default %d for a Claude "
+        "session's Codex buddy) this buddy may send beyond the per-sequence "
+        "cap, across sequences and shim restarts; revoked by `buddy clear` or "
+        "binding another buddy" % (BUDDY_REPLIES_MAX, BUDDY_REPLIES_DEFAULT),
     )
     buddy_action("ping", "report status, attaching a Codex buddy's shim if needed")
     buddy_action("clear", "unbind the buddy")

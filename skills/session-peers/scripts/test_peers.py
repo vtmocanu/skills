@@ -6898,13 +6898,78 @@ class TestRestartAndBuddyReplies(BuddyBase):
 
     # -- A5: buddy set --replies ----------------------------------------
 
-    def test_binding_without_replies_grants_nothing(self):
+    def test_binding_without_replies_grants_the_default_total(self):
         rc, out, err = self.bind()
         self.assertEqual(rc, 0, err)
+        self.assertEqual(err, "")
+        default = peers.BUDDY_REPLIES_DEFAULT
+        self.assertIn("replies left: %d of %d" % (default, default), out)
+        self.assertEqual(
+            json.loads(self.record_path(self.owner).read_text())["replies"], default
+        )
+        self.consume(self.shim)
+        self.assertEqual(self.shim._cap_for(self.sid_a), default)
+        self.assertEqual(self.shim._cap_for(self.sid_b), peers.REPLY_BUDGET)
+
+    def test_the_default_total_never_attaches_a_shim_itself(self):
+        calls = []
+        saved = peers.attach_thread
+        peers.attach_thread = lambda tid, verbose=True: calls.append(tid) or None
+        try:
+            rc, out, err = self.bind(prove=False)
+        finally:
+            peers.attach_thread = saved
+        self.assertEqual(rc, 0, err)
+        self.assertNotIn("default reply total", err)
         self.assertNotIn("replies left", out)
+        # Only the status line's attach, as before; the default grant adds none.
+        self.assertEqual(calls, [self.tid])
         self.assertFalse(os.path.exists(peers.budget_binding_path(self.tid)))
         self.assertNotIn("replies", json.loads(self.record_path(self.owner).read_text()))
-        self.assertEqual(self.shim._cap_for(self.sid_a), peers.REPLY_BUDGET)
+
+    def test_an_older_shim_takes_a_small_explicit_total_but_not_the_default(self):
+        pid = os.getppid()
+        self.hold_pidfile(self.tid, pid=pid)
+        peers.write_json_atomic(
+            peers.thread_state_path(self.tid),
+            {"thread_id": self.tid, "shim_pid": pid,
+             "shim_features": ["budget_allow", "binding_allowance"]},
+        )
+        rc, _out, err = self.bind("--replies", "50", prove=False)
+        self.assertEqual(rc, 1)
+        self.assertIn("at most %d" % peers.BUDGET_ALLOW_MAX, err)
+        self.assertFalse(self.record_path(self.owner).exists())
+        rc, out, err = self.bind(prove=False)
+        self.assertEqual(rc, 0, err)
+        self.assertIn("warning: bound without the default reply total", err)
+        self.assertNotIn("replies left", out)
+        self.assertFalse(os.path.exists(peers.budget_binding_path(self.tid)))
+        rc, out, err = self.bind("--replies", str(peers.BUDGET_ALLOW_MAX), prove=False)
+        self.assertEqual(rc, 0, err)
+        self.assertIn("replies left: %d of %d" % ((peers.BUDGET_ALLOW_MAX,) * 2), out)
+
+    def test_the_maximum_total_binds_and_a_shim_honours_it(self):
+        top = peers.BUDDY_REPLIES_MAX
+        rc, out, err = self.bind("--replies", str(top))
+        self.assertEqual(rc, 0, err)
+        self.assertIn("replies left: %d of %d" % (top, top), out)
+        self.consume(self.shim)
+        self.assertEqual(self.shim.binding["total"], top)
+        self.assertEqual(self.shim._cap_for(self.sid_a), top)
+        self.assertEqual(self.new_shim().binding["total"], top)
+
+    def test_a_default_bind_on_a_buddy_another_owner_holds_warns_and_binds(self):
+        self.assertEqual(self.bind("--replies", "6")[0], 0)
+        self.consume(self.shim)
+        other = "cc:%s" % self.sid_b
+        rc, out, err = self.bind(owner=other)
+        self.assertEqual(rc, 0, err)
+        self.assertIn("warning: bound without the default reply total", err)
+        self.assertIn("already holds a reply total", err)
+        self.assertNotIn("replies", json.loads(self.record_path(other).read_text()))
+        self.consume(self.shim)
+        self.assertEqual(self.shim.binding["sid"], self.sid_a)
+        self.assertEqual(self.shim.binding["total"], 6)
 
     def test_a_bound_total_survives_sequences_and_a_restart_without_replenishing(self):
         rc, out, err = self.bind("--replies", "6")
@@ -7244,7 +7309,7 @@ class TestRestartAndBuddyReplies(BuddyBase):
         self.assertIsNone(self.shim.binding)
 
     def test_bad_replies_are_rejected(self):
-        for value in ("0", str(peers.BUDGET_ALLOW_MAX + 1)):
+        for value in ("0", str(peers.BUDDY_REPLIES_MAX + 1)):
             rc, _out, err = self.bind("--replies", value)
             self.assertEqual(rc, 2, err)
         rc, _out, err = self.bind("--replies", "5", target="cc:%s" % self.sid_b)
