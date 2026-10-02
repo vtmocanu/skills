@@ -20,17 +20,40 @@ def build_parser():
     )
     sub = p.add_subparsers(dest="command")
 
+    _register_list(sub)
+
+    _register_messaging(sub)
+
+    _register_lifecycle(sub)
+
+    _register_budget(sub)
+
+    _register_buddy(sub)
+
+    _register_hooks(sub)
+
+    _register_topics(sub)
+
+    _register_maintenance(sub)
+
+    return p
+
+
+def add_message_source(parser):
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--message", help="the message body")
+    group.add_argument(
+        "--message-file", metavar="PATH", help="read the message body from PATH"
+    )
+
+
+def _register_list(sub):
     p_list = sub.add_parser("list", help="live Claude sessions and Codex threads")
     p_list.add_argument("--json", action="store_true", help="machine-readable output")
     p_list.set_defaults(func=sp_diagnostics.cmd_list)
 
-    def add_message_source(parser):
-        group = parser.add_mutually_exclusive_group(required=True)
-        group.add_argument("--message", help="the message body")
-        group.add_argument(
-            "--message-file", metavar="PATH", help="read the message body from PATH"
-        )
 
+def _register_messaging(sub):
     p_send = sub.add_parser("send", help="send one message in either direction")
     p_send.add_argument(
         "--to",
@@ -134,6 +157,8 @@ def build_parser():
     p_wait.add_argument("--json", action="store_true", help="machine-readable result")
     p_wait.set_defaults(func=sp_messaging.cmd_wait_peer)
 
+
+def _register_lifecycle(sub):
     p_shim = sub.add_parser("shim", help="run as one Codex thread's peer (foreground)")
     p_shim.add_argument("--thread", required=True, metavar="UUID")
     p_shim.set_defaults(func=sp_shim.cmd_shim)
@@ -153,6 +178,8 @@ def build_parser():
     p_restart.add_argument("target", metavar="name|uuid")
     p_restart.set_defaults(func=sp_lifecycle.cmd_restart)
 
+
+def _register_budget(sub):
     p_budget = sub.add_parser("budget", help="reply budget maintenance")
     bsub = p_budget.add_subparsers(dest="budget_cmd")
     p_reset = bsub.add_parser("reset", help="clear a thread's reply budget")
@@ -181,6 +208,8 @@ def build_parser():
     p_allow.set_defaults(func=sp_buddy.cmd_budget)
     p_budget.set_defaults(func=sp_buddy.cmd_budget, budget_cmd=None, thread=None)
 
+
+def _register_buddy(sub):
     p_buddy = sub.add_parser("buddy", help="bind, show, ping or clear this session's buddy")
     p_buddy.add_argument(
         "--as", dest="as_identity", metavar="cc:<uuid>|codex:<uuid>",
@@ -242,6 +271,8 @@ def build_parser():
     buddy_action("clear", "unbind the buddy")
     p_buddy.set_defaults(func=sp_buddy.cmd_buddy, buddy_cmd=None)
 
+
+def _register_hooks(sub):
     p_hook = sub.add_parser("session-hook", help="Codex SessionStart entry point")
     p_hook.add_argument(
         "--auto-attach", action="store_true", help="attach the triggering session UUID"
@@ -260,6 +291,8 @@ def build_parser():
     )
     p_install.set_defaults(func=sp_hooks.cmd_install_hook)
 
+
+def _register_topics(sub):
     p_topic = sub.add_parser("topic", help="pull-only topic logs any peer can post to")
     tsub = p_topic.add_subparsers(dest="topic_cmd")
     p_tpost = tsub.add_parser("post", help="append one entry to a topic")
@@ -293,6 +326,8 @@ def build_parser():
     p_tlist.set_defaults(func=sp_topics.cmd_topic)
     p_topic.set_defaults(func=sp_topics.cmd_topic, topic_cmd=None)
 
+
+def _register_maintenance(sub):
     p_gc = sub.add_parser("gc", help="prune inactive bridge metadata")
     p_gc.add_argument("--days", type=float, help="retention in days (default: 7)")
     p_gc.add_argument("--dry-run", action="store_true", help="print without deleting")
@@ -300,8 +335,6 @@ def build_parser():
 
     p_doctor = sub.add_parser("doctor", help="check the bridge end to end")
     p_doctor.set_defaults(func=sp_diagnostics.cmd_doctor)
-
-    return p
 
 
 def main(argv=None):

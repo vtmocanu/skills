@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 import json
+import collections
 import os
 import sys
 import time
@@ -158,14 +159,19 @@ def _send_claude(target, args):
     return 0
 
 
-def cmd_ask(args):
-    """Send one correlated request to Claude and return its reply on stdout."""
+_RequestSetup = collections.namedtuple(
+    "_RequestSetup", "message timeout thread_id record request_id meta_path reply_path expires_at meta"
+)
+
+
+def _prepare_request(args, purpose):
+    """Shared validation and mailbox creation; caller owns cleanup policy."""
     sp_diagnostics.warn_versions()
-    failed = _expand_buddy_arg(args, "to", "ask")
+    failed = _expand_buddy_arg(args, "to", purpose)
     if failed is not None:
         return failed
     if not args.to.startswith("cc:"):
-        sys.stderr.write("error: ask --to must start with cc:\n")
+        sys.stderr.write("error: %s --to must start with cc:\n" % purpose)
         return 2
     try:
         message = sp_runtime.message_from_args(args)
@@ -191,35 +197,45 @@ def cmd_ask(args):
     meta_path = sp_storage.request_path(request_id)
     reply_path = sp_storage.request_reply_path(request_id)
     expires_at = time.time() + timeout
-    sp_runtime.write_json_atomic(
-        meta_path,
-        sp_requests._request_meta(request_id, thread_id, rec, expires_at, reply_path),
+    meta = sp_requests._request_meta(request_id, thread_id, rec, expires_at, reply_path)
+    sp_runtime.write_json_atomic(meta_path, meta)
+    return _RequestSetup(message, timeout, thread_id, rec, request_id, meta_path, reply_path, expires_at, meta)
+
+
+def _send_prepared_request(request):
+    return sp_claude._deliver_claude(
+        request.record,
+        sp_requests._request_envelope(request.request_id, request.message, request.timeout),
+        request.thread_id,
+        reply_route=False,
     )
+
+
+def cmd_ask(args):
+    """Send one correlated request to Claude and return its reply on stdout."""
+    request = _prepare_request(args, "ask")
+    if isinstance(request, int):
+        return request
     try:
         try:
-            message_id, _reply_capable = sp_claude._deliver_claude(
-                rec,
-                sp_requests._request_envelope(request_id, message, timeout),
-                thread_id,
-                reply_route=False,
-            )
+            message_id, _reply_capable = _send_prepared_request(request)
         except (OSError, ValueError) as exc:
             sys.stderr.write("error: could not send request to %s: %s\n" % (args.to, exc))
             return 1
         sp_runtime.log(
             "request %s sent to %s; waiting up to %.0fs"
-            % (request_id, rec.get("name") or rec.get("sessionId"), timeout)
+            % (request.request_id, request.record.get("name") or request.record.get("sessionId"), request.timeout)
         )
-        deadline = time.monotonic() + timeout
+        deadline = time.monotonic() + request.timeout
         while time.monotonic() < deadline:
-            response = sp_runtime.read_json(reply_path, None)
-            if sp_requests._reply_matches(response, request_id, rec.get("sessionId")):
+            response = sp_runtime.read_json(request.reply_path, None)
+            if sp_requests._reply_matches(response, request.request_id, request.record.get("sessionId")):
                 payload = {
                     "status": "replied",
-                    "request_id": request_id,
+                    "request_id": request.request_id,
                     "request_message_id": message_id,
-                    "session_id": rec.get("sessionId"),
-                    "session_name": rec.get("name"),
+                    "session_id": request.record.get("sessionId"),
+                    "session_name": request.record.get("name"),
                     "message": response["message"],
                 }
                 if args.json:
@@ -232,12 +248,12 @@ def cmd_ask(args):
             time.sleep(sp_constants.REQUEST_POLL_INTERVAL)
         sys.stderr.write(
             "error: request %s timed out after %.0f seconds; no reply was queued\n"
-            % (request_id, timeout)
+            % (request.request_id, request.timeout)
         )
         return 124
     finally:
-        sp_requests._unlink_quiet(meta_path)
-        sp_requests._unlink_quiet(reply_path)
+        sp_requests._unlink_quiet(request.meta_path)
+        sp_requests._unlink_quiet(request.reply_path)
 
 
 def cmd_reply(args):
@@ -310,58 +326,23 @@ def cmd_dispatch(args):
     outlives this invocation so a later `await --request` can consume the
     reply. `--timeout` sets the request lifetime and the mailbox `expires_at`.
     """
-    sp_diagnostics.warn_versions()
-    failed = _expand_buddy_arg(args, "to", "dispatch")
-    if failed is not None:
-        return failed
-    if not args.to.startswith("cc:"):
-        sys.stderr.write("error: dispatch --to must start with cc:\n")
-        return 2
+    request = _prepare_request(args, "dispatch")
+    if isinstance(request, int):
+        return request
     try:
-        message = sp_runtime.message_from_args(args)
-        timeout = sp_requests._bounded_timeout(args.timeout)
-        thread_id = sp_identity._thread_from_args(args, required=True)
-    except ValueError as exc:
-        sys.stderr.write("error: %s\n" % exc)
-        return 2
-    try:
-        rec = sp_claude._resolve_claude_record(args.to[len("cc:") :])
-    except sp_codex.ResolveError as exc:
-        sys.stderr.write("error: %s\n" % exc)
-        return 1
-    if not rec.get("sessionId"):
-        sys.stderr.write(
-            "error: Claude target %r has no session id, so its reply cannot be verified\n"
-            % (rec.get("name") or args.to)
-        )
-        return 1
-
-    sp_requests.cleanup_expired_requests()
-    request_id = str(uuidlib.uuid4())
-    meta_path = sp_storage.request_path(request_id)
-    reply_path = sp_storage.request_reply_path(request_id)
-    expires_at = time.time() + timeout
-    meta = sp_requests._request_meta(request_id, thread_id, rec, expires_at, reply_path)
-    sp_runtime.write_json_atomic(meta_path, meta)
-    try:
-        message_id, _reply_capable = sp_claude._deliver_claude(
-            rec,
-            sp_requests._request_envelope(request_id, message, timeout),
-            thread_id,
-            reply_route=False,
-        )
+        message_id, _reply_capable = _send_prepared_request(request)
     except (OSError, ValueError) as exc:
         # Delivery failed, so no reply can ever arrive: do not leave an orphan
         # mailbox that a later `await` would poll until it expired.
-        sp_requests._unlink_quiet(meta_path)
-        sp_requests._unlink_quiet(reply_path)
+        sp_requests._unlink_quiet(request.meta_path)
+        sp_requests._unlink_quiet(request.reply_path)
         if args.json:
             print(
                 json.dumps(
                     {
                         "status": "delivery_failed",
-                        "request_id": request_id,
-                        "target_session_id": rec.get("sessionId"),
+                        "request_id": request.request_id,
+                        "target_session_id": request.record.get("sessionId"),
                         "detail": str(exc),
                     },
                     sort_keys=True,
@@ -371,24 +352,24 @@ def cmd_dispatch(args):
         return 1
     sp_runtime.log(
         "dispatched request %s to %s; expires in %.0fs"
-        % (request_id, rec.get("name") or rec.get("sessionId"), timeout)
+        % (request.request_id, request.record.get("name") or request.record.get("sessionId"), request.timeout)
     )
     payload = {
         "status": "socket_write_succeeded",
-        "request_id": request_id,
+        "request_id": request.request_id,
         "request_message_id": message_id,
-        "requester_thread_id": thread_id,
-        "target_session_id": rec.get("sessionId"),
-        "target_session_name": rec.get("name"),
-        "created_at": meta["created_at"],
-        "expires_at": expires_at,
+        "requester_thread_id": request.thread_id,
+        "target_session_id": request.record.get("sessionId"),
+        "target_session_name": request.record.get("name"),
+        "created_at": request.meta["created_at"],
+        "expires_at": request.expires_at,
     }
     _print_send_result(
         args,
         payload,
         "dispatched request %s to %s; await it with "
         "`peers.py await --request %s`"
-        % (request_id, rec.get("name") or rec.get("sessionId"), request_id),
+        % (request.request_id, request.record.get("name") or request.record.get("sessionId"), request.request_id),
     )
     return 0
 
