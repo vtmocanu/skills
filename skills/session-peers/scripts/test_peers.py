@@ -5492,7 +5492,8 @@ class TestConfigReaderPaths(Base):
         self.assertIn("does not parse as TOML", err.getvalue())
         self.assertIn("environment and default paths", err.getvalue())
 
-    def test_an_invalid_file_cannot_route_the_database(self):
+    @unittest.skipUnless(HAS_TOMLLIB, "invalid TOML rejection requires stdlib tomllib")
+    def test_with_tomllib_an_invalid_file_cannot_route_the_database(self):
         self.config().write_text(
             'sqlite_home = "%s"\nthis line is not toml\n' % (self.root / "wrong")
         )
@@ -5510,6 +5511,17 @@ class TestConfigReaderPaths(Base):
         with self.lite_reader_only():
             cfg = peers.read_toml_lite(str(self.config()))
         self.assertEqual(cfg[""]["model"], "gpt-5")
+
+    def test_without_tomllib_the_database_path_is_best_effort_and_env_is_fallback(self):
+        configured = str(self.root / "configured")
+        override = str(self.root / "from-env")
+        self.config().write_text('sqlite_home = "%s"\nthis line is not toml\n' % configured)
+        with self.lite_reader_only():
+            self.assertEqual(peers.codex_sqlite_home(), configured)
+            os.environ["CODEX_SQLITE_HOME"] = override
+            self.assertEqual(peers.codex_sqlite_home(), configured)
+            self.config().write_text("this line is not toml\n")
+            self.assertEqual(peers.codex_sqlite_home(), override)
 
     def test_a_missing_file_is_an_empty_table_on_both_paths(self):
         missing = str(self.root / "nope.toml")
