@@ -133,6 +133,33 @@ work while this session steers and reviews:
   replies do not. When the user's message gives a number, grant it as the
   delegation starts (`peers.py buddy set NAME --replies N`), not after a reply
   is held.
+- **A Codex worker that writes code needs a widened sandbox** (macOS). The
+  default `workspace-write` blocks loopback sockets and the home build
+  caches. Have the user launch it from a shell in the worker's worktree:
+
+  ```bash
+  codex [fork <thread-uuid>] -C "$WT" -s workspace-write \
+    -c 'sandbox_workspace_write.network_access=true' \
+    -c "sandbox_workspace_write.writable_roots=[\"$WT\", \"<main checkout>/.git\", \"$(getconf DARWIN_USER_CACHE_DIR)\", <project and toolchain caches>]"
+  ```
+
+  - List the worktree in `writable_roots` explicitly, and the main checkout's
+    `.git` (a worktree's git data lives there).
+  - Never fork inside a running Codex window: that fork keeps the parent
+    thread's working directory and ignores `-C`. `codex fork <uuid>` from a
+    shell keeps the history; `codex resume` fails ("open in another app")
+    while the shared app-server daemon still holds the thread, even after its
+    window exits.
+  - Tools that start their own `sandbox-exec` (SwiftPM, Xcode package
+    resolution) cannot nest inside Codex's sandbox: the worker passes
+    `--disable-sandbox` (SwiftPM) or
+    `-IDEPackageSupportDisableManifestSandbox=YES
+    -IDEPackageSupportDisablePluginExecutionSandbox=YES` (xcodebuild), and the
+    steerer runs wrappers that cannot take those flags outside any sandbox.
+  - Before any code, the worker probes loopback bind, a write to each root,
+    `git update-ref`, and one build and test. Prefer `codex sandbox` with the
+    same `-c` flags to test the settings before the user relaunches.
+  - Record the project's exact command in its own tracked agent docs.
 
 **Longer loops.** For a user-requested review or brainstorm loop with a Codex
 buddy, raise the reply cap instead of resetting it every round:
