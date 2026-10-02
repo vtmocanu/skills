@@ -122,7 +122,7 @@ class ReplyBudget:
         """Release one held reply; drop it once delivered or undeliverable.
 
         A transient write failure keeps a fresh entry, tagged with why it was
-        being released, so `_retry_held` tries it again. Usage is counted only
+        being released, so `retry_held` tries it again. Usage is counted only
         by a delivery that succeeded, so a retry never double-counts.
         """
         entry = self.held.get(sid)
