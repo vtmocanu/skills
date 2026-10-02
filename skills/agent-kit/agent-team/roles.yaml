@@ -37,8 +37,9 @@
 #                    report findings to the team-lead or claim/complete tasks.
 #                    Empty array `tools: []` means "inherit all", so these are
 #                    already implicit there.
-#   model          : optional alias tier ("opus" or "sonnet"); omit to
-#                    inherit the lead's model. Reasoning-heavy roles use "opus",
+#   model          : optional model override, an alias tier preferred
+#                    ("opus" or "sonnet"; SKILL.md covers exact model IDs); omit
+#                    to inherit the lead's model. Reasoning-heavy roles use "opus",
 #                    the coder and mechanical roles "sonnet". Never "haiku".
 #                    SKILL.md Step 5 ("Model tiers") holds the tier list and the
 #                    auto-mode rationale; keep the two in agreement.
