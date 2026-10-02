@@ -33,8 +33,10 @@ work while this session steers and reviews:
 - Before implementation the worker probes its assigned worktree, Git metadata
   writes, and socket tests. When the ordinary sandbox blocks one, it first
   tries the authorized approval escalation, which avoids a relaunch and
-  routing every command through the steerer; it relays the exact command only
-  when escalation stays blocked. A sandbox restriction is not an approval
+  routing every command through the steerer. A denied approval is final: the
+  worker neither runs nor relays that command. When escalation stays blocked
+  without a denial, it relays the exact command, which the steerer runs only if
+  the user authorized that action. A sandbox restriction is not an approval
   denial.
 - Correlated `ask`/`dispatch` replies bypass the shim reply budget; asynchronous
   replies do not. When the user's message gives a number, grant it as the
