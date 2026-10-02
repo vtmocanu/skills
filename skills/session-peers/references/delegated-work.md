@@ -5,7 +5,13 @@ work while this session steers and reviews:
 
 - A Codex worker sees queued messages only between turns, so corrections sent
   during a long turn pile up and its replies answer superseded instructions.
-  Steer through check-ins instead of a message stream.
+  Steer through check-ins instead of a message stream. A queued message never
+  interrupts the active turn; each later runs as its own turn with its own
+  reply, and an asynchronous reply spends the reply budget. Once the worker is
+  in a long turn, answer only inside the correlated reply to its next check-in;
+  an intervention that cannot wait for it needs the user.
+- If the worker's turn completes without continuing to the next step and no
+  check-in arrives, resend the next instruction as an ordinary message.
 - **The worker checks in** at each gate, about every 15 minutes while actively
   working, and before any push, apply or other outward step: done (with SHAs),
   next, blockers, questions. A routine check-in uses `dispatch`, so work
@@ -16,15 +22,22 @@ work while this session steers and reviews:
   (exit 124) deletes the mailbox, so a late reply is lost, and permits only
   independent, already-authorized work. The gate stays closed.
 - **The steerer answers in that reply**, folding in everything it would have
-  sent: verdicts, user decisions, corrections. Between check-ins it sends only
-  what cannot wait, and marks a message that replaces an earlier one
-  `supersedes <msg_id>`.
+  sent: verdicts, user decisions, corrections. An ordinary message sent after
+  the worker's turn completes marks one it replaces `supersedes <msg_id>`.
 - Relay user decisions verbatim and say they came from the user; the worker
   cannot see this session's conversation.
 - A sandboxed worker may lack host network (forge HTTPS, state backends, LAN
   hosts, secret stores). It sends the exact command; the steerer runs it only
   if the user authorized that action for this work, and returns the output.
   Never run an action the worker was denied permission for.
+- Before implementation the worker probes its assigned worktree, Git metadata
+  writes, and socket tests. When the ordinary sandbox blocks one, it first
+  tries the authorized approval escalation, which avoids a relaunch and
+  routing every command through the steerer. A denied approval is final: the
+  worker neither runs nor relays that command. When escalation stays blocked
+  without a denial, it relays the exact command, which the steerer runs only if
+  the user authorized that action. A sandbox restriction is not an approval
+  denial.
 - Correlated `ask`/`dispatch` replies bypass the shim reply budget; asynchronous
   replies do not. When the user's message gives a number, grant it as the
   delegation starts (`peers.py buddy set NAME --replies N`), not after a reply

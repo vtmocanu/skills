@@ -55,6 +55,11 @@ Bind only when the user's own message names a buddy or says to ask one:
   Delivered replies count across sequences and restarts; grants never replenish
   spent replies. Other peers default to 3 replies per sequence. New messages
   do not reset that guard. Correlated ask/dispatch replies bypass it.
+- After binding a Codex buddy as a Claude session, check the bind output. "no
+  buddy reply total recorded" means the default was skipped: once a compatible
+  shim runs, bind again with `codex:<full-uuid>`; follow a capability or
+  conflict warning instead of rebinding repeatedly. "replies left" can include
+  a grant the shim has not applied yet.
 
 Read [references/budgets.md](references/budgets.md) before granting/resetting a
 supervised loop, changing a reply total, or releasing a held reply. Never extend

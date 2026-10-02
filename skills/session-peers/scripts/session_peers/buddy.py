@@ -287,7 +287,17 @@ def _buddy_line(rec, status):
     left = _replies_left(rec)
     if left is not None:
         line += "; replies left: %d of %d" % (left, rec["replies"])
+    elif _takes_reply_total(rec):
+        line += (
+            "; no buddy reply total recorded (default sequence cap is %d)"
+            % sp_constants.REPLY_BUDGET
+        )
     return line
+
+
+def _takes_reply_total(rec):
+    """True for the one binding kind a reply total applies to."""
+    return rec["owner"]["kind"] == "cc" and rec["buddy"]["kind"] == "codex"
 
 
 def _replies_left(rec):
@@ -317,6 +327,8 @@ def _print_buddy(args, rec, status):
         left = _replies_left(rec)
         if left is not None:
             payload["replies_left"] = left
+        if _takes_reply_total(rec):
+            payload["reply_total_recorded"] = left is not None
         print(json.dumps(payload, indent=2, sort_keys=True))
     else:
         print(_buddy_line(rec, status))
@@ -413,13 +425,12 @@ def _set_buddy(args, owner, path):
     # total for a Claude session's Codex buddy is best-effort (a warning).
     explicit = args.replies is not None
     grant = args.replies
-    if (
-        not explicit
-        and owner["kind"] == "cc"
-        and buddy["kind"] == "codex"
-        and sp_lifecycle.shim_pid(buddy["uuid"])
-    ):
-        grant = sp_constants.BUDDY_REPLIES_DEFAULT
+    no_shim = False
+    if not explicit and owner["kind"] == "cc" and buddy["kind"] == "codex":
+        if sp_lifecycle.shim_pid(buddy["uuid"]):
+            grant = sp_constants.BUDDY_REPLIES_DEFAULT
+        else:
+            no_shim = True
     if grant is not None:
         # An explicit grant attaches the shim when needed, so this runs
         # outside every lock; the default never attaches one.
@@ -436,6 +447,14 @@ def _set_buddy(args, owner, path):
     if isinstance(result, int):
         return result
     rec = result
+    if no_shim and _replies_left(rec) is None:
+        # The default never attaches a shim, and the status line below may
+        # show one that started meanwhile, so say the total is missing.
+        sys.stderr.write(
+            "warning: bound without the default reply total: no running shim "
+            "for %s; once its shim runs, bind again with `peers.py buddy set "
+            "codex:%s`\n" % (buddy["uuid"], buddy["uuid"])
+        )
     _print_buddy(args, rec, buddy_status(buddy, attach=True))
     return 0
 
