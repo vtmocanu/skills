@@ -1,8 +1,8 @@
 # Runtime package
 
 Run the sibling `../peers.py` launcher. Implementation modules are bundled
-inside the skill directory; no package installation or external dependency is
-required. The launcher path also drives shim subprocesses, hook commands, and
+inside the skill directory; no Python package installation or third-party
+Python dependency is required. The launcher path also drives shim subprocesses, hook commands, and
 the reply command included in a request envelope.
 
 | Module | Owns |

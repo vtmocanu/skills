@@ -26,6 +26,7 @@ import os
 import pathlib
 import re
 import shutil
+import shlex
 import signal
 import socket
 import sqlite3
@@ -4097,7 +4098,8 @@ class TestInstallHook(Base):
         ]
         self.assertIn("third-party-start", commands)
         self.assertEqual(len(commands), 2)
-        self.assertTrue(commands[1].endswith("peers.py session-hook"))
+        self.assertEqual(shlex.split(commands[1]),
+                         ["python3", os.path.realpath(str(PEERS)), "session-hook"])
         self.assertTrue(commands[1].startswith("python3 "))
         self.assertEqual(data["SessionStart"][1]["matcher"], "startup|resume")
         self.assertEqual(
@@ -4138,7 +4140,8 @@ class TestInstallHook(Base):
         self.assertEqual(rc, 0)
         data = json.loads(self.hooks_path().read_text())
         command = data["hooks"]["SessionStart"][0]["hooks"][0]["command"]
-        self.assertTrue(command.endswith("peers.py session-hook --auto-attach"))
+        self.assertEqual(shlex.split(command),
+                         ["python3", os.path.realpath(str(PEERS)), "session-hook", "--auto-attach"])
 
     def test_reinstall_can_upgrade_manual_reconcile_to_auto_attach(self):
         self.cli("install-hook")
@@ -5538,6 +5541,19 @@ class TestConfigReaderPaths(Base):
 
 
 class TestCliSurface(Base):
+    def test_launcher_finds_its_bundled_package_with_isolated_import_paths(self):
+        for options in ([], ["-I"]):
+            with self.subTest(options=options):
+                env = dict(os.environ)
+                env["PYTHONSAFEPATH"] = "1"
+                result = subprocess.run(
+                    [sys.executable, *options, str(PEERS), "--help"],
+                    cwd=str(self.root), env=env, text=True,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("session-hook", result.stdout)
+
     def test_no_subcommand_prints_help(self):
         rc, out, _err = self.cli()
         self.assertEqual(rc, 2)

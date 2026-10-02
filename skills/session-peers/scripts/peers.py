@@ -71,6 +71,10 @@ import time
 import uuid as uuidlib
 from datetime import datetime, timezone
 
+_HERE = os.path.dirname(os.path.realpath(__file__))
+if sys.path[:1] != [_HERE]:
+    sys.path.insert(0, _HERE)
+
 from session_peers import config as sp_config, constants as sp_constants, protocol as sp_protocol, rollout as sp_rollout, runtime as sp_runtime
 
 
