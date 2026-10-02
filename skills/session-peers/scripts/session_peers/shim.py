@@ -93,7 +93,7 @@ class Shim:
         )
         if self.alias_refresh_interval <= 0:
             self.alias_refresh_interval = sp_constants.ALIAS_REFRESH_INTERVAL_DEFAULT
-        self.reply_budget._configure_window()
+        self.reply_budget.configure_window()
         self._proc_start = None
         self.idle_subs = []
         self.record_rewrites = 0
@@ -146,8 +146,8 @@ class Shim:
         signal.signal(signal.SIGTERM, self._on_signal)
         signal.signal(signal.SIGINT, self._on_signal)
         try:
-            self.reply_budget._consume_budget_marker(initial=True)
-            self.reply_budget._consume_budget_binding_marker(initial=True)
+            self.reply_budget.consume_reset(initial=True)
+            self.reply_budget.consume_binding(initial=True)
             # Save recovered requests only after taking ownership, but before
             # advertising readiness. A crash followed by completion while down
             # must resume this cursor, not treat the answer as old history.
@@ -165,7 +165,7 @@ class Shim:
             )
             if self.reply_budget.release_after_start:
                 self.reply_budget.release_after_start = False
-                self.reply_budget._release_held()
+                self.reply_budget.release_held()
                 self._save_state()
             self._poll_loop()
         finally:
@@ -665,11 +665,11 @@ class Shim:
         last_live = time.time()
         last_alias = last_live
         while not self.stop.wait(self.poll_interval):
-            self.reply_budget._consume_budget_marker()
+            self.reply_budget.consume_reset()
             # Never at startup: a release it triggers needs the bound socket.
-            self.reply_budget._consume_budget_allow_marker()
-            self.reply_budget._consume_budget_binding_marker()
-            self.reply_budget._expire_held()
+            self.reply_budget.consume_allowance()
+            self.reply_budget.consume_binding()
+            self.reply_budget.expire_held()
             try:
                 events = self.tail.poll()
             except Exception as exc:  # never let a bad line kill the shim
@@ -694,7 +694,7 @@ class Shim:
             self._check_liveness()
             if self.stop.is_set():
                 return last_live, last_alias
-            self.reply_budget._retry_held()
+            self.reply_budget.retry_held()
         if now - last_alias >= self.alias_refresh_interval:
             last_alias = now
             self._refresh_name()
@@ -815,7 +815,7 @@ class Shim:
             return
 
         tag = turn.tag or {}
-        self.reply_budget._advance_budget_sequence(tag)
+        self.reply_budget.advance_sequence(tag)
         text = sp_protocol.strip_tag(turn.last_agent_message or "").strip()
 
         records = sp_claude.live_claude_records()
@@ -935,7 +935,7 @@ class Shim:
         """Return stop only when reply construction must end target iteration."""
         sid = rec.get("sessionId")
         spent = self.reply_budget.budgets.get(sid, 0)
-        cap = self.reply_budget._cap_for(sid)
+        cap = self.reply_budget.cap_for(sid)
         if spent >= cap:
             detail = (
                 "reply held, not delivered: the loop guard reached %d "
@@ -1013,7 +1013,7 @@ class Shim:
             return "stop"
         if sp_claude.deliver_to_record(rec, sp_protocol.build_user_frame(body, self.sock_path)):
             self.reply_budget.budgets[sid] = spent + 1
-            self.reply_budget._spend_binding(sid)
+            self.reply_budget.spend_binding(sid)
             # Deliberately no body text: the log is a delivery record, not
             # a transcript, and it lands in a file the user may share.
             sp_runtime.log(

@@ -21,6 +21,13 @@ the reply command included in a request envelope.
 | diagnostics | Version observations and rate-limited warnings |
 | shim | Process/socket ownership, contacts, polling, delivery, and state serialization |
 | budgets | Sequence/binding accounting, allowance markers, and held-reply policy |
+| identity | Typed peer resolution and caller attribution |
+| messaging | Send, correlated requests/replies, await, and wait commands |
+| buddy | Buddy records, binding transactions, and budget commands |
+| hooks | Hook installation, trust metadata, and startup reconciliation |
+| topics | Pull-only shared logs, retention, identity, and cursor commands |
+| maintenance | Owned bridge metadata and buddy garbage collection |
+| cli | Argument registration and command dispatch |
 
 Import modules eagerly in `__init__.py` before a shim serves traffic. Capture
 the loaded source digest after those imports and keep it for the process's
@@ -38,10 +45,13 @@ python3 skills/session-peers/scripts/test_peers.py
 
 Keep vendor assumptions in the Claude/Codex adapters. Discovery preserves
 unknown liveness separately from dead; transport verifies identity before
-routing. The command handlers remain in the launcher during this incremental
-extraction; package modules do not import it back.
+routing. The launcher imports only the CLI entrypoint; command handlers live in the
+package and no module imports the launcher back.
 
 `ReplyBudget` uses discovery, socket validation, and delivery callbacks supplied
 by `Shim`. It owns no transport and adds no lock. Keep the existing shim and
 cross-process binding locks at their original call sites. The shim remains the
 only serializer, using the same persisted keys and lifecycle points.
+
+Use the public `ReplyBudget` operations at the shim boundary; its validators
+and implementation-only release helpers remain private.
