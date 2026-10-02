@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Cross-session messaging between Claude Code sessions and Codex CLI threads.
 
-One script, one CLI. See PRD #44 and ``../references/spike-checklist.md`` for the
+One stable launcher, one CLI, with bundled runtime modules. See PRD #44 and ``../references/spike-checklist.md`` for the
 measurements every mechanism here relies on; the decision letters (D1..D11) in
 the comments point at that PRD's decision log.
 
@@ -71,379 +71,16 @@ import time
 import uuid as uuidlib
 from datetime import datetime, timezone
 
-# --------------------------------------------------------------------------
-# Constants
-# --------------------------------------------------------------------------
+_HERE = os.path.dirname(os.path.realpath(__file__))
+if sys.path[:1] != [_HERE]:
+    sys.path.insert(0, _HERE)
 
-# D11: pins, not requirements. A newer install warns, never fails.
-CLAUDE_CODE_TESTED = "2.1.263"
-CODEX_TESTED = "0.153.4"
-
-PEER_PROTOCOL = 1
-PEER_FEATURES = ["notify_idle"]
-
-# Codex MAX_USER_INPUT_TEXT_CHARS, and roughly Claude's inbound line cap.
-MAX_TEXT_CHARS = 1048576
-
-# D4: replies per (thread, Claude session) before the shim goes quiet.
-REPLY_BUDGET = 3
-# `budget allow` may raise one requester's cap to at most this many replies.
-BUDGET_ALLOW_MAX = 20
-# A buddy binding's reply total: granted by default when a Claude session binds a
-# Codex buddy, and `buddy set --replies N` may raise it up to the maximum.
-BUDDY_REPLIES_DEFAULT = 100
-BUDDY_REPLIES_MAX = 500
-# What a running shim's code supports, saved in its own state file (never the
-# vendor-read registry record). A shim keeps the code it started with, so a
-# command whose marker only newer shims consume checks this first.
-SHIM_FEATURES = ["budget_allow", "binding_allowance", "binding_allowance_max500"]
-REPLY_BUDGET_WINDOW_DEFAULT = 30 * 60.0
-REQUEST_TIMEOUT_DEFAULT = 10 * 60.0
-REQUEST_TIMEOUT_MAX = 60 * 60.0
-REQUEST_POLL_INTERVAL = 0.1
-WAIT_POLL_INTERVAL_DEFAULT = 1.0
-REQUEST_ORPHAN_TTL = 60.0
-VERSION_WARNING_WINDOW = 24 * 60 * 60.0
-
-# Columns the `threads` table must have for the schema to count as recognised.
-THREADS_COLUMNS = frozenset({"id", "rollout_path", "cwd", "name", "updated_at"})
-
-TAG_PREFIX = "[session-peers"
-TAG_RE = re.compile(
-    r"^\[session-peers from=@(?P<from>\S*) sid=(?P<sid>\S*)"
-    r"(?: mid=(?P<mid>\S*))? reply=(?P<reply>.*)\]$"
-)
-WRAPPER_RE = re.compile(
-    r"^\s*<cross-session-message\s+(?P<attrs>[^>]*)>\n?(?P<body>.*?)\n?</cross-session-message>\s*$",
-    re.DOTALL,
-)
-ATTR_RE = re.compile(r'([A-Za-z][A-Za-z0-9-]*)="([^"]*)"')
-UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
-VERSION_RE = re.compile(r"(\d+(?:\.\d+)+)")
-AT_NAME_RE = re.compile(r"^@([A-Za-z0-9][A-Za-z0-9_.\-]*)")
-
-# Sentinel for a tag field the sender could not fill in. Parses back to None.
-TAG_ABSENT = "-"
-MAX_TAG_FIELD_CHARS = 256
-
-# Built rather than written literally so this file has no stray triple
-# quotes; _scan_multiline compares against them.
-TRIPLE_DQ = '"' * 3
-TRIPLE_SQ = "'" * 3
-
-# A TOML bare key needs no quoting in a table header.
-BARE_KEY_RE = re.compile(r"^[A-Za-z0-9_-]+$")
-
-# `[features] # flags` is a valid TOML header; `# [features]` is a comment.
-TOML_HEADER_RE = re.compile(r"^\s*\[([^\]]+)\]\s*(?:#.*)?$")
-
-# A peer name reaches Claude inside a wrapper attribute and inside the tag line,
-# so it is restricted at the door rather than escaped at every use (B1).
-PEER_NAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
-
-# Substitute for the "<" of a wrapper tag appearing inside a body. Printable and
-# visible in a transcript, unlike a zero-width character.
-LT_SUBSTITUTE = "\u2039"
-WRAPPER_MARKUP_RE = re.compile(r"<(/?)(cross-session-message)", re.IGNORECASE)
-REQUEST_MARKUP_RE = re.compile(r"<(/?)(session-peers-request)", re.IGNORECASE)
-C0_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
-
-# Tunables, read at shim start. The tests turn them down so a fixture rollout is
-# picked up in milliseconds rather than seconds.
-POLL_INTERVAL_DEFAULT = 1.0
-LIVENESS_INTERVAL_DEFAULT = 5.0
-ALIAS_REFRESH_INTERVAL_DEFAULT = 30.0
-CONN_TIMEOUT = 30.0
-MAX_RECORD_REWRITES = 2
-PROCESSED_TURN_HISTORY = 200
-CONTACT_HISTORY = 200
-MAX_CONCURRENT_CLIENTS = 8
-MAX_FRAMES_PER_CONNECTION = 16
-READ_CHUNK = 1024 * 1024
-# A rollout line longer than this is not a Codex turn (its own text cap is 1
-# MiB): skip it rather than buffer it, so one damaged file cannot exhaust RAM.
-MAX_ROLLOUT_LINE = 8 * 1024 * 1024
-# S7: a completion older than this at shim start is recorded, never posted.
-RESTART_DELIVERY_WINDOW = 900.0
-GC_DAYS_DEFAULT = 7.0
-# Per-thread files in state_dir(), named <thread uuid><suffix>. GC owns them.
-THREAD_ARTIFACT_SUFFIXES = (".json", ".log", ".pid", ".budget-reset", ".budget-allow")
-
-# What a buddy is for. Advisory scope only: nothing grants a permission from it.
-BUDDY_USES = ("review", "brainstorm", "second-opinion", "co-steer", "ping", "sanity-check")
-BUDDY_KINDS = ("cc", "codex")
-
-def parse_time(value):
-    """Epoch seconds from an ISO-8601 string or a numeric epoch. None if unclear.
-
-    Codex writes ISO timestamps on rollout lines and on `task_complete`; a
-    numeric form is accepted in case a future version switches, and anything
-    else is "unknown", which the caller treats as "deliver" rather than a guess.
-    """
-    if value is None:
-        return None
-    if isinstance(value, (int, float)):
-        seconds = float(value)
-        # A value this large is milliseconds, not seconds (year 5138 vs 1970).
-        return seconds / 1000.0 if seconds > 1e11 else seconds
-    if not isinstance(value, str) or not value.strip():
-        return None
-    text = value.strip()
-    try:
-        numeric = float(text)
-    except ValueError:
-        pass
-    else:
-        return numeric / 1000.0 if numeric > 1e11 else numeric
-    text = text.replace("Z", "+00:00")
-    try:
-        parsed = datetime.fromisoformat(text)
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.timestamp()
-
-
-def _float_env(name, default):
-    try:
-        return float(os.environ.get(name, "") or default)
-    except ValueError:
-        return default
-
-
-Turn = collections.namedtuple(
-    "Turn", "turn_id user_text tag outcome last_agent_message completed_at",
-    defaults=(None,),
-)
-Event = collections.namedtuple("Event", "kind turn_id turn")
-
-def log(msg: str) -> None:
-    """One stderr line, timestamped. The shim's stderr is its log file."""
-    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    sys.stderr.write("[session-peers %s] %s\n" % (stamp, msg))
-    sys.stderr.flush()
-
-
-def now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace(
-        "+00:00", "Z"
-    )
-
-
-def now_ms() -> int:
-    return int(time.time() * 1000)
-
-
-# --------------------------------------------------------------------------
-# Small helpers
-# --------------------------------------------------------------------------
-
-
-def read_json(path, default=None):
-    """Parse a JSON file, tolerating absence and corruption (never raises)."""
-    try:
-        with open(path, "r", encoding="utf-8", errors="replace") as fh:
-            return json.load(fh)
-    except FileNotFoundError:
-        return default
-    except (OSError, ValueError) as exc:
-        log("ignoring unreadable %s: %s" % (path, exc))
-        return default
-
-
-def write_json_atomic(path, data, mode=0o600):
-    """Write JSON through a temp file in the same directory, then rename."""
-    d = os.path.dirname(path)
-    if d:
-        os.makedirs(d, exist_ok=True)
-    tmp = "%s.tmp.%d" % (path, os.getpid())
-    # N2: create at the final mode rather than widening it for a moment.
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        json.dump(data, fh, indent=2, sort_keys=True)
-        fh.write("\n")
-    os.chmod(tmp, mode)  # umask may have narrowed the mode above
-    os.replace(tmp, path)
-
-
-def write_json_exclusive(path, data, mode=0o600):
-    """Create one small JSON file exactly once; return False if it exists."""
-    try:
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
-    except FileExistsError:
-        return False
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(data, fh, sort_keys=True)
-            fh.write("\n")
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.chmod(path, mode)
-    except BaseException:
-        try:
-            os.unlink(path)
-        except OSError:
-            pass
-        raise
-    return True
-
-
-def message_from_args(args):
-    """Read one CLI message source and enforce the shared character bound."""
-    value = getattr(args, "message", None)
-    path = getattr(args, "message_file", None)
-    if path:
-        try:
-            with open(path, "r", encoding="utf-8") as fh:
-                value = fh.read()
-        except (OSError, UnicodeError) as exc:
-            raise ValueError("cannot read message file %s: %s" % (path, exc))
-    if value is None:
-        raise ValueError("one of --message or --message-file is required")
-    if len(value) > MAX_TEXT_CHARS:
-        raise ValueError(
-            "message is %d characters, over the %d cap"
-            % (len(value), MAX_TEXT_CHARS)
-        )
-    size = utf8_len(value)
-    if size > MAX_TEXT_CHARS:
-        raise ValueError(
-            "message is %d UTF-8 bytes, over the %d cap"
-            % (size, MAX_TEXT_CHARS)
-        )
-    return value
-
-
-def is_uuid(value) -> bool:
-    return bool(value) and bool(UUID_RE.match(str(value)))
-
-
-def parse_version(text):
-    """Pull the first dotted-numeric run out of a `--version` line."""
-    if not text:
-        return None
-    m = VERSION_RE.search(text)
-    if not m:
-        return None
-    try:
-        return tuple(int(p) for p in m.group(1).split("."))
-    except ValueError:
-        return None
-
-
-def version_is_newer(installed, pinned) -> bool:
-    """True when `installed` sorts above `pinned`; unparseable means False."""
-    a, b = parse_version(installed), parse_version(pinned)
-    if a is None or b is None:
-        return False
-    return a > b
-
-
-def run_cmd(argv, timeout=10, env=None, cwd=None):
-    """Run a command, returning (rc, stdout, stderr). A missing binary is rc 127."""
-    try:
-        proc = subprocess.run(
-            argv,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=timeout,
-            env=env,
-            cwd=cwd,
-        )
-    except FileNotFoundError:
-        return 127, "", "%s: not found" % argv[0]
-    except (OSError, subprocess.SubprocessError) as exc:
-        return 126, "", str(exc)
-    return (
-        proc.returncode,
-        proc.stdout.decode("utf-8", "replace"),
-        proc.stderr.decode("utf-8", "replace"),
-    )
-
-
-def stable_dir(preferred=None):
-    """The first existing directory of `preferred`, `$HOME`, `/`.
-
-    A detached shim must not depend on the directory of whoever started it:
-    `codex queue` resolves its config from the working directory and fails on
-    a deleted one (a removed git worktree, say).
-    """
-    for candidate in (preferred, os.path.expanduser("~"), "/"):
-        if candidate and os.path.isdir(candidate):
-            return candidate
-    return "/"
-
-
-def spawn_detached(argv, log_path):
-    """Double-fork and exec, returning the daemon pid with no Popen handle.
-
-    The intermediate child is reaped immediately; the daemon is adopted by the
-    OS. This is the standard detach pattern for the supported macOS/Linux
-    platforms and avoids Python 3.14 ResourceWarnings from abandoning a live
-    ``Popen`` object.
-    """
-    read_fd, write_fd = os.pipe()
-    try:
-        child = os.fork()
-    except OSError:
-        os.close(read_fd)
-        os.close(write_fd)
-        raise
-    if child == 0:
-        os.close(read_fd)
-        try:
-            os.setsid()
-            os.chdir(stable_dir())
-            daemon = os.fork()
-            if daemon > 0:
-                os.write(write_fd, ("%d\n" % daemon).encode("ascii"))
-                os._exit(0)
-            os.close(write_fd)
-            null_in = os.open(os.devnull, os.O_RDONLY)
-            log_fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-            os.dup2(null_in, 0)
-            os.dup2(log_fd, 1)
-            os.dup2(log_fd, 2)
-            os.closerange(3, safe_open_max())
-            os.execv(argv[0], argv)
-        except BaseException as exc:
-            try:
-                os.write(2, ("detached exec failed: %s\n" % exc).encode("utf-8"))
-            except OSError:
-                pass
-            os._exit(127)
-    os.close(write_fd)
-    try:
-        raw = os.read(read_fd, 64).strip()
-    finally:
-        os.close(read_fd)
-        os.waitpid(child, 0)
-    if not raw:
-        raise OSError("detached child did not report its pid")
-    return int(raw)
-
-
-def safe_open_max():
-    """A usable exclusive closerange ceiling even when sysconf returns -1."""
-    try:
-        value = int(os.sysconf("SC_OPEN_MAX"))
-    except (OSError, TypeError, ValueError):
-        return 256
-    return value if value >= 3 else 256
-
-
-def tool_version(binary):
-    """`<binary> --version` output, or None. Never raises, never fails a run."""
-    rc, out, err = run_cmd([binary, "--version"], timeout=10)
-    if rc != 0:
-        return None
-    return (out or err).strip() or None
+from session_peers import config as sp_config, constants as sp_constants, protocol as sp_protocol, rollout as sp_rollout, runtime as sp_runtime
 
 
 def warn_versions(kinds=("claude", "codex")) -> None:
     """D11: warn once per installed/pinned pair per day, never fail a run."""
-    previous = read_json(version_warning_path(), {}) or {}
+    previous = sp_runtime.read_json(version_warning_path(), {}) or {}
     if not isinstance(previous, dict):
         previous = {}
     now = time.time()
@@ -455,154 +92,34 @@ def warn_versions(kinds=("claude", "codex")) -> None:
             last = float(previous.get(key, 0))
         except (TypeError, ValueError):
             last = 0
-        if now - last < VERSION_WARNING_WINDOW:
+        if now - last < sp_constants.VERSION_WARNING_WINDOW:
             return
-        log(message)
+        sp_runtime.log(message)
         previous[key] = now
         changed = True
 
     if "claude" in kinds:
-        v = tool_version("claude")
-        if v and version_is_newer(v, CLAUDE_CODE_TESTED):
+        v = sp_runtime.tool_version("claude")
+        if v and sp_runtime.version_is_newer(v, sp_constants.CLAUDE_CODE_TESTED):
             warn_once(
-                "claude:%s>%s" % (v.strip(), CLAUDE_CODE_TESTED),
+                "claude:%s>%s" % (v.strip(), sp_constants.CLAUDE_CODE_TESTED),
                 "Claude Code %s is newer than the tested %s; if peers stop "
                 "appearing, re-run references/spike-checklist.md"
-                % (v.strip(), CLAUDE_CODE_TESTED)
+                % (v.strip(), sp_constants.CLAUDE_CODE_TESTED)
             )
     if "codex" in kinds:
-        v = tool_version("codex")
-        if v and version_is_newer(v, CODEX_TESTED):
+        v = sp_runtime.tool_version("codex")
+        if v and sp_runtime.version_is_newer(v, sp_constants.CODEX_TESTED):
             warn_once(
-                "codex:%s>%s" % (v.strip(), CODEX_TESTED),
+                "codex:%s>%s" % (v.strip(), sp_constants.CODEX_TESTED),
                 "Codex CLI %s is newer than the tested %s; if discovery breaks, "
-                "re-run references/spike-checklist.md" % (v.strip(), CODEX_TESTED)
+                "re-run references/spike-checklist.md" % (v.strip(), sp_constants.CODEX_TESTED)
             )
     if changed:
         try:
-            write_json_atomic(version_warning_path(), previous)
+            sp_runtime.write_json_atomic(version_warning_path(), previous)
         except OSError:
             pass
-
-
-# --------------------------------------------------------------------------
-# A very small TOML reader (D3: no tomllib on 3.9)
-# --------------------------------------------------------------------------
-
-
-def _toml_scalar(raw):
-    raw = raw.strip()
-    if not raw:
-        return ""
-    if raw[0] in "\"'":
-        quote = raw[0]
-        end = raw.find(quote, 1)
-        if end == -1:
-            return raw[1:]
-        return raw[1:end]
-    # Strip an inline comment from an unquoted value.
-    raw = raw.split("#", 1)[0].strip()
-    if raw in ("true", "false"):
-        return raw == "true"
-    try:
-        return int(raw)
-    except ValueError:
-        pass
-    try:
-        return float(raw)
-    except ValueError:
-        return raw
-
-
-def _toml_key_text(part):
-    """One dotted-path segment as TOML would write it in a table header."""
-    return part if BARE_KEY_RE.match(part) else '"%s"' % part
-
-
-def _flatten_toml(data):
-    """A parsed TOML document in the shape read_toml_lite returns.
-
-    {"": root scalars, "features": {...}, 'hooks.state."<k>"': {...}}, so the
-    two readers are interchangeable for every caller.
-    """
-    out = {}
-
-    def walk(prefix, table):
-        scalars = {}
-        for key, value in table.items():
-            if isinstance(value, dict):
-                walk(prefix + [key], value)
-            else:
-                scalars[key] = value
-        out[".".join(_toml_key_text(p) for p in prefix)] = scalars
-
-    walk([], data)
-    out.setdefault("", {})
-    return out
-
-
-def read_toml_lite(path):
-    """Return {section_header: {key: value}} with "" for the root table.
-
-    R3: a real parser reads the file where one exists, because a line reader
-    cannot tell a key from the same text inside a multiline string. The line
-    reader stays as the fallback for 3.9 and 3.10. With tomllib available, an
-    invalid file yields environment/default paths, matching Codex refusal.
-    """
-    try:
-        with open(path, "r", encoding="utf-8", errors="replace") as fh:
-            text = fh.read()
-    except FileNotFoundError:
-        return {"": {}}
-    except OSError as exc:
-        log("ignoring unreadable %s: %s" % (path, exc))
-        return {"": {}}
-    tomllib = _load_tomllib()
-    if tomllib is not None:
-        try:
-            return _flatten_toml(tomllib.loads(text))
-        except Exception as exc:
-            # A partial line-by-line read of an invalid file is worse than no
-            # read: it could route the database off a key Codex never honours,
-            # because Codex refuses the same file outright.
-            log(
-                "%s does not parse as TOML (%s); Codex would refuse it too, so "
-                "the bridge is using environment and default paths" % (path, exc)
-            )
-            return {"": {}}
-    # No tomllib (3.9, 3.10): the line reader is the only reader there is.
-    return read_toml_lite_text(text)
-
-
-def read_toml_lite_text(text):
-    """The line-reader fallback.
-
-    R3: lines inside a multiline string are skipped, and the active table name
-    is normalised so `["features"]` stores its keys under `features`.
-    """
-    out = {"": {}}
-    lines = text.splitlines()
-    inside = _line_states(lines)
-    section = ""
-    for i, line in enumerate(lines):
-        if inside[i]:
-            continue
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        header = TOML_HEADER_RE.match(line)
-        if header:
-            name = header.group(1).strip()
-            if name.startswith("[") and name.endswith("]"):
-                name = name[1:-1].strip()  # array of tables
-            section = _unquote_table_name(name)
-            out.setdefault(section, {})
-            continue
-        if "=" not in stripped:
-            continue
-        key, _, raw = stripped.partition("=")
-        out.setdefault(section, {})[key.strip().strip("\"'")] = _toml_scalar(raw)
-    return out
 
 
 # --------------------------------------------------------------------------
@@ -633,7 +150,7 @@ def codex_sqlite_home():
     TOP-LEVEL key counts. A `sqlite_home` inside another table belongs to that
     table, and taking it would point the bridge at the wrong database.
     """
-    cfg = read_toml_lite(codex_config_path())
+    cfg = sp_config.read_toml_lite(codex_config_path())
     value = cfg.get("", {}).get("sqlite_home")
     if isinstance(value, str) and value:
         return os.path.expanduser(value)
@@ -682,9 +199,6 @@ def budget_binding_path(thread_id):
     return os.path.join(state_dir(), "%s.budget-binding" % thread_id)
 
 
-BINDING_LOCK_TIMEOUT = 10.0
-
-
 class BindingLockTimeout(Exception):
     """The per-thread binding lock stayed busy for the whole bounded wait."""
 
@@ -696,7 +210,7 @@ def _flock_file(path, timeout, what):
     Waits at most ``timeout`` seconds (default BINDING_LOCK_TIMEOUT), then
     raises BindingLockTimeout naming ``what``.
     """
-    timeout = BINDING_LOCK_TIMEOUT if timeout is None else timeout
+    timeout = sp_constants.BINDING_LOCK_TIMEOUT if timeout is None else timeout
     fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
     try:
         deadline = time.monotonic() + timeout
@@ -764,7 +278,7 @@ def buddies_dir():
 
 
 def buddy_path(owner):
-    if owner.get("kind") not in BUDDY_KINDS or not is_uuid(owner.get("uuid")):
+    if owner.get("kind") not in sp_constants.BUDDY_KINDS or not sp_runtime.is_uuid(owner.get("uuid")):
         raise ValueError("a buddy owner must be cc:<uuid> or codex:<uuid>")
     return os.path.join(buddies_dir(), "%s-%s.json" % (owner["kind"], owner["uuid"]))
 
@@ -784,13 +298,13 @@ def request_dir():
 
 
 def request_path(request_id):
-    if not is_uuid(request_id):
+    if not sp_runtime.is_uuid(request_id):
         raise ValueError("request id must be a UUID")
     return os.path.join(request_dir(), "%s.request.json" % request_id)
 
 
 def request_reply_path(request_id):
-    if not is_uuid(request_id):
+    if not sp_runtime.is_uuid(request_id):
         raise ValueError("request id must be a UUID")
     return os.path.join(request_dir(), "%s.reply.json" % request_id)
 
@@ -822,7 +336,7 @@ def proc_start_checked(pid):
     env = dict(os.environ)
     env["LC_ALL"] = "C"
     env["TZ"] = "UTC"
-    rc, out, err = run_cmd(
+    rc, out, err = sp_runtime.run_cmd(
         ["ps", "-o", "lstart=", "-p", str(pid)], timeout=10, env=env
     )
     if rc != 0:
@@ -849,12 +363,12 @@ def read_claude_records():
     except (FileNotFoundError, NotADirectoryError):
         return out
     except OSError as exc:
-        log("cannot read %s: %s" % (d, exc))
+        sp_runtime.log("cannot read %s: %s" % (d, exc))
         return out
     for name in names:
         if not name.endswith(".json"):
             continue
-        rec = read_json(os.path.join(d, name))
+        rec = sp_runtime.read_json(os.path.join(d, name))
         if isinstance(rec, dict):
             rec = dict(rec)
             rec["_path"] = os.path.join(d, name)
@@ -911,7 +425,7 @@ def claude_record_by_target(target, records=None):
     """Every record addressed by mutable name or stable session UUID."""
     if records is None:
         records = live_claude_records()
-    if is_uuid(target):
+    if sp_runtime.is_uuid(target):
         return [r for r in records if r.get("sessionId") == target]
     return [r for r in records if r.get("name") == target]
 
@@ -1062,7 +576,7 @@ def find_state_db(sqlite_home=None):
             cols = set()
         finally:
             conn.close()
-        if THREADS_COLUMNS <= cols:
+        if sp_constants.THREADS_COLUMNS <= cols:
             return path
     return None
 
@@ -1100,7 +614,7 @@ def read_session_index():
                 if not name:
                     continue
                 tid = str(obj["id"])
-                when = parse_time(obj.get("updated_at"))
+                when = sp_runtime.parse_time(obj.get("updated_at"))
                 previous = seen_at.get(tid)
                 if tid in out and previous is not None and when is not None:
                     if when < previous:
@@ -1164,7 +678,7 @@ def lsof_holders_checked(paths):
     paths = existing
     if not paths:
         return out, True, None
-    rc, stdout, stderr = run_cmd(
+    rc, stdout, stderr = sp_runtime.run_cmd(
         ["lsof", "-F", "pcn", "--"] + list(paths), timeout=20
     )
     if rc != 0 and not (rc == 1 and not stderr.strip()):
@@ -1198,7 +712,7 @@ def lsof_holders(paths):
     """Compatibility wrapper returning only verified holder data."""
     holders, verified, error = lsof_holders_checked(paths)
     if not verified:
-        log("Codex thread liveness is unavailable: %s" % error)
+        sp_runtime.log("Codex thread liveness is unavailable: %s" % error)
     return holders
 
 
@@ -1226,7 +740,7 @@ def codex_threads(check_live=True):
     """(threads, schema_ok). Each thread is a dict; degraded mode returns []."""
     db = find_state_db()
     if db is None:
-        log(
+        sp_runtime.log(
             "no state_*.sqlite with a recognised `threads` schema under %s; "
             "Codex discovery is unavailable (send by UUID still works)"
             % codex_sqlite_home()
@@ -1236,7 +750,7 @@ def codex_threads(check_live=True):
     try:
         conn = sqlite3.connect("file:%s?mode=ro" % db, uri=True, timeout=2)
     except sqlite3.Error as exc:
-        log("cannot open %s: %s" % (db, exc))
+        sp_runtime.log("cannot open %s: %s" % (db, exc))
         return [], False
     try:
         cur = conn.execute(
@@ -1244,7 +758,7 @@ def codex_threads(check_live=True):
         )
         rows = cur.fetchall()
     except sqlite3.Error as exc:
-        log("cannot read threads from %s: %s" % (db, exc))
+        sp_runtime.log("cannot read threads from %s: %s" % (db, exc))
         return [], False
     finally:
         conn.close()
@@ -1384,7 +898,7 @@ def resolve_thread(target, require_live=True, exclude=None):
     """
     threads, schema_ok = codex_threads()
     if not schema_ok:
-        if is_uuid(target):
+        if sp_runtime.is_uuid(target):
             # D11 degraded mode: queue by UUID, liveness unverified.
             return {
                 "id": target,
@@ -1401,7 +915,7 @@ def resolve_thread(target, require_live=True, exclude=None):
             "Codex thread discovery is unavailable (unknown state_*.sqlite "
             "schema); pass the thread UUID instead of a name"
         )
-    if is_uuid(target):
+    if sp_runtime.is_uuid(target):
         for t in threads:
             if t["id"] == target:
                 return t
@@ -1425,7 +939,7 @@ def resolve_thread(target, require_live=True, exclude=None):
     # refuse the collision instead of silently sending to either one.
     prefix_target = target[6:] if target.startswith("codex-") else target
     prefix = None
-    if is_uuid(prefix_target):
+    if sp_runtime.is_uuid(prefix_target):
         prefix = prefix_target.replace("-", "").lower()
     elif re.fullmatch(r"[0-9a-fA-F]{8,32}", prefix_target):
         prefix = prefix_target.lower()
@@ -1495,13 +1009,13 @@ def resolve_thread_prefer_live(target, exclude=None):
 
 
 def read_registered():
-    data = read_json(registered_path(), {}) or {}
+    data = sp_runtime.read_json(registered_path(), {}) or {}
     threads = data.get("threads")
     return threads if isinstance(threads, dict) else {}
 
 
 def write_registered(threads):
-    write_json_atomic(registered_path(), {"threads": threads}, mode=0o600)
+    sp_runtime.write_json_atomic(registered_path(), {"threads": threads}, mode=0o600)
 
 
 def register_thread(thread):
@@ -1509,18 +1023,18 @@ def register_thread(thread):
     refused here rather than at delivery time, so the failure names the fix."""
     name = thread.get("name")
     if name is not None:
-        require_peer_name(name)
+        sp_protocol.require_peer_name(name)
     # P9: a read-modify-write on one shared file, so it runs under the lock the
     # reconcile uses. Two `up` calls at once would otherwise lose one.
     with reconcile_lock():
         threads = read_registered()
-        threads[thread["id"]] = {"name": name, "registered_at": now_iso()}
+        threads[thread["id"]] = {"name": name, "registered_at": sp_runtime.now_iso()}
         write_registered(threads)
 
 
 def refresh_registered_name(thread_id, name):
     """Refresh the cached alias for a persistently registered UUID."""
-    require_peer_name(name, "peer alias")
+    sp_protocol.require_peer_name(name, "peer alias")
     with reconcile_lock(blocking=False) as acquired:
         if not acquired:
             return False
@@ -1551,17 +1065,17 @@ def unregister_thread(thread_id) -> bool:
 
 def _bridge_thread_ids():
     """UUIDs represented by registrations or per-thread bridge artifacts."""
-    out = {thread_id for thread_id in read_registered() if is_uuid(thread_id)}
+    out = {thread_id for thread_id in read_registered() if sp_runtime.is_uuid(thread_id)}
     try:
         names = os.listdir(state_dir())
     except OSError:
         return out
     for name in names:
-        for suffix in THREAD_ARTIFACT_SUFFIXES:
+        for suffix in sp_constants.THREAD_ARTIFACT_SUFFIXES:
             if not name.endswith(suffix):
                 continue
             candidate = name[: -len(suffix)]
-            if is_uuid(candidate):
+            if sp_runtime.is_uuid(candidate):
                 out.add(candidate)
             break
     return out
@@ -1573,19 +1087,19 @@ def _thread_last_seen(thread_id, registered, threads):
     meta = registered.get(thread_id)
     if isinstance(meta, dict):
         for key in ("last_seen_at", "registered_at"):
-            value = parse_time(meta.get(key))
+            value = sp_runtime.parse_time(meta.get(key))
             if value is not None:
                 seen.append(value)
-    state = read_json(thread_state_path(thread_id), {}) or {}
-    value = parse_time(state.get("updated_at")) if isinstance(state, dict) else None
+    state = sp_runtime.read_json(thread_state_path(thread_id), {}) or {}
+    value = sp_runtime.parse_time(state.get("updated_at")) if isinstance(state, dict) else None
     if value is not None:
         seen.append(value)
     thread = threads.get(thread_id)
     if thread is not None:
-        value = parse_time(thread.get("updated_at"))
+        value = sp_runtime.parse_time(thread.get("updated_at"))
         if value is not None:
             seen.append(value)
-    for suffix in THREAD_ARTIFACT_SUFFIXES:
+    for suffix in sp_constants.THREAD_ARTIFACT_SUFFIXES:
         path = os.path.join(state_dir(), thread_id + suffix)
         try:
             seen.append(os.stat(path).st_mtime)
@@ -1594,7 +1108,7 @@ def _thread_last_seen(thread_id, registered, threads):
     return max(seen) if seen else None
 
 
-def gc_bridge_state(days=GC_DAYS_DEFAULT, dry_run=False, verbose=True):
+def gc_bridge_state(days=sp_constants.GC_DAYS_DEFAULT, dry_run=False, verbose=True):
     """Prune exact bridge-owned artifacts for inactive threads older than days.
 
     Codex rollouts, writer locks and queued messages are outside ``state_dir``
@@ -1656,7 +1170,7 @@ def gc_bridge_state(days=GC_DAYS_DEFAULT, dry_run=False, verbose=True):
             if last_seen is None or last_seen > cutoff:
                 continue
             failed = False
-            for suffix in THREAD_ARTIFACT_SUFFIXES:
+            for suffix in sp_constants.THREAD_ARTIFACT_SUFFIXES:
                 path = os.path.join(state_dir(), thread_id + suffix)
                 try:
                     os.unlink(path)
@@ -1664,7 +1178,7 @@ def gc_bridge_state(days=GC_DAYS_DEFAULT, dry_run=False, verbose=True):
                     pass
                 except OSError as exc:
                     failed = True
-                    log("could not prune %s: %s" % (path, exc))
+                    sp_runtime.log("could not prune %s: %s" % (path, exc))
             if failed:
                 continue
             registrations.pop(thread_id, None)
@@ -1676,80 +1190,9 @@ def gc_bridge_state(days=GC_DAYS_DEFAULT, dry_run=False, verbose=True):
     return removed
 
 
-# --------------------------------------------------------------------------
-# The tag line (D4)
-# --------------------------------------------------------------------------
-
-
-def build_tag(from_name=None, sid=None, reply_socket=None, msg_id=None) -> str:
-    """The one line every bridged message carries into a Codex thread.
-
-    A field the sender could not fill in renders as `-` and parses back to
-    None, so an untagged-looking send is still distinguishable from a typed
-    prompt while carrying no reply address.
-    """
-
-    def field(value):
-        # A newline would end the tag line and forge a second one, so CR and
-        # LF collapse to underscores exactly like spaces (N3).
-        value = (value or "").strip()
-        if not value:
-            return TAG_ABSENT
-        for ch in (" ", "\r", "\n", "\t"):
-            value = value.replace(ch, "_")
-        return C0_RE.sub("", value)[:MAX_TAG_FIELD_CHARS] or TAG_ABSENT
-
-    reply = (reply_socket or "").strip()
-    return "[session-peers from=@%s sid=%s mid=%s reply=%s]" % (
-        field(from_name),
-        field(sid),
-        field(msg_id),
-        ("uds:%s" % reply) if reply else TAG_ABSENT,
-    )
-
-
-def parse_tag(text):
-    """(tag_dict_or_None, body_without_tag). Never raises."""
-    if not text:
-        return None, text or ""
-    first, sep, rest = text.partition("\n")
-    if not first.startswith(TAG_PREFIX):
-        return None, text
-    m = TAG_RE.match(first.strip())
-    if not m:
-        return None, text
-    tag = {}
-    for key in ("from", "sid", "mid", "reply"):
-        value = m.group(key)
-        if value == TAG_ABSENT or value == "":
-            tag[key] = None
-        elif key == "reply" and value.startswith("uds:"):
-            tag[key] = value[4:]
-        else:
-            tag[key] = value
-    return tag, rest if sep else ""
-
-
-def strip_tag(text):
-    return parse_tag(text)[1]
-
-
-# --------------------------------------------------------------------------
-# Frames (D7)
-# --------------------------------------------------------------------------
-
-
-class NameError_(ValueError):
-    """A peer name that cannot be put into a wrapper attribute safely."""
-
-
-def valid_peer_name(name) -> bool:
-    return bool(name) and bool(PEER_NAME_RE.match(str(name)))
-
-
 def codex_title_owner(thread_name, threads=None):
     """Lowest live UUID for a title, providing a stable duplicate tiebreak."""
-    if not valid_peer_name(thread_name):
+    if not sp_protocol.valid_peer_name(thread_name):
         return None
     if threads is None:
         threads, schema_ok = codex_threads()
@@ -1780,136 +1223,15 @@ def peer_name_for_thread(
         if rec.get("sessionId") != thread_id and rec.get("name")
     }
     candidates = []
-    if valid_peer_name(thread_name) and title_owner in (None, thread_id):
+    if sp_protocol.valid_peer_name(thread_name) and title_owner in (None, thread_id):
         candidates.append(str(thread_name))
     candidates.extend(
         ["codex-%s" % thread_id[:8], "codex-%s" % thread_id]
     )
     for candidate in candidates:
-        if valid_peer_name(candidate) and candidate not in occupied:
+        if sp_protocol.valid_peer_name(candidate) and candidate not in occupied:
             return candidate
-    raise NameError_("no unique peer alias is available for thread %s" % thread_id)
-
-
-def require_peer_name(name, what="thread name"):
-    """Refuse a name that could break out of a wrapper attribute (B1).
-
-    A Codex thread name reaches Claude as `from-name="..."`, so a name
-    containing a quote could assert `from-mode`, the one claim D7 forbids.
-    Restricting the character set at registration beats escaping at every use.
-    """
-    if not valid_peer_name(name):
-        raise NameError_(
-            "%s %r is not usable as a peer name: allow only letters, digits, "
-            "dot, underscore and hyphen (up to 64). /rename the thread."
-            % (what, name)
-        )
-    return str(name)
-
-
-def escape_attr(value) -> str:
-    """XML-escape one wrapper attribute value and drop control characters."""
-    text = "" if value is None else str(value)
-    text = text.replace("\r", "").replace("\n", "")
-    text = C0_RE.sub("", text)
-    return (
-        text.replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-        .replace('"', "&quot;")
-    )
-
-
-def neutralise_wrapper_markup(body) -> str:
-    """Stop a body closing or forging the wrapper that carries it (B1)."""
-    return WRAPPER_MARKUP_RE.sub(LT_SUBSTITUTE + r"\1\2", body or "")
-
-
-def neutralise_request_markup(body) -> str:
-    """Stop request content closing or forging its correlation envelope."""
-    return REQUEST_MARKUP_RE.sub(LT_SUBSTITUTE + r"\1\2", body or "")
-
-
-def build_wrapper(body, from_socket, from_session, from_name) -> str:
-    """The wrapper Claude's parser accepts, WITHOUT `from-mode` (D7).
-
-    Codex has no Claude permission class, and an unclassified sender is
-    exactly what a bypass-permissions session holds for approval. Asserting a
-    mode here would be a lie with a security consequence, which is why every
-    attribute is escaped and the body cannot close the element (B1).
-    """
-    socket_text = str(from_socket or "")
-    if C0_RE.search(socket_text) or set('"<>&\r\n') & set(socket_text):
-        # Never ship a mangled reply address: a Claude reply would go nowhere.
-        raise ValueError("socket path %r cannot be put in a wrapper" % socket_text)
-    return (
-        '<cross-session-message from="uds:%s" from-session="%s" from-name="%s">\n'
-        "%s\n</cross-session-message>"
-        % (
-            escape_attr(socket_text),
-            escape_attr(from_session),
-            escape_attr(from_name),
-            neutralise_wrapper_markup(body),
-        )
-    )
-
-
-def unwrap_message(content):
-    """(body, attrs) for a wrapped frame; (content, {}) for a bare one."""
-    if isinstance(content, list):
-        parts = []
-        for block in content:
-            if isinstance(block, dict) and isinstance(block.get("text"), str):
-                parts.append(block["text"])
-            elif isinstance(block, str):
-                parts.append(block)
-        content = "\n".join(parts)
-    if not isinstance(content, str):
-        return "", {}
-    m = WRAPPER_RE.match(content)
-    if not m:
-        return content, {}
-    attrs = dict(ATTR_RE.findall(m.group("attrs")))
-    return m.group("body"), attrs
-
-
-def build_user_frame(body, from_socket=None):
-    """The exact frame Claude itself sends between sessions."""
-    frame = {
-        "msgV": 1,
-        "msg_id": str(uuidlib.uuid4()),
-        "type": "user",
-        "message": {"role": "user", "content": body},
-        "priority": "next",
-    }
-    if from_socket:
-        frame["from"] = "uds:%s" % from_socket
-    return frame
-
-
-def reply_text(text, msg_id, held_reply=False):
-    """Prefix a reply with the id of the request it answers.
-
-    `msg_id` is the requester's own SendMessage msg_id (carried in the turn
-    tag), so a Claude session can tell which of its messages a reply answers
-    when several crossed. No id, no prefix.
-    """
-    if not msg_id:
-        return text
-    label = "held reply, in reply to message" if held_reply else "in reply to message"
-    return "[%s %s]\n%s" % (label, msg_id, text)
-
-
-def build_cc_body(text, thread_id, thread_name, shim_socket):
-    """Wrapped when the thread has a shim socket to reply to, bare otherwise.
-
-    The bare form renders like a typed prompt with no peer name (measured), so
-    it carries its own attribution line.
-    """
-    if shim_socket:
-        return build_wrapper(text, shim_socket, thread_id, thread_name)
-    label = thread_name or thread_id
-    return "Message from Codex thread %s:\n%s" % (label, text)
+    raise sp_protocol.NameError_("no unique peer alias is available for thread %s" % thread_id)
 
 
 def send_frame(sock_path, frame, auth_token=None, timeout=10.0):
@@ -1934,238 +1256,14 @@ def deliver_to_record(rec, frame):
     """Send one frame to a Claude session record, with its auth line if any."""
     sock_path = rec.get("messagingSocketPath")
     if not socket_path_ok(sock_path):
-        log("refusing to write to %r: symlink or non-allowlisted directory" % sock_path)
+        sp_runtime.log("refusing to write to %r: symlink or non-allowlisted directory" % sock_path)
         return False
     try:
         send_frame(sock_path, frame, auth_token=peer_token_for(rec))
     except OSError as exc:
-        log("delivery to %s failed: %s" % (rec.get("name") or rec.get("pid"), exc))
+        sp_runtime.log("delivery to %s failed: %s" % (rec.get("name") or rec.get("pid"), exc))
         return False
     return True
-
-
-# --------------------------------------------------------------------------
-# Rollout tail
-# --------------------------------------------------------------------------
-
-
-class RolloutTail:
-    """Incremental turn-boundary reader over a Codex rollout JSONL.
-
-    Correlation is by boundary events only: `task_started` opens a turn,
-    the following `role: user` response_item (which carries NO turn_id) is its
-    prompt, and `task_complete` or `turn_aborted` closes it. "Last user item
-    before EOF" is never used, because a queued turn and a typed one interleave.
-    """
-
-    def __init__(self, path, cursor=0, open_turn=None, pending=None,
-                 last_boundary=None):
-        self.path = path
-        self.cursor = int(cursor or 0)
-        self.open_turn = open_turn
-        self.pending = dict(pending or {})
-        # N6: the newest of task_started / task_complete / turn_aborted seen,
-        # so the interrupt question is answered without rescanning the file.
-        self.last_boundary = last_boundary
-
-    # -- state -------------------------------------------------------------
-
-    def state(self):
-        return {
-            "cursor": self.cursor,
-            "open_turn": self.open_turn,
-            "pending": self.pending,
-            "last_boundary": self.last_boundary,
-        }
-
-    @classmethod
-    def from_state(cls, path, state):
-        state = state or {}
-        return cls(
-            path,
-            cursor=state.get("cursor", 0),
-            open_turn=state.get("open_turn"),
-            pending=state.get("pending"),
-            last_boundary=state.get("last_boundary"),
-        )
-
-    # -- reading -----------------------------------------------------------
-
-    def _read_lines(self):
-        """Complete lines since the cursor, read in bounded chunks (S4).
-
-        Reading cursor-to-EOF in one allocation peaked at 587 MiB on a 194 MiB
-        rollout. The cursor still advances only past newline-terminated lines,
-        so a partial trailing write is re-read next poll rather than lost.
-        """
-        try:
-            size = os.path.getsize(self.path)
-        except OSError:
-            return
-        if size < self.cursor:
-            # Truncated or rotated underneath us: resync rather than replay.
-            log("%s shrank; resyncing the cursor to EOF" % self.path)
-            self.cursor = size
-            return
-        if size == self.cursor:
-            return
-        remaining = size - self.cursor
-        pending = b""
-        skipping = False
-        try:
-            with open(self.path, "rb") as fh:
-                fh.seek(self.cursor)
-                while remaining > 0:
-                    chunk = fh.read(min(READ_CHUNK, remaining))
-                    if not chunk:
-                        break
-                    remaining -= len(chunk)
-                    parts = (pending + chunk).split(b"\n")
-                    pending = parts.pop()
-                    for part in parts:
-                        self.cursor += len(part) + 1
-                        if skipping:
-                            skipping = False
-                            continue
-                        if part.strip():
-                            yield part.decode("utf-8", "replace")
-                    if len(pending) > MAX_ROLLOUT_LINE:
-                        # No Codex turn is this long; drop it rather than grow.
-                        log(
-                            "skipping a rollout line over %d bytes in %s"
-                            % (MAX_ROLLOUT_LINE, self.path)
-                        )
-                        self.cursor += len(pending)
-                        pending = b""
-                        skipping = True
-        except OSError as exc:
-            log("cannot read %s: %s" % (self.path, exc))
-
-    def poll(self, emit_events=True):
-        """Read turn state and, normally, emit its ordered start/end events.
-
-        First startup passes emit_events=False to recover the open request
-        without replaying completed replies. The cursor and pending sender
-        come from the same bounded read, including a partial trailing line.
-        """
-        events = []
-        for line in self._read_lines():
-            try:
-                obj = json.loads(line)
-            except ValueError:
-                continue
-            if not isinstance(obj, dict):
-                continue
-            kind = obj.get("type")
-            payload = obj.get("payload")
-            if not isinstance(payload, dict):
-                continue
-            if kind == "event_msg":
-                ptype = payload.get("type")
-                if ptype == "task_started":
-                    turn_id = payload.get("turn_id")
-                    self.open_turn = turn_id
-                    self.last_boundary = "started"
-                    self.pending.setdefault(turn_id, {"tag": None, "text": ""})
-                    if emit_events:
-                        events.append(Event("start", turn_id, None))
-                elif ptype in ("task_complete", "turn_aborted"):
-                    turn_id = payload.get("turn_id")
-                    info = self.pending.pop(turn_id, {"tag": None, "text": ""})
-                    if self.open_turn == turn_id:
-                        self.open_turn = None
-                    outcome = "complete" if ptype == "task_complete" else "aborted"
-                    self.last_boundary = outcome
-                    if not emit_events:
-                        continue
-                    last = payload.get("last_agent_message") if outcome == "complete" else None
-                    finished = parse_time(payload.get("completed_at"))
-                    if finished is None:
-                        finished = parse_time(obj.get("timestamp"))
-                    events.append(
-                        Event(
-                            "end",
-                            turn_id,
-                            Turn(
-                                turn_id,
-                                info.get("text") or "",
-                                info.get("tag"),
-                                outcome,
-                                last,
-                                finished,
-                            ),
-                        )
-                    )
-            elif kind == "response_item":
-                if payload.get("role") != "user":
-                    continue
-                text = self._item_text(payload)
-                if text is None:
-                    continue
-                turn_id = self.open_turn
-                if turn_id is None:
-                    continue
-                tag, body = parse_tag(text)
-                info = self.pending.setdefault(turn_id, {"tag": None, "text": ""})
-                info["text"] = body
-                if tag is not None:
-                    info["tag"] = tag
-        return events
-
-    def poll_turns(self):
-        return [e.turn for e in self.poll() if e.kind == "end"]
-
-    @staticmethod
-    def _item_text(payload):
-        content = payload.get("content")
-        if isinstance(content, str):
-            return content
-        if not isinstance(content, list):
-            return None
-        parts = []
-        for block in content:
-            if isinstance(block, dict) and isinstance(block.get("text"), str):
-                parts.append(block["text"])
-        return "\n".join(parts) if parts else None
-
-
-def last_boundary(rollout_path):
-    """The last turn boundary in a rollout: 'started', 'complete', 'aborted'.
-
-    Used for the interrupt check: a `turn_aborted` with no later `task_started`
-    means the queue is paused until the human types something (measured).
-    """
-    result = None
-    try:
-        fh = open(rollout_path, "r", encoding="utf-8", errors="replace")
-    except (FileNotFoundError, OSError, TypeError):
-        return None
-    with fh:
-        for line in fh:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                obj = json.loads(line)
-            except ValueError:
-                continue
-            if not isinstance(obj, dict) or obj.get("type") != "event_msg":
-                continue
-            payload = obj.get("payload")
-            if not isinstance(payload, dict):
-                continue
-            ptype = payload.get("type")
-            if ptype == "task_started":
-                result = "started"
-            elif ptype == "task_complete":
-                result = "complete"
-            elif ptype == "turn_aborted":
-                result = "aborted"
-    return result
-
-
-def thread_is_paused(rollout_path) -> bool:
-    return last_boundary(rollout_path) == "aborted"
 
 
 # --------------------------------------------------------------------------
@@ -2177,76 +1275,29 @@ class QueueError(Exception):
     pass
 
 
-def utf8_len(text) -> int:
-    return len(text.encode("utf-8"))
-
-
-def truncate_utf8(text, max_bytes):
-    """Trim `text` to at most `max_bytes` UTF-8 bytes, on a character boundary.
-
-    P5: the budget is a byte budget, so cutting by characters overshoots on any
-    non-ASCII text, and cutting by bytes alone can split a code point.
-    """
-    encoded = text.encode("utf-8")
-    if len(encoded) <= max_bytes:
-        return text
-    if max_bytes <= 0:
-        return ""
-    return encoded[:max_bytes].decode("utf-8", "ignore")
-
-
-def env_bytes():
-    """UTF-8 bytes the environment occupies in the exec budget."""
-    return sum(utf8_len(k) + utf8_len(v) + 2 for k, v in os.environ.items())
-
-
-def argv_text_budget():
-    """BYTES that `codex queue --message <text>` can actually carry.
-
-    The message is one argv element, so the real ceiling is ARG_MAX minus the
-    environment, not Codex's MAX_USER_INPUT_TEXT_CHARS. On macOS both are
-    1048576, so a message at Codex's own cap never reaches it: the exec fails
-    with E2BIG (measured 2026-09-07, `getconf ARG_MAX` = 1048576).
-    """
-    try:
-        arg_max = os.sysconf("SC_ARG_MAX")
-    except (ValueError, OSError, AttributeError):
-        return MAX_TEXT_CHARS
-    budget = arg_max - env_bytes() - 8192
-    if sys.platform.startswith("linux"):
-        # Linux caps ONE argv element at MAX_ARG_STRLEN (32 pages), far below
-        # ARG_MAX; macOS has no separate per-argument limit.
-        try:
-            page = os.sysconf("SC_PAGESIZE")
-        except (ValueError, OSError, AttributeError):
-            page = 4096
-        budget = min(budget, 32 * page - 1024)
-    return max(4096, min(MAX_TEXT_CHARS, budget))
-
-
 def codex_queue(thread_id, text, cwd=None):
     """`codex queue --thread <uuid> --message <text>`, run in `stable_dir(cwd)`.
 
     rc != 0, or "No active session" on stderr, means the thread is not live.
     Pass the thread's own cwd; a deleted one falls back to `$HOME`.
     """
-    budget = argv_text_budget()
-    size = utf8_len(text)
+    budget = sp_runtime.argv_text_budget()
+    size = sp_runtime.utf8_len(text)
     if size > budget:
         raise QueueError(
             "message is %d bytes, over the %d cap this machine can pass to "
             "`codex queue` (Codex itself stops at %d characters)"
-            % (size, budget, MAX_TEXT_CHARS)
+            % (size, budget, sp_constants.MAX_TEXT_CHARS)
         )
-    if len(text) > MAX_TEXT_CHARS:
+    if len(text) > sp_constants.MAX_TEXT_CHARS:
         raise QueueError(
             "message is %d characters, over Codex's %d cap"
-            % (len(text), MAX_TEXT_CHARS)
+            % (len(text), sp_constants.MAX_TEXT_CHARS)
         )
-    rc, out, err = run_cmd(
+    rc, out, err = sp_runtime.run_cmd(
         ["codex", "queue", "--thread", str(thread_id), "--message", text],
         timeout=60,
-        cwd=stable_dir(cwd),
+        cwd=sp_runtime.stable_dir(cwd),
     )
     if rc == 127:
         raise QueueError("codex is not on PATH")
@@ -2286,54 +1337,15 @@ def peer_uid(conn):
     return None
 
 
-def runtime_code_files(script=None):
-    """Launcher and runtime modules, resolving installed skill symlinks."""
-    script = os.path.realpath(script or __file__)
-    root = os.path.dirname(script)
-    files = [script]
-    package = os.path.join(root, "session_peers")
-    if os.path.isdir(package):
-        for directory, subdirs, names in os.walk(package):
-            subdirs[:] = sorted(d for d in subdirs if d != "__pycache__")
-            files.extend(os.path.join(directory, n) for n in sorted(names) if n.endswith(".py"))
-    return files
-
-
-def code_digest(files):
-    """Source identity for diagnostics; None if the runtime cannot be read.
-
-    Relative names make identical installations and symlink projections agree.
-    Call once when a shim starts, never when it saves its state later.
-    """
-    if not files:
-        return None
-    paths = [os.path.realpath(path) for path in files]
-    root = os.path.dirname(paths[0])
-    digest = hashlib.sha256()
-    try:
-        for relative, path in sorted((os.path.relpath(path, root), path) for path in paths):
-            with open(path, "rb") as fh:
-                content = fh.read()
-            digest.update(relative.encode("utf-8") + b"\0")
-            digest.update(len(content).to_bytes(8, "big"))
-            digest.update(content)
-    except OSError:
-        return None
-    return digest.hexdigest()
-
-
 def shim_code_status(thread_id, pid, installed_digest):
     """Unknown old/unreadable state is not evidence of stale running code."""
-    state = read_json(thread_state_path(thread_id), {})
+    state = sp_runtime.read_json(thread_state_path(thread_id), {})
     if not isinstance(state, dict) or state.get("shim_pid") != pid:
         return "unknown"
     running = state.get("code_digest")
     if not installed_digest or not isinstance(running, str) or not re.fullmatch(r"[0-9a-f]{64}", running):
         return "unknown"
     return "current" if running == installed_digest else "stale"
-
-
-LOADED_CODE_DIGEST = code_digest(runtime_code_files())
 
 
 class Shim:
@@ -2345,7 +1357,7 @@ class Shim:
     """
 
     def __init__(self, thread):
-        self.code_digest = LOADED_CODE_DIGEST
+        self.code_digest = sp_runtime.LOADED_CODE_DIGEST
         self.thread = thread
         self.thread_id = thread["id"]
         self.rollout_path = thread.get("rollout_path")
@@ -2360,7 +1372,7 @@ class Shim:
             self.thread_id,
             title_owner=codex_title_owner(self.thread_name),
         )
-        self.cwd = thread.get("cwd") or stable_dir()
+        self.cwd = thread.get("cwd") or sp_runtime.stable_dir()
 
         self.sock_dir = default_socket_dir()
         self.sock_path = os.path.join(self.sock_dir, "%d.sock" % os.getpid())
@@ -2368,17 +1380,17 @@ class Shim:
             claude_sessions_dir(), "%d.json" % os.getpid()
         )
 
-        state = read_json(thread_state_path(self.thread_id), {}) or {}
-        self.tail = RolloutTail.from_state(self.rollout_path, state.get("tail"))
+        state = sp_runtime.read_json(thread_state_path(self.thread_id), {}) or {}
+        self.tail = sp_rollout.RolloutTail.from_state(self.rollout_path, state.get("tail"))
         # This is an at-most-once processing ledger, including dropped replies,
         # not evidence of delivery. Read the legacy name when upgrading.
         self.processed_turns = collections.deque(
             state.get("processed_turns", state.get("delivered")) or [],
-            maxlen=PROCESSED_TURN_HISTORY,
+            maxlen=sp_constants.PROCESSED_TURN_HISTORY,
         )
         self.budgets = dict(state.get("budgets") or {})
         self.budget_sender_sid = state.get("budget_sender_sid")
-        self.budget_last_at = parse_time(state.get("budget_last_at"))
+        self.budget_last_at = sp_runtime.parse_time(state.get("budget_last_at"))
         # Sessions already told (once) that a reply of theirs was dropped for
         # budget; cleared whenever the budget sequence resets so a genuinely new
         # sequence can notify again.
@@ -2411,7 +1423,7 @@ class Shim:
         elif self.tail.last_boundary is None and self.rollout_path:
             # N6: one full scan at start seeds the interrupt state; every later
             # answer comes from the tail, not from rescanning the whole file.
-            self.tail.last_boundary = last_boundary(self.rollout_path)
+            self.tail.last_boundary = sp_rollout.last_boundary(self.rollout_path)
 
         self.started_at = time.time()
         # A registry record describes this shim process. Its initial nameSince
@@ -2421,24 +1433,24 @@ class Shim:
         # First startup recovers the current boundary along with the sender;
         # saved state carries the last boundary seen by the previous shim.
         self.status = "busy" if self.tail.last_boundary == "started" else "idle"
-        self.poll_interval = _float_env(
-            "SESSION_PEERS_POLL_INTERVAL", POLL_INTERVAL_DEFAULT
+        self.poll_interval = sp_runtime._float_env(
+            "SESSION_PEERS_POLL_INTERVAL", sp_constants.POLL_INTERVAL_DEFAULT
         )
-        self.liveness_interval = _float_env(
-            "SESSION_PEERS_LIVENESS_INTERVAL", LIVENESS_INTERVAL_DEFAULT
+        self.liveness_interval = sp_runtime._float_env(
+            "SESSION_PEERS_LIVENESS_INTERVAL", sp_constants.LIVENESS_INTERVAL_DEFAULT
         )
-        self.alias_refresh_interval = _float_env(
+        self.alias_refresh_interval = sp_runtime._float_env(
             "SESSION_PEERS_ALIAS_REFRESH_INTERVAL",
-            ALIAS_REFRESH_INTERVAL_DEFAULT,
+            sp_constants.ALIAS_REFRESH_INTERVAL_DEFAULT,
         )
         if self.alias_refresh_interval <= 0:
-            self.alias_refresh_interval = ALIAS_REFRESH_INTERVAL_DEFAULT
-        self.reply_budget_window = _float_env(
+            self.alias_refresh_interval = sp_constants.ALIAS_REFRESH_INTERVAL_DEFAULT
+        self.reply_budget_window = sp_runtime._float_env(
             "SESSION_PEERS_REPLY_BUDGET_WINDOW",
-            REPLY_BUDGET_WINDOW_DEFAULT,
+            sp_constants.REPLY_BUDGET_WINDOW_DEFAULT,
         )
         if self.reply_budget_window <= 0:
-            self.reply_budget_window = REPLY_BUDGET_WINDOW_DEFAULT
+            self.reply_budget_window = sp_constants.REPLY_BUDGET_WINDOW_DEFAULT
         if self.allowance and not (
             self._allowance_waiting(time.time())
             or (
@@ -2448,7 +1460,7 @@ class Shim:
             )
         ):
             # A restart keeps a grant only while it would still apply.
-            log("reply allowance for %s expired while the shim was down"
+            sp_runtime.log("reply allowance for %s expired while the shim was down"
                 % self.allowance.get("sid"))
             self.allowance = None
         self._proc_start = None
@@ -2459,7 +1471,7 @@ class Shim:
         self._lock = threading.Lock()
         self._cleaned = False
         self._pidfile_fd = None
-        self._clients = threading.Semaphore(MAX_CONCURRENT_CLIENTS)
+        self._clients = threading.Semaphore(sp_constants.MAX_CONCURRENT_CLIENTS)
         self.codex_version = None
         self.liveness_unverified = False
 
@@ -2467,17 +1479,17 @@ class Shim:
 
     def run(self):
         if not self.rollout_path:
-            log("thread %s has no rollout path; nothing to tail" % self.thread_id)
+            sp_runtime.log("thread %s has no rollout path; nothing to tail" % self.thread_id)
             return 2
         held, pid = thread_is_held(self.rollout_path, self.holder_pid, self.lock_path)
         if held is None:
-            log(
+            sp_runtime.log(
                 "thread %s liveness is unverified; not starting a shim"
                 % self.thread_id
             )
             return 3
         if not held:
-            log(
+            sp_runtime.log(
                 "thread %s is not held by a live codex process; not starting"
                 % self.thread_id
             )
@@ -2485,15 +1497,15 @@ class Shim:
         self.holder_pid = pid or self.holder_pid
         # S12: `codex --version` prints "codex-cli 0.153.4", so the raw string
         # rendered as "codex-codex-cli 0.153.4" in the record. Keep the number.
-        raw = tool_version("codex")
-        parsed = parse_version(raw)
-        self.codex_version = ".".join(str(n) for n in parsed) if parsed else CODEX_TESTED
+        raw = sp_runtime.tool_version("codex")
+        parsed = sp_runtime.parse_version(raw)
+        self.codex_version = ".".join(str(n) for n in parsed) if parsed else sp_constants.CODEX_TESTED
 
         # P2: ownership FIRST. Everything below mutates state another shim may
         # own (the pidfile, the per-thread state file, the budget marker), and
         # _cleanup would delete the live shim's pidfile on the way out.
         if not self._acquire_ownership():
-            log(
+            sp_runtime.log(
                 "another shim already owns thread %s; exiting without touching "
                 "its pidfile, state or record" % self.thread_id
             )
@@ -2516,7 +1528,7 @@ class Shim:
                 target=self._accept_loop, name="accept", daemon=True
             )
             accept.start()
-            log(
+            sp_runtime.log(
                 "shim up: thread=%s name=%s socket=%s holder=%s"
                 % (self.thread_id, self.name, self.sock_path, self.holder_pid)
             )
@@ -2534,7 +1546,7 @@ class Shim:
         # poll loop after its stop check; cleaning here would let the rest of
         # that iteration recreate the registry record after cleanup had marked
         # itself complete.
-        log("signal %d; shutting down" % signum)
+        sp_runtime.log("signal %d; shutting down" % signum)
         self.stop.set()
 
     def _cleanup(self):
@@ -2597,7 +1609,7 @@ class Shim:
         # S12: every timestamp in a live 2.1.263 record is integer milliseconds
         # (startedAt, nameSince, updatedAt, statusUpdatedAt); only procStart is
         # a string.
-        stamp = now_ms()
+        stamp = sp_runtime.now_ms()
         if self._proc_start is None:
             self._proc_start = proc_start(os.getpid())
         return {
@@ -2609,9 +1621,9 @@ class Shim:
             # ago" in ListAgents (measured in M6).
             "startedAt": int(self.started_at * 1000),
             "procStart": self._proc_start,
-            "version": "codex-%s" % (self.codex_version or CODEX_TESTED),
-            "peerProtocol": PEER_PROTOCOL,
-            "peerFeatures": list(PEER_FEATURES),
+            "version": "codex-%s" % (self.codex_version or sp_constants.CODEX_TESTED),
+            "peerProtocol": sp_constants.PEER_PROTOCOL,
+            "peerFeatures": list(sp_constants.PEER_FEATURES),
             "kind": "interactive",
             "entrypoint": "codex",
             "pidDomain": pid_domain(),
@@ -2631,7 +1643,7 @@ class Shim:
             os.chmod(d, 0o700)
         except OSError:
             pass
-        write_json_atomic(self.record_path, self.record(), mode=0o644)
+        sp_runtime.write_json_atomic(self.record_path, self.record(), mode=0o644)
 
     def _set_status(self, status):
         if status == self.status:
@@ -2641,14 +1653,14 @@ class Shim:
             self._write_record()
 
     @staticmethod
-    def _bound(mapping, cap=CONTACT_HISTORY):
+    def _bound(mapping, cap=sp_constants.CONTACT_HISTORY):
         """Drop the oldest entries so a long-lived shim cannot grow (N1)."""
         while len(mapping) > cap:
             mapping.pop(next(iter(mapping)))
         return mapping
 
     def _save_state(self):
-        write_json_atomic(
+        sp_runtime.write_json_atomic(
             thread_state_path(self.thread_id),
             {
                 "thread_id": self.thread_id,
@@ -2656,7 +1668,7 @@ class Shim:
                 "thread_name": self.thread_name,
                 "name_since": int(self.name_since * 1000),
                 "shim_pid": os.getpid(),
-                "shim_features": list(SHIM_FEATURES),
+                "shim_features": list(sp_constants.SHIM_FEATURES),
                 "code_digest": self.code_digest,
                 "tail": self.tail.state(),
                 "processed_turns": list(self.processed_turns),
@@ -2668,7 +1680,7 @@ class Shim:
                 "allowance": self.allowance,
                 "binding": self.binding,
                 "contacts": self._bound(self.contacts),
-                "updated_at": now_iso(),
+                "updated_at": sp_runtime.now_iso(),
             },
             mode=0o600,
         )
@@ -2728,7 +1740,7 @@ class Shim:
         """
         if self._clients.acquire(blocking=False):
             return True
-        log("refusing a client: %d already in flight" % MAX_CONCURRENT_CLIENTS)
+        sp_runtime.log("refusing a client: %d already in flight" % sp_constants.MAX_CONCURRENT_CLIENTS)
         return False
 
     def _handle_connection(self, conn):
@@ -2738,26 +1750,26 @@ class Shim:
                 # S3: an unreadable peer uid is a refusal, not a shrug. Both
                 # supported platforms answer (LOCAL_PEERCRED / SO_PEERCRED),
                 # so "unavailable" means something is wrong, not permissive.
-                log(
+                sp_runtime.log(
                     "refusing a client: peer uid %s is not %d"
                     % ("unavailable" if uid is None else uid, os.getuid())
                 )
                 return
             # S9: one deadline for the whole connection, not per recv, so a
             # client dribbling a byte at a time cannot hold a slot for ever.
-            deadline = time.time() + CONN_TIMEOUT
+            deadline = time.time() + sp_constants.CONN_TIMEOUT
             frames = 0
             buf = b""
             while not self.stop.is_set():
                 remaining = deadline - time.time()
                 if remaining <= 0:
-                    log("client sent no complete line in %ds" % int(CONN_TIMEOUT))
+                    sp_runtime.log("client sent no complete line in %ds" % int(sp_constants.CONN_TIMEOUT))
                     return
                 conn.settimeout(remaining)
                 try:
                     chunk = conn.recv(65536)
                 except socket.timeout:
-                    log("client sent no complete line in %ds" % int(CONN_TIMEOUT))
+                    sp_runtime.log("client sent no complete line in %ds" % int(sp_constants.CONN_TIMEOUT))
                     return
                 except OSError:
                     return
@@ -2767,17 +1779,17 @@ class Shim:
                 while b"\n" in buf:
                     line, buf = buf.split(b"\n", 1)
                     frames += 1
-                    if frames > MAX_FRAMES_PER_CONNECTION:
-                        log(
+                    if frames > sp_constants.MAX_FRAMES_PER_CONNECTION:
+                        sp_runtime.log(
                             "dropping a client after %d frames on one connection"
-                            % MAX_FRAMES_PER_CONNECTION
+                            % sp_constants.MAX_FRAMES_PER_CONNECTION
                         )
                         return
                     self._handle_line(line.decode("utf-8", "replace"))
-                if len(buf) > MAX_TEXT_CHARS:
-                    log("dropping a client whose line exceeds %d chars" % MAX_TEXT_CHARS)
+                if len(buf) > sp_constants.MAX_TEXT_CHARS:
+                    sp_runtime.log("dropping a client whose line exceeds %d chars" % sp_constants.MAX_TEXT_CHARS)
                     return
-            if buf.strip() and frames < MAX_FRAMES_PER_CONNECTION:
+            if buf.strip() and frames < sp_constants.MAX_FRAMES_PER_CONNECTION:
                 self._handle_line(buf.decode("utf-8", "replace"))
         finally:
             try:
@@ -2793,7 +1805,7 @@ class Shim:
         try:
             frame = json.loads(line)
         except ValueError:
-            log("ignoring a non-JSON line from a client")
+            sp_runtime.log("ignoring a non-JSON line from a client")
             return
         if not isinstance(frame, dict):
             return
@@ -2808,14 +1820,14 @@ class Shim:
         if ftype == "control":
             self._handle_control(frame)
             return
-        log("ignoring an unknown frame type %r" % ftype)
+        sp_runtime.log("ignoring an unknown frame type %r" % ftype)
 
     def _handle_user(self, frame):
         message = frame.get("message")
         content = message.get("content") if isinstance(message, dict) else None
-        body, attrs = unwrap_message(content)
+        body, attrs = sp_protocol.unwrap_message(content)
         if not body.strip():
-            log("ignoring an empty inbound message")
+            sp_runtime.log("ignoring an empty inbound message")
             return
 
         from_field = frame.get("from") or attrs.get("from") or ""
@@ -2824,7 +1836,7 @@ class Shim:
         if sock_path and socket_path_ok(sock_path):
             sender = claude_record_by_socket(sock_path)
         elif sock_path:
-            log("ignoring a reply address outside the allowlisted directories")
+            sp_runtime.log("ignoring a reply address outside the allowlisted directories")
             sock_path = ""
 
         sender_name = (sender or {}).get("name") or attrs.get("from-name")
@@ -2835,11 +1847,11 @@ class Shim:
             self.contacts[sender_sid] = {
                 "name": sender_name,
                 "socket": sock_path,
-                "last_seen": now_iso(),
+                "last_seen": sp_runtime.now_iso(),
             }
             self._bound(self.contacts)
 
-        tag = build_tag(
+        tag = sp_protocol.build_tag(
             sender_name,
             sender_sid,
             sock_path if sender else None,
@@ -2848,18 +1860,18 @@ class Shim:
         # The tag rides inside the same text Codex caps, so the body is trimmed
         # to leave room for it rather than pushing the whole message over.
         # P5: the argv budget is bytes; the Codex cap is characters. Both.
-        room_bytes = argv_text_budget() - utf8_len(tag) - 1
-        room_chars = MAX_TEXT_CHARS - len(tag) - 1
+        room_bytes = sp_runtime.argv_text_budget() - sp_runtime.utf8_len(tag) - 1
+        room_chars = sp_constants.MAX_TEXT_CHARS - len(tag) - 1
         trimmed_from = None
-        if utf8_len(body) > room_bytes or len(body) > room_chars:
+        if sp_runtime.utf8_len(body) > room_bytes or len(body) > room_chars:
             trimmed_from = len(body)
-            body = truncate_utf8(body, room_bytes)[:room_chars]
-            log("truncating an inbound body of %d chars to %d" % (trimmed_from, len(body)))
+            body = sp_runtime.truncate_utf8(body, room_bytes)[:room_chars]
+            sp_runtime.log("truncating an inbound body of %d chars to %d" % (trimmed_from, len(body)))
         text = "%s\n%s" % (tag, body)
 
         held, _pid = thread_is_held(self.rollout_path, self.holder_pid, self.lock_path)
         if held is None:
-            log("thread %s liveness is unverified; not queueing" % self.thread_id)
+            sp_runtime.log("thread %s liveness is unverified; not queueing" % self.thread_id)
             self._status_back(
                 frame,
                 sender,
@@ -2869,7 +1881,7 @@ class Shim:
             )
             return
         if not held:
-            log("thread %s is no longer live; refusing to queue" % self.thread_id)
+            sp_runtime.log("thread %s is no longer live; refusing to queue" % self.thread_id)
             self._status_back(
                 frame, sender, "failed", "the Codex thread is no longer running"
             )
@@ -2882,7 +1894,7 @@ class Shim:
         try:
             codex_queue(self.thread_id, text, cwd=self.thread.get("cwd"))
         except QueueError as exc:
-            log(
+            sp_runtime.log(
                 "queue failed for message %s: %s"
                 % (frame.get("msg_id") or "unknown", exc)
             )
@@ -2897,12 +1909,12 @@ class Shim:
                 )
                 deliver_to_record(
                     sender,
-                    build_user_frame(
-                        build_cc_body(notice, self.thread_id, self.name, None), None
+                    sp_protocol.build_user_frame(
+                        sp_protocol.build_cc_body(notice, self.thread_id, self.name, None), None
                     ),
                 )
             return
-        log(
+        sp_runtime.log(
             "queued inbound message %s to thread %s"
             % (frame.get("msg_id") or "unknown", self.thread_id)
         )
@@ -2924,7 +1936,7 @@ class Shim:
                 "carries the message as one argument" % (trimmed_from, len(body)),
             )
         if paused:
-            log("thread %s is paused after an interrupt" % self.thread_id)
+            sp_runtime.log("thread %s is paused after an interrupt" % self.thread_id)
             self._status_back(
                 frame,
                 sender,
@@ -2964,7 +1976,7 @@ class Shim:
     def _handle_control(self, frame):
         action = frame.get("action")
         if action != "notify_when_idle":
-            log("ignoring control action %r" % action)
+            sp_runtime.log("ignoring control action %r" % action)
             return
         from_field = frame.get("from") or ""
         sock_path = from_field[4:] if from_field.startswith("uds:") else from_field
@@ -2978,11 +1990,11 @@ class Shim:
     def _fire_idle(self, sub, detail):
         msg_id, sock_path = sub
         if not socket_path_ok(sock_path):
-            log("cannot answer notify_when_idle: %r is not an allowed socket" % sock_path)
+            sp_runtime.log("cannot answer notify_when_idle: %r is not an allowed socket" % sock_path)
             return
         rec = claude_record_by_socket(sock_path)
         if not rec:
-            log("cannot answer notify_when_idle: no live session at %s" % sock_path)
+            sp_runtime.log("cannot answer notify_when_idle: no live session at %s" % sock_path)
             return
         deliver_to_record(
             rec,
@@ -2991,7 +2003,7 @@ class Shim:
                 "action": "peer_idle_notice",
                 "orig_msg_id": msg_id,
                 "state": "idle",
-                "finished_at": now_ms(),
+                "finished_at": sp_runtime.now_ms(),
                 "detail": detail,
             },
         )
@@ -3010,7 +2022,7 @@ class Shim:
             try:
                 events = self.tail.poll()
             except Exception as exc:  # never let a bad line kill the shim
-                log("rollout read failed: %s" % exc)
+                sp_runtime.log("rollout read failed: %s" % exc)
                 events = []
             for event in events:
                 if event.kind == "start":
@@ -3043,17 +2055,17 @@ class Shim:
         )
         if held is None:
             if not self.liveness_unverified:
-                log(
+                sp_runtime.log(
                     "codex pid %s liveness is unverified; keeping the shim"
                     % self.holder_pid
                 )
             self.liveness_unverified = True
         elif held:
             if self.liveness_unverified:
-                log("codex pid %s liveness probe recovered" % self.holder_pid)
+                sp_runtime.log("codex pid %s liveness probe recovered" % self.holder_pid)
             self.liveness_unverified = False
         elif not held:
-            log(
+            sp_runtime.log(
                 "codex pid %s no longer holds %s or its writer lock; exiting"
                 % (self.holder_pid, self.rollout_path)
             )
@@ -3077,8 +2089,8 @@ class Shim:
                 self.thread_id,
                 title_owner=codex_title_owner(title, threads),
             )
-        except NameError_ as exc:
-            log("cannot refresh the peer alias: %s" % exc)
+        except sp_protocol.NameError_ as exc:
+            sp_runtime.log("cannot refresh the peer alias: %s" % exc)
             return
         self.thread_name = title
         if desired == self.name:
@@ -3091,17 +2103,17 @@ class Shim:
         if os.path.exists(self.record_path):
             self._write_record()
         self._save_state()
-        log("peer alias changed from %s to %s" % (previous, desired))
+        sp_runtime.log("peer alias changed from %s to %s" % (previous, desired))
 
     def _ensure_record(self):
         if os.path.exists(self.record_path):
             return
-        if self.record_rewrites >= MAX_RECORD_REWRITES:
+        if self.record_rewrites >= sp_constants.MAX_RECORD_REWRITES:
             return
         self.record_rewrites += 1
-        log(
+        sp_runtime.log(
             "registry record was removed; rewriting (%d of %d)"
-            % (self.record_rewrites, MAX_RECORD_REWRITES)
+            % (self.record_rewrites, sp_constants.MAX_RECORD_REWRITES)
         )
         self._write_record()
 
@@ -3122,7 +2134,7 @@ class Shim:
             # Not yet bound or registered: defer the release (see run()).
             self.release_after_start = bool(self.held)
             return
-        log("reply budget reset for thread %s" % self.thread_id)
+        sp_runtime.log("reply budget reset for thread %s" % self.thread_id)
         # An explicit reset is the supervision signal the loop guard waits for,
         # so it also releases the reply the guard held back.
         self._release_held()
@@ -3143,7 +2155,7 @@ class Shim:
             return
         for sid in stale:
             self.held.pop(sid, None)
-        log("purged %d expired held reply(s)" % len(stale))
+        sp_runtime.log("purged %d expired held reply(s)" % len(stale))
         self._save_state()
 
     def _release_held(self):
@@ -3200,23 +2212,23 @@ class Shim:
         now = time.time()
         age = now - float(entry.get("at") or 0)
         if age > self.reply_budget_window:
-            log("discarding a held reply for %s: %.0fs old" % (sid, age))
+            sp_runtime.log("discarding a held reply for %s: %.0fs old" % (sid, age))
             return "discarded"
         rec = next((r for r in records if r.get("sessionId") == sid), None)
         if rec is None:
-            log("discarding a held reply: session %s is gone" % sid)
+            sp_runtime.log("discarding a held reply: session %s is gone" % sid)
             return "discarded"
         if not socket_path_ok(rec.get("messagingSocketPath")):
-            log("discarding a held reply: %s listens outside the allowlist" % sid)
+            sp_runtime.log("discarding a held reply: %s listens outside the allowlist" % sid)
             return "discarded"
-        text = reply_text(entry["text"], entry.get("mid"), held_reply=True)
+        text = sp_protocol.reply_text(entry["text"], entry.get("mid"), held_reply=True)
         try:
-            body = build_cc_body(text, self.thread_id, self.name, self.sock_path)
+            body = sp_protocol.build_cc_body(text, self.thread_id, self.name, self.sock_path)
         except ValueError as exc:
-            log("cannot build a held reply for %s: %s" % (sid, exc))
+            sp_runtime.log("cannot build a held reply for %s: %s" % (sid, exc))
             return "discarded"
-        if not deliver_to_record(rec, build_user_frame(body, self.sock_path)):
-            log("keeping the held reply for %s to retry" % sid)
+        if not deliver_to_record(rec, sp_protocol.build_user_frame(body, self.sock_path)):
+            sp_runtime.log("keeping the held reply for %s to retry" % sid)
             return "failed"
         # An explicit reset opens a new sequence; an allowance continues the
         # current one, so the release counts toward its usage.
@@ -3224,7 +2236,7 @@ class Shim:
         self._spend_binding(sid)
         self.budget_sender_sid = sid
         self.budget_last_at = now
-        log(
+        sp_runtime.log(
             "released a held reply (turn %s) to %s"
             % (entry.get("turn_id"), rec.get("name") or sid)
         )
@@ -3239,8 +2251,8 @@ class Shim:
         return (
             isinstance(total, int)
             and not isinstance(total, bool)
-            and 1 <= total <= BUDGET_ALLOW_MAX
-            and parse_time(value.get("at")) is not None
+            and 1 <= total <= sp_constants.BUDGET_ALLOW_MAX
+            and sp_runtime.parse_time(value.get("at")) is not None
         )
 
     def _allowance_fresh(self, at, now):
@@ -3254,7 +2266,7 @@ class Shim:
 
     def _cap_for(self, sid):
         """The consecutive-reply cap for one requesting session."""
-        cap = REPLY_BUDGET
+        cap = sp_constants.REPLY_BUDGET
         if self.allowance and self.allowance.get("sid") == sid:
             cap = max(cap, self.allowance["total"])
         binding = self.binding
@@ -3278,7 +2290,7 @@ class Shim:
             number = value.get(key)
             if isinstance(number, bool) or not isinstance(number, int):
                 return False
-            if not low <= number <= BUDDY_REPLIES_MAX:
+            if not low <= number <= sp_constants.BUDDY_REPLIES_MAX:
                 return False
         return True
 
@@ -3296,13 +2308,13 @@ class Shim:
         # would be deleted unread. A busy lock waits for the next poll.
         try:
             with binding_lock(self.thread_id, timeout=2.0):
-                marker = read_json(path, None)
+                marker = sp_runtime.read_json(path, None)
                 try:
                     os.unlink(path)
                 except OSError:
                     return
         except BindingLockTimeout:
-            log("binding marker for thread %s is locked; retrying" % self.thread_id)
+            sp_runtime.log("binding marker for thread %s is locked; retrying" % self.thread_id)
             return
         if isinstance(marker, dict) and marker.get("revoke") is True:
             binding = self.binding
@@ -3311,7 +2323,7 @@ class Shim:
                 and binding["sid"] == marker.get("sid")
                 and binding["bind_id"] == marker.get("bind_id")
             ):
-                log("buddy reply allowance for %s revoked" % binding["sid"])
+                sp_runtime.log("buddy reply allowance for %s revoked" % binding["sid"])
                 self.binding = None
                 self._save_state()
             return
@@ -3324,7 +2336,7 @@ class Shim:
                 "spent": 0,
             }
         if not self._valid_binding(grant):
-            log("ignoring a malformed buddy reply allowance for thread %s"
+            sp_runtime.log("ignoring a malformed buddy reply allowance for thread %s"
                 % self.thread_id)
             return
         current = self.binding
@@ -3340,7 +2352,7 @@ class Shim:
         old_cap = self._cap_for(sid)
         self.binding = grant
         new_cap = self._cap_for(sid)
-        log(
+        sp_runtime.log(
             "buddy reply allowance for %s set to %d total (%d spent)"
             % (sid, grant["total"], grant["spent"])
         )
@@ -3359,18 +2371,18 @@ class Shim:
         path = budget_allow_path(self.thread_id)
         if not os.path.exists(path):
             return
-        grant = read_json(path, None)
+        grant = sp_runtime.read_json(path, None)
         try:
             os.unlink(path)
         except OSError:
             return
         if not self._valid_allowance(grant):
-            log("ignoring a malformed reply allowance for thread %s" % self.thread_id)
+            sp_runtime.log("ignoring a malformed reply allowance for thread %s" % self.thread_id)
             return
         sid, total = grant["sid"], grant["total"]
-        granted_at = parse_time(grant["at"])
+        granted_at = sp_runtime.parse_time(grant["at"])
         if not self._allowance_fresh(granted_at, time.time()):
-            log(
+            sp_runtime.log(
                 "ignoring a stale reply allowance for %s: granted %.0fs ago, "
                 "outside the %.0fs idle window"
                 % (sid, time.time() - granted_at, self.reply_budget_window)
@@ -3385,7 +2397,7 @@ class Shim:
             )
         current = self.allowance
         if current and current.get("sid") == sid and current["total"] >= total:
-            log(
+            sp_runtime.log(
                 "reply allowance of %d for %s already covers %d; unchanged"
                 % (current["total"], sid, total)
             )
@@ -3401,7 +2413,7 @@ class Shim:
             "bound": self.budget_sender_sid == sid,
         }
         new_cap = self._cap_for(sid)
-        log(
+        sp_runtime.log(
             "reply allowance for %s set to %d (%d spent)"
             % (sid, new_cap, self.budgets.get(sid, 0))
         )
@@ -3442,16 +2454,16 @@ class Shim:
         """End the current sequence: its usage, notices, held replies and any
         grant bound to it go; a fresh grant still waiting for its grantee stays."""
         if self.budgets:
-            log("reply budget sequence reset: %s" % reason)
+            sp_runtime.log("reply budget sequence reset: %s" % reason)
         if self.held:
             # Only an explicit reset releases a held reply; a sequence that
             # moved on must not receive a stale answer later.
-            log("discarding %d held reply(s): the sequence moved on" % len(self.held))
+            sp_runtime.log("discarding %d held reply(s): the sequence moved on" % len(self.held))
         self.budgets = {}
         self.budget_notified = set()
         self.held = {}
         if self.allowance and not self._allowance_waiting(now):
-            log("reply allowance for %s dropped: the sequence moved on"
+            sp_runtime.log("reply allowance for %s dropped: the sequence moved on"
                 % self.allowance.get("sid"))
             self.allowance = None
         self.budget_sender_sid = None
@@ -3467,7 +2479,7 @@ class Shim:
         """
         return (
             not self.allowance.get("bound", True)
-            and self._allowance_fresh(parse_time(self.allowance.get("at")) or 0.0, now)
+            and self._allowance_fresh(sp_runtime.parse_time(self.allowance.get("at")) or 0.0, now)
         )
 
     def _handle_turn_end(self, turn):
@@ -3486,14 +2498,14 @@ class Shim:
             self._fire_idle(sub, detail)
 
         if turn.outcome != "complete":
-            log("turn %s aborted; nothing to deliver" % turn.turn_id)
+            sp_runtime.log("turn %s aborted; nothing to deliver" % turn.turn_id)
             return
         # S7: a turn that completed while no shim ran IS picked up from the
         # cursor on restart. Recent is useful; hours old is a surprise reply to
         # a conversation that moved on, so it is recorded and not posted.
         age = None if turn.completed_at is None else self.started_at - turn.completed_at
-        if age is not None and age > RESTART_DELIVERY_WINDOW:
-            log(
+        if age is not None and age > sp_constants.RESTART_DELIVERY_WINDOW:
+            sp_runtime.log(
                 "turn %s completed %.0fs before this shim started; recording it "
                 "as processed without posting" % (turn.turn_id, age)
             )
@@ -3501,7 +2513,7 @@ class Shim:
 
         tag = turn.tag or {}
         self._advance_budget_sequence(tag)
-        text = strip_tag(turn.last_agent_message or "").strip()
+        text = sp_protocol.strip_tag(turn.last_agent_message or "").strip()
 
         records = live_claude_records()
         targets = []
@@ -3510,22 +2522,22 @@ class Shim:
         reply_socket = tag.get("reply")
         if reply_socket:
             if not socket_path_ok(reply_socket):
-                log("reply address %r is not an allowed socket" % reply_socket)
+                sp_runtime.log("reply address %r is not an allowed socket" % reply_socket)
             else:
                 rec = claude_record_by_socket(reply_socket, records)
                 if rec is None:
-                    log("the session that queued turn %s is gone" % turn.turn_id)
+                    sp_runtime.log("the session that queued turn %s is gone" % turn.turn_id)
                 elif not tag.get("sid"):
                     # P3: sockets are named after a pid and pids are reused, so
                     # a tag with no session id cannot prove the session at that
                     # socket is the one that asked. No id, no auto-delivery.
-                    log(
+                    sp_runtime.log(
                         "the tag for turn %s carries no session id; not "
                         "auto-delivering to %s" % (turn.turn_id, reply_socket)
                     )
                 elif rec.get("sessionId") != tag.get("sid"):
                     # Claude's own sender guards do not run here.
-                    log("session id at %s changed; not delivering" % reply_socket)
+                    sp_runtime.log("session id at %s changed; not delivering" % reply_socket)
                 else:
                     requester = rec
 
@@ -3539,12 +2551,12 @@ class Shim:
             self.contacts[rsid] = {
                 "name": requester.get("name") or tag.get("from"),
                 "socket": reply_socket,
-                "last_seen": now_iso(),
+                "last_seen": sp_runtime.now_iso(),
             }
             self._bound(self.contacts)
 
         if not text:
-            log("turn %s finished with no agent message" % turn.turn_id)
+            sp_runtime.log("turn %s finished with no agent message" % turn.turn_id)
             if requester is not None:
                 # The requester otherwise waits for a reply that never comes.
                 # One correlated status plus one plain notice with no reply
@@ -3557,8 +2569,8 @@ class Shim:
                 )
                 deliver_to_record(
                     requester,
-                    build_user_frame(
-                        build_cc_body(notice, self.thread_id, self.name, None), None
+                    sp_protocol.build_user_frame(
+                        sp_protocol.build_cc_body(notice, self.thread_id, self.name, None), None
                     ),
                 )
             return
@@ -3566,14 +2578,14 @@ class Shim:
         if requester is not None:
             targets.append(requester)
 
-        addressed = AT_NAME_RE.match(text.lstrip())
+        addressed = sp_constants.AT_NAME_RE.match(text.lstrip())
         if addressed:
             name = addressed.group(1)
             matches = claude_record_by_name(name, records)
             if not matches:
-                log("no live Claude session named %r" % name)
+                sp_runtime.log("no live Claude session named %r" % name)
             elif len(matches) > 1:
-                log("%r names %d live sessions; not delivering" % (name, len(matches)))
+                sp_runtime.log("%r names %d live sessions; not delivering" % (name, len(matches)))
             elif any(t.get("sessionId") == matches[0].get("sessionId") for t in targets):
                 # Addressed to the session the reply already goes to: the
                 # reply path delivers it once, so there is nothing to check or
@@ -3588,7 +2600,7 @@ class Shim:
                 if allowed:
                     targets.append(rec)
                 else:
-                    log(
+                    sp_runtime.log(
                         "dropping an unsolicited reply to %r: no prior contact "
                         "(set SESSION_PEERS_ALLOW_UNSOLICITED=1 to allow)" % name
                     )
@@ -3613,7 +2625,7 @@ class Shim:
                     % (
                         cap,
                         self.thread_id,
-                        BUDGET_ALLOW_MAX,
+                        sp_constants.BUDGET_ALLOW_MAX,
                         self.thread_id,
                         self.reply_budget_window,
                     )
@@ -3628,7 +2640,7 @@ class Shim:
                         "turn_id": turn.turn_id,
                         "at": time.time(),
                     }
-                log(
+                sp_runtime.log(
                     "reply budget of %d spent for session %s; holding the reply "
                     "(peers.py budget allow %s --replies N or peers.py budget "
                     "reset %s releases it)"
@@ -3659,29 +2671,29 @@ class Shim:
                             self.name or self.thread_id,
                             cap,
                             self.thread_id,
-                            BUDGET_ALLOW_MAX,
+                            sp_constants.BUDGET_ALLOW_MAX,
                             self.thread_id,
                             self.reply_budget_window,
                         )
                     )
-                    body = build_cc_body(notice, self.thread_id, self.name, None)
-                    if deliver_to_record(rec, build_user_frame(body, None)):
+                    body = sp_protocol.build_cc_body(notice, self.thread_id, self.name, None)
+                    if deliver_to_record(rec, sp_protocol.build_user_frame(body, None)):
                         self.budget_notified.add(sid)
                 continue
             out = (
-                reply_text(text, tag.get("mid")) if sid == tag.get("sid") else text
+                sp_protocol.reply_text(text, tag.get("mid")) if sid == tag.get("sid") else text
             )
             try:
-                body = build_cc_body(out, self.thread_id, self.name, self.sock_path)
+                body = sp_protocol.build_cc_body(out, self.thread_id, self.name, self.sock_path)
             except ValueError as exc:
-                log("cannot build a reply for turn %s: %s" % (turn.turn_id, exc))
+                sp_runtime.log("cannot build a reply for turn %s: %s" % (turn.turn_id, exc))
                 break
-            if deliver_to_record(rec, build_user_frame(body, self.sock_path)):
+            if deliver_to_record(rec, sp_protocol.build_user_frame(body, self.sock_path)):
                 self.budgets[sid] = spent + 1
                 self._spend_binding(sid)
                 # Deliberately no body text: the log is a delivery record, not
                 # a transcript, and it lands in a file the user may share.
-                log(
+                sp_runtime.log(
                     "delivered turn %s to %s"
                     % (turn.turn_id, rec.get("name") or sid)
                 )
@@ -3695,7 +2707,7 @@ class Shim:
 
 def cmd_list(args):
     warn_versions()
-    installed_digest = code_digest(runtime_code_files())
+    installed_digest = sp_runtime.code_digest(sp_runtime.runtime_code_files())
     all_records = read_claude_records()
     classified = [(record, record_liveness(record)) for record in all_records]
     records = [record for record, status in classified if status == "live"]
@@ -3722,7 +2734,7 @@ def cmd_list(args):
     claude_unverified = [claude_view(record) for record in unverified]
     def codex_view(thread):
         pid = shim_pid(thread["id"])
-        state = read_json(thread_state_path(thread["id"]), {}) if pid else {}
+        state = sp_runtime.read_json(thread_state_path(thread["id"]), {}) if pid else {}
         alias = state.get("name") if isinstance(state, dict) else None
         if not alias:
             try:
@@ -3732,7 +2744,7 @@ def cmd_list(args):
                     records=records,
                     title_owner=codex_title_owner(thread.get("name"), threads),
                 )
-            except NameError_:
+            except sp_protocol.NameError_:
                 alias = None
         return {
             "id": thread["id"],
@@ -3820,7 +2832,7 @@ def _thread_from_args(args, required=False):
     value = explicit or os.environ.get("CODEX_THREAD_ID") or os.environ.get(
         "CODEX_SESSION_ID"
     )
-    if value and not is_uuid(value):
+    if value and not sp_runtime.is_uuid(value):
         if explicit or required:
             raise ValueError("--from-thread/CODEX_THREAD_ID must be a UUID")
         return None
@@ -3833,7 +2845,7 @@ def _thread_from_args(args, required=False):
 
 def _resolve_claude_record(target, exclude=None):
     records = read_claude_records()
-    if exclude and not is_uuid(target):
+    if exclude and not sp_runtime.is_uuid(target):
         # A shim's record carries its thread's UUID, so this also drops the
         # excluded Codex thread's own shim.
         records = [r for r in records if r.get("sessionId") != exclude]
@@ -3846,7 +2858,7 @@ def _resolve_claude_record(target, exclude=None):
             "unavailable; retry outside the sandbox or with host permission" % target
         )
     if not matches:
-        noun = "id" if is_uuid(target) else "name"
+        noun = "id" if sp_runtime.is_uuid(target) else "name"
         raise ResolveNotFound("no live Claude session with %s %r" % (noun, target))
     if len(matches) > 1:
         raise ResolveError(
@@ -3866,21 +2878,21 @@ def _deliver_claude(rec, message, thread_id=None, reply_route=True):
     thread_name = None
     shim_socket = None
     if thread_id:
-        state = read_json(thread_state_path(thread_id), {}) or {}
+        state = sp_runtime.read_json(thread_state_path(thread_id), {}) or {}
         thread_name = state.get("name")
         pid = shim_pid(thread_id)
         if pid:
             rec_path = os.path.join(claude_sessions_dir(), "%d.json" % pid)
-            shim_rec = read_json(rec_path, {}) or {}
+            shim_rec = sp_runtime.read_json(rec_path, {}) or {}
             shim_socket = shim_rec.get("messagingSocketPath")
     route = shim_socket if reply_route else None
-    body = build_cc_body(message, thread_id or "", thread_name, route)
-    if len(body) > MAX_TEXT_CHARS or utf8_len(body) > MAX_TEXT_CHARS:
+    body = sp_protocol.build_cc_body(message, thread_id or "", thread_name, route)
+    if len(body) > sp_constants.MAX_TEXT_CHARS or sp_runtime.utf8_len(body) > sp_constants.MAX_TEXT_CHARS:
         raise ValueError(
             "wrapped message exceeds the %d-character/UTF-8-byte peer cap"
-            % MAX_TEXT_CHARS
+            % sp_constants.MAX_TEXT_CHARS
         )
-    frame = build_user_frame(body, route)
+    frame = sp_protocol.build_user_frame(body, route)
     send_frame(rec["messagingSocketPath"], frame, auth_token=peer_token_for(rec))
     return frame["msg_id"], bool(route)
 
@@ -3908,7 +2920,7 @@ def cmd_send(args):
     if failed is not None:
         return failed
     try:
-        args.message = message_from_args(args)
+        args.message = sp_runtime.message_from_args(args)
     except ValueError as exc:
         sys.stderr.write("error: %s\n" % exc)
         return 1
@@ -3929,7 +2941,7 @@ def _send_codex(target, args):
         return 1
     degraded = thread.get("degraded")
     if degraded:
-        log("liveness unverified: the Codex state schema is unknown")
+        sp_runtime.log("liveness unverified: the Codex state schema is unknown")
     else:
         held, _pid = thread_is_held(
             thread["rollout_path"], lock_path=writer_lock_path(thread["id"])
@@ -3946,8 +2958,8 @@ def _send_codex(target, args):
                 "(the queue would sit undrained)\n" % thread["id"]
             )
             return 1
-        if thread_is_paused(thread["rollout_path"]):
-            log(
+        if sp_rollout.thread_is_paused(thread["rollout_path"]):
+            sp_runtime.log(
                 "thread %s is paused after an interrupt: the message is queued "
                 "but drains only when its user types the next prompt" % thread["id"]
             )
@@ -3956,7 +2968,7 @@ def _send_codex(target, args):
         "CLAUDE_CODE_MESSAGING_SOCKET"
     )
     env_sid = os.environ.get("CLAUDE_CODE_SESSION_ID")
-    if not from_socket and not args.from_sid and is_uuid(env_sid):
+    if not from_socket and not args.from_sid and sp_runtime.is_uuid(env_sid):
         matches = claude_record_by_target(env_sid)
         if len(matches) == 1:
             from_socket = matches[0].get("messagingSocketPath")
@@ -3973,13 +2985,13 @@ def _send_codex(target, args):
         from_sid = from_sid or rec.get("sessionId")
         from_name = from_name or rec.get("name")
     elif not from_name and not from_sid:
-        log(
+        sp_runtime.log(
             "sender identity absent: replies stay in the Codex TUI; when "
             "sending from Claude Code, use its Bash tool so "
             "CLAUDE_CODE_MESSAGING_SOCKET is available"
         )
     msg_id = str(uuidlib.uuid4())
-    tag = build_tag(from_name, from_sid, from_socket, msg_id)
+    tag = sp_protocol.build_tag(from_name, from_sid, from_socket, msg_id)
     text = "%s\n%s" % (tag, args.message)
     try:
         codex_queue(thread["id"], text, cwd=thread.get("cwd"))
@@ -4013,7 +3025,7 @@ def _send_claude(target, args):
         sys.stderr.write("error: could not reach %s: %s\n" % (target, exc))
         return 1
     if thread_id and not reply_capable:
-        log(
+        sp_runtime.log(
             "Codex thread %s has no live shim; the message was sent, but a native "
             "peer reply cannot route back" % thread_id
         )
@@ -4034,11 +3046,11 @@ def _send_claude(target, args):
 
 
 def _bounded_timeout(value):
-    timeout = REQUEST_TIMEOUT_DEFAULT if value is None else float(value)
-    if timeout <= 0 or timeout > REQUEST_TIMEOUT_MAX:
+    timeout = sp_constants.REQUEST_TIMEOUT_DEFAULT if value is None else float(value)
+    if timeout <= 0 or timeout > sp_constants.REQUEST_TIMEOUT_MAX:
         raise ValueError(
             "timeout must be greater than 0 and at most %.0f seconds"
-            % REQUEST_TIMEOUT_MAX
+            % sp_constants.REQUEST_TIMEOUT_MAX
         )
     return timeout
 
@@ -4063,10 +3075,10 @@ def cleanup_expired_requests(now=None, dry_run=False):
         if not name.endswith(suffix):
             continue
         request_id = name[: -len(suffix)]
-        if not is_uuid(request_id):
+        if not sp_runtime.is_uuid(request_id):
             continue
         path = request_path(request_id)
-        data = read_json(path, {}) or {}
+        data = sp_runtime.read_json(path, {}) or {}
         try:
             expires_at = float(data.get("expires_at", 0))
         except (TypeError, ValueError):
@@ -4081,11 +3093,11 @@ def cleanup_expired_requests(now=None, dry_run=False):
         if not name.endswith(".reply.json"):
             continue
         request_id = name[: -len(".reply.json")]
-        if not is_uuid(request_id) or os.path.exists(request_path(request_id)):
+        if not sp_runtime.is_uuid(request_id) or os.path.exists(request_path(request_id)):
             continue
         path = request_reply_path(request_id)
         try:
-            stale = os.stat(path).st_mtime <= now - REQUEST_ORPHAN_TTL
+            stale = os.stat(path).st_mtime <= now - sp_constants.REQUEST_ORPHAN_TTL
         except OSError:
             stale = False
         if stale:
@@ -4097,7 +3109,7 @@ def cleanup_expired_requests(now=None, dry_run=False):
 
 
 def _request_envelope(request_id, message, timeout):
-    script = os.path.abspath(__file__)
+    script = sp_runtime.entrypoint_path()
     return (
         '<session-peers-request id="%s" timeout-seconds="%d">\n'
         "%s\n"
@@ -4111,7 +3123,7 @@ def _request_envelope(request_id, message, timeout):
         % (
             request_id,
             int(timeout),
-            neutralise_request_markup(message),
+            sp_protocol.neutralise_request_markup(message),
             shlex.quote(script),
             request_id,
         )
@@ -4129,7 +3141,7 @@ def _request_meta(request_id, requester_thread_id, rec, expires_at, reply_path):
         "requester_thread_id": requester_thread_id,
         "target_session_id": rec.get("sessionId"),
         "target_session_name": rec.get("name"),
-        "created_at": now_iso(),
+        "created_at": sp_runtime.now_iso(),
         "expires_at": expires_at,
         "reply_path": reply_path,
     }
@@ -4155,7 +3167,7 @@ def cmd_ask(args):
         sys.stderr.write("error: ask --to must start with cc:\n")
         return 2
     try:
-        message = message_from_args(args)
+        message = sp_runtime.message_from_args(args)
         timeout = _bounded_timeout(args.timeout)
         thread_id = _thread_from_args(args, required=True)
     except ValueError as exc:
@@ -4178,7 +3190,7 @@ def cmd_ask(args):
     meta_path = request_path(request_id)
     reply_path = request_reply_path(request_id)
     expires_at = time.time() + timeout
-    write_json_atomic(
+    sp_runtime.write_json_atomic(
         meta_path,
         _request_meta(request_id, thread_id, rec, expires_at, reply_path),
     )
@@ -4193,13 +3205,13 @@ def cmd_ask(args):
         except (OSError, ValueError) as exc:
             sys.stderr.write("error: could not send request to %s: %s\n" % (args.to, exc))
             return 1
-        log(
+        sp_runtime.log(
             "request %s sent to %s; waiting up to %.0fs"
             % (request_id, rec.get("name") or rec.get("sessionId"), timeout)
         )
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            response = read_json(reply_path, None)
+            response = sp_runtime.read_json(reply_path, None)
             if _reply_matches(response, request_id, rec.get("sessionId")):
                 payload = {
                     "status": "replied",
@@ -4216,7 +3228,7 @@ def cmd_ask(args):
                     if not response["message"].endswith("\n"):
                         sys.stdout.write("\n")
                 return 0
-            time.sleep(REQUEST_POLL_INTERVAL)
+            time.sleep(sp_constants.REQUEST_POLL_INTERVAL)
         sys.stderr.write(
             "error: request %s timed out after %.0f seconds; no reply was queued\n"
             % (request_id, timeout)
@@ -4242,7 +3254,7 @@ def _current_claude_session_id():
 def _read_completed_reply(path, attempts=20):
     """Read a competing reply after its exclusive writer finishes."""
     for _index in range(attempts):
-        value = read_json(path, None)
+        value = sp_runtime.read_json(path, None)
         if isinstance(value, dict):
             return value
         time.sleep(0.01)
@@ -4252,14 +3264,14 @@ def _read_completed_reply(path, attempts=20):
 def cmd_reply(args):
     """Complete one pending ask mailbox from its intended Claude session."""
     try:
-        message = message_from_args(args)
+        message = sp_runtime.message_from_args(args)
         path = request_path(args.request)
         reply_path = request_reply_path(args.request)
     except ValueError as exc:
         sys.stderr.write("error: %s\n" % exc)
         return 2
     cleanup_expired_requests()
-    meta = read_json(path, None)
+    meta = sp_runtime.read_json(path, None)
     if not isinstance(meta, dict):
         sys.stderr.write("error: request %s is unknown or expired\n" % args.request)
         return 1
@@ -4288,10 +3300,10 @@ def cmd_reply(args):
         "request_id": args.request,
         "session_id": sid,
         "message": message,
-        "replied_at": now_iso(),
+        "replied_at": sp_runtime.now_iso(),
     }
     try:
-        created = write_json_exclusive(reply_path, payload)
+        created = sp_runtime.write_json_exclusive(reply_path, payload)
     except OSError as exc:
         sys.stderr.write("error: could not write reply: %s\n" % exc)
         return 1
@@ -4327,7 +3339,7 @@ def cmd_dispatch(args):
         sys.stderr.write("error: dispatch --to must start with cc:\n")
         return 2
     try:
-        message = message_from_args(args)
+        message = sp_runtime.message_from_args(args)
         timeout = _bounded_timeout(args.timeout)
         thread_id = _thread_from_args(args, required=True)
     except ValueError as exc:
@@ -4351,7 +3363,7 @@ def cmd_dispatch(args):
     reply_path = request_reply_path(request_id)
     expires_at = time.time() + timeout
     meta = _request_meta(request_id, thread_id, rec, expires_at, reply_path)
-    write_json_atomic(meta_path, meta)
+    sp_runtime.write_json_atomic(meta_path, meta)
     try:
         message_id, _reply_capable = _deliver_claude(
             rec,
@@ -4378,7 +3390,7 @@ def cmd_dispatch(args):
             )
         sys.stderr.write("error: could not send request to %s: %s\n" % (args.to, exc))
         return 1
-    log(
+    sp_runtime.log(
         "dispatched request %s to %s; expires in %.0fs"
         % (request_id, rec.get("name") or rec.get("sessionId"), timeout)
     )
@@ -4428,7 +3440,7 @@ def _claim_reply(reply_path):
     except OSError:
         return None
     try:
-        data = read_json(claim_path, None)
+        data = sp_runtime.read_json(claim_path, None)
     finally:
         _unlink_quiet(claim_path)
     return data if isinstance(data, dict) else None
@@ -4452,7 +3464,7 @@ def cmd_await(args):
         return 2
 
     cleanup_expired_requests()
-    meta = read_json(meta_path, None)
+    meta = sp_runtime.read_json(meta_path, None)
     if not isinstance(meta, dict):
         # Expired-and-collected, already consumed, or never dispatched. Without
         # a durable terminal marker (deferred to a later slice) these cannot be
@@ -4477,7 +3489,7 @@ def cmd_await(args):
             return _await_expired(args, "expired before a reply arrived")
         if not os.path.exists(meta_path):
             return _await_expired(args, "unknown, already consumed, or expired")
-        response = read_json(reply_path, None)
+        response = sp_runtime.read_json(reply_path, None)
         if _reply_matches(response, args.request, target_sid):
             claimed = _claim_reply(reply_path)
             if claimed is None:
@@ -4500,7 +3512,7 @@ def cmd_await(args):
             return 0
         if time.monotonic() >= deadline:
             break
-        time.sleep(REQUEST_POLL_INTERVAL)
+        time.sleep(sp_constants.REQUEST_POLL_INTERVAL)
 
     if expires_at <= time.time():
         cleanup_expired_requests()
@@ -4542,11 +3554,11 @@ def cmd_wait_peer(args):
         return 1
     sid = rec.get("sessionId")
     deadline = time.monotonic() + timeout
-    interval = _float_env(
-        "SESSION_PEERS_WAIT_POLL_INTERVAL", WAIT_POLL_INTERVAL_DEFAULT
+    interval = sp_runtime._float_env(
+        "SESSION_PEERS_WAIT_POLL_INTERVAL", sp_constants.WAIT_POLL_INTERVAL_DEFAULT
     )
     if interval <= 0:
-        interval = WAIT_POLL_INTERVAL_DEFAULT
+        interval = sp_constants.WAIT_POLL_INTERVAL_DEFAULT
     while time.monotonic() < deadline:
         candidates = [
             item for item in read_claude_records() if item.get("sessionId") == sid
@@ -4581,7 +3593,7 @@ def shim_ready(thread_id):
     pid = shim_pid(thread_id)
     if pid is None:
         return None
-    rec = read_json(os.path.join(claude_sessions_dir(), "%d.json" % pid), None)
+    rec = sp_runtime.read_json(os.path.join(claude_sessions_dir(), "%d.json" % pid), None)
     if not isinstance(rec, dict) or rec.get("sessionId") != thread_id:
         return None
     sock = rec.get("messagingSocketPath")
@@ -4626,13 +3638,13 @@ def shim_pid(thread_id):
             pass
     if not pid_alive(pid):
         return None
-    rec = read_json(os.path.join(claude_sessions_dir(), "%d.json" % pid), None)
+    rec = sp_runtime.read_json(os.path.join(claude_sessions_dir(), "%d.json" % pid), None)
     if (
         isinstance(rec, dict)
         and rec.get("entrypoint") == "codex"
         and rec.get("sessionId") != thread_id
     ):
-        log("the pidfile for %s names another thread's shim; ignoring" % thread_id)
+        sp_runtime.log("the pidfile for %s names another thread's shim; ignoring" % thread_id)
         return None
     return pid
 
@@ -4645,7 +3657,7 @@ def cmd_shim(args):
         return 1
     try:
         shim = Shim(thread)
-    except NameError_ as exc:
+    except sp_protocol.NameError_ as exc:
         sys.stderr.write("error: %s\n" % exc)
         return 1
     return shim.run()
@@ -4657,15 +3669,15 @@ def spawn_shim(thread):
     Codex's hook runner waits for inherited stdout/stderr pipes, so a child
     started from `session-hook` MUST detach exactly like this (PRD Facts).
     """
-    script = os.path.realpath(__file__)
+    script = sp_runtime.entrypoint_path()
     log_path = thread_log_path(thread["id"])
     try:
-        daemon_pid = spawn_detached(
+        daemon_pid = sp_runtime.spawn_detached(
             [sys.executable, script, "shim", "--thread", thread["id"]],
             log_path,
         )
     except OSError as exc:
-        log("could not start the shim for %s: %s" % (thread["id"], exc))
+        sp_runtime.log("could not start the shim for %s: %s" % (thread["id"], exc))
         return None
     # The SHIM writes and locks the pidfile once it is serving, so the file is
     # never a claim without a holder. Wait for it so a following reconcile
@@ -4676,10 +3688,10 @@ def spawn_shim(thread):
         if pid:
             return pid
         if not pid_alive(daemon_pid):
-            log("the shim for %s exited; see %s" % (thread["id"], log_path))
+            sp_runtime.log("the shim for %s exited; see %s" % (thread["id"], log_path))
             return None
         time.sleep(0.05)
-    log("the shim for %s did not report ready in 10s; see %s" % (thread["id"], log_path))
+    sp_runtime.log("the shim for %s did not report ready in 10s; see %s" % (thread["id"], log_path))
     return None
 
 
@@ -4795,13 +3807,13 @@ def cmd_up(args):
             return 1
         try:
             register_thread(thread)
-        except NameError_ as exc:
+        except sp_protocol.NameError_ as exc:
             sys.stderr.write("error: %s\n" % exc)
             return 1
         # D4: an explicit `up` is one of the two things that clears the budget.
         try:
             with open(budget_reset_path(thread["id"]), "w", encoding="utf-8") as fh:
-                fh.write(now_iso() + "\n")
+                fh.write(sp_runtime.now_iso() + "\n")
         except OSError:
             pass
         print("registered %s (%s)" % (thread.get("name") or thread["id"], thread["id"]))
@@ -4844,7 +3856,7 @@ def cmd_down(args):
             thread = resolve_thread_prefer_live(args.target)
             tid = thread["id"]
         except ResolveError as exc:
-            tid = args.target if is_uuid(args.target) else None
+            tid = args.target if sp_runtime.is_uuid(args.target) else None
             if tid is None:
                 sys.stderr.write("error: %s\n" % exc)
                 return 1
@@ -4916,7 +3928,7 @@ def _budget_target(value, args):
     try:
         return resolve_thread_prefer_live(value)["id"], None
     except ResolveError as exc:
-        if not is_uuid(value):
+        if not sp_runtime.is_uuid(value):
             return None, (1, str(exc))
         return value, None
 
@@ -4934,22 +3946,22 @@ def cmd_budget(args):
     # An explicit reset drops any allowance, including one not yet consumed.
     _unlink_quiet(budget_allow_path(tid))
     with open(budget_reset_path(tid), "w", encoding="utf-8") as fh:
-        fh.write(now_iso() + "\n")
+        fh.write(sp_runtime.now_iso() + "\n")
     state_path = thread_state_path(tid)
-    state = read_json(state_path, None)
+    state = sp_runtime.read_json(state_path, None)
     if isinstance(state, dict) and (state.get("budgets") or state.get("allowance")):
         state["budgets"] = {}
         state["allowance"] = None
-        write_json_atomic(state_path, state, mode=0o600)
+        sp_runtime.write_json_atomic(state_path, state, mode=0o600)
     print("reply budget reset for %s" % tid)
     return 0
 
 
 def cmd_budget_allow(args):
     """Grant one requester a TOTAL reply allowance on one Codex thread."""
-    if not 1 <= args.replies <= BUDGET_ALLOW_MAX:
+    if not 1 <= args.replies <= sp_constants.BUDGET_ALLOW_MAX:
         sys.stderr.write(
-            "error: --replies must be between 1 and %d\n" % BUDGET_ALLOW_MAX
+            "error: --replies must be between 1 and %d\n" % sp_constants.BUDGET_ALLOW_MAX
         )
         return 2
     sid = args.for_session
@@ -4965,7 +3977,7 @@ def cmd_budget_allow(args):
             )
             return 2
         sid = caller["uuid"]
-    if not is_uuid(sid):
+    if not sp_runtime.is_uuid(sid):
         sys.stderr.write("error: --for-session must be a Claude session UUID\n")
         return 2
     tid, failure = _budget_target(args.thread, args)
@@ -4979,35 +3991,35 @@ def cmd_budget_allow(args):
             "allowances; a shim started from an older peers.py never reads the "
             "grant, so the cap would stay %d. Restart it: `"
             "peers.py restart %s` (keeps the budget and its spent replies), then "
-            "grant again\n" % (tid, pid, REPLY_BUDGET, tid)
+            "grant again\n" % (tid, pid, sp_constants.REPLY_BUDGET, tid)
         )
         return 1
     path = budget_allow_path(tid)
     total = args.replies
-    pending = read_json(path, None)
-    window = _float_env("SESSION_PEERS_REPLY_BUDGET_WINDOW", REPLY_BUDGET_WINDOW_DEFAULT)
+    pending = sp_runtime.read_json(path, None)
+    window = sp_runtime._float_env("SESSION_PEERS_REPLY_BUDGET_WINDOW", sp_constants.REPLY_BUDGET_WINDOW_DEFAULT)
     if window <= 0:
-        window = REPLY_BUDGET_WINDOW_DEFAULT
-    granted_at = now_iso()
+        window = sp_constants.REPLY_BUDGET_WINDOW_DEFAULT
+    granted_at = sp_runtime.now_iso()
     if isinstance(pending, dict) and pending.get("sid") == sid:
         # Not yet consumed: two grants before the shim polls keep the higher,
         # with the higher's own time, so a merge never refreshes an old grant.
         previous = pending.get("total")
-        previous_at = parse_time(pending.get("at"))
+        previous_at = sp_runtime.parse_time(pending.get("at"))
         if (
             isinstance(previous, int)
             and not isinstance(previous, bool)
             and previous_at is not None
             and time.time() - previous_at <= window
-            and min(previous, BUDGET_ALLOW_MAX) >= total
+            and min(previous, sp_constants.BUDGET_ALLOW_MAX) >= total
         ):
-            total = min(previous, BUDGET_ALLOW_MAX)
+            total = min(previous, sp_constants.BUDGET_ALLOW_MAX)
             granted_at = pending["at"]
-    write_json_atomic(path, {"sid": sid, "total": total, "at": granted_at}, mode=0o600)
+    sp_runtime.write_json_atomic(path, {"sid": sid, "total": total, "at": granted_at}, mode=0o600)
     print(
         "reply allowance for %s: up to %d consecutive replies to session %s "
         "(a total for this sequence; replies already delivered still count)"
-        % (tid, max(REPLY_BUDGET, total), sid)
+        % (tid, max(sp_constants.REPLY_BUDGET, total), sid)
     )
     if not pid:
         print("no shim is running for %s; the grant applies once one starts" % tid)
@@ -5021,7 +4033,7 @@ def shim_supports(thread_id, pid, feature):
     state naming another pid, proves nothing about the running code, so it
     counts as unsupported rather than risking a grant nothing reads.
     """
-    state = read_json(thread_state_path(thread_id), None)
+    state = sp_runtime.read_json(thread_state_path(thread_id), None)
     if not isinstance(state, dict) or state.get("shim_pid") != pid:
         return False
     return feature in (state.get("shim_features") or [])
@@ -5035,7 +4047,7 @@ def shim_supports(thread_id, pid, feature):
 def parse_typed(value):
     """`cc:<uuid>` / `codex:<uuid>` into a typed identity, or ValueError."""
     kind, sep, ident = str(value or "").partition(":")
-    if not sep or kind not in BUDDY_KINDS or not is_uuid(ident):
+    if not sep or kind not in sp_constants.BUDDY_KINDS or not sp_runtime.is_uuid(ident):
         raise ValueError("expected cc:<uuid> or codex:<uuid>, got %r" % value)
     return {"kind": kind, "uuid": ident}
 
@@ -5047,7 +4059,7 @@ def caller_identity(args):
         return parse_typed(explicit)
     sid = _current_claude_session_id()
     if sid:
-        if not is_uuid(sid):
+        if not sp_runtime.is_uuid(sid):
             raise ValueError("this Claude session's id %r is not a UUID" % sid)
         return {"kind": "cc", "uuid": sid}
     tid = _thread_from_args(args)
@@ -5060,7 +4072,7 @@ def _resolve_typed_kind(kind, target, live_only=False, exclude=None):
     if kind == "cc":
         rec = _resolve_claude_record(target, exclude=exclude)
         sid = rec.get("sessionId")
-        if not is_uuid(sid):
+        if not sp_runtime.is_uuid(sid):
             # A bound buddy is addressed by UUID only; a non-UUID id would be
             # re-read as a name later.
             raise ResolveError("Claude session %r has no UUID session id" % target)
@@ -5084,7 +4096,7 @@ def resolve_typed(target, exclude=None):
     target = str(target or "")
     if target.startswith("@"):
         target = target[1:]
-    for kind in BUDDY_KINDS:
+    for kind in sp_constants.BUDDY_KINDS:
         if target.startswith(kind + ":"):
             return _resolve_typed_kind(
                 kind, target[len(kind) + 1 :], exclude=exclude
@@ -5092,7 +4104,7 @@ def resolve_typed(target, exclude=None):
     if not target:
         raise ResolveError("an empty target names no session")
     found, errors, dead_codex = [], [], False
-    for kind in BUDDY_KINDS:
+    for kind in sp_constants.BUDDY_KINDS:
         try:
             # Live Codex threads only here: a dead namesake must not compete
             # with a live Claude session for the same bare name.
@@ -5112,7 +4124,7 @@ def resolve_typed(target, exclude=None):
         # An ambiguous or unverifiable side could be the one meant: never guess.
         raise ResolveAmbiguousKind(
             "%s; pick the kind" % errors[0],
-            ["%s:%s" % (kind, target) for kind in BUDDY_KINDS],
+            ["%s:%s" % (kind, target) for kind in sp_constants.BUDDY_KINDS],
         )
     if len(found) > 1:
         # Routine for an attached Codex thread: its UUID also names its shim's
@@ -5131,14 +4143,14 @@ def resolve_typed(target, exclude=None):
 
 def read_buddy(owner):
     """The owner's buddy record, or None when absent or malformed."""
-    rec = read_json(buddy_path(owner), None)
+    rec = sp_runtime.read_json(buddy_path(owner), None)
     if not isinstance(rec, dict):
         return None
     buddy = rec.get("buddy")
     if (
         not isinstance(buddy, dict)
-        or buddy.get("kind") not in BUDDY_KINDS
-        or not is_uuid(buddy.get("uuid"))
+        or buddy.get("kind") not in sp_constants.BUDDY_KINDS
+        or not sp_runtime.is_uuid(buddy.get("uuid"))
     ):
         return None
     return rec
@@ -5146,17 +4158,17 @@ def read_buddy(owner):
 
 def _parse_uses(value):
     if value is None:
-        return list(BUDDY_USES)
+        return list(sp_constants.BUDDY_USES)
     uses = []
     for word in value.split(","):
         word = word.strip()
         if word and word not in uses:
             uses.append(word)
-    unknown = [word for word in uses if word not in BUDDY_USES]
+    unknown = [word for word in uses if word not in sp_constants.BUDDY_USES]
     if unknown or not uses:
         raise ValueError(
             "unsupported --uses %s; supported: %s"
-            % (", ".join(unknown) or "(empty)", ", ".join(BUDDY_USES))
+            % (", ".join(unknown) or "(empty)", ", ".join(sp_constants.BUDDY_USES))
         )
     return uses
 
@@ -5230,12 +4242,12 @@ def _codex_status(uuid, attach):
         pid = attach_thread(uuid, verbose=False)
     status["shim_pid"] = pid
     if pid:
-        shim_rec = read_json(os.path.join(claude_sessions_dir(), "%d.json" % pid), None)
+        shim_rec = sp_runtime.read_json(os.path.join(claude_sessions_dir(), "%d.json" % pid), None)
         if isinstance(shim_rec, dict) and shim_rec.get("sessionId") == uuid:
             status["status"] = shim_rec.get("status")
     rollout = thread.get("rollout_path")
     if rollout and os.access(rollout, os.R_OK):
-        status["paused"] = thread_is_paused(rollout)
+        status["paused"] = sp_rollout.thread_is_paused(rollout)
     if thread.get("live") is None:
         status["route"] = "unavailable: liveness is unverified"
     elif not thread.get("live"):
@@ -5297,7 +4309,7 @@ def _replies_left(rec):
     total = rec.get("replies")
     if isinstance(total, bool) or not isinstance(total, int) or total < 1:
         return None
-    state = read_json(thread_state_path(rec["buddy"]["uuid"]), None)
+    state = sp_runtime.read_json(thread_state_path(rec["buddy"]["uuid"]), None)
     binding = state.get("binding") if isinstance(state, dict) else None
     if (
         isinstance(binding, dict)
@@ -5367,7 +4379,7 @@ def cmd_buddy(args):
                 target = _resolve_typed_kind(owner["kind"], owner["uuid"]).get("name")
             except ResolveError:
                 target = None
-            if not target or is_uuid(target):
+            if not target or sp_runtime.is_uuid(target):
                 sys.stderr.write(
                     "error: this session has no name to look up; name the buddy\n"
                 )
@@ -5403,7 +4415,7 @@ def cmd_buddy(args):
             and buddy["kind"] == "codex"
             and shim_pid(buddy["uuid"])
         ):
-            grant = BUDDY_REPLIES_DEFAULT
+            grant = sp_constants.BUDDY_REPLIES_DEFAULT
         if grant is not None:
             # An explicit grant attaches the shim when needed, so this runs
             # outside every lock; the default never attaches one.
@@ -5455,7 +4467,7 @@ def cmd_buddy(args):
                         "owner": owner,
                         "buddy": buddy,
                         "uses": uses,
-                        "set_at": now_iso(),
+                        "set_at": sp_runtime.now_iso(),
                     }
                     if replies is not None:
                         rec["replies"] = replies
@@ -5475,15 +4487,15 @@ def cmd_buddy(args):
                     # a retried set reuses the record's bind_id (so the shim
                     # keeps the spent count).
                     try:
-                        write_json_atomic(path, rec, mode=0o600)
+                        sp_runtime.write_json_atomic(path, rec, mode=0o600)
                         if grant is not None:
-                            write_json_atomic(
+                            sp_runtime.write_json_atomic(
                                 budget_binding_path(buddy["uuid"]),
                                 {
                                     "sid": owner["uuid"],
                                     "bind_id": bind_id,
                                     "total": replies,
-                                    "at": now_iso(),
+                                    "at": sp_runtime.now_iso(),
                                 },
                                 mode=0o600,
                             )
@@ -5512,8 +4524,8 @@ def _check_buddy_replies(replies, owner, buddy, attach=True):
 
     ``attach=False`` (the default total) uses only an already running shim.
     """
-    if not 1 <= replies <= BUDDY_REPLIES_MAX:
-        return 2, "--replies must be between 1 and %d" % BUDDY_REPLIES_MAX
+    if not 1 <= replies <= sp_constants.BUDDY_REPLIES_MAX:
+        return 2, "--replies must be between 1 and %d" % sp_constants.BUDDY_REPLIES_MAX
     if owner["kind"] != "cc" or buddy["kind"] != "codex":
         return 2, (
             "--replies applies to a Claude session's Codex buddy only: the "
@@ -5534,15 +4546,15 @@ def _check_buddy_replies(replies, owner, buddy, attach=True):
             "cannot verify the running shim for %s (pid %d) supports buddy "
             "allowances; a shim started from an older peers.py never reads the "
             "grant, so the cap would stay %d. Restart it: `peers.py restart %s`, "
-            "then bind again" % (buddy["uuid"], pid, REPLY_BUDGET, buddy["uuid"])
+            "then bind again" % (buddy["uuid"], pid, sp_constants.REPLY_BUDGET, buddy["uuid"])
         )
-    if replies > BUDGET_ALLOW_MAX and not shim_supports(
+    if replies > sp_constants.BUDGET_ALLOW_MAX and not shim_supports(
         buddy["uuid"], pid, "binding_allowance_max500"
     ):
         return 1, (
             "the running shim for %s (pid %d) accepts a reply total of at most %d; "
             "restart it (`peers.py restart %s`) and bind again"
-            % (buddy["uuid"], pid, BUDGET_ALLOW_MAX, buddy["uuid"])
+            % (buddy["uuid"], pid, sp_constants.BUDGET_ALLOW_MAX, buddy["uuid"])
         )
     return None
 
@@ -5557,10 +4569,10 @@ def _binding_conflict(owner, buddy):
     """
     tid = buddy["uuid"]
     holders = set()
-    marker = read_json(budget_binding_path(tid), None)
+    marker = sp_runtime.read_json(budget_binding_path(tid), None)
     if isinstance(marker, dict) and isinstance(marker.get("sid"), str):
         holders.add(marker["sid"])
-    state = read_json(thread_state_path(tid), None)
+    state = sp_runtime.read_json(thread_state_path(tid), None)
     binding = state.get("binding") if isinstance(state, dict) else None
     if isinstance(binding, dict) and isinstance(binding.get("sid"), str):
         holders.add(binding["sid"])
@@ -5569,7 +4581,7 @@ def _binding_conflict(owner, buddy):
     except OSError:
         names = []
     for name in names:
-        rec = read_json(os.path.join(buddies_dir(), name), None)
+        rec = sp_runtime.read_json(os.path.join(buddies_dir(), name), None)
         if not isinstance(rec, dict) or not rec.get("bind_id"):
             continue
         rec_buddy, rec_owner = rec.get("buddy"), rec.get("owner")
@@ -5610,13 +4622,13 @@ def _revoke_binding(owner, old):
     """
     if _revocable_thread(owner, old) is None:
         return
-    write_json_atomic(
+    sp_runtime.write_json_atomic(
         budget_binding_path(old["buddy"]["uuid"]),
         {
             "sid": owner["uuid"],
             "bind_id": old["bind_id"],
             "revoke": True,
-            "at": now_iso(),
+            "at": sp_runtime.now_iso(),
         },
         mode=0o600,
     )
@@ -5656,7 +4668,7 @@ def _owner_verified_gone(owner):
     return thread.get("live") is False
 
 
-def gc_buddy_records(days=GC_DAYS_DEFAULT, dry_run=False, verbose=True):
+def gc_buddy_records(days=sp_constants.GC_DAYS_DEFAULT, dry_run=False, verbose=True):
     """Prune buddy records whose owner is verified gone and older than days."""
     if days < 0:
         raise ValueError("retention days must be zero or greater")
@@ -5668,10 +4680,10 @@ def gc_buddy_records(days=GC_DAYS_DEFAULT, dry_run=False, verbose=True):
     removed = []
     for name in names:
         kind, sep, rest = name.partition("-")
-        if not sep or kind not in BUDDY_KINDS or not rest.endswith(".json"):
+        if not sep or kind not in sp_constants.BUDDY_KINDS or not rest.endswith(".json"):
             continue
         ident = rest[: -len(".json")]
-        if not is_uuid(ident):
+        if not sp_runtime.is_uuid(ident):
             continue
         path = os.path.join(buddies_dir(), name)
         try:
@@ -5687,7 +4699,7 @@ def gc_buddy_records(days=GC_DAYS_DEFAULT, dry_run=False, verbose=True):
             except FileNotFoundError:
                 continue
             except OSError as exc:
-                log("could not prune %s: %s" % (path, exc))
+                sp_runtime.log("could not prune %s: %s" % (path, exc))
                 continue
         removed.append(name)
         if verbose:
@@ -5699,7 +4711,7 @@ def cmd_gc(args):
     days = (
         args.days
         if args.days is not None
-        else _float_env("SESSION_PEERS_GC_DAYS", GC_DAYS_DEFAULT)
+        else sp_runtime._float_env("SESSION_PEERS_GC_DAYS", sp_constants.GC_DAYS_DEFAULT)
     )
     try:
         removed = gc_bridge_state(days=days, dry_run=args.dry_run)
@@ -5730,19 +4742,19 @@ def cmd_session_hook(_args):
         payload = {}
     source = payload.get("source", "unknown")
     session_id = payload.get("session_id")
-    script = os.path.realpath(__file__)
+    script = sp_runtime.entrypoint_path()
     log_path = os.path.join(state_dir(), "session-hook.log")
     try:
         command = [sys.executable, script, "hook-reconcile"]
         if (
             _args.auto_attach
             and source in ("startup", "resume")
-            and is_uuid(session_id)
+            and sp_runtime.is_uuid(session_id)
         ):
             command.extend(["--thread", session_id])
-        spawn_detached(command, log_path)
+        sp_runtime.spawn_detached(command, log_path)
     except OSError as exc:
-        log("could not start the reconcile: %s" % exc)
+        sp_runtime.log("could not start the reconcile: %s" % exc)
     try:
         with open(log_path, "a", encoding="utf-8") as logfh:
             logfh.write(
@@ -5757,11 +4769,11 @@ def cmd_session_hook(_args):
 
 def cmd_hook_reconcile(args):
     """Detached SessionStart worker: GC, reconcile, then attach this UUID."""
-    days = _float_env("SESSION_PEERS_GC_DAYS", GC_DAYS_DEFAULT)
+    days = sp_runtime._float_env("SESSION_PEERS_GC_DAYS", sp_constants.GC_DAYS_DEFAULT)
     try:
         gc_bridge_state(days=days, verbose=False)
     except ValueError as exc:
-        log("GC skipped: %s" % exc)
+        sp_runtime.log("GC skipped: %s" % exc)
     cleanup_expired_requests()
     reconcile(verbose=False)
     if args.thread:
@@ -5784,7 +4796,7 @@ def hook_command(script=None, auto_attach=False):
     The path is quoted: a checkout under a directory with a space would
     otherwise split into two arguments and the hook would fail (P8).
     """
-    script = script or os.path.realpath(__file__)
+    script = script or sp_runtime.entrypoint_path()
     command = "python3 %s session-hook" % shlex.quote(script)
     return command + (" --auto-attach" if auto_attach else "")
 
@@ -5918,7 +4930,7 @@ def cmd_install_hook(args):
         mode = stat.S_IMODE(os.stat(path).st_mode)
     except OSError:
         mode = 0o600
-    write_json_atomic(path, root, mode=mode)
+    sp_runtime.write_json_atomic(path, root, mode=mode)
     print("%s one SessionStart entry in %s" % (action, path))
     _print_trust_step()
     return 0
@@ -5934,70 +4946,6 @@ def backup_file(path, tag="session-peers"):
     with open(path, "rb") as src, open(backup, "wb") as dst:
         dst.write(src.read())
     return backup
-
-
-def _load_tomllib():
-    """The stdlib TOML parser, or None on 3.9 and 3.10.
-
-    A seam, so a test can prove the no-parser path without a second runtime.
-    """
-    try:
-        import tomllib
-    except ImportError:
-        return None
-    return tomllib
-
-
-def _unquote_table_name(name):
-    """`["features"]` names the same table as `[features]` (R1c)."""
-    name = name.strip()
-    if len(name) >= 2 and name[0] == name[-1] and name[0] in "\"'":
-        inner = name[1:-1]
-        if inner and '"' not in inner and "'" not in inner:
-            return inner.strip()
-    return name
-
-
-def _scan_multiline(line, delim):
-    """The open multiline-string delimiter after this line, or None.
-
-    Good enough to tell whether a `[features]` line is real config or an
-    example inside a triple-quoted block (R1); the parser diff backstops it.
-    """
-    i = 0
-    while i < len(line):
-        if delim is not None:
-            j = line.find(delim, i)
-            if j == -1:
-                return delim
-            i = j + 3
-            delim = None
-            continue
-        if line.startswith(TRIPLE_DQ, i) or line.startswith(TRIPLE_SQ, i):
-            delim = line[i:i + 3]
-            i += 3
-            continue
-        ch = line[i]
-        if ch == "#":
-            return None
-        if ch in "\"'":
-            j = line.find(ch, i + 1)
-            if j == -1:
-                return None
-            i = j + 1
-            continue
-        i += 1
-    return delim
-
-
-def _line_states(lines):
-    """[bool] telling, per line, whether it STARTS inside a multiline string."""
-    states = []
-    delim = None
-    for line in lines:
-        states.append(delim is not None)
-        delim = _scan_multiline(line, delim)
-    return states
 
 
 def _print_trust_step():
@@ -6045,26 +4993,26 @@ def unix_socket_probe(sock_dir):
 
 def cmd_doctor(_args):
     warn_versions()
-    installed_digest = code_digest(runtime_code_files())
+    installed_digest = sp_runtime.code_digest(sp_runtime.runtime_code_files())
     lines = []
 
     def add(status, text):
         lines.append("%-5s %s" % (status, text))
 
-    claude_v = tool_version("claude")
-    codex_v = tool_version("codex")
+    claude_v = sp_runtime.tool_version("claude")
+    codex_v = sp_runtime.tool_version("codex")
     add(
-        "warn" if claude_v and version_is_newer(claude_v, CLAUDE_CODE_TESTED) else "ok",
+        "warn" if claude_v and sp_runtime.version_is_newer(claude_v, sp_constants.CLAUDE_CODE_TESTED) else "ok",
         "Claude Code %s (tested against %s)"
-        % (claude_v.strip() if claude_v else "not on PATH", CLAUDE_CODE_TESTED),
+        % (claude_v.strip() if claude_v else "not on PATH", sp_constants.CLAUDE_CODE_TESTED),
     )
     add(
-        "warn" if codex_v and version_is_newer(codex_v, CODEX_TESTED) else "ok",
+        "warn" if codex_v and sp_runtime.version_is_newer(codex_v, sp_constants.CODEX_TESTED) else "ok",
         "Codex CLI %s (tested against %s)"
-        % (codex_v.strip() if codex_v else "not on PATH", CODEX_TESTED),
+        % (codex_v.strip() if codex_v else "not on PATH", sp_constants.CODEX_TESTED),
     )
     add("ok" if codex_v else "fail", "codex on PATH")
-    rc, _out, _err = run_cmd(["lsof", "-v"], timeout=10)
+    rc, _out, _err = sp_runtime.run_cmd(["lsof", "-v"], timeout=10)
     add("ok" if rc != 127 else "fail", "lsof on PATH (thread liveness needs it)")
     _started, ps_error = proc_start_checked(os.getpid())
     add(
@@ -6109,7 +5057,7 @@ def cmd_doctor(_args):
         add("warn", "bridge GC skipped while Codex liveness is unverified")
     elif db:
         stale = gc_bridge_state(
-            days=_float_env("SESSION_PEERS_GC_DAYS", GC_DAYS_DEFAULT),
+            days=sp_runtime._float_env("SESSION_PEERS_GC_DAYS", sp_constants.GC_DAYS_DEFAULT),
             dry_run=True,
             verbose=False,
         )
@@ -6170,13 +5118,13 @@ def cmd_doctor(_args):
         )
 
     hooks_path = os.path.join(codex_home(), "hooks.json")
-    data = read_json(hooks_path, None)
+    data = sp_runtime.read_json(hooks_path, None)
     if data is None:
         add("ok", "no %s (the SessionStart hook is optional)" % hooks_path)
     else:
         events, _root = _hooks_event_map(data)
         entries = events.get("SessionStart") or []
-        cfg = read_toml_lite(codex_config_path())
+        cfg = sp_config.read_toml_lite(codex_config_path())
         found = False
         for i, entry in enumerate(entries):
             if not isinstance(entry, dict):
@@ -6230,21 +5178,6 @@ def cmd_doctor(_args):
     return 0
 
 
-# --------------------------------------------------------------------------
-# Topics: pull-only, append-only logs any peer can post to and read
-# --------------------------------------------------------------------------
-
-TOPIC_MAX_CHARS = 256
-TOPIC_TTL_DAYS_DEFAULT = 7.0
-TOPIC_MAX_ENTRIES_DEFAULT = 1000
-TOPIC_MAX_BYTES_DEFAULT = 16 * 1024 * 1024
-TOPIC_TAIL_DEFAULT = 20
-TOPIC_TAIL_MAX = 1000
-TOPIC_KIND_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$")
-# C0 and C1 controls: a topic is one printable line.
-TOPIC_BAD_CHARS_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
-
-
 class TopicError(Exception):
     """A refused topic operation; carries the exit code."""
 
@@ -6264,9 +5197,9 @@ def validate_topic(topic):
     """The topic string unchanged, or TopicError. It is opaque otherwise."""
     if not isinstance(topic, str) or not topic.strip():
         raise TopicError("a topic must be a non-empty string", 2)
-    if len(topic) > TOPIC_MAX_CHARS:
-        raise TopicError("a topic is at most %d characters" % TOPIC_MAX_CHARS, 2)
-    if TOPIC_BAD_CHARS_RE.search(topic):
+    if len(topic) > sp_constants.TOPIC_MAX_CHARS:
+        raise TopicError("a topic is at most %d characters" % sp_constants.TOPIC_MAX_CHARS, 2)
+    if sp_constants.TOPIC_BAD_CHARS_RE.search(topic):
         raise TopicError("a topic must not contain control characters", 2)
     try:
         topic.encode("utf-8")
@@ -6294,13 +5227,13 @@ def _topic_lock(lock_path):
 
 
 def _topic_limits():
-    ttl = _float_env("SESSION_PEERS_TOPIC_TTL_DAYS", TOPIC_TTL_DAYS_DEFAULT)
-    entries = int(_float_env("SESSION_PEERS_TOPIC_MAX_ENTRIES", TOPIC_MAX_ENTRIES_DEFAULT))
-    size = int(_float_env("SESSION_PEERS_TOPIC_MAX_BYTES", TOPIC_MAX_BYTES_DEFAULT))
+    ttl = sp_runtime._float_env("SESSION_PEERS_TOPIC_TTL_DAYS", sp_constants.TOPIC_TTL_DAYS_DEFAULT)
+    entries = int(sp_runtime._float_env("SESSION_PEERS_TOPIC_MAX_ENTRIES", sp_constants.TOPIC_MAX_ENTRIES_DEFAULT))
+    size = int(sp_runtime._float_env("SESSION_PEERS_TOPIC_MAX_BYTES", sp_constants.TOPIC_MAX_BYTES_DEFAULT))
     return (
-        ttl if ttl > 0 else TOPIC_TTL_DAYS_DEFAULT,
-        entries if entries > 0 else TOPIC_MAX_ENTRIES_DEFAULT,
-        size if size > 0 else TOPIC_MAX_BYTES_DEFAULT,
+        ttl if ttl > 0 else sp_constants.TOPIC_TTL_DAYS_DEFAULT,
+        entries if entries > 0 else sp_constants.TOPIC_MAX_ENTRIES_DEFAULT,
+        size if size > 0 else sp_constants.TOPIC_MAX_BYTES_DEFAULT,
     )
 
 
@@ -6329,14 +5262,14 @@ def _topic_state(topic, log_path, meta_path, now):
     """
     ttl_days, max_entries, max_bytes = _topic_limits()
     lines = _read_topic_lines(log_path)
-    meta = read_json(meta_path, {}) or {}
+    meta = sp_runtime.read_json(meta_path, {}) or {}
     next_seq = meta.get("next_seq") if isinstance(meta.get("next_seq"), int) else 1
     if lines:
         next_seq = max(next_seq, lines[-1][0]["seq"] + 1)
     cutoff = now - ttl_days * 86400.0
     kept = [
         (entry, size) for entry, size in lines
-        if (parse_time(entry.get("ts")) or 0.0) >= cutoff
+        if (sp_runtime.parse_time(entry.get("ts")) or 0.0) >= cutoff
     ]
     kept = kept[-max_entries:]
     total = sum(size for _entry, size in kept)
@@ -6358,20 +5291,17 @@ def _write_topic_log(log_path, entries):
 
 
 def _write_topic_meta(meta_path, topic, next_seq, last_ts):
-    write_json_atomic(
+    sp_runtime.write_json_atomic(
         meta_path,
         {"topic": topic, "next_seq": next_seq, "last_ts": last_ts},
         mode=0o600,
     )
 
 
-_NO_DATA = object()
-
-
-def topic_post(topic, from_identity, kind=None, text=None, data=_NO_DATA):
+def topic_post(topic, from_identity, kind=None, text=None, data=sp_constants._NO_DATA):
     """Append one entry and return it. Seq is unique and monotonic per topic."""
     validate_topic(topic)
-    if kind is not None and not TOPIC_KIND_RE.match(kind):
+    if kind is not None and not sp_constants.TOPIC_KIND_RE.match(kind):
         raise TopicError(
             "--kind must be 1-64 characters of letters, digits, '.', '_', ':' "
             "or '-', starting with a letter or digit", 2
@@ -6382,14 +5312,14 @@ def topic_post(topic, from_identity, kind=None, text=None, data=_NO_DATA):
         _entries, next_seq = _topic_state(topic, log_path, meta_path, now)
         entry = {
             "seq": next_seq,
-            "ts": now_iso(),
+            "ts": sp_runtime.now_iso(),
             "topic": topic,
             "from_kind": from_identity.get("kind"),
             "from_name": from_identity.get("name"),
             "from_sid": from_identity.get("uuid"),
             "kind": kind,
         }
-        if data is not _NO_DATA:
+        if data is not sp_constants._NO_DATA:
             entry["data"] = data
         else:
             entry["text"] = text
@@ -6404,7 +5334,7 @@ def topic_post(topic, from_identity, kind=None, text=None, data=_NO_DATA):
     return entry
 
 
-def topic_tail(topic, since=None, limit=TOPIC_TAIL_DEFAULT):
+def topic_tail(topic, since=None, limit=sp_constants.TOPIC_TAIL_DEFAULT):
     """{"entries", "next", "gap"}: entries with seq > since in order, or the
     last ``limit`` when since is None. ``gap`` names pruned seqs the cursor
     skipped, so a slow reader learns it lost entries instead of guessing."""
@@ -6442,7 +5372,7 @@ def topic_list():
     for name in names:
         if not name.endswith(".meta.json"):
             continue
-        meta = read_json(os.path.join(topics_dir(), name), None)
+        meta = sp_runtime.read_json(os.path.join(topics_dir(), name), None)
         if not isinstance(meta, dict) or not isinstance(meta.get("topic"), str):
             continue
         next_seq = meta.get("next_seq")
@@ -6466,7 +5396,7 @@ def topic_prune_all():
 def process_ancestors(pid=None, limit=64):
     """Ancestor pids of ``pid`` (default: this process), nearest first, or
     None when the process table cannot be read."""
-    rc, out, _err = run_cmd(["ps", "-axo", "pid=,ppid="])
+    rc, out, _err = sp_runtime.run_cmd(["ps", "-axo", "pid=,ppid="])
     if rc != 0:
         return None
     parent = {}
@@ -6509,12 +5439,12 @@ def topic_sender(args):
     claude = None
     sock = os.environ.get("CLAUDE_CODE_MESSAGING_SOCKET")
     rec = claude_record_by_socket(sock) if sock else None
-    if rec and is_uuid(rec.get("sessionId")):
+    if rec and sp_runtime.is_uuid(rec.get("sessionId")):
         claude = {"kind": "cc", "uuid": rec["sessionId"], "name": rec.get("name"),
                   "pid": rec.get("pid")}
     else:
         sid = os.environ.get("CLAUDE_CODE_SESSION_ID")
-        if is_uuid(sid):
+        if sp_runtime.is_uuid(sid):
             matches = claude_record_by_target(sid)
             only = matches[0] if len(matches) == 1 else {}
             claude = {"kind": "cc", "uuid": sid, "name": only.get("name"),
@@ -6588,10 +5518,10 @@ def cmd_topic(args):
 
 def _cmd_topic_post(args):
     validate_topic(args.topic)
-    data, text = _NO_DATA, None
+    data, text = sp_constants._NO_DATA, None
     try:
         if args.json_file:
-            raw = message_from_args(
+            raw = sp_runtime.message_from_args(
                 argparse.Namespace(message=None, message_file=args.json_file)
             )
             try:
@@ -6599,7 +5529,7 @@ def _cmd_topic_post(args):
             except ValueError as exc:
                 raise TopicError("--json-file is not valid JSON: %s" % exc)
         else:
-            text = message_from_args(args)
+            text = sp_runtime.message_from_args(args)
     except UnicodeError:
         raise TopicError("the message is not valid UTF-8")
     except ValueError as exc:
@@ -6609,7 +5539,7 @@ def _cmd_topic_post(args):
     except ValueError as exc:
         raise TopicError(str(exc), 2)
     if sender is None:
-        log(
+        sp_runtime.log(
             "sender identity absent: posting anonymously; from Claude Code use "
             "its Bash tool, from Codex its shell, or pass --as"
         )
@@ -6625,8 +5555,8 @@ def _cmd_topic_post(args):
 def _cmd_topic_tail(args):
     if args.since is not None and args.since < 0:
         raise TopicError("--since must be zero or greater", 2)
-    if not 1 <= args.limit <= TOPIC_TAIL_MAX:
-        raise TopicError("--limit must be between 1 and %d" % TOPIC_TAIL_MAX, 2)
+    if not 1 <= args.limit <= sp_constants.TOPIC_TAIL_MAX:
+        raise TopicError("--limit must be between 1 and %d" % sp_constants.TOPIC_TAIL_MAX, 2)
     result = topic_tail(args.topic, since=args.since, limit=args.limit)
     if args.json:
         print(json.dumps(result, ensure_ascii=False))
@@ -6822,7 +5752,7 @@ def build_parser():
         type=int,
         required=True,
         metavar="N",
-        help="total consecutive replies for this sequence (1..%d)" % BUDGET_ALLOW_MAX,
+        help="total consecutive replies for this sequence (1..%d)" % sp_constants.BUDGET_ALLOW_MAX,
     )
     p_allow.add_argument(
         "--for-session",
@@ -6882,7 +5812,7 @@ def build_parser():
     p_buddy_set.add_argument(
         "--uses",
         metavar="a,b",
-        help="advisory scope (default: all of %s)" % ", ".join(BUDDY_USES),
+        help="advisory scope (default: all of %s)" % ", ".join(sp_constants.BUDDY_USES),
     )
     p_buddy_set.add_argument(
         "--replies",
@@ -6891,7 +5821,7 @@ def build_parser():
         help="a finite TOTAL of replies (1..%d, default %d for a Claude "
         "session's Codex buddy) this buddy may send beyond the per-sequence "
         "cap, across sequences and shim restarts; revoked by `buddy clear` or "
-        "binding another buddy" % (BUDDY_REPLIES_MAX, BUDDY_REPLIES_DEFAULT),
+        "binding another buddy" % (sp_constants.BUDDY_REPLIES_MAX, sp_constants.BUDDY_REPLIES_DEFAULT),
     )
     buddy_action("ping", "report status, attaching a Codex buddy's shim if needed")
     buddy_action("clear", "unbind the buddy")
@@ -6937,9 +5867,9 @@ def build_parser():
         help="print entries after SEQ (default: the last --limit entries)",
     )
     p_ttail.add_argument(
-        "--limit", type=int, default=TOPIC_TAIL_DEFAULT, metavar="N",
+        "--limit", type=int, default=sp_constants.TOPIC_TAIL_DEFAULT, metavar="N",
         help="at most N entries (default %d, maximum %d)"
-        % (TOPIC_TAIL_DEFAULT, TOPIC_TAIL_MAX),
+        % (sp_constants.TOPIC_TAIL_DEFAULT, sp_constants.TOPIC_TAIL_MAX),
     )
     p_ttail.add_argument("--json", action="store_true", help="machine-readable output")
     p_ttail.set_defaults(func=cmd_topic)

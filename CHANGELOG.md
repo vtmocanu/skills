@@ -8,6 +8,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- `session-peers`: extract protocol, rollout, TOML config, constants, and runtime helpers into an eagerly loaded bundled package; retain the stable CLI and hook path, preserve saved state, and patch owning modules directly in tests. The launcher works with isolated Python import paths; reply envelopes use the canonical skill location when invoked through a symlink.
 - `session-peers`: list and doctor compare a shim’s startup source digest with the installed CLI, report current/stale/unknown code, and name the explicit restart command without resetting budgets or restarting automatically.
 - `session-peers`: run the regression suite in CI on Python 3.9 through 3.14, exercising the declared minimum and both stdlib TOML reader paths with real interpreters.
 - `session-peers`: keep common messaging, buddy, review, and reply safety rules in a shorter core skill; move lifecycle, budgets, delegated work, detailed messaging, topics, and diagnostics to task-specific references. Correct stale title, command synopsis, and TOML parser documentation without changing runtime behavior.
