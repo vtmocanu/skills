@@ -210,6 +210,17 @@ def cmd_doctor(_args):
     def add(status, text):
         lines.append("%-5s %s" % (status, text))
 
+    _doctor_environment(add)
+
+    _doctor_peers(add, installed_digest)
+
+    _doctor_hooks(add)
+
+    print("\n".join(lines))
+    return 0
+
+
+def _doctor_environment(add):
     claude_v = sp_runtime.tool_version("claude")
     codex_v = sp_runtime.tool_version("codex")
     add(
@@ -236,6 +247,9 @@ def cmd_doctor(_args):
     if sp_storage.codex_sqlite_home() != sp_storage.codex_home():
         add("ok", "codex sqlite_home: %s" % sp_storage.codex_sqlite_home())
 
+
+
+def _doctor_peers(add, installed_digest):
     sock_dir = sp_claude.default_socket_dir()
     add(
         "ok" if sp_claude.dir_is_allowlisted(sock_dir) else "warn",
@@ -328,6 +342,9 @@ def cmd_doctor(_args):
             % (thread.get("name") or thread["id"], thread["id"]),
         )
 
+
+
+def _doctor_hooks(add):
     hooks_path = os.path.join(sp_storage.codex_home(), "hooks.json")
     data = sp_runtime.read_json(hooks_path, None)
     if data is None:
@@ -384,6 +401,3 @@ def cmd_doctor(_args):
             add("ok", "[features] hooks = true in config.toml")
         else:
             add("ok", "[features] hooks is unset (enabled by default)")
-
-    print("\n".join(lines))
-    return 0

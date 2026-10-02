@@ -331,182 +331,198 @@ def cmd_buddy(args):
         return 2
     path = sp_storage.buddy_path(owner)
     if action == "clear":
-        try:
-            with sp_storage.owner_lock(owner["uuid"]):
-                old = read_buddy(owner)
-                with sp_storage._binding_locks(_revocable_thread(owner, old)):
-                    # Revoke first: a failed revoke keeps the record, so clear
-                    # can be retried.
-                    try:
-                        _revoke_binding(owner, old)
-                    except OSError as exc:
-                        sys.stderr.write(
-                            "error: could not revoke the reply total on %s (%s); "
-                            "the buddy is still bound, retry `buddy clear`\n"
-                            % (old["buddy"]["uuid"], exc)
-                        )
-                        return 1
-                    try:
-                        os.unlink(path)
-                    except FileNotFoundError:
-                        print("no buddy was set")
-                        return 0
-        except sp_storage.BindingLockTimeout as exc:
-            sys.stderr.write("error: %s; the buddy is still bound, retry\n" % exc)
-            return 1
-        print("buddy cleared")
-        return 0
+        return _clear_buddy(owner, path)
     if action == "set":
-        try:
-            uses = _parse_uses(args.uses)
-        except ValueError as exc:
-            sys.stderr.write("error: %s\n" % exc)
-            return 2
-        target = args.target
-        if target is None:
-            # No name given: look for a peer sharing this session's own name.
-            try:
-                target = sp_identity._resolve_typed_kind(owner["kind"], owner["uuid"]).get("name")
-            except sp_codex.ResolveError:
-                target = None
-            if not target or sp_runtime.is_uuid(target):
-                sys.stderr.write(
-                    "error: this session has no name to look up; name the buddy\n"
-                )
-                return 1
-        try:
-            buddy = sp_identity.resolve_typed(target, exclude=owner["uuid"])
-        except sp_codex.ResolveNotFound as exc:
-            if args.target is None:
-                sys.stderr.write(
-                    "error: no other session is named %r; name the buddy\n" % target
-                )
-            else:
-                sys.stderr.write("error: %s\n" % exc)
-            return 1
-        except sp_codex.ResolveAmbiguousKind as exc:
-            sys.stderr.write("error: %s. Retry with one of:\n" % exc)
-            for choice in exc.choices:
-                sys.stderr.write("  %s\n" % _buddy_set_command(choice, args))
-            return 1
-        except sp_codex.ResolveError as exc:
-            sys.stderr.write("error: %s\n" % exc)
-            return 1
-        if buddy["kind"] == owner["kind"] and buddy["uuid"] == owner["uuid"]:
-            sys.stderr.write("error: a session cannot be its own buddy\n")
-            return 2
-        # An explicit --replies must be honoured or the bind fails; the default
-        # total for a Claude session's Codex buddy is best-effort (a warning).
-        explicit = args.replies is not None
-        grant = args.replies
-        if (
-            not explicit
-            and owner["kind"] == "cc"
-            and buddy["kind"] == "codex"
-            and sp_lifecycle.shim_pid(buddy["uuid"])
-        ):
-            grant = sp_constants.BUDDY_REPLIES_DEFAULT
-        if grant is not None:
-            # An explicit grant attaches the shim when needed, so this runs
-            # outside every lock; the default never attaches one.
-            refusal = _check_buddy_replies(grant, owner, buddy, attach=explicit)
-            if refusal and explicit:
-                sys.stderr.write("error: %s\n" % refusal[1])
-                return refusal[0]
-            if refusal:
-                sys.stderr.write(
-                    "warning: bound without the default reply total: %s\n" % refusal[1]
-                )
-                grant = None
-        try:
-            with sp_storage.owner_lock(owner["uuid"]):
-                old = read_buddy(owner)
-                same = (
-                    old is not None
-                    and old["buddy"]["kind"] == buddy["kind"]
-                    and old["buddy"]["uuid"] == buddy["uuid"]
-                )
-                kept, bind_id = None, None
-                if same and old.get("bind_id") and isinstance(old.get("replies"), int):
-                    kept, bind_id = old["replies"], old["bind_id"]
-                locked = set()
-                if grant is not None:
-                    locked.add(buddy["uuid"])
-                if not same and _revocable_thread(owner, old):
-                    locked.add(old["buddy"]["uuid"])
-                with sp_storage._binding_locks(*locked):
-                    # The conflict check and every write below share the
-                    # locks, so a competing owner cannot slip between check
-                    # and publish.
-                    if grant is not None:
-                        conflict = _binding_conflict(owner, buddy)
-                        if conflict and explicit:
-                            sys.stderr.write("error: %s\n" % conflict)
-                            return 1
-                        if conflict:
-                            sys.stderr.write(
-                                "warning: bound without the default reply total: %s\n"
-                                % conflict
-                            )
-                            grant = None
-                    replies = kept
-                    if grant is not None:
-                        replies = max(grant, kept or 0)
-                        bind_id = bind_id or uuidlib.uuid4().hex
-                    rec = {
-                        "owner": owner,
-                        "buddy": buddy,
-                        "uses": uses,
-                        "set_at": sp_runtime.now_iso(),
-                    }
-                    if replies is not None:
-                        rec["replies"] = replies
-                        rec["bind_id"] = bind_id
-                    if not same:
-                        try:
-                            _revoke_binding(owner, old)
-                        except OSError as exc:
-                            sys.stderr.write(
-                                "error: could not revoke the reply total on %s "
-                                "(%s); the old buddy is still bound, retry\n"
-                                % (old["buddy"]["uuid"], exc)
-                            )
-                            return 1
-                    # Record first, grant second: whatever fails in between,
-                    # no grant exists without a record that can revoke it, and
-                    # a retried set reuses the record's bind_id (so the shim
-                    # keeps the spent count).
-                    try:
-                        sp_runtime.write_json_atomic(path, rec, mode=0o600)
-                        if grant is not None:
-                            sp_runtime.write_json_atomic(
-                                sp_storage.budget_binding_path(buddy["uuid"]),
-                                {
-                                    "sid": owner["uuid"],
-                                    "bind_id": bind_id,
-                                    "total": replies,
-                                    "at": sp_runtime.now_iso(),
-                                },
-                                mode=0o600,
-                            )
-                    except OSError as exc:
-                        sys.stderr.write(
-                            "error: could not bind the buddy (%s); retry "
-                            "`buddy set` (a retry keeps replies already spent)\n"
-                            % exc
-                        )
-                        return 1
-        except sp_storage.BindingLockTimeout as exc:
-            sys.stderr.write("error: %s; nothing was changed, retry\n" % exc)
-            return 1
-        _print_buddy(args, rec, buddy_status(buddy, attach=True))
-        return 0
+        return _set_buddy(args, owner, path)
     rec = read_buddy(owner)
     if rec is None:
         sys.stderr.write("error: no buddy set; run `peers.py buddy set <name|uuid>`\n")
         return 1
     _print_buddy(args, rec, buddy_status(rec["buddy"], attach=(action == "ping")))
     return 0
+
+
+def _clear_buddy(owner, path):
+    try:
+        with sp_storage.owner_lock(owner["uuid"]):
+            old = read_buddy(owner)
+            with sp_storage._binding_locks(_revocable_thread(owner, old)):
+                # Revoke first: a failed revoke keeps the record, so clear
+                # can be retried.
+                try:
+                    _revoke_binding(owner, old)
+                except OSError as exc:
+                    sys.stderr.write(
+                        "error: could not revoke the reply total on %s (%s); "
+                        "the buddy is still bound, retry `buddy clear`\n"
+                        % (old["buddy"]["uuid"], exc)
+                    )
+                    return 1
+                try:
+                    os.unlink(path)
+                except FileNotFoundError:
+                    print("no buddy was set")
+                    return 0
+    except sp_storage.BindingLockTimeout as exc:
+        sys.stderr.write("error: %s; the buddy is still bound, retry\n" % exc)
+        return 1
+    print("buddy cleared")
+    return 0
+
+
+def _set_buddy(args, owner, path):
+    try:
+        uses = _parse_uses(args.uses)
+    except ValueError as exc:
+        sys.stderr.write("error: %s\n" % exc)
+        return 2
+    target = args.target
+    if target is None:
+        # No name given: look for a peer sharing this session's own name.
+        try:
+            target = sp_identity._resolve_typed_kind(owner["kind"], owner["uuid"]).get("name")
+        except sp_codex.ResolveError:
+            target = None
+        if not target or sp_runtime.is_uuid(target):
+            sys.stderr.write(
+                "error: this session has no name to look up; name the buddy\n"
+            )
+            return 1
+    try:
+        buddy = sp_identity.resolve_typed(target, exclude=owner["uuid"])
+    except sp_codex.ResolveNotFound as exc:
+        if args.target is None:
+            sys.stderr.write(
+                "error: no other session is named %r; name the buddy\n" % target
+            )
+        else:
+            sys.stderr.write("error: %s\n" % exc)
+        return 1
+    except sp_codex.ResolveAmbiguousKind as exc:
+        sys.stderr.write("error: %s. Retry with one of:\n" % exc)
+        for choice in exc.choices:
+            sys.stderr.write("  %s\n" % _buddy_set_command(choice, args))
+        return 1
+    except sp_codex.ResolveError as exc:
+        sys.stderr.write("error: %s\n" % exc)
+        return 1
+    if buddy["kind"] == owner["kind"] and buddy["uuid"] == owner["uuid"]:
+        sys.stderr.write("error: a session cannot be its own buddy\n")
+        return 2
+    # An explicit --replies must be honoured or the bind fails; the default
+    # total for a Claude session's Codex buddy is best-effort (a warning).
+    explicit = args.replies is not None
+    grant = args.replies
+    if (
+        not explicit
+        and owner["kind"] == "cc"
+        and buddy["kind"] == "codex"
+        and sp_lifecycle.shim_pid(buddy["uuid"])
+    ):
+        grant = sp_constants.BUDDY_REPLIES_DEFAULT
+    if grant is not None:
+        # An explicit grant attaches the shim when needed, so this runs
+        # outside every lock; the default never attaches one.
+        refusal = _check_buddy_replies(grant, owner, buddy, attach=explicit)
+        if refusal and explicit:
+            sys.stderr.write("error: %s\n" % refusal[1])
+            return refusal[0]
+        if refusal:
+            sys.stderr.write(
+                "warning: bound without the default reply total: %s\n" % refusal[1]
+            )
+            grant = None
+    result = _bind_buddy_record(owner, buddy, uses, grant, explicit, path)
+    if isinstance(result, int):
+        return result
+    rec = result
+    _print_buddy(args, rec, buddy_status(buddy, attach=True))
+    return 0
+
+
+def _bind_buddy_record(owner, buddy, uses, grant, explicit, path):
+    try:
+        with sp_storage.owner_lock(owner["uuid"]):
+            old = read_buddy(owner)
+            same = (
+                old is not None
+                and old["buddy"]["kind"] == buddy["kind"]
+                and old["buddy"]["uuid"] == buddy["uuid"]
+            )
+            kept, bind_id = None, None
+            if same and old.get("bind_id") and isinstance(old.get("replies"), int):
+                kept, bind_id = old["replies"], old["bind_id"]
+            locked = set()
+            if grant is not None:
+                locked.add(buddy["uuid"])
+            if not same and _revocable_thread(owner, old):
+                locked.add(old["buddy"]["uuid"])
+            with sp_storage._binding_locks(*locked):
+                # The conflict check and every write below share the
+                # locks, so a competing owner cannot slip between check
+                # and publish.
+                if grant is not None:
+                    conflict = _binding_conflict(owner, buddy)
+                    if conflict and explicit:
+                        sys.stderr.write("error: %s\n" % conflict)
+                        return 1
+                    if conflict:
+                        sys.stderr.write(
+                            "warning: bound without the default reply total: %s\n"
+                            % conflict
+                        )
+                        grant = None
+                replies = kept
+                if grant is not None:
+                    replies = max(grant, kept or 0)
+                    bind_id = bind_id or uuidlib.uuid4().hex
+                rec = {
+                    "owner": owner,
+                    "buddy": buddy,
+                    "uses": uses,
+                    "set_at": sp_runtime.now_iso(),
+                }
+                if replies is not None:
+                    rec["replies"] = replies
+                    rec["bind_id"] = bind_id
+                if not same:
+                    try:
+                        _revoke_binding(owner, old)
+                    except OSError as exc:
+                        sys.stderr.write(
+                            "error: could not revoke the reply total on %s "
+                            "(%s); the old buddy is still bound, retry\n"
+                            % (old["buddy"]["uuid"], exc)
+                        )
+                        return 1
+                # Record first, grant second: whatever fails in between,
+                # no grant exists without a record that can revoke it, and
+                # a retried set reuses the record's bind_id (so the shim
+                # keeps the spent count).
+                try:
+                    sp_runtime.write_json_atomic(path, rec, mode=0o600)
+                    if grant is not None:
+                        sp_runtime.write_json_atomic(
+                            sp_storage.budget_binding_path(buddy["uuid"]),
+                            {
+                                "sid": owner["uuid"],
+                                "bind_id": bind_id,
+                                "total": replies,
+                                "at": sp_runtime.now_iso(),
+                            },
+                            mode=0o600,
+                        )
+                except OSError as exc:
+                    sys.stderr.write(
+                        "error: could not bind the buddy (%s); retry "
+                        "`buddy set` (a retry keeps replies already spent)\n"
+                        % exc
+                    )
+                    return 1
+    except sp_storage.BindingLockTimeout as exc:
+        sys.stderr.write("error: %s; nothing was changed, retry\n" % exc)
+        return 1
+    return rec
 
 
 def _check_buddy_replies(replies, owner, buddy, attach=True):

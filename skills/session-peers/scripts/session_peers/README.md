@@ -55,3 +55,11 @@ only serializer, using the same persisted keys and lifecycle points.
 
 Use the public `ReplyBudget` operations at the shim boundary; its validators
 and implementation-only release helpers remain private.
+
+Buddy binding publishes under owner lock followed by sorted binding locks:
+revoke the old total, write the revocable owner record, then publish its grant.
+Shared request preparation validates the target and creates one mailbox;
+ask owns unconditional cleanup, dispatch preserves it for await, and pending
+await retains an unexpired request. Keep those cleanup branches explicit.
+Doctor probes preserve report order; CLI registration helpers preserve parser
+insertion order and argument defaults.
