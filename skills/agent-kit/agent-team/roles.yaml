@@ -37,19 +37,11 @@
 #                    report findings to the team-lead or claim/complete tasks.
 #                    Empty array `tools: []` means "inherit all", so these are
 #                    already implicit there.
-#   model          : optional model override. Omit to inherit lead's model.
-#                    Default ALL roles to "sonnet" (the alias resolves to Sonnet
-#                    4.6). Do NOT use "haiku" for any role. Auto-mode (the
-#                    bias-to-act permission mode) requires Sonnet 4.6, Opus 4.6,
-#                    or Opus 4.7 ONLY; Haiku and Sonnet 4.5 are unsupported per
-#                    the Claude Code docs, so a haiku teammate cannot participate
-#                    in auto-mode and falls back to ask-for-everything, breaking
-#                    autonomous flow (e.g. a release teammate that cannot push
-#                    without a manual confirmation round-trip). A repo MAY bump
-#                    the heavier roles (coder/reviewer/auditor) to "opus" for
-#                    deeper reasoning; that is also auto-mode-capable. The release
-#                    role stays "sonnet" (mechanical CLI work, but still needs
-#                    auto-mode to complete tag/push autonomously).
+#   model          : optional alias tier ("opus" or "sonnet"); omit to
+#                    inherit the lead's model. Reasoning-heavy roles use "opus",
+#                    the coder and mechanical roles "sonnet". Never "haiku".
+#                    SKILL.md Step 5 ("Model tiers") holds the tier list and the
+#                    auto-mode rationale; keep the two in agreement.
 #   prompt_body    : the body appended to the teammate's system prompt. Use
 #                    imperative voice. End with a "missing-context backstop"
 #                    sentence so the worker surfaces gaps instead of guessing.

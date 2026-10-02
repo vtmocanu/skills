@@ -17,6 +17,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- `agent-team`: the `roles.yaml` model-field comment no longer claims every role defaults to sonnet or names retired models; it points at SKILL.md's tier list, which now matches `roles.yaml` (researcher mid tier; tui-ux, ux-designer, skill-reviewer strong).
+- `skill-maker`: agent-definition notes add that Cursor reads both `.claude/agents/` and `.codex/agents/`, and that no listed runtime reads `.agents/agents/`.
 - `reflect`: finds a skill's source repository from the skills lockfile (`~/.agents/.skill-lock.json` or `skills-lock.json`) instead of dot-ai `source:` frontmatter.
 - `skill-maker`: drops the dot-ai parser comparison from the colon-space description rule.
 - CONTRIBUTING: skills live in `skills/<name>/SKILL.md` (folder only), not at the repository root; lists the README row and CHANGELOG steps.
