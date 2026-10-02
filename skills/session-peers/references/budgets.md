@@ -15,8 +15,9 @@
   it: `peers.py restart <uuid>`, then bind again. The default is best-effort:
   with no running shim, an older shim, or another owner's total, the bind
   succeeds without it, with a warning, and `buddy` reports "no buddy reply
-  total recorded" (`reply_total_recorded: false` in `--json`). A rebind that
-  keeps an already recorded total does not warn.
+  total recorded" (`reply_total_recorded: false` in `--json`). With no running
+  shim, a rebind that keeps an already recorded total does not warn; capability
+  and conflict warnings still apply when a shim runs.
 
 **Longer loops.** A bound Codex buddy's total usually covers a whole working
 session. For another peer, or a buddy bound without a total, raise the reply

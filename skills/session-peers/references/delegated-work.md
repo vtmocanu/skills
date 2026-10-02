@@ -22,9 +22,8 @@ work while this session steers and reviews:
   (exit 124) deletes the mailbox, so a late reply is lost, and permits only
   independent, already-authorized work. The gate stays closed.
 - **The steerer answers in that reply**, folding in everything it would have
-  sent: verdicts, user decisions, corrections. Between check-ins it sends only
-  what cannot wait, and marks a message that replaces an earlier one
-  `supersedes <msg_id>`.
+  sent: verdicts, user decisions, corrections. An ordinary message sent after
+  the worker's turn completes marks one it replaces `supersedes <msg_id>`.
 - Relay user decisions verbatim and say they came from the user; the worker
   cannot see this session's conversation.
 - A sandboxed worker may lack host network (forge HTTPS, state backends, LAN
