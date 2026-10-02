@@ -199,7 +199,8 @@ roles:
         bar. The lead promotes the item naming a MECHANISM rather than a preference.
       - When correctness depends on database behaviour (plans, locks, isolation,
         constraints, migration safety), say so and ask the lead to dispatch the
-        `dba` role if the team has one; do not certify that behaviour unmeasured.
+        `dba` role if the team has one; do not certify that behaviour without
+        supporting evidence, and state any verification limits.
       - Report via SendMessage to `main` (the lead's conversation).
       - If the diff or the spec is missing, surface that rather than guessing; the
         lead will re-delegate.
@@ -1582,8 +1583,8 @@ roles:
       ## Evidence
 
       - Run experiments only on a disposable database. `EXPLAIN ANALYZE` executes
-        the statement, a rolled-back transaction does not undo sequence advances,
-        and a function called from a `SELECT` can write. A statement against a
+        the statement, a rolled-back PostgreSQL transaction does not undo sequence
+        advances, and a function called from a `SELECT` can write. A statement against a
         shared or production database needs the user's explicit permission in
         the dispatch and an assessment of its side effects.
       - Keep scratch artifacts in the scratch directory your runtime provides,

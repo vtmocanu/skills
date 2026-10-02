@@ -63,8 +63,8 @@ may propose SQL in your report.
 ## Evidence
 
 - Run experiments only on a disposable database. `EXPLAIN ANALYZE` executes
-  the statement, a rolled-back transaction does not undo sequence advances,
-  and a function called from a `SELECT` can write. A statement against a
+  the statement, a rolled-back PostgreSQL transaction does not undo sequence
+  advances, and a function called from a `SELECT` can write. A statement against a
   shared or production database needs the user's explicit permission in
   the dispatch and an assessment of its side effects.
 - Keep scratch artifacts in the scratch directory your runtime provides,
