@@ -40,10 +40,24 @@ jobs:
       - name: Test skills/agent-kit/agent-team/scripts/sync.py
         run: python3 skills/agent-kit/agent-team/scripts/test_sync.py
 
-      # Stdlib only, and every root (CLAUDE_CONFIG_DIR, CODEX_HOME, the socket
-      # directory, PATH) is a temp dir, so this needs no agent installed.
-      - name: Test skills/session-peers/scripts/peers.py
-        run: python3 skills/session-peers/scripts/test_peers.py
-
       - name: Test skills/skill-maker/scripts/refresh_skills.py
         run: python3 skills/skill-maker/scripts/test_refresh_skills.py
+
+  peers-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+      # Stdlib only. Temp roots, fake binaries, and fixture rollouts keep the
+      # suite independent of installed agents and exercise each real runtime.
+      - name: Test skills/session-peers/scripts/peers.py
+        run: python3 skills/session-peers/scripts/test_peers.py
