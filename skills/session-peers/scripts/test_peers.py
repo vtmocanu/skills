@@ -48,8 +48,8 @@ spec.loader.exec_module(peers)
 
 PS_LSTART = "Mon Sep  7 12:00:00 2026"
 
-# R1: without tomllib the installer refuses to edit config.toml at all,
-# so the editing assertions only mean something where it exists (3.11+).
+# The parser-path warning assertion applies only when stdlib tomllib exists
+# (Python 3.11+); the hook installer edits hooks.json on every supported runtime.
 HAS_TOMLLIB = peers._load_tomllib() is not None
 
 FAKE_PS = '''\

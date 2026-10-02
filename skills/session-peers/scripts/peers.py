@@ -14,6 +14,11 @@ Subcommands::
                   [--from-socket P]
     peers.py ask --to cc:<name|uuid>|buddy (--message <text>|--message-file <path>)
                  [--from-thread <uuid>] [--timeout <seconds>] [--json]
+    peers.py dispatch --to cc:<name|uuid>|buddy
+                      (--message <text>|--message-file <path>)
+                      [--from-thread <uuid>] [--timeout <seconds>] [--json]
+    peers.py await --request <uuid> [--from-thread <uuid>]
+                   [--timeout <seconds>] [--json]
     peers.py reply --request <uuid> (--message <text>|--message-file <path>)
                    [--json]
     peers.py wait --for cc:<name|uuid>|buddy [--state idle|busy] [--timeout <seconds>]
@@ -541,8 +546,8 @@ def read_toml_lite(path):
 
     R3: a real parser reads the file where one exists, because a line reader
     cannot tell a key from the same text inside a multiline string. The line
-    reader stays as the fallback for 3.9 and 3.10 and for a file that does not
-    parse, where reading something beats reading nothing.
+    reader stays as the fallback for 3.9 and 3.10. With tomllib available, an
+    invalid file yields environment/default paths, matching Codex refusal.
     """
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as fh:
