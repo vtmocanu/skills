@@ -196,6 +196,9 @@ class TestInstalledShimUpgrade(Base):
         self.assertGreater(recovered["tail"]["cursor"], state_a["tail"]["cursor"])
         rc, _, err = self.installed_cli(script_b, "budget", "reset", tid)
         self.assertEqual(rc, 0, err)
-        self.assertTrue(wait_for(lambda: len([f for f in listener.of_type("user") if f.get("from")]) == 4))
+        # Socket delivery precedes saving state; wait for both observations.
+        self.assertTrue(wait_for(lambda:
+            len([f for f in listener.of_type("user") if f.get("from")]) == 4
+            and not sp_runtime.read_json(state_path)["held"]))
         self.assertEqual(sp_runtime.read_json(state_path)["binding"]["spent"], 3)
         self.assertFalse(sp_runtime.read_json(state_path)["held"])
