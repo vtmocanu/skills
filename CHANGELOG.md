@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- `session-peers`: a Claude session binding a Codex buddy whose shim is running now gets a reply total of 100 by default, and `buddy set --replies N` accepts up to 500 (was 20), so a supervised co-steer no longer hits the cap and needs a reset every few rounds. A total above 20 needs a shim started from this version (`binding_allowance_max500`; an older shim refuses an explicit total and skips the default with a warning). The default is best-effort: it never attaches a shim, and it is skipped (with a warning) when another owner holds the thread's total. Other peers keep the cap of 3, and `budget allow` keeps its maximum of 20.
+
 ## [0.44.0] - 2026-10-02
 
 ### Added
