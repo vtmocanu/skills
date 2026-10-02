@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.44.0] - 2026-10-02
+
 ### Added
 
 - `agent-team`: new **dba** role (v1), a read-only database specialist: advises on schema, index, transaction and migration design, and reviews database-affecting diffs (including ORM, transaction, pagination, pool and retry changes) for lock and rewrite cost, rolling-deploy compatibility, plan stability, concurrency, integrity and growth, with mutating experiments confined to a disposable database and every performance claim stating its workload. `architect` (v12) consults it; `reviewer` (v19) asks the lead to dispatch it when correctness depends on database behaviour. SKILL.md adds the database-surface discovery signal, roster rule and tail contents.
