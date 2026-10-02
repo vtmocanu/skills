@@ -678,12 +678,42 @@ class TestRestartAndBuddyReplies(BuddyBase):
         finally:
             sp_lifecycle.attach_thread = saved
         self.assertEqual(rc, 0, err)
-        self.assertNotIn("default reply total", err)
+        # Skipping the default is no longer silent: the status line may show a
+        # shim that started meanwhile, so the bind names the missing total.
+        self.assertIn("warning: bound without the default reply total: no running shim", err)
+        self.assertIn("buddy set codex:%s" % self.tid, err)
         self.assertNotIn("replies left", out)
+        self.assertIn("no buddy reply total recorded (default sequence cap is %d)"
+                      % sp_constants.REPLY_BUDGET, out)
         # Only the status line's attach, as before; the default grant adds none.
         self.assertEqual(calls, [self.tid])
         self.assertFalse(os.path.exists(sp_storage.budget_binding_path(self.tid)))
         self.assertNotIn("replies", json.loads(self.record_path(self.owner).read_text()))
+        rc, out, _err = self.buddy(self.owner, "show", "--json")
+        self.assertEqual(rc, 0)
+        payload = json.loads(out)
+        self.assertIs(payload["reply_total_recorded"], False)
+        self.assertNotIn("replies_left", payload)
+
+    def test_a_recorded_total_reports_itself_and_survives_a_rebind_without_a_shim(self):
+        rc, out, err = self.bind("--replies", "6")
+        self.assertEqual(rc, 0, err)
+        self.assertNotIn("no buddy reply total", out)
+        rc, out, _err = self.buddy(self.owner, "show", "--json")
+        self.assertIs(json.loads(out)["reply_total_recorded"], True)
+        # Rebinding while the shim restarts keeps the recorded total, so there
+        # is nothing to warn about.
+        saved = (sp_lifecycle.shim_pid, sp_lifecycle.attach_thread)
+        sp_lifecycle.shim_pid = lambda *a, **k: None
+        sp_lifecycle.attach_thread = lambda tid, verbose=True: None
+        try:
+            rc, out, err = self.bind(prove=False)
+        finally:
+            sp_lifecycle.shim_pid, sp_lifecycle.attach_thread = saved
+        self.assertEqual(rc, 0, err)
+        self.assertNotIn("default reply total", err)
+        self.assertIn("replies left: 6 of 6", out)
+        self.assertEqual(json.loads(self.record_path(self.owner).read_text())["replies"], 6)
 
     def test_an_older_shim_takes_a_small_explicit_total_but_not_the_default(self):
         pid = os.getppid()

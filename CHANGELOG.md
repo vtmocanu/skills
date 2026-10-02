@@ -6,6 +6,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- `session-peers`: a Claude session's Codex buddy bound while no shim runs no longer loses its default reply total silently: the bind warns with the rebind command, and `buddy` reports "no buddy reply total recorded" (`reply_total_recorded` in `--json`). A rebind that keeps a recorded total does not warn.
+
+### Changed
+
+- `session-peers`: delegated-work guidance: answer a worker in a long turn only through its next check-in's correlated reply, resend the next instruction when a turn ends without continuing, and probe then escalate the worker sandbox before relaying commands.
+
 ## [0.45.0] - 2026-10-02
 
 ### Changed
