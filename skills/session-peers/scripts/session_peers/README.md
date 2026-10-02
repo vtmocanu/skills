@@ -19,6 +19,8 @@ the reply command included in a request envelope.
 | requests | Mailbox metadata, correlation, expiry, and single-use reply claims |
 | lifecycle | Shim ownership, readiness, attachment, restart, and stopping |
 | diagnostics | Version observations and rate-limited warnings |
+| shim | Process/socket ownership, contacts, polling, delivery, and state serialization |
+| budgets | Sequence/binding accounting, allowance markers, and held-reply policy |
 
 Import modules eagerly in `__init__.py` before a shim serves traffic. Capture
 the loaded source digest after those imports and keep it for the process's
@@ -38,3 +40,8 @@ Keep vendor assumptions in the Claude/Codex adapters. Discovery preserves
 unknown liveness separately from dead; transport verifies identity before
 routing. The command handlers remain in the launcher during this incremental
 extraction; package modules do not import it back.
+
+`ReplyBudget` uses discovery, socket validation, and delivery callbacks supplied
+by `Shim`. It owns no transport and adds no lock. Keep the existing shim and
+cross-process binding locks at their original call sites. The shim remains the
+only serializer, using the same persisted keys and lifecycle points.
