@@ -12,6 +12,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- `session-peers`: delegated-work guidance: the worker checks gate tool versions against the CI pins before its first gate run, and its own review never counts as independent review of its work.
 - `session-peers`: delegated-work guidance: answer a worker in a long turn only through its next check-in's correlated reply, resend the next instruction when a turn ends without continuing, and probe then escalate the worker sandbox before relaying commands.
 
 ## [0.45.0] - 2026-10-02

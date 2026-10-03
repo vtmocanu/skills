@@ -38,6 +38,14 @@ work while this session steers and reviews:
   without a denial, it relays the exact command, which the steerer runs only if
   the user authorized that action. A sandbox restriction is not an approval
   denial.
+- The same probe compares each gate tool's version with the repo's CI pin.
+  On a mismatch the worker provisions the pinned version with the repo's
+  verified setup method in a temporary path or isolated environment (never a
+  global install), or reports a blocker when that is unavailable. A gate run
+  on the wrong version is reported, not counted.
+- The worker's own review never counts as independent review of its work. The
+  steerer reviews the diff and arranges an independent reviewer; the worker
+  verifies that reviewer's findings.
 - Correlated `ask`/`dispatch` replies bypass the shim reply budget; asynchronous
   replies do not. When the user's message gives a number, grant it as the
   delegation starts (`peers.py buddy set NAME --replies N`), not after a reply
