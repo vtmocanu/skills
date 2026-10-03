@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.46.0] - 2026-10-03
+
 ### Fixed
 
 - `session-peers`: a Claude session's Codex buddy bound while no shim runs no longer loses its default reply total silently: the bind warns with the rebind command, and `buddy` reports "no buddy reply total recorded" (`reply_total_recorded` in `--json`). With no running shim, a rebind that keeps a recorded total does not warn.
