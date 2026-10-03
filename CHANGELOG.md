@@ -12,7 +12,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- `agent-team`: `reviewer` (v20), `auditor` (v15), `tester` (v18) and `fact-checker` (v12) export into a dispatcher-assigned slot, `<scratch>/snap-<slot>` (name of letters, digits, `_`, `-`; else `mktemp -d`), so a build cache keyed by source path reuses unchanged packages across review waves; SKILL.md Step 4 tells the lead to assign stable, exclusive slots.
+- `agent-team`: `reviewer` (v20), `auditor` (v15), `tester` (v18) and `fact-checker` (v12) export into a dispatcher-assigned slot, `<scratch>/snap-<slot>` (name of letters, digits, `_`, `-`; else `mktemp -d`), cleaned in the same `&&` chain as the extraction, so a build cache keyed by source path reuses unchanged packages across review waves; SKILL.md Step 4 tells the lead to assign stable, exclusive slots.
 - `session-peers`: delegated-work guidance: a build step that needs a package cache the worker's sandbox cannot reach (e.g. a Nix-based render) runs on the steerer's host at the worker's committed SHA.
 - `session-peers`: delegated-work guidance: the worker checks gate tool versions against the CI pins before its first gate run, and its own review never counts as independent review of its work.
 - `session-peers`: delegated-work guidance: answer a worker in a long turn only through its next check-in's correlated reply, resend the next instruction when a turn ends without continuing, and probe then escalate the worker sandbox before relaying commands.
