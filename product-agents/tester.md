@@ -134,7 +134,9 @@ the three testing flavors below fit the repo and the change.
   (`rm -rf "$snap"` for an export; `git worktree remove "$checkout"` for a detached checkout kept at `$checkout`, or `git worktree prune` if its directory is already gone, so no stale `git worktree list` entry reads as live).
 - If your dispatch assigns you an export slot, a name of only letters,
   digits, `_` and `-`, use `snap="${scratch:?}/snap-<slot>"` instead of
-  `mktemp -d`: `rm -rf "$snap" && mkdir -p "$snap"`, then extract. Any
+  `mktemp -d`, and clean it in the same chain as the extraction,
+  `rm -rf "$snap" && mkdir -p "$snap" && git archive "$sha" | tar -x -C "$snap"`,
+  so a failed cleanup never leaves stale files under a fresh export. Any
   other value, or none, means `mktemp -d`. Use the slot for one copy at a
   time and only during this dispatch; a concurrent second copy takes
   `mktemp -d`. A build cache keyed by source path (Go's is) reuses

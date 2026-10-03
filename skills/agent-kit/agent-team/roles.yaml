@@ -215,7 +215,9 @@ roles:
         both halves of the pipe.
       - If your dispatch assigns you an export slot, a name of only letters,
         digits, `_` and `-`, use `snap="${scratch:?}/snap-<slot>"` instead of
-        `mktemp -d`: `rm -rf "$snap" && mkdir -p "$snap"`, then extract. Any
+        `mktemp -d`, and clean it in the same chain as the extraction,
+        `rm -rf "$snap" && mkdir -p "$snap" && git archive "$sha" | tar -x -C "$snap"`,
+        so a failed cleanup never leaves stale files under a fresh export. Any
         other value, or none, means `mktemp -d`. Use the slot for one copy at a
         time and only during this dispatch; a concurrent second copy takes
         `mktemp -d`. A build cache keyed by source path (Go's is) reuses
@@ -369,7 +371,9 @@ roles:
         Git there. Remove the throwaway when you finish (`rm -rf "$snap"` for an export; `git worktree remove "$checkout"` for a detached checkout kept at `$checkout`, or `git worktree prune` if its directory is already gone).
       - If your dispatch assigns you an export slot, a name of only letters,
         digits, `_` and `-`, use `snap="${scratch:?}/snap-<slot>"` instead of
-        `mktemp -d`: `rm -rf "$snap" && mkdir -p "$snap"`, then extract. Any
+        `mktemp -d`, and clean it in the same chain as the extraction,
+        `rm -rf "$snap" && mkdir -p "$snap" && git archive "$sha" | tar -x -C "$snap"`,
+        so a failed cleanup never leaves stale files under a fresh export. Any
         other value, or none, means `mktemp -d`. Use the slot for one copy at a
         time and only during this dispatch; a concurrent second copy takes
         `mktemp -d`. A build cache keyed by source path (Go's is) reuses
@@ -574,7 +578,9 @@ roles:
         (`rm -rf "$snap"` for an export; `git worktree remove "$checkout"` for a detached checkout kept at `$checkout`, or `git worktree prune` if its directory is already gone, so no stale `git worktree list` entry reads as live).
       - If your dispatch assigns you an export slot, a name of only letters,
         digits, `_` and `-`, use `snap="${scratch:?}/snap-<slot>"` instead of
-        `mktemp -d`: `rm -rf "$snap" && mkdir -p "$snap"`, then extract. Any
+        `mktemp -d`, and clean it in the same chain as the extraction,
+        `rm -rf "$snap" && mkdir -p "$snap" && git archive "$sha" | tar -x -C "$snap"`,
+        so a failed cleanup never leaves stale files under a fresh export. Any
         other value, or none, means `mktemp -d`. Use the slot for one copy at a
         time and only during this dispatch; a concurrent second copy takes
         `mktemp -d`. A build cache keyed by source path (Go's is) reuses
@@ -985,7 +991,7 @@ roles:
 
       ## Two techniques, whenever the change gives you the opening
 
-      - A test guarding a specific defect claims it fails when that defect is present, so prove it: reintroduce the defect at the call site, not in a shared helper, in a throwaway copy of the reviewed commit (a write the read-only rule above allows), never in the shared tree. Make the copy a throwaway detached checkout where your runtime permits one, else a fresh export, `set -o pipefail; snap=$(mktemp -d "${scratch:?}/snap.XXXXXX") && git archive "$sha" | tar -x -C "$snap"`, after setting the shell variable `scratch` to the scratch directory your runtime provides, else to a directory inside the worktree that the repo ignores or a temporary directory your sandbox allows; if your dispatch assigns you an export slot (a name of only letters, digits, `_` and `-`; any other value means `mktemp -d`), use `snap="${scratch:?}/snap-<slot>"` and `rm -rf "$snap" && mkdir -p "$snap"` before extracting instead, for one copy at a time and only during this dispatch (a concurrent second copy takes `mktemp -d`), since a build cache keyed by source path (Go's is) reuses unchanged packages at a repeated path; remove it afterwards (`rm -rf "$snap"` for an export, `git worktree remove "$checkout"` for a detached checkout kept at `$checkout`). An export has no Git metadata or installed dependencies, and Git run inside it finds the parent checkout, so never run Git there; report a fold the export cannot run rather than claiming it. Confirm the test fails for the stated reason, then remove the throwaway and show the original worktree untouched (`git status --porcelain` empty, HEAD unmoved). A regression test never seen to fail is decoration.
+      - A test guarding a specific defect claims it fails when that defect is present, so prove it: reintroduce the defect at the call site, not in a shared helper, in a throwaway copy of the reviewed commit (a write the read-only rule above allows), never in the shared tree. Make the copy a throwaway detached checkout where your runtime permits one, else a fresh export, `set -o pipefail; snap=$(mktemp -d "${scratch:?}/snap.XXXXXX") && git archive "$sha" | tar -x -C "$snap"`, after setting the shell variable `scratch` to the scratch directory your runtime provides, else to a directory inside the worktree that the repo ignores or a temporary directory your sandbox allows; if your dispatch assigns you an export slot (a name of only letters, digits, `_` and `-`; any other value means `mktemp -d`), use `snap="${scratch:?}/snap-<slot>"` and clean it in the same chain as the extraction instead (`rm -rf "$snap" && mkdir -p "$snap" && git archive "$sha" | tar -x -C "$snap"`, so a failed cleanup never leaves stale files), for one copy at a time and only during this dispatch (a concurrent second copy takes `mktemp -d`), since a build cache keyed by source path (Go's is) reuses unchanged packages at a repeated path; remove it afterwards (`rm -rf "$snap"` for an export, `git worktree remove "$checkout"` for a detached checkout kept at `$checkout`). An export has no Git metadata or installed dependencies, and Git run inside it finds the parent checkout, so never run Git there; report a fold the export cannot run rather than claiming it. Confirm the test fails for the stated reason, then remove the throwaway and show the original worktree untouched (`git status --porcelain` empty, HEAD unmoved). A regression test never seen to fail is decoration.
       - A citation of an external standard, spec or normative criterion (a WCAG success criterion, an RFC clause, a claimed contrast ratio) is verified against the source text, not the document citing it. Fetch the normative wording and confirm both that it says what the citation claims and that it applies here. Recompute a claimed number, a ratio or a size, from raw inputs.
 
       ## Report

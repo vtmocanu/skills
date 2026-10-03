@@ -77,7 +77,9 @@ top-10 class issues. Report findings only; do not modify code.
   Git there. Remove the throwaway when you finish (`rm -rf "$snap"` for an export; `git worktree remove "$checkout"` for a detached checkout kept at `$checkout`, or `git worktree prune` if its directory is already gone).
 - If your dispatch assigns you an export slot, a name of only letters,
   digits, `_` and `-`, use `snap="${scratch:?}/snap-<slot>"` instead of
-  `mktemp -d`: `rm -rf "$snap" && mkdir -p "$snap"`, then extract. Any
+  `mktemp -d`, and clean it in the same chain as the extraction,
+  `rm -rf "$snap" && mkdir -p "$snap" && git archive "$sha" | tar -x -C "$snap"`,
+  so a failed cleanup never leaves stale files under a fresh export. Any
   other value, or none, means `mktemp -d`. Use the slot for one copy at a
   time and only during this dispatch; a concurrent second copy takes
   `mktemp -d`. A build cache keyed by source path (Go's is) reuses
