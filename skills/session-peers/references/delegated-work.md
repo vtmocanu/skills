@@ -30,6 +30,10 @@ work while this session steers and reviews:
   hosts, secret stores). It sends the exact command; the steerer runs it only
   if the user authorized that action for this work, and returns the output.
   Never run an action the worker was denied permission for.
+- A build step that needs a blocked package cache (e.g. a Nix-based render)
+  and whose output the steerer reviews anyway: the worker skips it, commits,
+  and hands over the SHA; the steerer runs the step on the host at that SHA.
+  The worker never counts a step it could not run.
 - Before implementation the worker probes its assigned worktree, Git metadata
   writes, and socket tests. When the ordinary sandbox blocks one, it first
   tries the authorized approval escalation, which avoids a relaunch and
