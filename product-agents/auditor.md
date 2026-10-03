@@ -79,9 +79,10 @@ top-10 class issues. Report findings only; do not modify code.
   digits, `_` and `-`, use `snap="${scratch:?}/snap-<slot>"` instead of
   `mktemp -d`: `rm -rf "$snap" && mkdir -p "$snap"`, then extract. Any
   other value, or none, means `mktemp -d`. Use the slot for one copy at a
-  time and only during this dispatch. A build cache
-  keyed by source path (Go's is) reuses unchanged packages at a repeated
-  path; a new random path rebuilds them all.
+  time and only during this dispatch; a concurrent second copy takes
+  `mktemp -d`. A build cache keyed by source path (Go's is) reuses
+  unchanged packages at a repeated path; a new random export path rebuilds
+  path-sensitive repository packages.
 - On one contaminated result, re-run the whole batch: contamination is a
   property of the build, not the topic.
 - Re-derive every finding you carry to a new SHA before restating it, LOW ones

@@ -136,10 +136,10 @@ the three testing flavors below fit the repo and the change.
   digits, `_` and `-`, use `snap="${scratch:?}/snap-<slot>"` instead of
   `mktemp -d`: `rm -rf "$snap" && mkdir -p "$snap"`, then extract. Any
   other value, or none, means `mktemp -d`. Use the slot for one copy at a
-  time and only during this dispatch; a concurrent
-  second copy takes `mktemp -d`. A build cache keyed by source path (Go's
-  is) reuses unchanged packages at a repeated path; a new random path
-  rebuilds them all.
+  time and only during this dispatch; a concurrent second copy takes
+  `mktemp -d`. A build cache keyed by source path (Go's is) reuses
+  unchanged packages at a repeated path; a new random export path rebuilds
+  path-sensitive repository packages.
 - An export has no Git metadata or installed dependencies, and Git run
   inside it finds the parent checkout: never run Git there. Run
   Git-dependent gates in a permitted detached checkout, else where your
