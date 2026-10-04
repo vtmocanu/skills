@@ -1,6 +1,6 @@
 ---
 name: done
-description: End-of-session wrap-up prompt. When invoked, asks Claude to determine whether the session is finished and safe to close by checking git status for uncommitted, unstaged, untracked, and unpushed changes across the working directories touched this session, removing git artifacts this session created once they are safely no longer needed (worktrees, local branches, temporary refs, throwaway clones), reviewing the session for unfinished tasks or loose ends, then reporting a plain verdict on whether the session can be closed or something is still outstanding. Invoke explicitly with /done when wrapping up a working session.
+description: Wraps up a working session. Checks git state in every directory the session touched, removes git artifacts the session created once they are safely unneeded, reviews unfinished work, and gives a plain verdict on whether the session can close. Use when the user invokes /done or asks whether the session is done or can be closed.
 ---
 
 # Done
@@ -14,12 +14,12 @@ This document is located at: `~/stuff/gitrepos/gh/vtmocanu/skills/skills/done/SK
 Are we done here? Can we close this session? Decide and tell me, after checking:
 
 - **Git**: run `git status` in the current repo and any other working directory we touched this session. Report uncommitted, unstaged, untracked, and unpushed changes (where an upstream exists, `git log --oneline @{u}..`). If everything is committed and pushed, say so in one line.
-- **Cleanup, without asking**: remove git artifacts this session created that are no longer needed: worktrees, local branches, temporary refs (e.g. `refs/reviews/*`), throwaway clones under `/tmp`. Remove one only when all hold, else leave it and report it:
-  - this session created it, still owns it, and nothing uses it: not handed to another session, not backing a running check, review or borrowed tree;
-  - it is clean: `git status --porcelain` is empty, and ignored files (`git status --ignored --porcelain`) hold nothing needed;
-  - its current tip is preserved: equal to a merged PR's final head, or every commit is on the remote per a fresh `git fetch --prune` (not a stale or deleted tracking ref). A squash merge counts only through the first test, never through ancestry. A tools or review tree counts as never holding work only while its HEAD is still the commit it was created at.
+- **Cleanup, without asking**: remove git artifacts this session created that are no longer needed (worktrees, local branches, temporary refs, throwaway clones). Remove one only when all hold; otherwise leave it and report it:
+  - this session created it, still owns it, and nothing uses it: not handed to another session, not backing a running check or review;
+  - nothing in it is needed, ignored files included;
+  - its current tip is preserved: it equals a merged PR's final head, or every commit is on the remote according to freshly fetched state (stale or deleted tracking refs do not count). A squash merge counts only by the final-head match, never by ancestry. A tools or review tree counts as never holding work only while it still sits at the commit it was created on.
 
-  Commands: `git worktree remove` without `--force`; `git branch -d`, using `-D` only after the preservation proof above (e.g. a squash-merged PR); `git update-ref -d` for a temporary ref. Never touch the `main` worktree, stashes, remote branches, or anything another session or the user created. List what you removed.
+  Never force a removal past git's own safety checks, except deleting a branch whose work the preservation test above has proven. Never touch the `main` worktree, stashes, remote branches, or anything another session or the user created. List what you removed.
 - **Outstanding work**: review this session for anything unfinished: partial edits, failed or skipped steps, open TODOs, loose ends.
 
 Then give me a plain verdict: can we close the session, or is there something left to do? Apart from that cleanup, do not commit, push, or change anything; report only.

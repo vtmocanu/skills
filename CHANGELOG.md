@@ -8,7 +8,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- `done`: removes git artifacts the session created once they are safely no longer needed (clean, and merged or pushed, or never holding work), without asking, and lists what it removed; anything uncertain or another session's is reported, not removed. Fixes the stale source path in its Document Location.
+- `done`: removes git artifacts the session created once they are safely unneeded, without asking, and lists them; anything uncertain or not its own is reported, not removed. Adds a "Use when" trigger and fixes the stale source path.
 
 ## [0.46.0] - 2026-10-03
 
