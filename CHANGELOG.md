@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- `done`: removes git artifacts the session created once they are safely no longer needed (clean, and merged or pushed, or never holding work), without asking, and lists what it removed; anything uncertain or another session's is reported, not removed. Fixes the stale source path in its Document Location.
+
 ## [0.46.0] - 2026-10-03
 
 ### Fixed
