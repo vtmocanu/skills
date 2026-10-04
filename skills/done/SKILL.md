@@ -17,7 +17,7 @@ Are we done here? Can we close this session? Decide and tell me, after checking:
 - **Cleanup, without asking**: remove git artifacts this session created that are no longer needed: worktrees, local branches, temporary refs (e.g. `refs/reviews/*`), throwaway clones under `/tmp`. Remove one only when all hold, else leave it and report it:
   - this session created it, still owns it, and nothing uses it: not handed to another session, not backing a running check, review or borrowed tree;
   - it is clean: `git status --porcelain` is empty, and ignored files (`git status --ignored --porcelain`) hold nothing needed;
-  - its current tip is preserved: equal to a merged PR's final head, or every commit is on the remote per a fresh `git fetch` (not a stale tracking ref). A squash merge counts only through the first test, never through ancestry. A tools or review tree counts as never holding work only while its HEAD is still the commit it was created at.
+  - its current tip is preserved: equal to a merged PR's final head, or every commit is on the remote per a fresh `git fetch --prune` (not a stale or deleted tracking ref). A squash merge counts only through the first test, never through ancestry. A tools or review tree counts as never holding work only while its HEAD is still the commit it was created at.
 
   Commands: `git worktree remove` without `--force`; `git branch -d`, using `-D` only after the preservation proof above (e.g. a squash-merged PR); `git update-ref -d` for a temporary ref. Never touch the `main` worktree, stashes, remote branches, or anything another session or the user created. List what you removed.
 - **Outstanding work**: review this session for anything unfinished: partial edits, failed or skipped steps, open TODOs, loose ends.
