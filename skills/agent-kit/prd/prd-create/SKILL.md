@@ -87,6 +87,19 @@ These are the sections of the `prds/` file. The "GitHub Issue Template" further 
 6. **Milestones**: vertical slices, per the rules below.
 7. **Decision Log**: every technical decision with its reason and the alternative rejected.
 
+#### Design mocks
+
+When the feature has a mock (HTML page, TUI script, image), supplied by the user or made while authoring:
+
+- **Commit it with the PRD** under `prds/mockups/[issue-id]-[feature-name].[ext]`. An implementer or offline uzi worker sees only the repo. If the user's mock lives outside the repo, ask once to commit it; if they decline, describe the design in the PRD text instead.
+- **Link it at the top of the PRD** (`**Design mock**: <path>`, plus how to view it) and write this contract into the PRD:
+  - The mock is the presentation reference: layout, columns, order, glyphs, colour roles, keys, wording. Implement it, not only the text spec.
+  - Small deviations for consistency with the app are expected: its palette tokens, wording, components and spacing.
+  - A larger deviation (a dropped element, a different layout, navigation or information) only when necessary, listed in the PR body under `Mock deviations` with its reason. An absent list claims parity.
+  - Validation compares the result with the mock side by side (screenshots or the repo's render harness) and the PR carries that evidence.
+- **Name the precedence**: the PRD text wins where it specifies; the mock governs what the text leaves out.
+- **Put mock parity in the acceptance criteria** of each milestone that renders mocked UI.
+
 #### Milestones are vertical slices
 
 - **Each milestone is one complete behaviour** that can be verified on its own, cutting through every layer it needs (schema, logic, API, UI, tests, docs). One fresh implementation run must be able to build and verify it.
@@ -191,7 +204,7 @@ The **next step** and **PRD review** choices were captured up front (Step 1.5, v
 
 ### PRD Review (if requested)
 
-If the user asked for review, spawn reviewer agent(s) with the **Agent** tool (`subagent_type: Explore` or `general-purpose`) to read `prds/[issue-id]-[feature-name].md` and critique it: scope (one independently valuable outcome; no milestone that needs an unfinished PRD), vertical slicing (no standalone layer milestones; real `Blocked by` edges; each slice fits one fresh run), testability at the named seams, for untrusted input, resource bounds, declared-value verification before any irreversible cross-owner action, and reused safety stories (Modules and seams), clarity, missing risks and dependencies. When the repo has an agent-team `architect` role, make it one of the reviewers.
+If the user asked for review, spawn reviewer agent(s) with the **Agent** tool (`subagent_type: Explore` or `general-purpose`) to read `prds/[issue-id]-[feature-name].md` and critique it: scope (one independently valuable outcome; no milestone that needs an unfinished PRD), vertical slicing (no standalone layer milestones; real `Blocked by` edges; each slice fits one fresh run), testability at the named seams, for untrusted input, resource bounds, declared-value verification before any irreversible cross-owner action, and reused safety stories (Modules and seams), a committed mock with its contract (Design mocks), clarity, missing risks and dependencies. When the repo has an agent-team `architect` role, make it one of the reviewers.
 
 - **One reviewer**: a single agent.
 - **Let the skill decide**: pick the count from the PRD's size and complexity: 1 for a small single-component PRD, 2-3 for a large or multi-component one, each agent taking a distinct lens (scope/feasibility, milestones/testability, risks/dependencies). Run them in parallel.
@@ -218,8 +231,9 @@ If the user picked **Commit & push for later**:
 > **Commit the PRD straight to `main` — no PR, no feature branch.** This overrides any "branch first on the default branch" rule; branches and PRs are for the `prd-start` implementation, not the PRD file.
 
 ```bash
-# Stage the PRD file (and ROADMAP.md if it was updated)
+# Stage the PRD file (plus its mock and ROADMAP.md when present)
 git add prds/[issue-id]-[feature-name].md
+# git add prds/mockups/[issue-id]-[feature-name].[ext]
 # If docs/ROADMAP.md exists and was updated, include it:
 # git add docs/ROADMAP.md
 
