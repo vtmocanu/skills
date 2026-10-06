@@ -33,13 +33,16 @@ work while this session steers and reviews:
   cannot see this session's conversation.
 - **Freeze what the user runs.** When the user runs a binary, app or test lane
   built from the worker's worktree, the worker builds and mutation-tests only
-  in its own scratch build path until the steerer says the run finished.
-  Before handing a run over, the steerer checks the tree is clean at the
-  approved SHA and the binary is newer than that commit and contains the new
-  code (e.g. `strings` for a new label).
+  in its own scratch build path, or an isolated checkout when wrappers
+  hardcode output paths, until the steerer says the run finished. Staging
+  locations the run copies from stay frozen too. Before handing a run over,
+  the steerer confirms the tree is clean at the approved SHA with mutations
+  restored, and a normal build from it succeeds. A binary timestamp or
+  `strings` check is supplementary: an incremental build need not relink, so
+  a correct binary can predate its commit.
 - Write definitions, not labels, into the tracked brief: record each finding's
-  text, not just its ID (`FN4-FN6`). Scratch notes and session transcripts do
-  not survive into the next lead session.
+  text, not just its ID (`FN4-FN6`). Scratch notes and session transcripts are
+  not automatically carried into the next lead's context.
 - A sandboxed worker may lack host network (forge HTTPS, state backends, LAN
   hosts, secret stores). It sends the exact command; the steerer runs it only
   if the user authorized that action for this work, and returns the output.
