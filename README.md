@@ -62,7 +62,7 @@ Anything later added under `skills/agent-kit/` joins the bundle automatically.
 
 ## 📦 All skills
 
-The whole catalog (20 skills), agent-kit included.
+The whole catalog (22 skills), agent-kit included.
 
 ```sh
 npx -y skills@latest add https://github.com/vtmocanu/skills -a claude-code codex -g -y
@@ -98,6 +98,7 @@ npx -y skills@latest add https://github.com/vtmocanu/skills -a claude-code codex
 | [session-peers](skills/session-peers/SKILL.md) | Make Claude Code sessions and Codex CLI threads on one machine message each other. Async `send` supports handoffs; correlated `ask`/`reply` returns multi-round peer work to the current Codex turn without a stale queued reply; `wait` observes peer state. Codex threads can auto-attach as real peers and aliases follow renames. Auto-attachment requires running `~/.agents/skills/session-peers/scripts/peers.py install-hook --auto-attach` once, then trusting the entry through Codex `/hooks`; see [setup](skills/session-peers/SKILL.md#automatic-attachment-recommended). |
 | [reflect](skills/reflect/SKILL.md) | Analyze the current session and propose improvements to the whole authored skill package, including instructions, scripts, tests, references, templates, assets, and hooks, then test and publish the approved changes. |
 | [skill-maker](skills/skill-maker/SKILL.md) | Author, lint, and publish portable Claude Code, Codex, and OpenCode skills: canonical `.agents/skills` repo layout, Claude compatibility symlinks, cross-agent refresh hooks, agnix linting, and npx distribution scopes. |
+| [status-check](skills/status-check/SKILL.md) | Report what is still open in the session (background jobs, items waiting on you, on another session, on CI or a bot, held items) as one table, then repeat it every 20 minutes on a session-only timer until nothing is left. Read-only; `/status-check stop` ends the timer. |
 | [token-audit](skills/token-audit/SKILL.md) | Audit a Claude Code setup for token waste (report only, change nothing): measure in-scope CLAUDE.md sizes and @imports, MCP servers/tool counts and whether tool deferral is active, any proxy that silently disables it, model/effort and mid-session switches, output-reducing hooks, per-agent model inheritance, cron/loop intervals vs the measured cache TTL, and the newest session log's cache-read/creation/input/output token split; emit one severity-ranked table plus the single highest-leverage fix. |
 | [upgrade-advisor](skills/upgrade-advisor/SKILL.md) | Evaluate a tool, framework, or dependency upgrade: discover the pinned version, find the latest *installable* one, read the changelog across the whole delta, and report which breaking changes actually touch this codebase (by grepping usage), with a safe / blocked / needs-work verdict. |
 

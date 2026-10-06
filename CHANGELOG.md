@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `status-check`: reports the session's open work as one table (background jobs, items waiting on the user, another session, CI or a bot, held items, done since last check), then arms a session-only timer that repeats the report every 20 minutes (`/status-check every N` to change, `stop` to end) and stops itself when nothing is open. Read-only. Runs a repository's `.agents/status-check` script when present.
+
 ### Fixed
 
 - `session-peers`: commands that address a live Codex thread (`budget reset|allow`, `buddy set codex:<uuid>`, `send`) resolve its state from the home its shim runs under (recorded as `codexHome` in the shim's registry record, else `~/.codex`) instead of the caller's `CODEX_HOME`. Before, a Claude session with its own `CODEX_HOME` printed success for a reset or grant the shim never read, and could not bind the thread by UUID.
