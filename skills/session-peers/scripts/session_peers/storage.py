@@ -100,6 +100,29 @@ def _recorded_shim_homes(thread_id):
     return homes
 
 
+_PINNED_HOMES = {}
+
+
+def pin_thread_home(thread_id):
+    """Fix this process's home for ``thread_id`` to its current CODEX_HOME.
+
+    A shim owns files under the home it started in. Without the pin,
+    `thread_home` could resolve to another shim's held pidfile elsewhere and,
+    once that shim exits, let this one lock it while advertising its own home.
+    CLI commands never pin; only a running shim does.
+    """
+    _PINNED_HOMES[thread_id] = codex_home()
+
+
+def unpin_thread_home(thread_id):
+    _PINNED_HOMES.pop(thread_id, None)
+
+
+def own_thread_state_path(thread_id):
+    """The state file under this process's own home, never another shim's."""
+    return os.path.join(state_dir(), "%s.json" % thread_id)
+
+
 def thread_home(thread_id):
     """The CODEX_HOME the shim for ``thread_id`` actually runs under.
 
@@ -111,6 +134,8 @@ def thread_home(thread_id):
     caller's home wins when it holds one; with no live shim anywhere the
     caller's home is returned, which is where a new shim would start.
     """
+    if thread_id in _PINNED_HOMES:
+        return _PINNED_HOMES[thread_id]
     mine = codex_home()
     candidates = [mine] + _recorded_shim_homes(thread_id) + [os.path.expanduser("~/.codex")]
     seen = set()

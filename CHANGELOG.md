@@ -10,7 +10,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - `session-peers`: commands that address a live Codex thread (`budget reset|allow`, `buddy set codex:<uuid>`, `send`) resolve its state from the home its shim runs under (recorded as `codexHome` in the shim's registry record, else `~/.codex`) instead of the caller's `CODEX_HOME`. Before, a Claude session with its own `CODEX_HOME` printed success for a reset or grant the shim never read, and could not bind the thread by UUID.
 - `session-peers`: a Codex buddy bound by its shim name is recorded as a Codex thread, so `budget allow buddy` works and `send --to buddy` takes the Codex path with a reply route.
-- `session-peers`: every relayed message now opens with a provenance line naming the sender's real runtime (`[session-peers from Codex thread NAME (UUID)]` or `[session-peers from Claude Code session NAME (SID)]`), the reply header follows it. `list` labels a shim entry as a Codex thread with its title. `ask` and `dispatch` warn on a request lifetime under 120 seconds.
+- `session-peers`: every relayed message now opens with a provenance line naming the sender's real runtime (`[session-peers from Codex thread NAME (UUID)]` or `[session-peers from Claude Code session NAME (SID)]`), the reply header follows it. `list` labels a shim entry as a Codex thread with its title. `ask` and `dispatch` warn on a request lifetime under 120 seconds. The label follows the verified sender (a Codex shim is never called a Claude session; an unverified sender is labelled as such), and the line strips every Unicode line boundary and control character. A running shim pins its own startup home so a startup race cannot move its pidfile into another shim's home.
 
 ### Changed
 

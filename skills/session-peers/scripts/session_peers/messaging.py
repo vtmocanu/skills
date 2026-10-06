@@ -128,7 +128,9 @@ def _send_codex(target, args):
         )
     msg_id = str(uuidlib.uuid4())
     tag = sp_protocol.build_tag(from_name, from_sid, from_socket, msg_id)
-    origin = sp_protocol.build_origin("claude", from_name, from_sid)
+    origin = sp_protocol.build_origin(
+        sp_protocol.sender_runtime(rec if from_socket else None), from_name, from_sid
+    )
     text = "%s\n%s\n%s" % (tag, origin, args.message)
     try:
         sp_codex.codex_queue(

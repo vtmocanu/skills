@@ -47,7 +47,7 @@ class Shim:
             sp_storage.claude_sessions_dir(), "%d.json" % os.getpid()
         )
 
-        state = sp_runtime.read_json(sp_storage.thread_state_path(self.thread_id), {}) or {}
+        state = sp_runtime.read_json(sp_storage.own_thread_state_path(self.thread_id), {}) or {}
         self.tail = sp_rollout.RolloutTail.from_state(self.rollout_path, state.get("tail"))
         # This is an at-most-once processing ledger, including dropped replies,
         # not evidence of delivery. Read the legacy name when upgrading.
@@ -140,6 +140,7 @@ class Shim:
                 "another shim already owns thread %s; exiting without touching "
                 "its pidfile, state or record" % self.thread_id
             )
+            sp_storage.unpin_thread_home(self.thread_id)
             return 4
         # From here on this process owns files that need removing, so the
         # handlers go in BEFORE the bind rather than after the record write.
@@ -206,6 +207,7 @@ class Shim:
             except OSError:
                 pass
             self._pidfile_fd = None
+        sp_storage.unpin_thread_home(self.thread_id)
 
     # -- socket and record -------------------------------------------------
 
@@ -326,6 +328,7 @@ class Shim:
         crash included, so nothing else can mistake a recycled pid for us.
         Returns False when another shim holds it, having changed nothing.
         """
+        sp_storage.pin_thread_home(self.thread_id)
         path = sp_storage.thread_pid_path(self.thread_id)
         fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
         for attempt in range(5):
@@ -538,7 +541,8 @@ class Shim:
         # The provenance line follows the tag, so a Codex thread reading the
         # turn sees the sender is a Claude Code session; tag parsers (including
         # shims running older code) only read the first line.
-        head = "%s\n%s" % (tag, sp_protocol.build_origin("claude", sender_name, sender_sid))
+        head = "%s\n%s" % (tag, sp_protocol.build_origin(
+            sp_protocol.sender_runtime(sender), sender_name, sender_sid))
         # The head rides inside the same text Codex caps, so the body is trimmed
         # to leave room for it rather than pushing the whole message over.
         # P5: the argv budget is bytes; the Codex cap is characters. Both.

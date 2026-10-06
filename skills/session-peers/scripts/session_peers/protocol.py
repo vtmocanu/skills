@@ -36,18 +36,32 @@ def build_tag(from_name=None, sid=None, reply_socket=None, msg_id=None) -> str:
     )
 
 
+def sender_runtime(record):
+    """Runtime of a verified sender registry record; "unknown" without one.
+
+    A Codex shim registers itself with entrypoint "codex"; any other verified
+    record is a Claude Code session. An unverified sender is never labelled.
+    """
+    if not isinstance(record, dict):
+        return "unknown"
+    return "codex" if record.get("entrypoint") == "codex" else "claude"
+
+
 def build_origin(runtime, name, ident):
     """One provenance line naming the true runtime of a relayed message.
 
-    ``runtime`` is "claude" or "codex". The line sits after the tag (Codex
-    side) or first in the body (Claude side), so a peer cannot mistake a
-    Codex thread for a Claude session or the reverse. Fields are sanitised so
-    a name cannot end the line or forge a second one.
+    ``runtime`` is "claude", "codex" or "unknown" (sender not verified). The
+    line sits after the tag (Codex side) or first in the body (Claude side).
+    Fields are sanitised so a name cannot end the line or forge a second one.
     """
-    label = {"claude": "Claude Code session", "codex": "Codex thread"}[runtime]
+    label = {
+        "claude": "Claude Code session",
+        "codex": "Codex thread",
+        "unknown": "peer of unverified runtime",
+    }[runtime]
 
     def clean(value):
-        value = sp_constants.C0_RE.sub("", str(value or "").replace("\r", " ").replace("\n", " "))
+        value = sp_constants.ORIGIN_BREAK_RE.sub(" ", str(value or ""))
         return value.replace("[", "(").replace("]", ")").strip()[:sp_constants.MAX_TAG_FIELD_CHARS]
 
     name, ident = clean(name), clean(ident)

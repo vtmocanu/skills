@@ -81,6 +81,8 @@ PEER_NAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 LT_SUBSTITUTE = "\u2039"
 WRAPPER_MARKUP_RE = re.compile(r"<(/?)(cross-session-message)", re.IGNORECASE)
 REQUEST_MARKUP_RE = re.compile(r"<(/?)(session-peers-request)", re.IGNORECASE)
+# Every character str.splitlines() treats as a boundary, plus C0/C1 controls.
+ORIGIN_BREAK_RE = re.compile("[\x00-\x1f\x7f-\x9f\u2028\u2029]")
 C0_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
 # Tunables, read at shim start. The tests turn them down so a fixture rollout is

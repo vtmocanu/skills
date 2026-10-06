@@ -8,11 +8,13 @@ that live shim must act on the shim's state, never on the caller's home.
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import io
 import json
 import os
 import pathlib
 import time
+from unittest import mock
 
 from .support import (
     BuddyBase,
@@ -253,3 +255,87 @@ class TestShortRequestLifetimeWarning(CrossHomeBase):
         )
         self.assertEqual(rc, 0, err)
         self.assertNotIn("request lifetime", err)
+
+
+class TestShimOwnershipStaysInItsStartupHome(CrossHomeBase):
+    def test_a_shim_cannot_take_another_homes_pidfile_when_that_shim_exits(self):
+        other = self.as_other_home()
+        first_pid = pathlib.Path(self.shim_home) / "session-peers" / (self.tid + ".pid")
+        original_open = os.open
+
+        def release_before_open(path, *args, **kwargs):
+            if str(path) == str(first_pid):
+                # The existing shim exits after resolution, before acquisition.
+                for fh in self._held_pidfiles:
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+            return original_open(path, *args, **kwargs)
+
+        with mock.patch("os.open", side_effect=release_before_open):
+            acquired = self.shim._acquire_ownership()
+        try:
+            self.assertTrue(acquired)
+            self.assertEqual(
+                pathlib.Path(sp_storage.thread_pid_path(self.tid)),
+                other / "session-peers" / (self.tid + ".pid"),
+            )
+            self.assertEqual(self.shim.record()["codexHome"], str(other))
+        finally:
+            if self.shim._pidfile_fd is not None:
+                os.close(self.shim._pidfile_fd)
+                self.shim._pidfile_fd = None
+            sp_storage.unpin_thread_home(self.tid)
+
+
+class TestInboundRuntimeLabel(CrossHomeBase):
+    def inbound_head(self, sender, name, sid):
+        text, _body, _trim = self.shim._prepare_inbound(
+            {"msg_id": "m"}, "hello", sender, name, sid, self.listener.path
+        )
+        return text.splitlines()[1]
+
+    def test_a_codex_sender_is_labelled_a_codex_thread(self):
+        sender = self.shim.record()
+        line = self.inbound_head(sender, sender["name"], self.tid)
+        self.assertEqual(
+            line, "[session-peers from Codex thread %s (%s)]" % (sender["name"], self.tid)
+        )
+
+    def test_a_claude_sender_is_labelled_a_claude_session(self):
+        sender = next(
+            r for r in sp_runtime_records() if r.get("sessionId") == self.sid
+        )
+        line = self.inbound_head(sender, "cc-a", self.sid)
+        self.assertEqual(line, "[session-peers from Claude Code session cc-a (%s)]" % self.sid)
+
+    def test_an_unverified_sender_is_not_called_claude(self):
+        line = self.inbound_head(None, "x", "y")
+        self.assertNotIn("Claude", line)
+
+    def test_send_from_a_codex_shim_socket_is_labelled_codex(self):
+        os.environ["CLAUDE_CODE_MESSAGING_SOCKET"] = self.shim.record()["messagingSocketPath"]
+        with mock.patch.object(sp_claude_mod(), "claude_record_by_socket",
+                               return_value=self.shim.record()):
+            rc, _out, err = self.cli("send", "--to", "codex:%s" % self.tid, "--message", "hi")
+        self.assertEqual(rc, 0, err)
+        text = self.queue_calls()[0][4]
+        self.assertIn("[session-peers from Codex thread", text.splitlines()[1])
+
+
+def sp_claude_mod():
+    from .support import sp_claude
+
+    return sp_claude
+
+
+class TestOriginLineBreaks(CrossHomeBase):
+    BREAKS = ["\n", "\r", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029", "\x00", "\x1b", "\x7f"]
+
+    def test_no_line_boundary_survives_in_name_or_id(self):
+        for ch in self.BREAKS:
+            for runtime in ("claude", "codex"):
+                line = sp_protocol.build_origin(runtime, "a%sb" % ch, "c%sd" % ch)
+                self.assertEqual(len(line.splitlines()), 1, repr(ch))
+                self.assertEqual(line, line.splitlines()[0], repr(ch))
+                self.assertFalse(
+                    any(c in line for c in self.BREAKS), repr(ch)
+                )
