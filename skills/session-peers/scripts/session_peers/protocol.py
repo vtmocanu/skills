@@ -36,6 +36,25 @@ def build_tag(from_name=None, sid=None, reply_socket=None, msg_id=None) -> str:
     )
 
 
+def build_origin(runtime, name, ident):
+    """One provenance line naming the true runtime of a relayed message.
+
+    ``runtime`` is "claude" or "codex". The line sits after the tag (Codex
+    side) or first in the body (Claude side), so a peer cannot mistake a
+    Codex thread for a Claude session or the reverse. Fields are sanitised so
+    a name cannot end the line or forge a second one.
+    """
+    label = {"claude": "Claude Code session", "codex": "Codex thread"}[runtime]
+
+    def clean(value):
+        value = sp_constants.C0_RE.sub("", str(value or "").replace("\r", " ").replace("\n", " "))
+        return value.replace("[", "(").replace("]", ")").strip()[:sp_constants.MAX_TAG_FIELD_CHARS]
+
+    name, ident = clean(name), clean(ident)
+    who = " ".join(x for x in (name, "(%s)" % ident if ident else "") if x)
+    return "[session-peers from %s%s]" % (label, " " + who if who else "")
+
+
 def parse_tag(text):
     """(tag_dict_or_None, body_without_tag). Never raises."""
     if not text:
@@ -187,10 +206,15 @@ def reply_text(text, msg_id, held_reply=False):
 def build_cc_body(text, thread_id, thread_name, shim_socket):
     """Wrapped when the thread has a shim socket to reply to, bare otherwise.
 
-    The bare form renders like a typed prompt with no peer name (measured), so
-    it carries its own attribution line.
+    Both forms start the body with a provenance line naming the sender as a
+    Codex thread: the wrapper's from-name alone reads as a Claude session. The
+    bare form also renders like a typed prompt with no peer name (measured).
     """
     if shim_socket:
-        return build_wrapper(text, shim_socket, thread_id, thread_name)
-    label = thread_name or thread_id
-    return "Message from Codex thread %s:\n%s" % (label, text)
+        return build_wrapper(
+            "%s\n%s" % (build_origin("codex", thread_name, thread_id), text),
+            shim_socket,
+            thread_id,
+            thread_name,
+        )
+    return "%s\n%s" % (build_origin("codex", thread_name, thread_id), text)

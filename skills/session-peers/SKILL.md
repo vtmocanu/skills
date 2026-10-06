@@ -15,7 +15,13 @@ macOS/Linux). Use the commands for your own runtime below.
   hook. A Codex thread may have a generated title or a user `/rename` alias;
   its shim exposes it as a Claude peer. No shim means no automatic reply route.
 - Run `peers.py list --json` to identify the intended peer and its busy/idle
-  state. Do not guess which human title an opaque `codex-<uuid prefix>` names.
+  state. A shim's `codex-<uuid prefix>` entry is a Codex thread (`runtime:
+  codex`); `list` shows its title when known, else "untitled". Never guess.
+- Every relayed message opens with `[session-peers from Codex thread NAME
+  (UUID)]` or `[session-peers from Claude Code session NAME (SID)]`. Treat a
+  `from-name` like `codex-<prefix>` in Claude's own wrapper as a Codex thread.
+- Thread-scoped state follows the shim's own `CODEX_HOME` (recorded in its
+  registry record), not the caller's; no shim anywhere means the caller's.
 - Queue acceptance and a successful socket write prove transport only, not that
   the peer read, acted on, or answered the message. Confirm the response.
 - Use `--message-file PATH` for substantial UTF-8 content and `--message TEXT`
@@ -77,7 +83,8 @@ an unattended loop.
   identify the live head reviewed and which requests the verdict supersedes.
 - Match `[in reply to message <msg_id>]` to the originating message before
   acting. Held replies use `[held reply, in reply to message <msg_id>]`.
-  Strip the header before parsing exact text/JSON. Correlated ask/await replies
+  Strip the provenance line, then the reply header, before parsing exact
+  text/JSON. Correlated ask/await replies
   and `@name` replies to another session have no header.
 - Check `list` and batch messages while a Codex peer is busy: each queued
   message becomes a later turn and reply. If the reviewer edits the artifact,
@@ -102,8 +109,11 @@ ambiguous alias or an explicit CLI result, use:
 <this skill's directory>/scripts/peers.py send --to codex:<uuid> --message-file PATH --json
 ```
 
-The Bash tool's identity and reply route are resolved automatically; do not
-hand-build `--from-name`, `--from-sid`, or `--from-socket`. Without a shim,
+The Bash tool's identity and reply route are resolved automatically for a
+Codex target (`codex:<uuid>`, a shim's `cc:codex-<prefix>` alias, or a buddy);
+do not hand-build `--from-name`, `--from-sid`, or `--from-socket`. A `send`
+whose JSON says `"target": "claude"` and `"reply_capable": false` carries no
+reply route. Without a shim,
 queued replies appear only in Codex's TUI. If `SendMessage` cannot reach the
 peer, run `list`; a live thread with no `shim <pid>` needs `peers.py up <uuid>`
 before sending by its bare name. Completion and idle notices do not prove reply
@@ -145,6 +155,8 @@ Choose the response path:
 
 ```bash
 # Consume a peer's response in this Codex turn; default timeout 600, max 3600.
+# Keep a Claude peer's lifetime at 120 or more: it may be mid tool-call, and
+# a shorter one warns.
 <this skill's directory>/scripts/peers.py ask --to cc:<uuid> --message-file PATH --timeout 600 --json
 # Work independently while a single-use request is pending.
 <this skill's directory>/scripts/peers.py dispatch --to cc:<uuid> --message-file PATH --timeout 1800 --json

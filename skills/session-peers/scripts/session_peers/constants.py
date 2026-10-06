@@ -33,6 +33,8 @@ SHIM_FEATURES = ["budget_allow", "binding_allowance", "binding_allowance_max500"
 REPLY_BUDGET_WINDOW_DEFAULT = 30 * 60.0
 REQUEST_TIMEOUT_DEFAULT = 10 * 60.0
 REQUEST_TIMEOUT_MAX = 60 * 60.0
+# Below this a Claude peer mid tool-call can miss the request entirely.
+REQUEST_TIMEOUT_ADVISED_MIN = 120.0
 REQUEST_POLL_INTERVAL = 0.1
 WAIT_POLL_INTERVAL_DEFAULT = 1.0
 REQUEST_ORPHAN_TTL = 60.0

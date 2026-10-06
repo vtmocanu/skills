@@ -3,10 +3,25 @@
 from __future__ import annotations
 import os
 import shlex
+import sys
 import time
 import uuid as uuidlib
 from . import constants as sp_constants, protocol as sp_protocol, runtime as sp_runtime
 from . import storage as sp_storage
+
+def warn_short_lifetime(timeout):
+    """Warn when a request lifetime is short enough to expire unread."""
+    if timeout < sp_constants.REQUEST_TIMEOUT_ADVISED_MIN:
+        sys.stderr.write(
+            "warning: a %.0fs request lifetime can expire before a Claude peer "
+            "that is mid tool-call reads it; use at least %.0f (default %.0f)\n"
+            % (
+                timeout,
+                sp_constants.REQUEST_TIMEOUT_ADVISED_MIN,
+                sp_constants.REQUEST_TIMEOUT_DEFAULT,
+            )
+        )
+
 
 def _bounded_timeout(value):
     timeout = sp_constants.REQUEST_TIMEOUT_DEFAULT if value is None else float(value)

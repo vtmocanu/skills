@@ -594,6 +594,12 @@ class BuddyBase(ShimBase):
 
 
 
+def strip_origin(body):
+    """The body without its leading `[session-peers from <runtime> ...]` line."""
+    first, sep, rest = body.partition("\n")
+    return rest if sep and first.startswith("[session-peers from ") else body
+
+
 def new_uuid():
     return str(uuidlib.uuid4())
 

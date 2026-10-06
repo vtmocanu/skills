@@ -72,8 +72,18 @@ def cmd_list(args):
     threads, schema_ok = sp_codex.codex_threads()
     registered = sp_storage.read_registered()
 
+    def codex_title(record):
+        """The Codex thread title a shim's peer record fronts, else None."""
+        if record.get("entrypoint") != "codex" or not record.get("sessionId"):
+            return None
+        state = sp_runtime.read_json(sp_storage.thread_state_path(record["sessionId"]), {})
+        title = state.get("thread_name") if isinstance(state, dict) else None
+        return title if isinstance(title, str) and title else None
+
     def claude_view(record):
         return {
+            "runtime": "codex" if record.get("entrypoint") == "codex" else "claude",
+            "thread_title": codex_title(record),
             "pid": record.get("pid"),
             "sessionId": record.get("sessionId"),
             "name": record.get("name"),
@@ -137,10 +147,12 @@ def cmd_list(args):
         return 0
     print("Claude sessions (%d live):" % len(claude))
     for c in claude:
-        print(
-            "  %-24s pid %-7s %-6s %s"
-            % (c["name"] or "(unnamed)", c["pid"], c["status"] or "?", c["cwd"] or "")
-        )
+        label = c["name"] or "(unnamed)"
+        if c["runtime"] == "codex":
+            label += ' [Codex thread%s]' % (
+                ' "%s"' % c["thread_title"] if c["thread_title"] else ", untitled"
+            )
+        print("  %-24s pid %-7s %-6s %s" % (label, c["pid"], c["status"] or "?", c["cwd"] or ""))
     if claude_unverified:
         print(
             "Claude sessions (%d unverified; process probe unavailable):"

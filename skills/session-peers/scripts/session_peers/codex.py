@@ -253,6 +253,28 @@ def missing_thread_message(thread_id):
     return message + " Check `peers.py list` and `peers.py doctor`."
 
 
+def _thread_in_shim_home(thread_id):
+    """The thread row from the CODEX_HOME its live shim runs under, or None.
+
+    Only consulted when the caller's own home has no such thread and a shim
+    for it holds its pidfile under another home. The row carries
+    ``codex_home`` so liveness probes and `codex queue` use that home too.
+    """
+    home = sp_storage.thread_home(thread_id)
+    if os.path.realpath(home) == os.path.realpath(sp_storage.codex_home()):
+        return None
+    with sp_storage.codex_home_override(home):
+        threads, schema_ok = codex_threads()
+    if not schema_ok:
+        return None
+    for t in threads:
+        if t["id"] == thread_id:
+            t = dict(t)
+            t["codex_home"] = home
+            return t
+    return None
+
+
 def resolve_thread(target, require_live=True, exclude=None):
     """Turn `<name|uuid>` into one thread dict, or raise ResolveError.
 
@@ -262,6 +284,10 @@ def resolve_thread(target, require_live=True, exclude=None):
     from name matching only; a UUID target is never excluded.
     """
     threads, schema_ok = codex_threads()
+    if sp_runtime.is_uuid(target) and not any(t["id"] == target for t in threads):
+        foreign = _thread_in_shim_home(target)
+        if foreign is not None:
+            return foreign
     if not schema_ok:
         if sp_runtime.is_uuid(target):
             # D11 degraded mode: queue by UUID, liveness unverified.
@@ -421,11 +447,12 @@ class QueueError(Exception):
     pass
 
 
-def codex_queue(thread_id, text, cwd=None):
+def codex_queue(thread_id, text, cwd=None, home=None):
     """`codex queue --thread <uuid> --message <text>`, run in `stable_dir(cwd)`.
 
     rc != 0, or "No active session" on stderr, means the thread is not live.
-    Pass the thread's own cwd; a deleted one falls back to `$HOME`.
+    Pass the thread's own cwd; a deleted one falls back to `$HOME`. ``home``
+    is the thread's CODEX_HOME when it differs from the caller's.
     """
     budget = sp_runtime.argv_text_budget()
     size = sp_runtime.utf8_len(text)
@@ -444,6 +471,7 @@ def codex_queue(thread_id, text, cwd=None):
         ["codex", "queue", "--thread", str(thread_id), "--message", text],
         timeout=60,
         cwd=sp_runtime.stable_dir(cwd),
+        env=dict(os.environ, CODEX_HOME=home) if home else None,
     )
     if rc == 127:
         raise QueueError("codex is not on PATH")

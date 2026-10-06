@@ -15,6 +15,7 @@ import threading
 import time
 from datetime import timezone
 from .support import (
+    strip_origin,
     BuddyBase,
     ShimBase,
     new_uuid,
@@ -152,7 +153,7 @@ class TestBudgetAllow(BuddyBase):
         self.allow(5)
         frames = wait_for(lambda: self.replies(self.listener_a))
         body, _attrs = sp_protocol.unwrap_message(frames[0]["message"]["content"])
-        self.assertEqual(body, "[held reply, in reply to message m-t-held]\nheld answer")
+        self.assertEqual(strip_origin(body), "[held reply, in reply to message m-t-held]\nheld answer")
         self.assertEqual(self.shim.reply_budget.held, {})
         self.assertEqual(self.shim.reply_budget.budgets[self.sid_a], sp_constants.REPLY_BUDGET + 1)
         self.allow(6)  # raising again: nothing left to release
@@ -409,7 +410,7 @@ class TestBudgetAllow(BuddyBase):
         time.sleep(0.2)
         self.assertEqual(len(self.replies(self.listener_a)), 1)
         body, _attrs = sp_protocol.unwrap_message(frames[0]["message"]["content"])
-        self.assertEqual(body, "[held reply, in reply to message m-t-held]\nheld answer")
+        self.assertEqual(strip_origin(body), "[held reply, in reply to message m-t-held]\nheld answer")
         self.assertEqual(self.shim.reply_budget.held, {})
         self.assertEqual(self.shim.reply_budget.budgets[self.sid_a], sp_constants.REPLY_BUDGET + 1)
 

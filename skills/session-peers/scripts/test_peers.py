@@ -27,6 +27,7 @@ MODULES = (
     "peer_tests.test_shim",
     "peer_tests.test_budgets",
     "peer_tests.test_buddy",
+    "peer_tests.test_cross_home",
     "peer_tests.test_commands",
     "peer_tests.test_topics",
     "peer_tests.test_upgrade",

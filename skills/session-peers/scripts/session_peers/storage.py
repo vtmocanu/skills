@@ -61,28 +61,113 @@ def registered_path():
     return os.path.join(state_dir(), "registered.json")
 
 
+def _pidfile_is_held(path):
+    """True when some process holds the shim ownership flock on ``path``."""
+    try:
+        fh = open(path, "r+")
+    except OSError:
+        return False
+    try:
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except OSError:
+            return True
+        fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        return False
+    finally:
+        fh.close()
+
+
+def _recorded_shim_homes(thread_id):
+    """CODEX_HOME values that live shim registry records of this thread carry."""
+    homes = []
+    try:
+        names = sorted(os.listdir(claude_sessions_dir()))
+    except OSError:
+        return homes
+    for name in names:
+        if not name.endswith(".json"):
+            continue
+        rec = sp_runtime.read_json(os.path.join(claude_sessions_dir(), name), None)
+        if (
+            isinstance(rec, dict)
+            and rec.get("entrypoint") == "codex"
+            and rec.get("sessionId") == thread_id
+            and isinstance(rec.get("codexHome"), str)
+            and rec["codexHome"]
+        ):
+            homes.append(rec["codexHome"])
+    return homes
+
+
+def thread_home(thread_id):
+    """The CODEX_HOME the shim for ``thread_id`` actually runs under.
+
+    Per-thread state (pidfile, state, log, budget markers) lives under the
+    shim's own home, which can differ from the caller's CODEX_HOME (a Claude
+    session launched with its own). Invariant: a shim holds an exclusive flock
+    on ``<home>/session-peers/<thread>.pid`` for its whole life, so the first
+    candidate home whose pidfile is held is the home the shim reads. The
+    caller's home wins when it holds one; with no live shim anywhere the
+    caller's home is returned, which is where a new shim would start.
+    """
+    mine = codex_home()
+    candidates = [mine] + _recorded_shim_homes(thread_id) + [os.path.expanduser("~/.codex")]
+    seen = set()
+    for home in candidates:
+        key = os.path.realpath(home)
+        if key in seen:
+            continue
+        seen.add(key)
+        if _pidfile_is_held(os.path.join(home, "session-peers", "%s.pid" % thread_id)):
+            return home
+    return mine
+
+
+def thread_dir(thread_id):
+    """The session-peers state directory of the home this thread's shim uses."""
+    home = thread_home(thread_id)
+    if os.path.realpath(home) == os.path.realpath(codex_home()):
+        return state_dir()
+    return os.path.join(home, "session-peers")
+
+
+@contextlib.contextmanager
+def codex_home_override(home):
+    """Run a block with CODEX_HOME pointed at ``home`` (single-threaded CLI use)."""
+    old = os.environ.get("CODEX_HOME")
+    os.environ["CODEX_HOME"] = home
+    try:
+        yield
+    finally:
+        if old is None:
+            os.environ.pop("CODEX_HOME", None)
+        else:
+            os.environ["CODEX_HOME"] = old
+
+
 def thread_state_path(thread_id):
-    return os.path.join(state_dir(), "%s.json" % thread_id)
+    return os.path.join(thread_dir(thread_id), "%s.json" % thread_id)
 
 
 def thread_pid_path(thread_id):
-    return os.path.join(state_dir(), "%s.pid" % thread_id)
+    return os.path.join(thread_dir(thread_id), "%s.pid" % thread_id)
 
 
 def thread_log_path(thread_id):
-    return os.path.join(state_dir(), "%s.log" % thread_id)
+    return os.path.join(thread_dir(thread_id), "%s.log" % thread_id)
 
 
 def budget_reset_path(thread_id):
-    return os.path.join(state_dir(), "%s.budget-reset" % thread_id)
+    return os.path.join(thread_dir(thread_id), "%s.budget-reset" % thread_id)
 
 
 def budget_allow_path(thread_id):
-    return os.path.join(state_dir(), "%s.budget-allow" % thread_id)
+    return os.path.join(thread_dir(thread_id), "%s.budget-allow" % thread_id)
 
 
 def budget_binding_path(thread_id):
-    return os.path.join(state_dir(), "%s.budget-binding" % thread_id)
+    return os.path.join(thread_dir(thread_id), "%s.budget-binding" % thread_id)
 
 
 class BindingLockTimeout(Exception):
@@ -126,7 +211,7 @@ def binding_lock(thread_id, timeout=None):
     or unlink.
     """
     return _flock_file(
-        os.path.join(state_dir(), "%s.binding-lock" % thread_id), timeout, thread_id
+        os.path.join(thread_dir(thread_id), "%s.binding-lock" % thread_id), timeout, thread_id
     )
 
 

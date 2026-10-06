@@ -13,6 +13,7 @@ import sys
 import threading
 import time
 from .support import (
+    strip_origin,
     Base,
     HOSTILE_NAME,
     sp_claude,
@@ -133,7 +134,9 @@ class TestFrames(Base):
         wrapped = sp_protocol.build_cc_body("hi", "tid", "codex-uzi", "/tmp/cc-socks/1.sock")
         self.assertTrue(wrapped.startswith("<cross-session-message"))
         bare = sp_protocol.build_cc_body("hi", "tid", "codex-uzi", None)
-        self.assertEqual(bare, "Message from Codex thread codex-uzi:\nhi")
+        self.assertEqual(
+            bare, "[session-peers from Codex thread codex-uzi (tid)]\nhi"
+        )
 
 
 class TestPeerToken(Base):
@@ -473,6 +476,7 @@ class TestByteBudget(Base):
         self.assertLessEqual(sp_runtime.utf8_len(queued), sp_runtime.argv_text_budget())
         queued.encode("utf-8").decode("utf-8")
         _tag, trimmed = sp_protocol.parse_tag(queued)
+        trimmed = strip_origin(trimmed)
         self.assertTrue(trimmed, "the whole body was trimmed away")
         self.assertTrue(
             body.startswith(trimmed),

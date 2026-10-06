@@ -42,9 +42,30 @@ def cmd_send(args):
     if target.startswith("codex:"):
         return _send_codex(target[len("codex:") :], args)
     if target.startswith("cc:"):
+        shim_thread = _codex_shim_thread(target[len("cc:") :], args)
+        if shim_thread:
+            return _send_codex(shim_thread, args)
         return _send_claude(target[len("cc:") :], args)
     sys.stderr.write("error: --to must start with codex: or cc:\n")
     return 2
+
+
+def _codex_shim_thread(target, args):
+    """Thread UUID when a Claude-side sender names a Codex shim's peer record.
+
+    The shim's registry record is a Claude-facing alias of a Codex thread. A
+    Claude sender goes through the Codex path, which stamps its own identity
+    and reply route; the Claude-facing path is for Codex senders only.
+    """
+    try:
+        if sp_identity._thread_from_args(args):
+            return None
+        rec = sp_claude._resolve_claude_record(target)
+    except (sp_codex.ResolveError, ValueError):
+        return None
+    if rec.get("entrypoint") == "codex" and sp_runtime.is_uuid(rec.get("sessionId")):
+        return rec["sessionId"]
+    return None
 
 
 def _send_codex(target, args):
@@ -58,7 +79,8 @@ def _send_codex(target, args):
         sp_runtime.log("liveness unverified: the Codex state schema is unknown")
     else:
         held, _pid = sp_codex.thread_is_held(
-            thread["rollout_path"], lock_path=sp_codex.writer_lock_path(thread["id"])
+            thread["rollout_path"],
+            lock_path=sp_codex.writer_lock_path(thread["id"], home=thread.get("codex_home")),
         )
         if held is None:
             sys.stderr.write(
@@ -106,9 +128,12 @@ def _send_codex(target, args):
         )
     msg_id = str(uuidlib.uuid4())
     tag = sp_protocol.build_tag(from_name, from_sid, from_socket, msg_id)
-    text = "%s\n%s" % (tag, args.message)
+    origin = sp_protocol.build_origin("claude", from_name, from_sid)
+    text = "%s\n%s\n%s" % (tag, origin, args.message)
     try:
-        sp_codex.codex_queue(thread["id"], text, cwd=thread.get("cwd"))
+        sp_codex.codex_queue(
+            thread["id"], text, cwd=thread.get("cwd"), home=thread.get("codex_home")
+        )
     except sp_codex.QueueError as exc:
         sys.stderr.write("error: %s\n" % exc)
         return 1
@@ -180,6 +205,7 @@ def _prepare_request(args, purpose):
     except ValueError as exc:
         sys.stderr.write("error: %s\n" % exc)
         return 2
+    sp_requests.warn_short_lifetime(timeout)
     try:
         rec = sp_claude._resolve_claude_record(args.to[len("cc:") :])
     except sp_codex.ResolveError as exc:
