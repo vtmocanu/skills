@@ -9,12 +9,17 @@ work while this session steers and reviews:
   interrupts the active turn; each later runs as its own turn with its own
   reply, and an asynchronous reply spends the reply budget. Once the worker is
   in a long turn, answer only inside the correlated reply to its next check-in;
-  an intervention that cannot wait for it needs the user.
+  an intervention that cannot wait for it needs the user. This includes new
+  tasks: queue nothing while the worker is busy. Observed: tasks queued
+  mid-turn drew several late "already complete" replies, and one task body
+  never reached the active turn until resent inside a check-in reply.
 - If the worker's turn completes without continuing to the next step and no
   check-in arrives, resend the next instruction as an ordinary message.
 - **The worker checks in** at each gate, about every 15 minutes while actively
   working, and before any push, apply or other outward step: done (with SHAs),
-  next, blockers, questions. A routine check-in uses `dispatch`, so work
+  next, blockers, questions. Each check-in also restates the current task, its
+  constraints and the last approved SHA, so the steerer sees drift after a
+  context compaction at once. A routine check-in uses `dispatch`, so work
   continues, and the worker briefly `await`s that request at its next
   check-in; set `dispatch --timeout` longer than the interval, since expiry
   discards even an unread reply. A pending `await` (exit 124) stays resumable. A gate
@@ -26,6 +31,15 @@ work while this session steers and reviews:
   the worker's turn completes marks one it replaces `supersedes <msg_id>`.
 - Relay user decisions verbatim and say they came from the user; the worker
   cannot see this session's conversation.
+- **Freeze what the user runs.** When the user runs a binary, app or test lane
+  built from the worker's worktree, the worker builds and mutation-tests only
+  in its own scratch build path until the steerer says the run finished.
+  Before handing a run over, the steerer checks the tree is clean at the
+  approved SHA and the binary is newer than that commit and contains the new
+  code (e.g. `strings` for a new label).
+- Write definitions, not labels, into the tracked brief: record each finding's
+  text, not just its ID (`FN4-FN6`). Scratch notes and session transcripts do
+  not survive into the next lead session.
 - A sandboxed worker may lack host network (forge HTTPS, state backends, LAN
   hosts, secret stores). It sends the exact command; the steerer runs it only
   if the user authorized that action for this work, and returns the output.
