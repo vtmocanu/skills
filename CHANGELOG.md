@@ -8,7 +8,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- `status-check`: reports the session's open work as one table (background jobs, items waiting on the user, another session, CI or a bot, held items, done since last check), then arms a session-only timer that repeats the report every 20 minutes (`/status-check every N` to change, `stop` to end) and stops itself when nothing is open. Read-only. Runs a repository's `.agents/status-check` script when present.
+- `status-check`: reports the session's open work as one table (background jobs, items waiting on the user, another session, CI or a bot, held items, done since last check), then arms a session-only timer that repeats the report every 20 minutes (`/status-check every N` to change, `stop` to end) and stops itself when nothing is open. Read-only; it runs no repository-provided scripts.
 
 ### Fixed
 
