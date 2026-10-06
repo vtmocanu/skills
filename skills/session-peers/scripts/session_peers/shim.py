@@ -539,7 +539,8 @@ class Shim:
             frame.get("msg_id"),
         )
         # The provenance line follows the tag, so a Codex thread reading the
-        # turn sees the sender is a Claude Code session; tag parsers (including
+        # turn sees the verified sender's runtime (Claude Code session, Codex
+        # thread, or unverified); tag parsers (including
         # shims running older code) only read the first line.
         head = "%s\n%s" % (tag, sp_protocol.build_origin(
             sp_protocol.sender_runtime(sender), sender_name, sender_sid))
