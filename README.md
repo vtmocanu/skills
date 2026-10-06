@@ -114,7 +114,7 @@ npx -y skills@latest add https://github.com/vtmocanu/skills -a claude-code codex
 
 Plus the 11 [agent-kit](skills/agent-kit/) skills from the table above.
 
-## Notes for both paths
+## Notes for all three options
 
 - **Refresh safety:** Vercel installs into temporary projects; the wrapper publishes complete files with atomic replacement. Existing paths stay readable, unchanged files are untouched, and failed staging leaves the live installation intact. Retired supporting files remain available to already-loaded skills. This is atomic per file, not a frozen version of the whole skill. See [refresh safety](skills/skill-maker/references/refresh-safety.md) for the verified race, metadata compatibility, and cleanup limits.
 - The wrapper uses `add … --skill '*'` in staging to discover new catalog skills. It also refreshes other tracked global skills and current-project dependencies by their recorded names and refs. It serializes cooperating refresh jobs and leaves repo-authored skills outside `skills-lock.json` untouched. Automatic refresh is optional; for manual use with agents running, invoke the same wrapper. Run direct modifying `npx skills` commands only with consumers of that store closed.
