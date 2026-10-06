@@ -8,7 +8,7 @@ A public collection of agent skills for [Claude Code](https://claude.com/claude-
 
 Each skill is a folder `skills/<name>/SKILL.md` with YAML frontmatter (`name` + `description`). Target Claude Code plus Codex when installing the full catalog: the rolling `skills@latest` CLI writes the canonical store under `~/.agents/skills/<name>/`, which Codex and OpenCode read directly, and symlinks `~/.claude/skills/<name>/` for Claude Code. Restart the target agent if a newly installed skill does not appear.
 
-## Two options, pick one
+## Three options, pick one
 
 ## 🧰 Just agent-kit
 
@@ -60,6 +60,16 @@ npx -y skills@latest add vtmocanu/skills --skill skill-maker -a claude-code code
 
 Anything later added under `skills/agent-kit/` joins the bundle automatically.
 
+## 📝 Just the PRD skills
+
+The 10 `prd-*` skills from agent-kit, without `agent-team`. They work standalone; `prd-create` adds an agent-team `architect` reviewer only when the repo already has one.
+
+```sh
+npx -y skills@latest add vtmocanu/skills/skills/agent-kit/prd -a claude-code -g -y
+```
+
+For automatic updates, install the refresh helper and hook as in [Just agent-kit](#-just-agent-kit), with `--source vtmocanu/skills/skills/agent-kit/prd` in the hook command.
+
 ## 📦 All skills
 
 The whole catalog (22 skills), agent-kit included.
@@ -109,7 +119,7 @@ Plus the 11 [agent-kit](skills/agent-kit/) skills from the table above.
 - **Refresh safety:** Vercel installs into temporary projects; the wrapper publishes complete files with atomic replacement. Existing paths stay readable, unchanged files are untouched, and failed staging leaves the live installation intact. Retired supporting files remain available to already-loaded skills. This is atomic per file, not a frozen version of the whole skill. See [refresh safety](skills/skill-maker/references/refresh-safety.md) for the verified race, metadata compatibility, and cleanup limits.
 - The wrapper uses `add … --skill '*'` in staging to discover new catalog skills. It also refreshes other tracked global skills and current-project dependencies by their recorded names and refs. It serializes cooperating refresh jobs and leaves repo-authored skills outside `skills-lock.json` untouched. Automatic refresh is optional; for manual use with agents running, invoke the same wrapper. Run direct modifying `npx skills` commands only with consumers of that store closed.
 - The full-catalog installer targets `claude-code codex` explicitly. Codex supplies the universal `.agents/skills` destination, Claude receives a symlink to it, and OpenCode reads that same universal destination without another projection. A Claude-only target makes the CLI use copy mode and does not populate `.agents/skills`.
-- **Codex auto-update:** point the Codex `SessionStart` handler at the same installed refresher, using `~/.codex/hooks.json` with matcher `startup|resume`, then review and trust it through `/hooks`. For agent-kit-only installs, use the same `--source` argument as the Claude hook. Use the installed script or a thin machine-local trampoline that executes it; a detached copy of its implementation cannot receive updates. The hooks are asynchronous and best-effort: a session may begin with an older inventory, an early session end may cancel refresh, and the next start retries. The [skill-maker hook section](skills/skill-maker/SKILL.md#auto-install-new--refresh-on-session-start-hook) has the JSON contract and multi-source options.
+- **Codex auto-update:** point the Codex `SessionStart` handler at the same installed refresher, using `~/.codex/hooks.json` with matcher `startup|resume`, then review and trust it through `/hooks`. For agent-kit-only or PRD-only installs, use the same `--source` argument as the Claude hook. Use the installed script or a thin machine-local trampoline that executes it; a detached copy of its implementation cannot receive updates. The hooks are asynchronous and best-effort: a session may begin with an older inventory, an early session end may cancel refresh, and the next start retries. The [skill-maker hook section](skills/skill-maker/SKILL.md#auto-install-new--refresh-on-session-start-hook) has the JSON contract and multi-source options.
 - Renames and removals are **not** auto-pruned in a non-TTY hook; drop an old name with `npx -y skills@latest remove <old> -g -y`.
 - Drop `-g` to install into the current project only (`.agents/skills` store plus agent-specific projections such as `.claude/skills`). Add `-l` to list without installing, or `-s a b` (space-separated) to pick a subset.
 - Edit the source repo, never an npx-installed `.agents/skills` store or `.claude/skills` projection, which `add`/`update` overwrite.
