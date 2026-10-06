@@ -59,6 +59,8 @@ def cmd_budget(args):
         state["allowance"] = None
         sp_runtime.write_json_atomic(state_path, state, mode=0o600)
     print("reply budget reset for %s" % tid)
+    if not sp_lifecycle.shim_pid(tid):
+        print("no shim is running for %s; the reset applies once one starts" % tid)
     return 0
 
 
@@ -222,6 +224,7 @@ def _codex_status(uuid, attach):
         return status
     status.update(
         name=thread.get("name"),
+        title=thread.get("name"),
         live=thread.get("live"),
         registered=thread.get("registered"),
     )
@@ -262,6 +265,10 @@ def buddy_status(buddy, attach=False):
 
 def _buddy_line(rec, status):
     name = status.get("name") or rec["buddy"].get("name") or "(unnamed)"
+    alias = rec["buddy"].get("name")
+    if status["kind"] == "codex" and status.get("title") and alias and alias != name:
+        # The title is mutable; the bound peer alias is what `list` shows.
+        name = "%s [peer %s]" % (name, alias)
     live = {True: "live", False: "not live", None: "liveness unknown"}[status.get("live")]
     parts = ["%s" % live]
     if status["kind"] == "codex":

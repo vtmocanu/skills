@@ -58,6 +58,11 @@ def _resolve_typed_kind(kind, target, live_only=False, exclude=None):
             # A bound buddy is addressed by UUID only; a non-UUID id would be
             # re-read as a name later.
             raise sp_codex.ResolveError("Claude session %r has no UUID session id" % target)
+        if rec.get("entrypoint") == "codex":
+            # A Codex shim registers itself as a Claude peer so Claude can
+            # reach it, but the peer is a Codex thread: bind it as one so the
+            # reply budget and Codex routing apply.
+            return {"kind": "codex", "uuid": sid, "name": rec.get("name")}
         return {"kind": "cc", "uuid": sid, "name": rec.get("name")}
     # Codex reuses titles, so a live thread usually shares its name with dead
     # ones: the live match wins, and dead threads count only when none is live.
@@ -108,6 +113,11 @@ def resolve_typed(target, exclude=None):
             "%s; pick the kind" % errors[0],
             ["%s:%s" % (kind, target) for kind in sp_constants.BUDDY_KINDS],
         )
+    unique = []
+    for item in found:
+        if not any(i["kind"] == item["kind"] and i["uuid"] == item["uuid"] for i in unique):
+            unique.append(item)
+    found = unique
     if len(found) > 1:
         # Routine for an attached Codex thread: its UUID also names its shim's
         # Claude-facing registry record.

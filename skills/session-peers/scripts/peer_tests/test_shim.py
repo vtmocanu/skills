@@ -19,6 +19,7 @@ import time
 from datetime import timezone
 import uuid as uuidlib
 from .support import (
+    strip_origin,
     Base,
     PEERS,
     PS_LSTART,
@@ -56,7 +57,7 @@ class TestShimInbound(ShimBase):
         self.assertEqual(tag["sid"], "s1")
         self.assertEqual(tag["mid"], "m-1")
         self.assertEqual(tag["reply"], listener.path)
-        self.assertEqual(body, "do the thing")
+        self.assertEqual(strip_origin(body), "do the thing")
         self.assertIn("s1", shim.contacts)
         self.assertIn("queued inbound message m-1", err.getvalue())
 
@@ -109,7 +110,7 @@ class TestShimInbound(ShimBase):
         frame = sp_protocol.build_user_frame(content, listener.path)
         shim._handle_line(json.dumps(frame))
         tag, body = sp_protocol.parse_tag(self.queue_calls()[0][4])
-        self.assertEqual(body, "do the thing")
+        self.assertEqual(strip_origin(body), "do the thing")
         self.assertEqual(tag["from"], "cc-main")
         self.assertEqual(tag["sid"], "s1")
         self.assertEqual(tag["reply"], listener.path)
@@ -120,7 +121,7 @@ class TestShimInbound(ShimBase):
         frame = sp_protocol.build_user_frame("plain body", listener.path)
         shim._handle_line(json.dumps(frame))
         _tag, body = sp_protocol.parse_tag(self.queue_calls()[0][4])
-        self.assertEqual(body, "plain body")
+        self.assertEqual(strip_origin(body), "plain body")
 
     def test_a_body_over_the_cap_is_truncated_not_dropped(self):
         shim, _tid, _rollout = self.make_shim()
@@ -132,6 +133,7 @@ class TestShimInbound(ShimBase):
         queued = self.queue_calls()[0][4]
         self.assertLessEqual(len(queued), sp_runtime.argv_text_budget())
         _tag, body = sp_protocol.parse_tag(queued)
+        body = strip_origin(body)
         self.assertTrue(body.startswith("x"))
         self.assertLess(len(body), len(big))
         self.assertIn("truncating", err.getvalue())
@@ -277,7 +279,7 @@ class TestShimReplies(ShimBase):
         frames = wait_for(lambda: listener.of_type("user"))
         self.assertEqual(len(frames), 1)
         body, attrs = sp_protocol.unwrap_message(frames[0]["message"]["content"])
-        self.assertEqual(body, "[in reply to message m-1]\nthe answer")
+        self.assertEqual(strip_origin(body), "[in reply to message m-1]\nthe answer")
         self.assertEqual(attrs["from-name"], "codex-uzi")
         self.assertEqual(attrs["from-session"], tid)
         self.assertEqual(frames[0]["from"], "uds:%s" % shim.sock_path)
@@ -545,7 +547,7 @@ class TestShimReplies(ShimBase):
         shim._handle_turn_end(self._turn(listener.path, msg_id=None))
         frames = wait_for(lambda: self._reply_frames(listener))
         body, _attrs = sp_protocol.unwrap_message(frames[0]["message"]["content"])
-        self.assertEqual(body, "the answer")
+        self.assertEqual(strip_origin(body), "the answer")
 
     def test_a_budget_dropped_reply_is_held_and_released_by_a_reset(self):
         # The guard still stops the 4th consecutive reply (same sid, fresh
@@ -585,7 +587,7 @@ class TestShimReplies(ShimBase):
         body, _attrs = sp_protocol.unwrap_message(frames[-1]["message"]["content"])
         last = sp_constants.REPLY_BUDGET + 1
         self.assertEqual(
-            body, "[held reply, in reply to message m%d]\nanswer %d" % (last, last)
+            strip_origin(body), "[held reply, in reply to message m%d]\nanswer %d" % (last, last)
         )
         self.assertEqual(shim.reply_budget.held, {})
         self.assertEqual(shim.reply_budget.budgets["s1"], 1)  # the released reply opens the sequence
@@ -724,7 +726,7 @@ class TestShimReplies(ShimBase):
         shim._handle_turn_end(self._turn(listener.path, text=echoed))
         frames = wait_for(lambda: listener.of_type("user"))
         body, _attrs = sp_protocol.unwrap_message(frames[0]["message"]["content"])
-        self.assertEqual(body, "[in reply to message m-1]\nthe answer")
+        self.assertEqual(strip_origin(body), "[in reply to message m-1]\nthe answer")
 
 
 class TestStatusFrameShape(ShimBase):
@@ -1099,7 +1101,7 @@ class TestShimEndToEnd(Base):
         self.assertEqual(frames[0]["from"], "uds:%s" % rec["messagingSocketPath"])
         body, _attrs = sp_protocol.unwrap_message(frames[0]["message"]["content"])
         self.assertEqual(
-            body, "[held reply, in reply to message m-restart]\nheld across restart"
+            strip_origin(body), "[held reply, in reply to message m-restart]\nheld across restart"
         )
         log_text = self.shim_log()
         self.assertLess(log_text.index("shim up:"), log_text.index("released a held reply"))
@@ -1128,7 +1130,7 @@ class TestShimEndToEnd(Base):
         proc.wait(timeout=10)
         frames = listener.of_type("user")
         self.assertEqual(
-            [sp_protocol.unwrap_message(f["message"]["content"])[0] for f in frames],
+            [strip_origin(sp_protocol.unwrap_message(f["message"]["content"])[0]) for f in frames],
             ["the review verdict"],
         )
         self.assertNotIn("delivered turn t-finished", self.shim_log())
@@ -1154,7 +1156,7 @@ class TestShimEndToEnd(Base):
         proc2.terminate()
         proc2.wait(timeout=10)
         self.assertEqual(
-            [sp_protocol.unwrap_message(f["message"]["content"])[0]
+            [strip_origin(sp_protocol.unwrap_message(f["message"]["content"])[0])
              for f in listener.of_type("user")],
             ["finished while down"],
         )
@@ -1177,7 +1179,7 @@ class TestShimEndToEnd(Base):
         tagged = calls[0][4]
         tag, body = sp_protocol.parse_tag(tagged)
         self.assertEqual(tag["reply"], listener.path)
-        self.assertEqual(body, "do it")
+        self.assertEqual(strip_origin(body), "do it")
 
         append(rollout, ev("task_started", turn_id="t1"), user_item(tagged))
         self.assertTrue(
@@ -1195,7 +1197,7 @@ class TestShimEndToEnd(Base):
         # The header names the SENDER'S OWN frame msg_id (what SendMessage
         # returned), carried through the Codex turn tag end to end.
         self.assertEqual(
-            reply_body, "[in reply to message %s]\nall done" % frame["msg_id"]
+            strip_origin(reply_body), "[in reply to message %s]\nall done" % frame["msg_id"]
         )
         self.assertEqual(attrs["from-name"], "codex-uzi")
         self.assertTrue(

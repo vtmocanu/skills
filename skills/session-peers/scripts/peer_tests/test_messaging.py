@@ -11,6 +11,7 @@ import threading
 import time
 import uuid as uuidlib
 from .support import (
+    strip_origin,
     Base,
     Listener,
     append,
@@ -42,7 +43,7 @@ class TestSendToCodex(Base):
         self.assertEqual(tag["from"], "cc-main")
         self.assertTrue(sp_runtime.is_uuid(tag["mid"]))
         self.assertEqual(tag["reply"], listener.path)
-        self.assertEqual(body, "hello")
+        self.assertEqual(strip_origin(body), "hello")
         self.assertIn("queued to", out)
 
     def test_send_reads_a_message_file_and_reports_json_identity(self):
@@ -60,7 +61,7 @@ class TestSendToCodex(Base):
         self.assertTrue(sp_runtime.is_uuid(result["message_id"]))
         tag, body = sp_protocol.parse_tag(self.queue_calls()[0][4])
         self.assertEqual(result["message_id"], tag["mid"])
-        self.assertEqual(body, "from file")
+        self.assertEqual(strip_origin(body), "from file")
 
     def test_message_file_obeys_the_utf8_byte_cap(self):
         tid, _rollout = self.one_thread()
@@ -99,7 +100,7 @@ class TestSendToCodex(Base):
         self.assertEqual(tag["from"], "cc-main")
         self.assertEqual(tag["sid"], rec["sessionId"])
         self.assertEqual(tag["reply"], listener.path)
-        self.assertEqual(body, "hello")
+        self.assertEqual(strip_origin(body), "hello")
 
     def test_send_warns_when_no_sender_identity_is_available(self):
         tid, _rollout = self.one_thread()
@@ -203,7 +204,7 @@ class TestSendToClaude(Base):
         self.assertEqual(rc, 0)
         frame = wait_for(lambda: listener.of_type("user"))[0]
         self.assertEqual(frame["priority"], "next")
-        self.assertIn("Message from Codex thread", frame["message"]["content"])
+        self.assertIn("[session-peers from Codex thread", frame["message"]["content"])
         self.assertNotIn("from", frame)
         self.assertIn("sent to cc-main", out)
 
@@ -248,7 +249,7 @@ class TestSendToClaude(Base):
         self.assertEqual(rc, 0)
         frame = wait_for(lambda: listener.of_type("user"))[0]
         body, attrs = sp_protocol.unwrap_message(frame["message"]["content"])
-        self.assertEqual(body, "hello")
+        self.assertEqual(strip_origin(body), "hello")
         self.assertEqual(attrs["from-name"], "codex-uzi")
         self.assertEqual(attrs["from-session"], tid)
         self.assertNotIn("from-mode", attrs)
@@ -303,7 +304,7 @@ class TestCorrelatedAskReply(Base):
     def _request_id(self, listener):
         frame = wait_for(lambda: listener.of_type("user"))[0]
         self.assertNotIn("from", frame)
-        self.assertIn("Message from Codex thread", frame["message"]["content"])
+        self.assertIn("[session-peers from Codex thread", frame["message"]["content"])
         match = re.search(
             r'<session-peers-request id="([0-9a-f-]+)"',
             frame["message"]["content"],

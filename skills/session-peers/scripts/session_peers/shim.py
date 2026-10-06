@@ -47,7 +47,7 @@ class Shim:
             sp_storage.claude_sessions_dir(), "%d.json" % os.getpid()
         )
 
-        state = sp_runtime.read_json(sp_storage.thread_state_path(self.thread_id), {}) or {}
+        state = sp_runtime.read_json(sp_storage.own_thread_state_path(self.thread_id), {}) or {}
         self.tail = sp_rollout.RolloutTail.from_state(self.rollout_path, state.get("tail"))
         # This is an at-most-once processing ledger, including dropped replies,
         # not evidence of delivery. Read the legacy name when upgrading.
@@ -140,6 +140,7 @@ class Shim:
                 "another shim already owns thread %s; exiting without touching "
                 "its pidfile, state or record" % self.thread_id
             )
+            sp_storage.unpin_thread_home(self.thread_id)
             return 4
         # From here on this process owns files that need removing, so the
         # handlers go in BEFORE the bind rather than after the record write.
@@ -206,6 +207,7 @@ class Shim:
             except OSError:
                 pass
             self._pidfile_fd = None
+        sp_storage.unpin_thread_home(self.thread_id)
 
     # -- socket and record -------------------------------------------------
 
@@ -257,6 +259,9 @@ class Shim:
             "peerFeatures": list(sp_constants.PEER_FEATURES),
             "kind": "interactive",
             "entrypoint": "codex",
+            # Where this shim's own state lives; a caller with a different
+            # CODEX_HOME finds the shim's budget markers through it.
+            "codexHome": sp_storage.codex_home(),
             "pidDomain": sp_process.pid_domain(),
             "messagingSocketPath": self.sock_path,
             "name": self.name,
@@ -323,6 +328,7 @@ class Shim:
         crash included, so nothing else can mistake a recycled pid for us.
         Returns False when another shim holds it, having changed nothing.
         """
+        sp_storage.pin_thread_home(self.thread_id)
         path = sp_storage.thread_pid_path(self.thread_id)
         fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
         for attempt in range(5):
@@ -532,17 +538,23 @@ class Shim:
             sock_path if sender else None,
             frame.get("msg_id"),
         )
-        # The tag rides inside the same text Codex caps, so the body is trimmed
+        # The provenance line follows the tag, so a Codex thread reading the
+        # turn sees the verified sender's runtime (Claude Code session, Codex
+        # thread, or unverified); tag parsers (including
+        # shims running older code) only read the first line.
+        head = "%s\n%s" % (tag, sp_protocol.build_origin(
+            sp_protocol.sender_runtime(sender), sender_name, sender_sid))
+        # The head rides inside the same text Codex caps, so the body is trimmed
         # to leave room for it rather than pushing the whole message over.
         # P5: the argv budget is bytes; the Codex cap is characters. Both.
-        room_bytes = sp_runtime.argv_text_budget() - sp_runtime.utf8_len(tag) - 1
-        room_chars = sp_constants.MAX_TEXT_CHARS - len(tag) - 1
+        room_bytes = sp_runtime.argv_text_budget() - sp_runtime.utf8_len(head) - 1
+        room_chars = sp_constants.MAX_TEXT_CHARS - len(head) - 1
         trimmed_from = None
         if sp_runtime.utf8_len(body) > room_bytes or len(body) > room_chars:
             trimmed_from = len(body)
             body = sp_runtime.truncate_utf8(body, room_bytes)[:room_chars]
             sp_runtime.log("truncating an inbound body of %d chars to %d" % (trimmed_from, len(body)))
-        text = "%s\n%s" % (tag, body)
+        text = "%s\n%s" % (head, body)
 
         return text, body, trimmed_from
 

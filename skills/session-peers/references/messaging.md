@@ -3,8 +3,8 @@
 ### Messaging a Codex thread
 
 Use `SendMessage` (or `@<name>` in the prompt) exactly as for another Claude
-session. The shim tags the message with your name and reply address and queues
-it; Codex runs it as its next user turn under the thread's own approval mode.
+session. The shim tags the message with your name and reply address, adds a
+`[session-peers from Claude Code session NAME (SID)]` line, and queues it; Codex runs it as its next user turn under the thread's own approval mode.
 
 For a request whose reply gates an action, use `peers.py list` to identify the
 live thread and its busy/idle state, then match the reply's message-id header
@@ -25,8 +25,9 @@ it does not bypass the busy thread's queue.
 - **Reply header**: a reply to your own message starts with
   `[in reply to message <msg_id>]`, the `msg_id` your `SendMessage` returned.
   When messages cross, match it before acting on the reply; a reply to an
-  older message cannot satisfy the current gate (see [the core buddy rules](../SKILL.md#buddy)). Strip that first
-  line before parsing a reply body as exact text or JSON. Correlated
+  older message cannot satisfy the current gate (see [the core buddy rules](../SKILL.md#buddy)). It follows the
+  `[session-peers from Codex thread NAME (UUID)]` provenance line. Strip both
+  lines before parsing a reply body as exact text or JSON. Correlated
   `ask`/`await` replies and `@name` replies to another session carry no header.
 
 ### Replying to a waiting Codex request
