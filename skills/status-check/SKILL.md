@@ -43,7 +43,7 @@ Use the scheduled-prompt tools (`CronList`, `CronCreate`, `CronDelete` in Claude
 1. `CronList`. If a job with prompt `/status-check tick` exists, keep it; arm nothing new. On a new interval, delete it first, then arm.
 2. Pick the cron minutes: an offset `o` from 1 to N-1 that avoids minutes 0 and 30, then `o, o+N, …` below 60. Example for 20 minutes: `7,27,47 * * * *`.
 3. `CronCreate` with that cron, `recurring: true`, prompt `/status-check tick`.
-4. Tell the user in one line: the interval, that ticks fire only while the session is idle and may run a few minutes late, that the timer belongs to this session and expires after 7 days, and that `/status-check stop` ends it.
+4. Tell the user in one line: the interval, that ticks fire only while the session is idle and may run late, that the timer belongs to this session and expires after 7 days, and that `/status-check stop` ends it.
 
 **Stop on its own.** When a report finds no open items, delete the timer (or skip arming it) and say the session has nothing left to track. The timer itself never counts as open work.
 
