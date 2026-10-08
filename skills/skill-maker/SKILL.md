@@ -86,8 +86,6 @@ Track both the real directory and the symlink. Do not relocate a lockfile-owned 
 
 Under either layout, use `<repo>/.agents/skills`, not `~/.agents/skills`: the tilde path is user-global and would make a repository contract machine-local. A shared path makes one body discoverable; it does not translate harness-specific behavior. Before declaring a skill cross-agent, inspect its frontmatter, tool names, slash commands, lifecycle assumptions, and literal `.claude/skills/...` paths. Keep `name`, `description`, and the body portable; retain host-specific metadata only when that host needs it, and never rely on another host ignoring a field as a security boundary. Reference supporting files through the runtime-provided skill base directory rather than hardcoding either discovery path.
 
-Product caveat: uzi's worker currently enumerates repo skills only from a real `.claude/skills` directory and skips both symlink forms under its ADR-0246 containment guard. A repository with `repo_skills_enabled` therefore loses those skills in worker runs until [vtmocanu/uzi#1205](https://github.com/vtmocanu/uzi/issues/1205) adds `.agents/skills` as a second real-directory root.
-
 ### Agent definitions are not portable skill directories
 
 Do not generalize the `.agents/skills` layout to `.agents/agents`. There is no shared agent-definition discovery path or file schema across these runtimes:
