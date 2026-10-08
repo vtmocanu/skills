@@ -19,6 +19,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- `agent-team`: reviewer (v21) gains cleanup lenses in its optional design-smells section: reuse (search for an existing helper and check its contract fits), simplification, and efficiency, each Non-blocking with the simpler form named. Architect (v13) places a fix at the responsible layer and reviews fix altitude, Blocking only when a failing case shows the fix incomplete.
 - `done`: removes git artifacts the session created once they are safely unneeded, without asking, and lists them; anything uncertain or not its own is reported, not removed. Adds a "Use when" trigger and fixes the stale source path.
 
 ## [0.46.0] - 2026-10-03
