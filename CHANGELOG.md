@@ -8,6 +8,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `away-mode`: runs a session autonomously while the user is away. Arming restates the grant (scope, explicit spending cap, deadline), pre-asks predictable questions, checks the co-decider, and arms a session timer (`/away-mode tick`). Reversible in-scope items are decided with an exact-head co-sign from a bound buddy, or from a persistent subagent buddy when none is bound; irreversible, out-of-scope, over-cap, permission-denied and spec-departing actions are held. One round of disagreement holds the item with both positions; a lost buddy holds its decisions. Quiet ticks only log. The user's next message ends the grant before anything else runs, then one return report lists what needs them (one at a time, with both recommendations), what was done, what still runs, and corrections.
 - `status-check`: reports the session's open work as one table (background jobs, items waiting on the user, another session, CI or a bot, held items, done since last check), then arms a session-only timer that repeats the report every 20 minutes (`/status-check every N` to change, `stop` to end) and stops itself when nothing is open. Read-only; it runs no repository-provided scripts.
 
 ### Fixed
