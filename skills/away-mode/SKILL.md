@@ -28,7 +28,7 @@ Do these while the user is still present, in one message:
 
 1. **Restate the grant** in one short block: scope (which items, repos, runs), what may be decided, any spending cap, the deadline (default: none, the user's next message ends it), the tick interval. Ask only if scope is unclear.
 2. **Pre-ask the predictable questions.** List decisions you can already see coming (a design fork, a spec departure, a label, a spend) and get answers now. A question answered before the user leaves does not block the night.
-3. **Name the co-decider.** With a buddy bound (see Buddy), report its name, liveness, and reply allowance; an allowance that will run out overnight is a preflight failure, so ask the user for more now, and ask whether a subagent may co-sign if the buddy is lost. With no buddy, say whether a subagent co-signs (see No buddy) or the night runs solo and more conservatively.
+3. **Name the co-decider.** With a buddy bound (see Buddy), report its name, liveness, and reply allowance; an allowance that will run out overnight is a preflight failure, so ask the user for more now, and ask whether a subagent buddy may take over if the buddy is lost. With no buddy, say whether a subagent buddy co-decides (see No buddy) or the night runs solo and more conservatively.
 4. **Warn about blockers the user can clear now**: permission prompts the work will hit, missing credentials or tools, and that ticks fire only while the machine is awake (on macOS offer `caffeinate -i`).
 5. **Create the away log** (see Away log) and arm the timer (see Timer).
 
@@ -36,7 +36,7 @@ Do these while the user is still present, in one message:
 
 Every decision lands in exactly one class. An explicit user grant may move an item from Hold to Decide; nothing else can.
 
-**Decide** (with a co-sign from the buddy, or from a subagent when no buddy is bound): reversible actions inside the granted scope. Examples: approve or revise a plan, merge a reviewed change with green checks when its downstream effects (deploy, publish, migration, notification) also pass the scope, spending, and recoverability rules (the domain skill establishes those effects), rerun a flaky job, fix a small review finding, file a follow-up issue, answer an agent's question within the spec, spend within an explicit cap the user set.
+**Decide** (with the co-sign of the buddy, or of the subagent buddy when no buddy is bound): reversible actions inside the granted scope. Examples: approve or revise a plan, merge a reviewed change with green checks when its downstream effects (deploy, publish, migration, notification) also pass the scope, spending, and recoverability rules (the domain skill establishes those effects), rerun a flaky job, fix a small review finding, file a follow-up issue, answer an agent's question within the spec, spend within an explicit cap the user set.
 
 **Hold for the user**, even when the buddy agrees:
 
@@ -66,11 +66,15 @@ With a buddy:
 
 When you are the buddy of a session in away mode: reply with one of the three verdict forms pinned to a SHA or draft, say what you verified, and answer "hold" rather than agreeing to an action in a Hold class.
 
-## No buddy: subagent co-signer
+## No buddy: subagent buddy
 
-When no buddy is bound and the host can start subagents, use a fresh reviewer subagent as the co-signer for every Decide item that is not low-impact. Start a new one per decision, within the host's delegation rules, and give it what an independent review needs, not the conversation: the pinned artifact (SHA or draft), read access to the source, the acceptance criteria, the project and domain rules that apply, the grant, and the evidence. Require it to verify every consequential claim itself and report what it checked, in the same verdict forms; Buddy rules 2 to 5 apply. Say at arm time that the night runs with subagent co-sign.
+When no buddy is bound and the host can start subagents, start one reviewer subagent at arm time and use it as the buddy for the whole away period, within the host's delegation rules. Where the host can continue a finished subagent (Claude Code: `SendMessage` to its id), keep talking to the same one so revise rounds and earlier verdicts carry over; record its id in the away log. Say at arm time that the night runs with a subagent buddy. Buddy rules 1 to 5 apply, plus:
 
-A subagent co-sign never replaces a reviewer or approval gate the user or the domain rules require. It never replaces a lost buddy either: when the user bound a buddy, its loss means hold (Buddy rule 6), unless the user authorized the subagent fallback when arming.
+- **Review package.** For every decision send what an independent review needs, not the conversation: the pinned artifact (SHA or draft), read access to the source, the acceptance criteria, the project and domain rules that apply, the grant, and the evidence. Require it to verify every consequential claim itself and report what it checked. Send it decisions only, not tick traffic.
+- **Fresh reviewer** for a merge with downstream effects, a Recoverable-first action, or when the subagent buddy shows it lost relevant context or cannot complete verification: start a new one with the same package for that decision.
+- **Replacement.** If the subagent buddy fails or stops answering, start a new one from the away log and hold consequential actions until it approves. Pass on every unresolved REVISE or BLOCK and both positions of any disagreement. Never replace a reviewer to escape its verdict; a disagreement stays held. Do not restart a subagent the user stopped.
+
+A subagent never replaces a reviewer or approval gate the user or the domain rules require. It never replaces a lost user-bound buddy either: that loss means hold (Buddy rule 6), unless the user authorized the subagent fallback when arming.
 
 With neither a buddy nor subagents: decide alone only reversible, low-impact items (a rerun, a log note, a watcher restart); hold the rest.
 
