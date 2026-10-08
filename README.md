@@ -72,7 +72,7 @@ For automatic updates, install the refresh helper and hook as in [Just agent-kit
 
 ## 📦 All skills
 
-The whole catalog (22 skills), agent-kit included.
+The whole catalog (23 skills), agent-kit included.
 
 ```sh
 npx -y skills@latest add https://github.com/vtmocanu/skills -a claude-code codex -g -y
@@ -100,6 +100,7 @@ npx -y skills@latest add https://github.com/vtmocanu/skills -a claude-code codex
 
 | Skill | What it does |
 |---|---|
+| [away-mode](skills/away-mode/SKILL.md) | Let a session work while you are away (overnight, a weekend): it restates the grant, pre-asks the predictable questions, watches on a timer, decides reversible in-scope items with a buddy peer or a reviewer subagent as co-signer, holds irreversible, out-of-scope and denied actions, and greets you on return with one report of what was done, what was held, and the decisions left for you. |
 | [cicd-expert](skills/cicd-expert/SKILL.md) | The CI/CD expert. Generate a repo's pipelines through an interactive analyze-then-confirm conversation, or review, harden, debug, and speed up existing CI (supply-chain security, caching, path filters, job DAG, Renovate tool pins). |
 | [claude-permissions](skills/claude-permissions/SKILL.md) | Manage Claude Code permissions via Dippy (Bash/MCP allow/ask/deny plus the auto-mode `[ASK]` fallback wrapper, bundled) and settings.json (Read/WebFetch/Skill). |
 | [clodex](skills/clodex/SKILL.md) | Runbook for [clodex](https://github.com/bman654/clodex), which runs ChatGPT/Codex-plan and other OpenAI-compatible models inside Claude Code: install and upgrade, sign in, add or remove a model (`/clodex <model-id>`), re-patch after updates. User-invoked only. |
