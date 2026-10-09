@@ -22,6 +22,9 @@ macOS/Linux). Use the commands for your own runtime below.
   `from-name` like `codex-<prefix>` in Claude's own wrapper as a Codex thread.
 - Thread-scoped state follows the shim's own `CODEX_HOME` (recorded in its
   registry record), not the caller's; no shim anywhere means the caller's.
+- Discovery searches the caller's `CODEX_HOME`, then homes recorded by shims,
+  then `~/.codex`. A thread, request mailbox or reply found in another home is
+  used there; `up` registers and spawns the shim under that thread's home.
 - Queue acceptance and a successful socket write prove transport only, not that
   the peer read, acted on, or answered the message. Confirm the response.
 - Use `--message-file PATH` for substantial UTF-8 content and `--message TEXT`

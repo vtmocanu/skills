@@ -243,6 +243,13 @@ def missing_thread_message(thread_id):
         evidence.append("rollout %s exists" % rollouts[0])
     else:
         evidence.append("no rollout under %s" % os.path.join(sp_storage.codex_home(), "sessions"))
+    for home in sp_storage.other_homes():
+        with sp_storage.codex_home_override(home):
+            other_db = find_state_db()
+        evidence.append(
+            "also searched %s (%s)"
+            % (home, "no row in %s" % other_db if other_db else "no recognised state DB")
+        )
     message = "no Codex thread with id %s: %s." % (thread_id, "; ".join(evidence))
     if held:
         message += (
@@ -253,26 +260,38 @@ def missing_thread_message(thread_id):
     return message + " Check `peers.py list` and `peers.py doctor`."
 
 
-def _thread_in_shim_home(thread_id):
-    """The thread row from the CODEX_HOME its live shim runs under, or None.
+def threads_in_other_homes(known_ids=()):
+    """Threads from the other candidate homes, each tagged with ``codex_home``.
 
-    Only consulted when the caller's own home has no such thread and a shim
-    for it holds its pidfile under another home. The row carries
-    ``codex_home`` so liveness probes and `codex queue` use that home too.
+    Searches ``sp_storage.other_homes()`` under that home's own state DB and
+    writer locks, so liveness and `codex queue` use the right home. A home
+    without a recognised state DB contributes nothing (silently: it is a
+    search, not the caller's own home). A thread already in ``known_ids`` or
+    seen in an earlier home is skipped, so the first home wins.
     """
-    home = sp_storage.thread_home(thread_id)
-    if os.path.realpath(home) == os.path.realpath(sp_storage.codex_home()):
-        return None
-    with sp_storage.codex_home_override(home):
-        threads, schema_ok = codex_threads()
-    if not schema_ok:
-        return None
-    for t in threads:
-        if t["id"] == thread_id:
+    seen = set(known_ids)
+    found = []
+    for home in sp_storage.other_homes():
+        with sp_storage.codex_home_override(home):
+            if find_state_db() is None:
+                continue
+            threads, schema_ok = codex_threads()
+            registered = sp_storage.read_registered()
+        if not schema_ok:
+            continue
+        # A UUID seen in an earlier home is skipped: the first home's row
+        # wins, so a stale local row can shadow a live copy elsewhere.
+        for t in threads:
+            if t["id"] in seen:
+                continue
+            seen.add(t["id"])
             t = dict(t)
             t["codex_home"] = home
-            return t
-    return None
+            meta = registered.get(t["id"])
+            # That home's own registration, so a cached alias still resolves.
+            t["registered_name"] = meta.get("name") if isinstance(meta, dict) else None
+            found.append(t)
+    return found
 
 
 def resolve_thread(target, require_live=True, exclude=None):
@@ -284,12 +303,14 @@ def resolve_thread(target, require_live=True, exclude=None):
     from name matching only; a UUID target is never excluded.
     """
     threads, schema_ok = codex_threads()
-    if sp_runtime.is_uuid(target) and not any(t["id"] == target for t in threads):
-        foreign = _thread_in_shim_home(target)
-        if foreign is not None:
-            return foreign
-    if not schema_ok:
-        if sp_runtime.is_uuid(target):
+    if sp_runtime.is_uuid(target):
+        for t in threads:
+            if t["id"] == target:
+                return t
+        for t in threads_in_other_homes(t["id"] for t in threads):
+            if t["id"] == target:
+                return t
+        if not schema_ok:
             # D11 degraded mode: queue by UUID, liveness unverified.
             return {
                 "id": target,
@@ -302,15 +323,16 @@ def resolve_thread(target, require_live=True, exclude=None):
                 "live": None,
                 "degraded": True,
             }
+        raise ResolveNotFound(missing_thread_message(target))
+    # A name, alias or prefix is matched across every candidate home at once,
+    # so a live match in two homes is ambiguous instead of silently resolved
+    # to the caller's.
+    threads = threads + threads_in_other_homes(t["id"] for t in threads)
+    if not threads and not schema_ok:
         raise ResolveError(
             "Codex thread discovery is unavailable (unknown state_*.sqlite "
             "schema); pass the thread UUID instead of a name"
         )
-    if sp_runtime.is_uuid(target):
-        for t in threads:
-            if t["id"] == target:
-                return t
-        raise ResolveNotFound(missing_thread_message(target))
     if exclude:
         threads = [t for t in threads if t["id"] != exclude]
     # Match the name from the state DB / session index, OR from our own
@@ -324,7 +346,12 @@ def resolve_thread(target, require_live=True, exclude=None):
         for tid, meta in reg.items()
         if isinstance(meta, dict) and meta.get("name") == target
     }
-    matches = [t for t in threads if t.get("name") == target or t["id"] in reg_ids]
+    matches = [
+        t for t in threads
+        if t.get("name") == target
+        or t["id"] in reg_ids
+        or t.get("registered_name") == target
+    ]
     # The peer list advertises UUID-derived aliases for unsafe or absent titles.
     # Check aliases alongside exact names: if they identify different threads,
     # refuse the collision instead of silently sending to either one.
@@ -342,10 +369,11 @@ def resolve_thread(target, require_live=True, exclude=None):
         matched_ids = {t["id"] for t in matches}
         matches.extend(t for t in prefix_matches if t["id"] not in matched_ids)
     if not matches:
+        searched = sp_storage.other_homes()
         raise ResolveNotFound(
-            "no Codex thread named %r or matching that ID prefix; run `peers.py list` "
+            "no Codex thread named %r or matching that ID prefix%s; run `peers.py list` "
             "for current UUIDs, or /rename it in the TUI"
-            % target
+            % (target, " (also searched %s)" % ", ".join(searched) if searched else "")
         )
     if require_live:
         live = [t for t in matches if t["live"] is True]

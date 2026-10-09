@@ -288,8 +288,7 @@ def cmd_reply(args):
     """Complete one pending ask mailbox from its intended Claude session."""
     try:
         message = sp_runtime.message_from_args(args)
-        path = sp_storage.request_path(args.request)
-        reply_path = sp_storage.request_reply_path(args.request)
+        path, reply_path = sp_storage.request_paths(args.request)
     except ValueError as exc:
         sys.stderr.write("error: %s\n" % exc)
         return 2
@@ -424,8 +423,7 @@ def cmd_await(args):
     its `expires_at` reports `expired`. The reply is consumed exactly once.
     """
     try:
-        meta_path = sp_storage.request_path(args.request)
-        reply_path = sp_storage.request_reply_path(args.request)
+        meta_path, reply_path = sp_storage.request_paths(args.request)
         timeout = sp_requests._bounded_timeout(args.timeout)
         thread_id = sp_identity._thread_from_args(args, required=True)
     except ValueError as exc:

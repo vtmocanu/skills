@@ -61,12 +61,41 @@ def cmd_hook_reconcile(args):
     sp_requests.cleanup_expired_requests()
     sp_lifecycle.reconcile(verbose=False)
     if args.thread:
-        deadline = time.time() + 10.0
-        while time.time() < deadline:
-            if sp_lifecycle.attach_thread(args.thread, verbose=False):
-                break
-            time.sleep(0.25)
+        _attach_with_log(args.thread)
     return 0
+
+
+def _attach_with_log(thread_id):
+    """Retry the attach, then leave one log line saying why it gave up.
+
+    The process is detached, so a long wait costs nothing. Why a fresh thread
+    is not attachable at hook time is unproven (its state-DB row, writer lock
+    or rollout may appear after the hook runs), so the failure line records
+    the last observed reason instead of asserting a cause.
+    """
+    started = time.time()
+    why = None
+    while True:
+        elapsed = time.time() - started
+        pid, why = sp_lifecycle.attach_thread_with_reason(thread_id, verbose=False)
+        if pid:
+            return pid
+        if elapsed >= sp_constants.HOOK_ATTACH_WAIT:
+            break
+        fast = elapsed < sp_constants.HOOK_ATTACH_FAST_WINDOW
+        time.sleep(
+            sp_constants.HOOK_ATTACH_FAST_STEP if fast else sp_constants.HOOK_ATTACH_SLOW_STEP
+        )
+    try:
+        log_path = os.path.join(sp_storage.state_dir(), "session-hook.log")
+        with open(log_path, "a", encoding="utf-8") as logfh:
+            logfh.write(
+                "hook-reconcile: gave up attaching thread=%s after %.0fs: %s\n"
+                % (thread_id, time.time() - started, why or "unknown")
+            )
+    except OSError:
+        pass
+    return None
 
 
 # --------------------------------------------------------------------------

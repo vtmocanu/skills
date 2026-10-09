@@ -70,7 +70,10 @@ def cmd_list(args):
         record for record, status in classified if status == "unverified"
     ]
     threads, schema_ok = sp_codex.codex_threads()
+    # Threads under another candidate CODEX_HOME are listed once, tagged with it.
+    threads = threads + sp_codex.threads_in_other_homes(t["id"] for t in threads)
     registered = sp_storage.read_registered()
+    own_home = sp_storage.codex_home()
 
     def codex_title(record):
         """The Codex thread title a shim's peer record fronts, else None."""
@@ -126,7 +129,17 @@ def cmd_list(args):
             # live-only, so `false` never appears here (see the module docs).
             "live": thread.get("live"),
             "liveness_error": thread.get("liveness_error"),
+            "codex_home": thread.get("codex_home") or own_home,
         }
+
+    def home_suffix(view):
+        if os.path.realpath(view["codex_home"]) == os.path.realpath(own_home):
+            return ""
+        home = view["codex_home"]
+        user_home = os.path.expanduser("~")
+        if home == user_home or home.startswith(user_home + os.sep):
+            home = "~" + home[len(user_home):]
+        return "  [home %s]" % home
 
     codex = [
         codex_view(thread) for thread in threads if thread.get("live") is True
@@ -176,7 +189,7 @@ def cmd_list(args):
                     t["shim_pid"], t["shim_code_status"],
                     " (run peers.py restart %s)" % t["id"] if t["shim_code_status"] == "stale" else "",
                 )) if t["shim_pid"] else "",
-            )
+            ) + home_suffix(t)
         )
     if codex_unverified:
         print("Codex threads (%d unverified; lsof unavailable):" % len(codex_unverified))
@@ -187,7 +200,7 @@ def cmd_list(args):
                     thread["name"] or "(unnamed)",
                     thread["id"],
                     thread.get("cwd") or "",
-                )
+                ) + home_suffix(thread)
             )
     if not schema_ok:
         print("  (thread discovery degraded: unknown state_*.sqlite schema)")
@@ -256,6 +269,16 @@ def _doctor_environment(add):
     )
     add("ok", "CLAUDE_CONFIG_DIR: %s" % sp_storage.claude_config_dir())
     add("ok", "CODEX_HOME: %s" % sp_storage.codex_home())
+    default_home = os.path.expanduser("~/.codex")
+    if os.path.realpath(default_home) != os.path.realpath(sp_storage.codex_home()):
+        with sp_storage.codex_home_override(default_home):
+            default_db = sp_codex.find_state_db()
+        if default_db:
+            add(
+                "ok",
+                "discovery also searches %s (state DB %s) for threads, shims "
+                "and request mailboxes" % (default_home, os.path.basename(default_db)),
+            )
     if sp_storage.codex_sqlite_home() != sp_storage.codex_home():
         add("ok", "codex sqlite_home: %s" % sp_storage.codex_sqlite_home())
 

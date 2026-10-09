@@ -65,12 +65,29 @@ grant or buddy total that is still valid, and never replenishes. `down <uuid>`
 then `up <uuid>` is a deliberate reset instead: `up` zeroes the budget and drops
 any grant.
 
+## Other CODEX_HOMEs
+
+A Claude session launched by an app can carry its own `CODEX_HOME` while the
+user's threads, state DB, writer locks and shims live under `~/.codex`. Thread
+discovery (`list`, `up`, name and UUID resolution) therefore searches the
+caller's home, every home a live shim recorded, then `~/.codex`. A match found
+in another home is registered, budget-reset, reconciled and spawned under that
+home. A live name present in two homes is refused as ambiguous, like two live
+threads in one home. `doctor` notes when `~/.codex` is searched in addition to
+the caller's home.
+
 ## Codex hook
 
 `install-hook --auto-attach` appends one `startup|resume` `SessionStart` entry
 to `$CODEX_HOME/hooks.json`, backing up an existing file first. Re-running it
 updates the session-peers entry in place and preserves other hook groups. Codex
 requires review through `/hooks` before a new or changed entry runs.
+
+The auto-attach worker waits up to 60 seconds for the new thread to become
+attachable (polling every 0.25 s for 10 s, then every second). When it gives up
+it appends `hook-reconcile: gave up attaching thread=<uuid> ...: <reason>` to
+`$CODEX_HOME/session-peers/session-hook.log`; read that line before assuming the
+hook never ran.
 
 Hooks are enabled by default. The installer never edits `config.toml` and never
 overrides an explicit `[features] hooks = false`; `doctor` reports that disable.
