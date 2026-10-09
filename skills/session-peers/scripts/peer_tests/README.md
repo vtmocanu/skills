@@ -23,7 +23,7 @@ python3 -m unittest peer_tests.test_messaging
 | test_shim | Inbound messages, replies, status, recovery, records, and delivery ordering |
 | test_budgets | Reset persistence, allowances, and restart/buddy reply accounting |
 | test_buddy | Binding records, routing, and buddy GC |
-| test_cross_home | Shim state under another CODEX_HOME, shim-name buddies, sender provenance, list titles |
+| test_cross_home | Shim state and thread discovery under another CODEX_HOME, request mailboxes, hook failure log, shim-name buddies, sender provenance, list titles |
 | test_commands | Version pins, doctor, hooks, config readers, and CLI surface |
 | test_topics | Shared topic logs and cursors |
 | test_upgrade | Source digests and replacing an installed copy under a running shim |

@@ -1,6 +1,7 @@
 """Lifecycle for the session-peers CLI."""
 
 from __future__ import annotations
+import contextlib
 import fcntl
 import os
 import re
@@ -124,32 +125,47 @@ def reconcile(verbose=True):
         return _reconcile(verbose)
 
 
+def _in_thread_home(thread):
+    """Run a block under the CODEX_HOME the thread lives in, when not the caller's."""
+    home = thread.get("codex_home")
+    return sp_storage.codex_home_override(home) if home else contextlib.nullcontext()
+
+
 def attach_thread(thread_id, verbose=True):
     """Start a shim for one live UUID without making it a persistent opt-in."""
-    with sp_storage.reconcile_lock():
-        try:
-            thread = sp_codex.resolve_thread(thread_id)
-        except sp_codex.ResolveError as exc:
-            if verbose:
-                print("  %s: not attachable (%s)" % (thread_id, exc))
-            return None
-        if thread.get("live") is not True:
-            if verbose:
-                state = "unverified" if thread.get("live") is None else "not live"
-                print("  %s: %s, skipped" % (thread_id, state))
-            return None
+    return attach_thread_with_reason(thread_id, verbose)[0]
+
+
+def attach_thread_with_reason(thread_id, verbose=True):
+    """(pid or None, why): ``attach_thread`` plus the reason it did not attach.
+
+    A thread found under another CODEX_HOME gets its shim spawned under that
+    home, so the shim starts where the thread's lock, rollout and state DB are.
+    """
+    try:
+        thread = sp_codex.resolve_thread(thread_id)
+    except sp_codex.ResolveError as exc:
+        if verbose:
+            print("  %s: not attachable (%s)" % (thread_id, exc))
+        return None, "not attachable: %s" % exc
+    if thread.get("live") is not True:
+        state = "unverified" if thread.get("live") is None else "not live"
+        if verbose:
+            print("  %s: %s, skipped" % (thread_id, state))
+        return None, "%s, skipped" % state
+    with _in_thread_home(thread), sp_storage.reconcile_lock():
         pid = shim_pid(thread_id)
         if pid:
             if verbose:
                 print("  %s: shim already running (pid %s)" % (thread_id, pid))
-            return pid
+            return pid, None
         pid = spawn_shim(thread)
-        if verbose:
-            if pid is None:
-                print("  %s: shim failed to start (see its log)" % thread_id)
-            else:
-                print("  %s: shim started (pid %d)" % (thread_id, pid))
-        return pid
+    if verbose:
+        if pid is None:
+            print("  %s: shim failed to start (see its log)" % thread_id)
+        else:
+            print("  %s: shim started (pid %d)" % (thread_id, pid))
+    return pid, (None if pid else "shim failed to start (see its log)")
 
 
 def _reconcile(verbose):
@@ -198,18 +214,23 @@ def cmd_up(args):
         except sp_codex.ResolveError as exc:
             sys.stderr.write("error: %s\n" % exc)
             return 1
-        try:
-            sp_storage.register_thread(thread)
-        except sp_protocol.NameError_ as exc:
-            sys.stderr.write("error: %s\n" % exc)
-            return 1
-        # D4: an explicit `up` is one of the two things that clears the budget.
-        try:
-            with open(sp_storage.budget_reset_path(thread["id"]), "w", encoding="utf-8") as fh:
-                fh.write(sp_runtime.now_iso() + "\n")
-        except OSError:
-            pass
-        print("registered %s (%s)" % (thread.get("name") or thread["id"], thread["id"]))
+        # A thread found under another CODEX_HOME is registered, budget-reset
+        # and reconciled there, so its shim starts in the thread's own home.
+        with _in_thread_home(thread):
+            try:
+                sp_storage.register_thread(thread)
+            except sp_protocol.NameError_ as exc:
+                sys.stderr.write("error: %s\n" % exc)
+                return 1
+            # D4: an explicit `up` is one of the two things that clears the budget.
+            try:
+                with open(sp_storage.budget_reset_path(thread["id"]), "w", encoding="utf-8") as fh:
+                    fh.write(sp_runtime.now_iso() + "\n")
+            except OSError:
+                pass
+            print("registered %s (%s)" % (thread.get("name") or thread["id"], thread["id"]))
+            reconcile()
+        return 0
     reconcile()
     return 0
 
@@ -249,6 +270,7 @@ def cmd_down(args):
             thread = sp_codex.resolve_thread_prefer_live(args.target)
             tid = thread["id"]
         except sp_codex.ResolveError as exc:
+            thread = {}
             tid = args.target if sp_runtime.is_uuid(args.target) else None
             if tid is None:
                 sys.stderr.write("error: %s\n" % exc)
@@ -256,7 +278,7 @@ def cmd_down(args):
         # R2: stop and unregister under ONE hold of the reconcile lock. A bare
         # `up` landing between them would restart the still-registered thread,
         # leaving an unregistered peer running while `down` reported success.
-        with sp_storage.reconcile_lock():
+        with _in_thread_home(thread), sp_storage.reconcile_lock():
             stopped = stop_shim(tid)
             removed = sp_storage._unregister_thread_unlocked(tid)
         if removed:

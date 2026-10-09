@@ -61,6 +61,12 @@ unchanged version warning to once per 24 hours; `doctor` always reports the
 current comparison. After an upgrade, read
 `<this skill's directory>/references/spike-checklist.md` and perform its checks.
 
+`list` also shows live and unverified Codex threads found under another
+candidate `CODEX_HOME` (see `references/attach-and-lifecycle.md`), once each,
+with `[home PATH]` when it differs from the caller's and `codex_home` in
+`--json`. `reply --request` and `await` find a request mailbox under another
+candidate home the same way.
+
 Before claiming a reply was sent, check
 `$CODEX_HOME/session-peers/<thread uuid>.log` (default home: `~/.codex`) for
 `delivered turn <turn id> to <session name>`, or confirm receipt in the target

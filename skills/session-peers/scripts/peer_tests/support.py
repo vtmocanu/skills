@@ -297,6 +297,11 @@ class Base(unittest.TestCase):
         self._saved_env = dict(os.environ)
         os.environ["CLAUDE_CONFIG_DIR"] = str(self.claude_dir)
         os.environ["CODEX_HOME"] = str(self.codex_dir)
+        # Discovery also searches ~/.codex; a bare home keeps the suite from
+        # reading the developer's real Codex state.
+        self.home = self.root / "home"
+        self.home.mkdir()
+        os.environ["HOME"] = str(self.home)
         os.environ.pop("CODEX_SQLITE_HOME", None)
         os.environ.pop("SESSION_PEERS_ALLOW_UNSOLICITED", None)
         os.environ.pop("CLAUDE_CODE_MESSAGING_SOCKET", None)

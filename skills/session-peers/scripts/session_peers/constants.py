@@ -137,3 +137,10 @@ TOPIC_BAD_CHARS_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 
 
 _NO_DATA = object()
+
+# The SessionStart hook's detached attach loop: poll every FAST_STEP seconds for
+# the first FAST_WINDOW seconds, then every SLOW_STEP, until WAIT seconds pass.
+HOOK_ATTACH_WAIT = 60.0
+HOOK_ATTACH_FAST_WINDOW = 10.0
+HOOK_ATTACH_FAST_STEP = 0.25
+HOOK_ATTACH_SLOW_STEP = 1.0

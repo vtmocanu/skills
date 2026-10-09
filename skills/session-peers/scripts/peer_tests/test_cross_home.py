@@ -17,10 +17,13 @@ import time
 from unittest import mock
 
 from .support import (
+    Base,
     BuddyBase,
     new_uuid,
     sp_buddy,
+    sp_codex,
     sp_constants,
+    sp_lifecycle,
     sp_protocol,
     sp_runtime,
     sp_storage,
@@ -339,3 +342,202 @@ class TestOriginLineBreaks(CrossHomeBase):
                 self.assertFalse(
                     any(c in line for c in self.BREAKS), repr(ch)
                 )
+
+
+class ForeignHomeBase(Base):
+    """A caller under its own CODEX_HOME; the user's threads live in ~/.codex.
+
+    No shim runs anywhere, which is the state a freshly renamed thread is in.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.default_home = self.home / ".codex"
+        self.default_home.mkdir()
+        self.tid, self.rollout = self.add_thread(self.default_home, "board")
+
+    def add_thread(self, home, name, filename="state_5.sqlite"):
+        tid = new_uuid()
+        rollout = home / ("rollout-%s.jsonl" % tid)
+        saved = self.codex_dir
+        self.codex_dir = home
+        try:
+            self.make_state_db(
+                [{"id": tid, "name": name, "rollout_path": str(rollout)}],
+                filename=filename,
+            )
+            self.set_holder(rollout)
+        finally:
+            self.codex_dir = saved
+        return tid, rollout
+
+
+class TestNameResolvesAcrossHomes(ForeignHomeBase):
+    def test_a_name_in_another_home_resolves_without_a_shim(self):
+        thread = sp_codex.resolve_thread("board")
+        self.assertEqual(thread["id"], self.tid)
+        self.assertEqual(thread["codex_home"], str(self.default_home))
+        self.assertTrue(thread["live"])
+
+    def test_a_live_name_in_two_homes_is_ambiguous_and_lists_both(self):
+        other_tid, _rollout = self.add_thread(self.codex_dir, "board", filename="state_2.sqlite")
+        with self.assertRaises(sp_codex.ResolveError) as ctx:
+            sp_codex.resolve_thread("board")
+        self.assertIn(other_tid, str(ctx.exception))
+        self.assertIn(self.tid, str(ctx.exception))
+
+    def test_not_found_says_which_other_homes_were_searched(self):
+        self.make_state_db([])
+        with self.assertRaises(sp_codex.ResolveNotFound) as ctx:
+            sp_codex.resolve_thread("nope")
+        self.assertIn(str(self.default_home), str(ctx.exception))
+        with self.assertRaises(sp_codex.ResolveNotFound) as ctx:
+            sp_codex.resolve_thread(new_uuid())
+        self.assertIn("also searched %s" % self.default_home, str(ctx.exception))
+
+    def test_a_dead_thread_in_another_home_stays_dead(self):
+        self.clear_holders()
+        with self.assertRaises(sp_codex.ResolveNoLive):
+            sp_codex.resolve_thread("board")
+
+
+class TestUpUsesTheThreadsHome(ForeignHomeBase):
+    def spawn_recorder(self):
+        calls = []
+
+        def fake_spawn(thread):
+            calls.append((thread["id"], os.environ.get("CODEX_HOME")))
+            return 4242
+
+        return calls, mock.patch.object(sp_lifecycle, "spawn_shim", side_effect=fake_spawn)
+
+    def test_up_by_name_registers_and_spawns_under_the_threads_home(self):
+        calls, patch = self.spawn_recorder()
+        with patch:
+            rc, out, err = self.cli("up", "board")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(calls, [(self.tid, str(self.default_home))])
+        registered = json.loads(
+            (self.default_home / "session-peers" / "registered.json").read_text()
+        )
+        self.assertIn(self.tid, registered["threads"])
+        self.assertTrue(
+            (self.default_home / "session-peers" / ("%s.budget-reset" % self.tid)).exists()
+        )
+        self.assertFalse((self.codex_dir / "session-peers" / "registered.json").exists())
+        self.assertEqual(os.environ["CODEX_HOME"], str(self.codex_dir))
+
+    def test_attach_spawns_under_the_threads_home(self):
+        calls, patch = self.spawn_recorder()
+        with patch:
+            pid = sp_lifecycle.attach_thread(self.tid, verbose=False)
+        self.assertEqual(pid, 4242)
+        self.assertEqual(calls, [(self.tid, str(self.default_home))])
+        self.assertEqual(os.environ["CODEX_HOME"], str(self.codex_dir))
+
+
+class TestListAcrossHomes(ForeignHomeBase):
+    def test_list_shows_the_foreign_thread_once_with_its_home(self):
+        rc, out, _err = self.cli("list", "--json")
+        self.assertEqual(rc, 0)
+        live = [t for t in json.loads(out)["codex"] if t["id"] == self.tid]
+        self.assertEqual(len(live), 1)
+        self.assertEqual(live[0]["codex_home"], str(self.default_home))
+        rc, text, _err = self.cli("list")
+        self.assertIn("Codex threads (1 live)", text)
+        self.assertEqual(sum(self.tid in line for line in text.splitlines()), 1)
+        line = next(l for l in text.splitlines() if self.tid in l)
+        self.assertIn("[home ", line)
+
+    def test_a_thread_in_the_callers_home_has_no_home_suffix(self):
+        local, _rollout = self.add_thread(self.codex_dir, "local", filename="state_2.sqlite")
+        rc, text, _err = self.cli("list")
+        line = next(l for l in text.splitlines() if local in l)
+        self.assertNotIn("[home ", line)
+
+
+class TestReplyFindsAnotherHomesMailbox(ForeignHomeBase):
+    def test_reply_completes_a_request_written_under_another_home(self):
+        sid = new_uuid()
+        request_id = new_uuid()
+        requests = self.default_home / "session-peers" / "requests"
+        requests.mkdir(parents=True)
+        (requests / ("%s.request.json" % request_id)).write_text(
+            json.dumps(
+                {
+                    "request_id": request_id,
+                    "requester_thread_id": self.tid,
+                    "target_session_id": sid,
+                    "expires_at": time.time() + 60,
+                }
+            )
+        )
+        os.environ["CLAUDE_CODE_SESSION_ID"] = sid
+        rc, _out, err = self.cli("reply", "--request", request_id, "--message", "answer")
+        self.assertEqual(rc, 0, err)
+        reply = json.loads((requests / ("%s.reply.json" % request_id)).read_text())
+        self.assertEqual(reply["message"], "answer")
+        self.assertEqual(reply["session_id"], sid)
+        self.assertFalse(
+            (self.codex_dir / "session-peers" / "requests" / ("%s.reply.json" % request_id)).exists()
+        )
+
+    def test_reply_still_checks_the_session_id_in_the_other_home(self):
+        request_id = new_uuid()
+        requests = self.default_home / "session-peers" / "requests"
+        requests.mkdir(parents=True)
+        (requests / ("%s.request.json" % request_id)).write_text(
+            json.dumps({"target_session_id": new_uuid(), "expires_at": time.time() + 60})
+        )
+        os.environ["CLAUDE_CODE_SESSION_ID"] = new_uuid()
+        rc, _out, err = self.cli("reply", "--request", request_id, "--message", "x")
+        self.assertEqual(rc, 1)
+        self.assertIn("belongs to Claude session", err)
+
+    def test_an_unknown_request_is_still_unknown(self):
+        os.environ["CLAUDE_CODE_SESSION_ID"] = new_uuid()
+        rc, _out, err = self.cli("reply", "--request", new_uuid(), "--message", "x")
+        self.assertEqual(rc, 1)
+        self.assertIn("unknown or expired", err)
+
+
+class TestHookReconcileLogsWhyItGaveUp(ForeignHomeBase):
+    def run_hook(self, thread_id):
+        with mock.patch.multiple(
+            sp_constants,
+            HOOK_ATTACH_WAIT=0.3,
+            HOOK_ATTACH_FAST_WINDOW=0.1,
+            HOOK_ATTACH_FAST_STEP=0.05,
+            HOOK_ATTACH_SLOW_STEP=0.05,
+        ):
+            rc, _out, _err = self.cli("hook-reconcile", "--thread", thread_id)
+        self.assertEqual(rc, 0)
+        log = self.codex_dir / "session-peers" / "session-hook.log"
+        return log.read_text() if log.exists() else ""
+
+    def test_a_thread_that_never_appears_leaves_one_line_with_the_reason(self):
+        missing = new_uuid()
+        self.make_state_db([])
+        log = self.run_hook(missing)
+        lines = [l for l in log.splitlines() if "gave up" in l]
+        self.assertEqual(len(lines), 1, log)
+        self.assertIn(missing, lines[0])
+        self.assertIn("no Codex thread with id", lines[0])
+
+    def test_a_thread_that_is_not_live_logs_that_state(self):
+        self.clear_holders()
+        log = self.run_hook(self.tid)
+        lines = [l for l in log.splitlines() if "gave up" in l]
+        self.assertEqual(len(lines), 1, log)
+        self.assertIn("not live", lines[0])
+
+    def test_a_successful_attach_logs_nothing(self):
+        with mock.patch.object(sp_lifecycle, "spawn_shim", return_value=4242):
+            log = self.run_hook(self.tid)
+        self.assertNotIn("gave up", log)
+
+
+class TestDoctorMentionsTheDefaultHome(ForeignHomeBase):
+    def test_doctor_says_discovery_also_searches_the_default_home(self):
+        rc, out, _err = self.cli("doctor")
+        self.assertIn("discovery also searches %s" % self.default_home, out)

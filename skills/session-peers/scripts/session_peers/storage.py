@@ -78,8 +78,12 @@ def _pidfile_is_held(path):
         fh.close()
 
 
-def _recorded_shim_homes(thread_id):
-    """CODEX_HOME values that live shim registry records of this thread carry."""
+def _recorded_shim_homes(thread_id=None):
+    """CODEX_HOME values that shim registry records carry.
+
+    With ``thread_id`` only that thread's records count; without it, every
+    Codex shim record under the Claude sessions directory contributes.
+    """
     homes = []
     try:
         names = sorted(os.listdir(claude_sessions_dir()))
@@ -92,12 +96,35 @@ def _recorded_shim_homes(thread_id):
         if (
             isinstance(rec, dict)
             and rec.get("entrypoint") == "codex"
-            and rec.get("sessionId") == thread_id
+            and (thread_id is None or rec.get("sessionId") == thread_id)
             and isinstance(rec.get("codexHome"), str)
             and rec["codexHome"]
         ):
             homes.append(rec["codexHome"])
     return homes
+
+
+def candidate_homes(thread_id=None):
+    """Distinct CODEX_HOMEs to search, caller's first, then shim-recorded, then ~/.codex.
+
+    A Claude session launched by an app can carry its own CODEX_HOME while the
+    user's threads, state DB, writer locks and request mailboxes live under
+    the default one; uniqueness is by realpath.
+    """
+    candidates = [codex_home()] + _recorded_shim_homes(thread_id) + [os.path.expanduser("~/.codex")]
+    homes = []
+    seen = set()
+    for home in candidates:
+        key = os.path.realpath(home)
+        if key not in seen:
+            seen.add(key)
+            homes.append(home)
+    return homes
+
+
+def other_homes():
+    """candidate_homes() minus the caller's own, existing directories only."""
+    return [home for home in candidate_homes()[1:] if os.path.isdir(home)]
 
 
 _PINNED_HOMES = {}
@@ -137,13 +164,7 @@ def thread_home(thread_id):
     if thread_id in _PINNED_HOMES:
         return _PINNED_HOMES[thread_id]
     mine = codex_home()
-    candidates = [mine] + _recorded_shim_homes(thread_id) + [os.path.expanduser("~/.codex")]
-    seen = set()
-    for home in candidates:
-        key = os.path.realpath(home)
-        if key in seen:
-            continue
-        seen.add(key)
+    for home in candidate_homes(thread_id):
         if _pidfile_is_held(os.path.join(home, "session-peers", "%s.pid" % thread_id)):
             return home
     return mine
@@ -297,6 +318,26 @@ def request_path(request_id):
     if not sp_runtime.is_uuid(request_id):
         raise ValueError("request id must be a UUID")
     return os.path.join(request_dir(), "%s.request.json" % request_id)
+
+
+def request_paths(request_id):
+    """(request, reply) mailbox paths, found in any candidate home.
+
+    A request is written under the asker's CODEX_HOME, which can differ from
+    the replying Claude session's. The caller's home wins when it holds the
+    request; otherwise the first other home that does. Nothing is created in
+    another home.
+    """
+    mine = request_path(request_id)
+    if not os.path.exists(mine):
+        for home in other_homes():
+            base = os.path.join(home, "session-peers", "requests")
+            if os.path.exists(os.path.join(base, "%s.request.json" % request_id)):
+                return (
+                    os.path.join(base, "%s.request.json" % request_id),
+                    os.path.join(base, "%s.reply.json" % request_id),
+                )
+    return mine, request_reply_path(request_id)
 
 
 def request_reply_path(request_id):
