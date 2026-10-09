@@ -180,16 +180,25 @@ def thread_dir(thread_id):
 
 @contextlib.contextmanager
 def codex_home_override(home):
-    """Run a block with CODEX_HOME pointed at ``home`` (single-threaded CLI use)."""
-    old = os.environ.get("CODEX_HOME")
+    """Run a block with CODEX_HOME pointed at ``home`` (single-threaded CLI use).
+
+    CODEX_SQLITE_HOME is unset inside the block: it describes the caller's
+    state DB, so leaving it would make another home's discovery (and a shim
+    spawned there) read the caller's DB. That home's own config.toml
+    `sqlite_home`, else its default, applies instead. Both variables are
+    restored exactly, present or absent.
+    """
+    saved = {k: os.environ.get(k) for k in ("CODEX_HOME", "CODEX_SQLITE_HOME")}
     os.environ["CODEX_HOME"] = home
+    os.environ.pop("CODEX_SQLITE_HOME", None)
     try:
         yield
     finally:
-        if old is None:
-            os.environ.pop("CODEX_HOME", None)
-        else:
-            os.environ["CODEX_HOME"] = old
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
 
 def thread_state_path(thread_id):

@@ -276,14 +276,20 @@ def threads_in_other_homes(known_ids=()):
             if find_state_db() is None:
                 continue
             threads, schema_ok = codex_threads()
+            registered = sp_storage.read_registered()
         if not schema_ok:
             continue
+        # A UUID seen in an earlier home is skipped: the first home's row
+        # wins, so a stale local row can shadow a live copy elsewhere.
         for t in threads:
             if t["id"] in seen:
                 continue
             seen.add(t["id"])
             t = dict(t)
             t["codex_home"] = home
+            meta = registered.get(t["id"])
+            # That home's own registration, so a cached alias still resolves.
+            t["registered_name"] = meta.get("name") if isinstance(meta, dict) else None
             found.append(t)
     return found
 
@@ -340,7 +346,12 @@ def resolve_thread(target, require_live=True, exclude=None):
         for tid, meta in reg.items()
         if isinstance(meta, dict) and meta.get("name") == target
     }
-    matches = [t for t in threads if t.get("name") == target or t["id"] in reg_ids]
+    matches = [
+        t for t in threads
+        if t.get("name") == target
+        or t["id"] in reg_ids
+        or t.get("registered_name") == target
+    ]
     # The peer list advertises UUID-derived aliases for unsafe or absent titles.
     # Check aliases alongside exact names: if they identify different threads,
     # refuse the collision instead of silently sending to either one.

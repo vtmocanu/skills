@@ -395,6 +395,53 @@ class TestNameResolvesAcrossHomes(ForeignHomeBase):
             sp_codex.resolve_thread(new_uuid())
         self.assertIn("also searched %s" % self.default_home, str(ctx.exception))
 
+    def register_foreign_alias(self, alias):
+        state = self.default_home / "session-peers"
+        state.mkdir(exist_ok=True)
+        (state / "registered.json").write_text(
+            json.dumps({"threads": {self.tid: {"name": alias, "registered_at": "x"}}})
+        )
+
+    def test_a_cached_alias_registered_in_another_home_resolves(self):
+        self.register_foreign_alias("cached-alias")
+        thread = sp_codex.resolve_thread("cached-alias")
+        self.assertEqual(thread["id"], self.tid)
+        self.assertEqual(thread["codex_home"], str(self.default_home))
+
+    def test_a_foreign_alias_and_a_live_local_namesake_are_ambiguous(self):
+        self.register_foreign_alias("cached-alias")
+        local, _rollout = self.add_thread(self.codex_dir, "cached-alias", filename="state_2.sqlite")
+        with self.assertRaises(sp_codex.ResolveError) as ctx:
+            sp_codex.resolve_thread("cached-alias")
+        self.assertIn(local, str(ctx.exception))
+        self.assertIn(self.tid, str(ctx.exception))
+
+    def test_the_callers_sqlite_home_does_not_hide_a_foreign_thread(self):
+        local_db_home = self.root / "dbhome"
+        local_db_home.mkdir()
+        saved = self.codex_dir
+        self.codex_dir = local_db_home
+        try:
+            self.make_state_db([])
+        finally:
+            self.codex_dir = saved
+        os.environ["CODEX_SQLITE_HOME"] = str(local_db_home)
+        self.assertEqual(sp_codex.resolve_thread("board")["id"], self.tid)
+
+    def test_the_override_restores_both_variables_present_or_absent(self):
+        for sqlite in (None, "/some/where"):
+            for home in (None, "/a/home"):
+                for key, value in (("CODEX_HOME", home), ("CODEX_SQLITE_HOME", sqlite)):
+                    if value is None:
+                        os.environ.pop(key, None)
+                    else:
+                        os.environ[key] = value
+                with sp_storage.codex_home_override("/other"):
+                    self.assertEqual(os.environ["CODEX_HOME"], "/other")
+                    self.assertNotIn("CODEX_SQLITE_HOME", os.environ)
+                self.assertEqual(os.environ.get("CODEX_HOME"), home)
+                self.assertEqual(os.environ.get("CODEX_SQLITE_HOME"), sqlite)
+
     def test_a_dead_thread_in_another_home_stays_dead(self):
         self.clear_holders()
         with self.assertRaises(sp_codex.ResolveNoLive):
