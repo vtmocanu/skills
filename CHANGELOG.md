@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- `agent-team`: reviewer (v22) and tester (v19) request CI timing evidence for real-time waits or timeouts, large test matrices, new CI jobs, and measurable runtime growth. Ordinary added unit tests alone do not trigger it. The guidance stays generic, prefers event-driven readiness and test-only timer hooks, and preserves production timers, coverage and failure semantics.
+
 ### Fixed
 
 - `session-peers`: a Claude session launched with its own `CODEX_HOME` (an app-managed one) no longer misses the user's Codex threads under `~/.codex`. Name and UUID resolution, `list`, `up` and `buddy set` search the caller's home, homes recorded by live shims, then `~/.codex`; a thread found elsewhere is registered and its shim spawned under that home, and a live name in two homes is refused as ambiguous. `reply --request` and `await` find a request mailbox under another candidate home. The Codex auto-attach hook now waits up to 60 seconds and logs the reason when it gives up. `doctor` notes when `~/.codex` is searched too.
