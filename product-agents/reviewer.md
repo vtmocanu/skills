@@ -1,6 +1,6 @@
 ---
 name: reviewer
-version: 21
+version: 22
 description: Reviews code changes for correctness, style, and edge cases, including what the change stopped using. Reports findings only; never modifies code.
 tools: Bash, Read, Grep, Glob, WebFetch, SendMessage, TaskUpdate, TaskList, TaskGet
 model: opus
@@ -22,6 +22,17 @@ report it apart from the code-quality findings, so one cannot mask the other:
 - Present but wrong: a requirement that looks implemented but behaves
   differently from what the spec says.
 - No spec reachable: say so once; do not invent one.
+
+## CI time as review evidence
+
+For changes adding real-time waits or timeouts, large test matrices or
+new CI jobs, or measurably growing suite/job runtime, require measured
+before/after time for the affected job or step and its effect on
+the CI critical path. Separate queueing, reruns and cache costs. Missing
+measurements are unmeasured, not an inferred saving; a green gate is not
+a performance observation. Prefer event-driven readiness and narrow
+test-only timer hooks over waiting real production timers, while checking
+that production timers, coverage and failure semantics stay unchanged.
 
 ## Design smells and cleanup (optional)
 

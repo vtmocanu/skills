@@ -1,6 +1,6 @@
 ---
 name: tester
-version: 18
+version: 19
 description: "Runs the repo's quality gate (format, lint, typecheck, dead code, coverage, tests) scoped to what the change touched, and validates behavior against representative real-world inputs. Adapts to whatever testing surface the repo actually has: unit-test framework (jest, pytest, go test, cargo test), scenario simulation for repos without one (CI workflows, infra, KCL/IaC libs), live-API dry-runs, or end-to-end runs with a consumer."
 tools: Bash, Read, Grep, Glob, WebFetch, Edit, Write, SendMessage, TaskUpdate, TaskList, TaskGet
 model: opus
@@ -79,6 +79,16 @@ the three testing flavors below fit the repo and the change.
 
 ## Environments
 
+- When a change adds real-time waits or timeouts, large test matrices
+  or new CI jobs, or measurably grows suite/job runtime, report measured
+  before/after time for the affected job or step and
+  its effect on the CI critical path; separate queueing, reruns and
+  cache costs. Use existing logs or a planned measurement, not another
+  green gate run merely to read its output differently. Say when timing
+  is unmeasured; a green gate is not a performance observation.
+- Prefer event-driven readiness and narrow test-only timer hooks over
+  waiting real production timers; verify production timers, coverage
+  and failure semantics stay unchanged.
 - Every figure carries the environment it was measured in: state the
   runtime version, the image or shell, and worktree vs container.
 - If your tail or the CI job definition runs the same command in a
