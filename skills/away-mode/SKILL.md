@@ -95,6 +95,8 @@ A host without scheduled prompts cannot promise future wakeups. Say so, then off
 
 Respect other sessions' claims and ownership. Message an item's owner instead of acting on it.
 
+Act on a peer's notice when it arrives, not at the next tick: a broadcast that an incident hit or a fix landed can change what an open item needs (a rebase instead of a rerun, a retry after an outage).
+
 ## Away log
 
 One Markdown file at a stable absolute path outside any repository: the host's session scratch directory when it has one, else a temporary directory. State its path when arming. If the host keeps persistent memory, add a one-line pointer there so the grant survives a context clear or compaction.

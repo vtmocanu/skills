@@ -8,6 +8,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- `away-mode`: act on a peer's incident or fix notice when it arrives instead of waiting for the next tick.
+- `session-peers`: write message files with a file-writing tool or a quoted heredoc, since an unquoted heredoc executes the body's command substitutions; delegated work keeps a worker-facing state file that the worker re-reads after a context compaction.
 - `agent-team`: reviewer (v22) and tester (v19) request CI timing evidence for real-time waits or timeouts, large test matrices, new CI jobs, and measurable runtime growth. Ordinary added unit tests alone do not trigger it. The guidance stays generic, prefers event-driven readiness and test-only timer hooks, and preserves production timers, coverage and failure semantics.
 
 ### Fixed

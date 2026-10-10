@@ -40,6 +40,10 @@ work while this session steers and reviews:
   restored, and a normal build from it succeeds. A binary timestamp or
   `strings` check is supplementary: an incremental build need not relink, so
   a correct binary can predate its commit.
+- Keep a worker-facing state file outside the repository: the queue, standing
+  rules, and files other sessions own. The worker re-reads it after a context
+  compaction and before each item; the steerer updates it when the queue
+  changes.
 - Write definitions, not labels, into the tracked brief: record each finding's
   text, not just its ID (`FN4-FN6`). Scratch notes and session transcripts are
   not automatically carried into the next lead's context.
