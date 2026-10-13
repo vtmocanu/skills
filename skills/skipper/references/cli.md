@@ -4,6 +4,8 @@ Invoke `<this skill's directory>/scripts/skipper` directly. Put global options
 before the subcommand. Use a private state directory outside every repository:
 `${XDG_STATE_HOME:-$HOME/.local/state}/skipper/`. Use `--state-dir PATH` for an
 independent skipper ledger and `--owner SESSION_UUID` for every mutation.
+Use a canonical bare UUID for `--owner` and an enrollment's `skipper` field;
+use qualified `claude:UUID`/`codex:UUID` identities for session targets.
 Refuse state paths with a `.git` entry in the directory or any ancestor. This
 includes a home directory tracked as a dotfiles repository. Use `--state-dir`
 with a private directory you own outside that repository, for example
@@ -71,6 +73,8 @@ Peer invocation failures report the selected script and the underlying error.
 Inspect that diagnostic before changing paths; retry process/socket-denied probes
 with authorized host permission. Status tables show Codex rows only with `--all`; the buddy column
 shows only explicitly recorded pairs. Missing discovery never authorizes a guess.
+For sends, correlate `peers.py send` JSON's `message_id`, not `msg_id`;
+delivery alone is no enrollment or stop acknowledgment.
 
 For Claude context, accept cc-statusline schema v1 only for the matching session
 ID, `source` native/tokens, `stale: false`, integer percentage 0..100 and publication
@@ -160,6 +164,9 @@ group/other permissions before reading or writing state. A failure to tighten
 it fails closed. Invalid JSON/schema and wrong owners fail closed with exit 2.
 Success is exit 0.
 
-For a successor skipper, obtain fresh user grants and reconcile commands,
-questions and holds with the leads before creating its own ledger. Retain the
-old ledger until recovery is complete. Do not silently rewrite its owner.
+For any predecessor, live or not, follow [takeover.md](takeover.md). Create a
+separate successor ledger when recording the first fresh grant; reconcile
+commands, questions and holds per lead. Keep the old ledger until recovery is
+complete; never rewrite its owner. Store `user_grant_ref`, `ack_ref` and
+`predecessor_stop_ref` on each successor enrollment record. Record a declined
+request as `transfer_status: "declined"` and revoke it, not a new lifecycle state.
