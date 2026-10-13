@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `skipper`: coordinates user-enrolled leads across repositories with a local task ledger, context observation, escalation tracking, handovers and explicit acknowledgment barriers. Includes a stdlib CLI and isolated tests.
+
 ### Changed
 
 - `away-mode`: act on a peer's incident or fix notice when it arrives instead of waiting for the next tick.

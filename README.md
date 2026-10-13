@@ -72,7 +72,7 @@ For automatic updates, install the refresh helper and hook as in [Just agent-kit
 
 ## 📦 All skills
 
-The whole catalog (23 skills), agent-kit included.
+The whole catalog (24 skills), agent-kit included.
 
 ```sh
 npx -y skills@latest add https://github.com/vtmocanu/skills -a claude-code codex -g -y
@@ -107,6 +107,7 @@ npx -y skills@latest add https://github.com/vtmocanu/skills -a claude-code codex
 | [done](skills/done/SKILL.md) | End-of-session wrap-up: check git state across the directories touched this session, review for loose ends, and give a plain verdict on whether the session can be closed. |
 | [generate-dockerfile](skills/generate-dockerfile/SKILL.md) | Generate a production-ready, secure, multi-stage Dockerfile and `.dockerignore` for the project. |
 | [session-peers](skills/session-peers/SKILL.md) | Make Claude Code sessions and Codex CLI threads on one machine message each other. Async `send` supports handoffs; correlated `ask`/`reply` returns multi-round peer work to the current Codex turn without a stale queued reply; `wait` observes peer state. Codex threads can auto-attach as real peers and aliases follow renames. Auto-attachment requires running `~/.agents/skills/session-peers/scripts/peers.py install-hook --auto-attach` once, then trusting the entry through Codex `/hooks`; see [setup](skills/session-peers/SKILL.md#automatic-attachment-recommended). |
+| [skipper](skills/skipper/SKILL.md) | Coordinate enrolled agent leads across repositories, route user questions, track Claude context and handovers, and coordinate shared-resource holds. Technical work stays with leads and buddies. |
 | [reflect](skills/reflect/SKILL.md) | Analyze the current session and propose improvements to the whole authored skill package, including instructions, scripts, tests, references, templates, assets, and hooks, then test and publish the approved changes. |
 | [skill-maker](skills/skill-maker/SKILL.md) | Author, lint, and publish portable Claude Code, Codex, and OpenCode skills: canonical `.agents/skills` repo layout, Claude compatibility symlinks, cross-agent refresh hooks, agnix linting, and npx distribution scopes. |
 | [status-check](skills/status-check/SKILL.md) | Report what is still open in the session (background jobs, items waiting on you, on another session, on CI or a bot, held items) as one table, then repeat it every 20 minutes on a session-only timer until nothing is left. Read-only; `/status-check stop` ends the timer. |

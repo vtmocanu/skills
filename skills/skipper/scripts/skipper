@@ -1,0 +1,686 @@
+#!/usr/bin/env python3
+"""Local coordination ledger and observation CLI (Python 3.9+, macOS/Linux)."""
+import argparse
+import contextlib
+import datetime
+import fcntl
+import json
+import math
+import os
+from pathlib import Path
+import re
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+import uuid
+
+ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+SCOPES = {"merges", "pushes-ci", "dispatches"}
+STATES = {
+    "command": {"queued": {"accepted", "superseded"},
+                "accepted": {"blocked", "done", "superseded"},
+                "blocked": {"accepted", "superseded"}, "done": set(), "superseded": set()},
+    "question": {"open": {"answered"}, "answered": {"acked"}, "acked": set()},
+    "handover": {"requested": {"ready"}, "ready": {"acked"},
+                 "acked": {"transferred"}, "transferred": set()},
+    "enrollment": {"requested": {"authorized", "revoked"},
+                   "authorized": {"acked", "revoked"}, "acked": {"revoked"}, "revoked": set()},
+}
+
+
+def identifier(value):
+    if not isinstance(value, str) or not ID.fullmatch(value):
+        raise ValueError("invalid identifier")
+    return value
+
+
+def session_identity(value):
+    if not isinstance(value, str) or ":" not in value:
+        raise ValueError("session target must be runtime:UUID")
+    runtime, sid = value.split(":", 1)
+    if runtime not in {"claude", "codex"}:
+        raise ValueError("unknown session runtime")
+    if str(uuid.UUID(sid)) != sid:
+        raise ValueError("session target requires a canonical UUID")
+    return value
+
+
+def number(value, minimum=0):
+    return (isinstance(value, (int, float)) and not isinstance(value, bool)
+            and math.isfinite(value) and value >= minimum)
+
+
+def read_json(path):
+    with open(path, encoding="utf-8") as stream:
+        return json.load(stream)
+
+
+def run(args, **kwargs):
+    return subprocess.run(args, text=True, capture_output=True, timeout=15, **kwargs)
+
+
+def liveness(record):
+    pid = record.get("pid")
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return "unverified"
+    if record.get("pidDomain", sys.platform) != sys.platform:
+        return "unverified"
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return "dead"
+    except OSError:
+        return "unverified"
+    if not record.get("procStart"):
+        return "unverified"
+    try:
+        env = dict(os.environ, LC_ALL="C", TZ="UTC")
+        result = run(["ps", "-o", "lstart=", "-p", str(pid)], env=env)
+    except (OSError, subprocess.TimeoutExpired):
+        return "unverified"
+    if result.returncode or not result.stdout.strip():
+        return "unverified"
+    return "live" if result.stdout.strip() == str(record["procStart"]).strip() else "dead"
+
+
+def export_valid(data):
+    return (isinstance(data, dict) and data.get("v") == 1
+            and data.get("source") in {"native", "tokens"}
+            and data.get("stale") is False and number(data.get("ts"))
+            and isinstance(data.get("used_pct"), int)
+            and not isinstance(data["used_pct"], bool) and 0 <= data["used_pct"] <= 100)
+
+
+def exports(directory, now, warnings):
+    result = {}
+    for path in sorted(directory.glob("*.json")):
+        try:
+            data = read_json(path)
+            if export_valid(data) and data.get("session_id") == path.stem and ID.fullmatch(path.stem):
+                result[path.stem] = data
+        except (OSError, ValueError):
+            warnings.append("unreadable context export: " + path.name)
+    return result
+
+
+def reverse_lines(stream):
+    """Read only as far back as needed, including lines crossing block boundaries."""
+    position = stream.seek(0, os.SEEK_END)
+    pending = b""
+    while position:
+        count = min(position, 65536)
+        position -= count
+        stream.seek(position)
+        pieces = (stream.read(count) + pending).split(b"\n")
+        pending = pieces[0]
+        yield from reversed(pieces[1:])
+    if pending:
+        yield pending
+
+
+def transcript_usage(paths, warnings):
+    latest = None
+    for path in paths:
+        try:
+            with path.open("rb") as stream:
+                for line in reverse_lines(stream):
+                    try:
+                        row = json.loads(line)
+                    except (ValueError, UnicodeDecodeError):
+                        continue  # A writer can leave a partial final line.
+                    if not isinstance(row, dict) or row.get("type") != "assistant":
+                        continue
+                    msg = row.get("message")
+                    if not isinstance(msg, dict) or msg.get("model") == "<synthetic>":
+                        continue
+                    usage = msg.get("usage")
+                    if not isinstance(usage, dict):
+                        candidate = None
+                    else:
+                        fields = [usage.get(key) for key in (
+                            "input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")]
+                        candidate = sum(fields) if all(number(v) for v in fields) else None
+                    stamp = row.get("timestamp")
+                    try:
+                        ts = datetime.datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp()
+                    except (AttributeError, TypeError, ValueError, OverflowError):
+                        continue
+                    item = {"ts": ts, "tokens": candidate, "model": msg.get("model"),
+                            "path": str(path)}
+                    if latest is None or ts >= latest["ts"]:
+                        latest = item
+                    break
+        except OSError:
+            warnings.append("unreadable transcript: " + str(path))
+    return latest
+
+
+def context(sid, paths, readings, now, default_window, warnings):
+    data = readings.get(sid)
+    if data and 0 <= now - data["ts"] < 180:
+        return {"pct": data["used_pct"], "quality": "exact", "source": "cc-statusline",
+                "ts": data["ts"], "age": now - data["ts"],
+                "window": data.get("context_window_size"), "window_source": "export",
+                "model": data.get("effective_model_id") or data.get("model_id"),
+                "runtime_version": data.get("cc_version")}
+    usage = transcript_usage(paths, warnings)
+    if not usage or usage["tokens"] is None:
+        return {"pct": None, "quality": "unknown", "source": "transcript"}
+    learned = [item for item in readings.values()
+               if usage["model"] and (item.get("effective_model_id") or item.get("model_id")) == usage["model"]
+               and 0 <= now - item["ts"] < 86400
+               and isinstance(item.get("context_window_size"), int)
+               and not isinstance(item["context_window_size"], bool) and item["context_window_size"] > 0]
+    if learned:
+        best = max(learned, key=lambda item: item["ts"])
+        window, source = best["context_window_size"], "learned-export"
+    else:
+        window, source = (default_window, "configured") if default_window else (200000, "builtin")
+    return {"pct": math.floor(usage["tokens"] * 100 / window), "quality": "est",
+            "source": usage["path"], "ts": usage["ts"], "age": now - usage["ts"],
+            "tokens": usage["tokens"], "window": window, "window_source": source,
+            "model": usage["model"], "runtime_version": data.get("cc_version") if data else None}
+
+
+def find_peers(home, explicit=None):
+    if explicit:
+        return Path(explicit)
+    candidates = [home / ".agents/skills/session-peers/scripts/peers.py",
+                  home / ".claude/skills/session-peers/scripts/peers.py",
+                  Path(__file__).resolve().parents[2] / "session-peers/scripts/peers.py"]
+    return next((path for path in candidates if path.is_file()), None)
+
+
+def repo(cwd):
+    if not isinstance(cwd, str) or not cwd:
+        return {"root": None, "remote": None}
+    try:
+        top = run(["git", "-C", cwd, "rev-parse", "--show-toplevel"])
+        if top.returncode:
+            return {"root": cwd, "remote": None}
+        root = top.stdout.strip()
+        remote = run(["git", "-C", root, "remote", "get-url", "origin"])
+        # Strip credentials from HTTPS remotes before persisting or displaying them.
+        url = re.sub(r"(https?://)[^/@]+@", r"\1", remote.stdout.strip()) if remote.returncode == 0 else None
+        return {"root": root, "remote": url}
+    except (OSError, subprocess.TimeoutExpired):
+        return {"root": cwd, "remote": None}
+
+
+def repo_name(repository):
+    remote = repository.get("remote")
+    if isinstance(remote, str) and remote:
+        name = remote.rstrip("/").rsplit("/", 1)[-1].rsplit(":", 1)[-1]
+        return name[:-4] if name.endswith(".git") else name
+    root = repository.get("root")
+    return Path(root).name if isinstance(root, str) and root else "?"
+
+
+def internal_reviewers(rows):
+    """Preserve coordinated threads; shared process alone cannot establish a child."""
+    excluded = {}
+    for row in rows:
+        sid = row.get("id")
+        if not sid or row.get("registered") or row.get("shim_pid"):
+            continue
+        pid = row.get("holder_pid")
+        shared = [other for other in rows if other.get("id") != sid
+                  and pid is not None and other.get("holder_pid") == pid
+                  and (other.get("registered") or other.get("shim_pid"))]
+        alias = row.get("peer_name")
+        if isinstance(alias, str) and alias.startswith("codex-"):
+            prefix = alias[6:].replace("-", "")
+            # The usual UUID-derived alias refers to this row, not its parent.
+            parents = [other for other in shared if str(other.get("id", "")).replace("-", "").startswith(prefix)]
+            if prefix and parents and not sid.replace("-", "").startswith(prefix):
+                excluded[sid] = "parent-peer-alias"
+                continue
+        if row.get("name") == "Guardian review":
+            excluded[sid] = "shared-holder-reviewer" if shared else "reviewer-title-fallback"
+    return excluded
+
+
+def observe(home, claude_dir, export_dir, ledger, now, default_window=None, peers_path=None,
+            include_internal=False):
+    warnings, sessions, dead = [], {}, set()
+    excluded = {}
+    complete = {"claude": True, "codex": False}
+    readings = exports(export_dir, now, warnings)
+    registry = claude_dir / "sessions"
+    try:
+        paths = sorted(registry.iterdir())
+    except OSError:
+        paths, complete["claude"] = [], False
+        warnings.append("Claude registry inaccessible; disappearance is unverified")
+    for path in paths:
+        if path.suffix != ".json":
+            continue
+        try:
+            row = read_json(path)
+            sid = identifier(row.get("sessionId"))
+            runtime = "codex" if row.get("entrypoint") == "codex" else "claude"
+            key = runtime + ":" + sid
+            live = liveness(row)
+            if live == "dead":
+                dead.add(key)
+                continue
+            sessions[key] = {"id": key, "session_id": sid, "name": row.get("name") or sid,
+                             "runtime": runtime, "liveness": live, "state": row.get("status") or "unknown",
+                             "cwd": row.get("cwd"), "observed_at": now, "source": str(path),
+                             "runtime_version": row.get("version")}
+        except (OSError, ValueError, AttributeError):
+            complete["claude"] = False
+            warnings.append("invalid registry record: " + path.name)
+    peer_file = find_peers(home, peers_path)
+    if peer_file:
+        try:
+            result = run([sys.executable, str(peer_file), "list", "--json"])
+            if result.returncode:
+                raise ValueError("peer listing failed")
+            payload = json.loads(result.stdout)
+            if not isinstance(payload, dict):
+                raise ValueError("invalid peer listing")
+            shim_states = {}
+            for field in ("claude", "claude_unverified"):
+                for row in payload.get(field, []):
+                    if row.get("runtime") == "codex" and row.get("sessionId"):
+                        shim_states[row["sessionId"]] = row.get("status")
+            rows = []
+            for field in ("codex", "codex_unverified"):
+                if not isinstance(payload.get(field), list):
+                    raise ValueError("unknown peer listing schema")
+                rows.extend(payload[field])
+            if not include_internal:
+                excluded = {"codex:" + sid: why for sid, why in internal_reviewers(rows).items()}
+                for key in excluded:
+                    sessions.pop(key, None)
+            for field in ("codex", "codex_unverified"):
+                for row in payload[field]:
+                    sid = identifier(row.get("id"))
+                    key = "codex:" + sid
+                    if key in excluded:
+                        continue
+                    old = sessions.get(key, {})
+                    sessions[key] = {"id": key, "session_id": sid,
+                                     "name": row.get("name") or sid, "runtime": "codex",
+                                     "liveness": "live" if field == "codex" else "unverified",
+                                     "state": row.get("status") or row.get("state") or shim_states.get(sid) or old.get("state") or "unknown",
+                                     "cwd": row.get("cwd") or old.get("cwd"),
+                                     "observed_at": now, "source": "session-peers"}
+            complete["codex"] = payload.get("codex_schema_recognised") is True
+        except (OSError, ValueError, AttributeError, subprocess.TimeoutExpired):
+            warnings.append("session-peers unavailable; Codex discovery is incomplete")
+    for item in sessions.values():
+        item["repo"] = repo(item["cwd"])
+        sid = item["session_id"]
+        item["context"] = (context(sid, sorted((claude_dir / "projects").glob("*/" + sid + ".jsonl")),
+                                   readings, now, default_window, warnings)
+                           if item["runtime"] == "claude" else {"pct": None, "quality": "unknown"})
+    previous = ledger.get("observations", {}).get("sessions", {})
+    vanished = [key for key in previous if key not in sessions and key not in excluded
+                and (key in dead or complete.get(previous[key].get("runtime"), False))]
+    uncertain = [key for key in previous if key not in sessions and key not in vanished and key not in excluded]
+    changed_keys = set(sessions) - set(previous) | set(vanished) | set(uncertain)
+    changes = {key: {field: (sessions.get(key) or previous[key]).get(field)
+                     for field in ("name", "repo", "runtime")} for key in changed_keys}
+    return {"sessions": sessions, "new": sorted(set(sessions) - set(previous)),
+            "vanished": sorted(vanished), "unverified_missing": sorted(uncertain),
+            "observed_at": now, "complete": complete, "warnings": warnings,
+            "changes": changes, "excluded": excluded}
+
+
+def empty_state():
+    return {"v": 1, "owner": None, "records": {}, "barriers": {}, "observations": {}, "events": []}
+
+
+def load_state(directory):
+    try:
+        state = read_json(directory / "state.json")
+    except FileNotFoundError:
+        return empty_state()
+    if (not isinstance(state, dict) or state.get("v") != 1
+            or not all(isinstance(state.get(key), dict) for key in ("records", "barriers", "observations"))
+            or not isinstance(state.get("events"), list)):
+        raise ValueError("unsupported or damaged ledger; preserve it for recovery")
+    return state
+
+
+@contextlib.contextmanager
+def writer(directory, owner):
+    identifier(owner)
+    if str(uuid.UUID(owner)) != owner:
+        raise ValueError("owner must be a canonical session UUID")
+    directory = directory.resolve()
+    if any((parent / ".git").exists() for parent in (directory,) + tuple(directory.parents)):
+        raise ValueError("state directory must be outside repositories")
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if stat.S_IMODE(directory.stat().st_mode) & 0o077:
+        directory.chmod(0o700)
+    fd = os.open(str(directory / ".lock"), os.O_CREAT | os.O_RDWR, 0o600)
+    with os.fdopen(fd, "a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise ValueError("another ledger writer is active")
+        state = load_state(directory)
+        if state["owner"] not in (None, owner):
+            raise ValueError("ledger belongs to another skipper; reconcile authority before using a new ledger")
+        state["owner"] = owner
+        yield state
+        temporary_fd, temporary = tempfile.mkstemp(prefix=".state-", dir=str(directory))
+        try:
+            with os.fdopen(temporary_fd, "w", encoding="utf-8") as stream:
+                json.dump(state, stream, allow_nan=False, sort_keys=True)
+                stream.write("\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, directory / "state.json")
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+
+
+def event(state, kind, key, now):
+    state["events"].append({"id": str(uuid.uuid4()), "kind": kind, "record": key, "ts": now})
+    state["events"] = state["events"][-200:]
+
+
+def required(item, fields):
+    for field in fields:
+        if not item.get(field):
+            raise ValueError("missing " + field)
+
+
+def enrolled(state, target):
+    return any(row.get("kind") == "enrollment" and row.get("target") == target
+               and row.get("state") == "acked" and row.get("skipper") == state["owner"]
+               for row in state["records"].values())
+
+
+def record(state, item, now):
+    if not isinstance(item, dict):
+        raise ValueError("record must be a JSON object")
+    key = identifier(item.get("id") or str(uuid.uuid4()))
+    old = state["records"].get(key)
+    kind = item.get("kind") or (old["kind"] if old else None)
+    if kind not in set(STATES) | {"session"}:
+        raise ValueError("unknown record kind")
+    if old and old["kind"] != kind:
+        raise ValueError("record kind is immutable")
+    merged = dict(old or {})
+    merged.update(item)
+    merged["id"] = key
+    merged["kind"] = kind
+    for field in ("target", "predecessor", "successor"):
+        if field in merged:
+            session_identity(merged[field])
+    if kind in STATES:
+        initial = {"command": "queued", "question": "open", "handover": "requested", "enrollment": "requested"}[kind]
+        new = merged.get("state", initial)
+        before = old["state"] if old else initial
+        if new not in STATES[kind] or (new != before and new not in STATES[kind][before]):
+            raise ValueError("invalid " + kind + " transition")
+        merged["state"] = new
+    if kind == "enrollment":
+        required(merged, ["target", "skipper", "scope"])
+        if merged["skipper"] != state["owner"]:
+            raise ValueError("enrollment skipper does not own this ledger")
+        if old and any(merged[field] != old[field] for field in ("target", "skipper", "scope")):
+            raise ValueError("enrollment scope and identities are immutable; revoke and request anew")
+        if merged["state"] in {"authorized", "acked"}:
+            required(merged, ["user_grant_ref"])
+        if merged["state"] == "acked":
+            required(merged, ["ack_ref"])
+    elif kind == "command":
+        required(merged, ["target", "task"])
+        if old is None and not enrolled(state, merged["target"]):
+            raise ValueError("command target is not enrolled")
+        if not isinstance(merged["task"], str):
+            raise ValueError("task must be a stable task identifier")
+        active = [row for row in state["records"].values() if row["kind"] == "command"
+                  and row["task"] == merged["task"] and row["state"] in {"queued", "accepted", "blocked"}
+                  and row["id"] != key]
+        if merged["state"] in {"queued", "accepted", "blocked"} and any(
+                row["target"] != merged["target"] for row in active):
+            raise ValueError("task already has another accountable lead")
+        transfers = [row for row in state["records"].values() if row["kind"] == "handover"
+                     and row["task"] == merged["task"] and row["state"] == "transferred"]
+        if transfers and merged["state"] in {"queued", "accepted", "blocked"}:
+            successor = max(transfers, key=lambda row: row["updated_at"])["successor"]
+            if merged["target"] != successor:
+                raise ValueError("task belongs to the acknowledged successor")
+        if old and any(merged.get(field) != old.get(field) for field in ("target", "task", "prompt", "irreversible", "reason")):
+            raise ValueError("command intent is immutable; supersede and create a new command")
+        if merged.get("irreversible"):
+            required(merged, ["reason"])
+        if merged["state"] in {"accepted", "done"}:
+            required(merged, ["ack_ref"])
+        if merged["state"] == "done":
+            required(merged, ["evidence"])
+    elif kind == "question":
+        required(merged, ["target", "question", "options", "pair_recommendation"])
+        if not isinstance(merged["options"], list):
+            raise ValueError("question options must be a list")
+        if old and any(merged.get(field) != old.get(field) for field in (
+                "target", "question", "options", "pair_recommendation", "dissent")):
+            raise ValueError("question intent is immutable; create another question")
+        if merged["state"] in {"answered", "acked"}:
+            required(merged, ["answer", "user_answer_ref"])
+        if merged["state"] == "acked":
+            required(merged, ["ack_ref"])
+    elif kind == "handover":
+        required(merged, ["predecessor", "successor", "task"])
+        if merged["predecessor"] == merged["successor"]:
+            raise ValueError("handover requires a different successor")
+        if old and any(merged[field] != old[field] for field in ("predecessor", "successor", "task")):
+            raise ValueError("handover identities and task are immutable")
+        if merged["state"] != "requested":
+            required(merged, ["handover_ref"])
+        if merged["state"] in {"acked", "transferred"}:
+            required(merged, ["successor_ack_ref"])
+        if merged["state"] == "transferred":
+            required(merged, ["predecessor_stop_ref"])
+            if not enrolled(state, merged["successor"]):
+                raise ValueError("successor needs its own enrollment")
+            active = [row for row in state["records"].values() if row["kind"] == "command"
+                      and row["task"] == merged["task"] and row["state"] in {"queued", "accepted", "blocked"}]
+            if any(row["target"] != merged["predecessor"] for row in active):
+                raise ValueError("handover predecessor does not own the task")
+    else:
+        required(merged, ["target", "task", "state", "report_ref"])
+    merged["updated_at"] = now
+    state["records"][key] = merged
+    if kind == "handover" and merged["state"] == "transferred":
+        for command in active:
+            command["state"] = "superseded"
+            command["handover_id"] = key
+            command["updated_at"] = now
+    if kind == "enrollment" and merged["state"] == "revoked":
+        for hold in state["barriers"].values():
+            if hold["state"] == "active" and merged["target"] in hold["participants"]:
+                hold["state"] = "requested"
+                hold["updated_at"] = now
+    event(state, kind, key, now)
+    return merged
+
+
+def barrier(state, action, key, owner, now, resource=None, scope=None, participants=None,
+            reason=None, participant=None, inflight=None, ack_ref=None):
+    if action == "request":
+        key = identifier(key or str(uuid.uuid4()))
+        if key in state["barriers"]:
+            raise ValueError("barrier id already exists")
+        if not resource or scope not in SCOPES or not participants or not reason:
+            raise ValueError("request requires resource, scope, participants and reason")
+        if len(set(participants)) != len(participants) or not all(enrolled(state, p) for p in participants):
+            raise ValueError("participants must be unique enrolled leads")
+        row = {"id": key, "owner": owner, "resource": resource, "scope": scope,
+               "participants": participants, "reason": reason, "state": "requested", "acks": {}}
+        state["barriers"][key] = row
+    else:
+        row = state["barriers"].get(key)
+        if not row or row["owner"] != owner:
+            raise ValueError("unknown barrier or wrong owner")
+        if row["state"] == "released":
+            raise ValueError("barrier already released")
+        if action == "ack":
+            if participant not in row["participants"] or not ack_ref or inflight is None:
+                raise ValueError("ack requires participant, evidence and explicit in-flight list")
+            row["acks"][participant] = {"ref": ack_ref, "inflight": inflight, "ts": now}
+            # Naming an in-flight operation is acknowledgment, not quiescence.
+            if any(ack["inflight"] for ack in row["acks"].values()):
+                row["state"] = "requested"
+        elif action == "active":
+            if (set(row["acks"]) != set(row["participants"])
+                    or any(ack["inflight"] for ack in row["acks"].values())
+                    or not all(enrolled(state, p) for p in row["participants"])):
+                raise ValueError("barrier incomplete: require enrolled acknowledgments with no in-flight work")
+            row["state"] = "active"
+        elif action == "release":
+            if not reason:
+                raise ValueError("release requires reason")
+            row["state"], row["release_reason"] = "released", reason
+        else:
+            raise ValueError("unknown barrier action")
+    row["updated_at"] = now
+    event(state, "barrier-" + action, key, now)
+    return row
+
+
+def cell(value):
+    return "".join(c if c.isprintable() and c != "|" else " " for c in str(value or "?"))[:120]
+
+
+def buddy_name(target, report, snapshot, state):
+    buddy = report.get("buddy")
+    if not buddy:
+        enrollments = [row for row in state["records"].values() if row["kind"] == "enrollment"
+                       and row.get("target") == target and row.get("state") == "acked" and row.get("buddy")]
+        if enrollments:
+            buddy = max(enrollments, key=lambda row: row["updated_at"])["buddy"]
+    if isinstance(buddy, dict):
+        key = buddy.get("id")
+        return snapshot["sessions"].get(key, {}).get("name") or buddy.get("name") or "?"
+    if isinstance(buddy, str):
+        return snapshot["sessions"].get(buddy, {}).get("name") or ("?" if ":" in buddy else buddy)
+    return "?"
+
+
+def status(snapshot, state, show_all=False, verbose=False):
+    lines = ["| session | repo | buddy | ctx % | state | task |", "|---|---|---|---|---|---|"]
+    reports = [row for row in state["records"].values() if row["kind"] == "session"]
+    for key, item in sorted(snapshot["sessions"].items(), key=lambda kv: (kv[1]["repo"]["root"] or "", kv[0])):
+        if item["runtime"] != "claude" and not show_all:
+            continue
+        report = max((r for r in reports if r["target"] == key), key=lambda r: r["updated_at"], default={})
+        ctx = item["context"]
+        pct = str(ctx["pct"]) + "%" if item["runtime"] == "claude" and ctx["pct"] is not None else "?"
+        state_label = report.get("state", item["state"])
+        flags = []
+        if ctx["quality"] == "est":
+            flags.append("ctx est")
+        if item["liveness"] != "live":
+            flags.append("liveness unverified")
+        if flags:
+            state_label = str(state_label) + " (" + ", ".join(flags) + ")"
+        name = item["name"] + (" [" + key + "]" if verbose else "")
+        lines.append("| " + " | ".join(cell(v) for v in (
+            name, item["repo"]["root"] if verbose else repo_name(item["repo"]),
+            buddy_name(key, report, snapshot, state), pct, state_label, report.get("task", "unknown"))) + " |")
+    for field in ("new", "vanished", "unverified_missing"):
+        labels = []
+        for key in snapshot[field]:
+            item = (snapshot["sessions"].get(key) or snapshot.get("changes", {}).get(key)
+                    or state.get("observations", {}).get("sessions", {}).get(key) or {})
+            if item.get("runtime", key.split(":", 1)[0]) != "claude" and not show_all:
+                continue
+            label = cell(item.get("name", "unknown")) + " (" + cell(repo_name(item.get("repo") or {})) + ")"
+            if verbose:
+                label += " [" + cell(key) + "]"
+            labels.append(label)
+        if labels:
+            lines.append(field + ": " + ", ".join(labels))
+    for row in state["barriers"].values():
+        if row["state"] != "released":
+            lines.append("hold " + cell(row["id"]) + ": " + cell(row["resource"]) + " / "
+                         + row["scope"] + " / " + row["state"])
+    lines.extend("warning: " + cell(w) for w in snapshot["warnings"])
+    return "\n".join(lines)
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--state-dir", type=Path, default=Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local/state"))) / "skipper")
+    parser.add_argument("--home", type=Path, default=Path.home())
+    parser.add_argument("--claude-dir", type=Path)
+    parser.add_argument("--export-dir", type=Path)
+    parser.add_argument("--peers", help="explicit trusted peers.py path")
+    parser.add_argument("--owner", help="skipper session UUID; required for mutations")
+    commands = parser.add_subparsers(dest="command", required=True)
+    p = commands.add_parser("observe", help="read-only discovery and diff as JSON")
+    p.add_argument("--all", action="store_true", help="include internal Codex reviewers")
+    p = commands.add_parser("status", help="refresh discovery and render a table")
+    p.add_argument("--json", action="store_true")
+    p.add_argument("--save", action="store_true", help="save observation baseline with owner")
+    p.add_argument("--all", action="store_true", help="include Codex rows and internal reviewers")
+    p.add_argument("--verbose", action="store_true", help="show session IDs and repository paths")
+    p = commands.add_parser("record", help="record a validated JSON object")
+    p.add_argument("--file", required=True, help="JSON input file, or - for stdin")
+    p = commands.add_parser("barrier", help="coordination holds; never expire automatically")
+    p.add_argument("action", choices=("request", "ack", "active", "release"))
+    for flag in ("id", "resource", "scope", "reason", "participant", "ack-ref"):
+        p.add_argument("--" + flag)
+    p.add_argument("--participants", nargs="+")
+    p.add_argument("--inflight", help="JSON array; pass [] explicitly when quiescent")
+    args = parser.parse_args(argv)
+    now = time.time()
+    try:
+        if args.command in {"record", "barrier"} or getattr(args, "save", False):
+            if not args.owner:
+                raise ValueError("--owner required for mutations")
+        if args.command in {"observe", "status"}:
+            raw_window = os.environ.get("SKIPPER_DEFAULT_CONTEXT_WINDOW")
+            window = int(raw_window) if raw_window else None
+            if window is not None and window <= 0:
+                raise ValueError("SKIPPER_DEFAULT_CONTEXT_WINDOW must be a positive integer")
+            claude = args.claude_dir or Path(os.environ.get("CLAUDE_CONFIG_DIR", str(args.home / ".claude")))
+            export = args.export_dir or Path(os.environ.get("CC_STATUSLINE_CTX_EXPORT_DIR", str(
+                Path(os.environ.get("XDG_STATE_HOME", str(args.home / ".local/state"))) / "cc-statusline/ctx")))
+            state = load_state(args.state_dir)
+            snapshot = observe(args.home, claude, export, state, now, window, args.peers, args.all)
+            if getattr(args, "save", False):
+                with writer(args.state_dir, args.owner) as state:
+                    # Preserve absent sessions when discovery was incomplete.
+                    remembered = dict(state.get("observations", {}).get("sessions", {}))
+                    remembered.update(snapshot["sessions"])
+                    for key in set(snapshot["vanished"]) | set(snapshot["excluded"]):
+                        remembered.pop(key, None)
+                    state["observations"] = dict(snapshot, sessions=remembered)
+                    event(state, "observe", "roster", now)
+            output = snapshot if args.command == "observe" or getattr(args, "json", False) else None
+            print(json.dumps(output, allow_nan=False, sort_keys=True) if output is not None
+                  else status(snapshot, state, args.all, args.verbose))
+        elif args.command == "record":
+            item = json.load(sys.stdin) if args.file == "-" else read_json(args.file)
+            with writer(args.state_dir, args.owner) as state:
+                result = record(state, item, now)
+            print(json.dumps(result, allow_nan=False, sort_keys=True))
+        else:
+            inflight = json.loads(args.inflight) if args.inflight is not None else None
+            if inflight is not None and not isinstance(inflight, list):
+                raise ValueError("--inflight must be a JSON array")
+            with writer(args.state_dir, args.owner) as state:
+                result = barrier(state, args.action, args.id, args.owner, now, args.resource,
+                                 args.scope, args.participants, args.reason, args.participant,
+                                 inflight, args.ack_ref)
+            print(json.dumps(result, allow_nan=False, sort_keys=True))
+        return 0
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        print("skipper: " + str(exc), file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())
