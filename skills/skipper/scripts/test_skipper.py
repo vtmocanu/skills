@@ -143,6 +143,66 @@ class ContextTests(FixtureCase):
 
 
 class DiscoveryTests(FixtureCase):
+    def test_peer_failure_reports_selected_path_and_reason(self):
+        for result, expected in (
+                (subprocess.CompletedProcess([], 3, "", "fixture permission denied"), "exited 3: fixture permission denied"),
+                (subprocess.CompletedProcess([], 0, "not JSON", ""), "JSONDecodeError")):
+            with self.subTest(expected=expected), \
+                    mock.patch.object(sk, "find_peers", return_value=Path("fixture-peers.py")), \
+                    mock.patch.object(sk, "run", return_value=result):
+                snapshot = sk.observe(self.home, self.claude, self.exports, self.state, NOW)
+            diagnostic = next(w for w in snapshot["warnings"] if w.startswith("session-peers unavailable"))
+            self.assertIn(expected, diagnostic)
+            self.assertIn("fixture-peers.py", diagnostic)
+            self.assertFalse(snapshot["complete"]["codex"])
+
+    def test_peer_timeout_diagnostic_retains_duration(self):
+        with mock.patch.object(sk, "find_peers", return_value=Path("fixture-peers.py")), \
+                mock.patch.object(sk, "run", side_effect=subprocess.TimeoutExpired(["fixture-peers.py"], 15)):
+            snapshot = sk.observe(self.home, self.claude, self.exports, self.state, NOW)
+        diagnostic = next(w for w in snapshot["warnings"] if w.startswith("session-peers unavailable"))
+        self.assertIn("timed out after 15 seconds", diagnostic)
+        self.assertIn("fixture-peers.py", diagnostic)
+        self.assertFalse(snapshot["complete"]["codex"])
+
+    def test_peer_detection_prefers_existing_installed_path(self):
+        path = self.home / ".agents/skills/session-peers/scripts/peers.py"
+        path.parent.mkdir(parents=True)
+        path.write_text("# fixture")
+        self.assertEqual(sk.find_peers(self.home), path)
+
+    def test_resolve_uses_roster_only_and_rejects_ambiguous_names(self):
+        item = {"id": LEAD, "session_id": SID, "runtime": "claude", "name": "lead-a", "liveness": "live"}
+        snapshot = {"sessions": {LEAD: item}, "changes": {LEAD: {"name": "lead-a"}}}
+        self.assertEqual(sk.resolve(snapshot, "lead-a")["id"], LEAD)
+        other = dict(item, id="codex:" + SID, runtime="codex")
+        snapshot["sessions"][other["id"]] = other
+        with self.assertRaisesRegex(ValueError, "ambiguous"):
+            sk.resolve(snapshot, "lead-a")
+        self.assertEqual(sk.resolve(snapshot, "lead-a", "claude")["id"], LEAD)
+        self.assertEqual(sk.resolve(snapshot, other["id"])["runtime"], "codex")
+
+    def test_resolve_rejects_absent_prefixes_and_unverified_liveness(self):
+        item = {"id": LEAD, "session_id": SID, "runtime": "claude", "name": "@lead-a", "liveness": "live"}
+        snapshot = {"sessions": {LEAD: item}}
+        self.assertEqual(sk.resolve(snapshot, "@lead-a")["session_id"], SID)
+        self.assertEqual(sk.resolve(snapshot, SID)["id"], LEAD)
+        with self.assertRaisesRegex(ValueError, "no observed session"):
+            sk.resolve(snapshot, "@lead")
+        item["liveness"] = "unverified"
+        with self.assertRaisesRegex(ValueError, "unverified liveness"):
+            sk.resolve(snapshot, "@lead-a")
+
+    def test_pending_handover_report_displays_without_fake_task(self):
+        self.registry()
+        sk.record(self.state, {"kind": "session", "id": "ready", "target": LEAD,
+                              "state": "pending-handover", "report_ref": "join-ack"}, NOW)
+        with mock.patch.object(sk, "liveness", return_value="live"):
+            table = sk.status(self.observe(), self.state)
+        self.assertIn("pending-handover", table)
+        self.assertIn("awaiting handover", table)
+        self.assertNotIn("task", self.state["records"]["ready"])
+
     def test_overfull_estimate_display_keeps_raw_json_value(self):
         self.registry()
         for tokens, raw, displayed in ((200000, 100, "100%"), (202000, 101, ">100%"),
@@ -344,6 +404,38 @@ class DiscoveryTests(FixtureCase):
 
 
 class LedgerTests(FixtureCase):
+    def test_pending_handover_clears_task_bearing_report_for_table(self):
+        sk.record(self.state, {"kind": "session", "id": "report", "target": LEAD,
+                              "state": "running", "task": "old-task", "report_ref": "work-report"}, NOW)
+        updated = sk.record(self.state, {"id": "report", "state": "pending-handover"}, NOW)
+        self.assertNotIn("task", updated)
+        snapshot = {"sessions": {LEAD: {"id": LEAD, "name": "lead-a", "runtime": "claude",
+                    "repo": {"root": "/example/repo-a", "remote": None}, "state": "idle",
+                    "liveness": "live", "context": {"pct": None, "quality": "unknown"}}},
+                    "new": [], "vanished": [], "unverified_missing": [], "warnings": []}
+        table = sk.status(snapshot, self.state)
+        self.assertIn("awaiting handover", table)
+        self.assertNotIn("old-task", table)
+
+    def test_pending_handover_refuses_supplied_tasks_without_mutation(self):
+        sk.record(self.state, {"kind": "session", "id": "report", "target": LEAD,
+                              "state": "running", "task": "old-task", "report_ref": "work-report"}, NOW)
+        before = json.dumps(self.state, sort_keys=True)
+        for task in ("new-task", None, ""):
+            with self.subTest(task=task), self.assertRaisesRegex(ValueError, "cannot include a task"):
+                sk.record(self.state, {"id": "report", "state": "pending-handover", "task": task}, NOW)
+        self.assertEqual(json.dumps(self.state, sort_keys=True), before)
+
+    def test_pending_handover_ack_requires_no_task_and_grants_no_ownership(self):
+        report = sk.record(self.state, {"kind": "session", "id": "ready", "target": LEAD,
+                                       "state": "pending-handover", "report_ref": "join-ack"}, NOW)
+        self.assertNotIn("task", report)
+        self.assertFalse(sk.enrolled(self.state, LEAD))
+        with self.assertRaisesRegex(ValueError, "missing task"):
+            sk.record(self.state, {"id": "ready", "state": "running"}, NOW)
+        assigned = sk.record(self.state, {"id": "ready", "state": "running", "task": "task-a"}, NOW)
+        self.assertEqual(assigned["task"], "task-a")
+
     def test_revoked_existing_command_cannot_be_accepted_again(self):
         self.enroll()
         sk.record(self.state, {"id": "c1", "kind": "command", "target": LEAD, "task": "task-a"}, NOW)
@@ -561,6 +653,20 @@ class BarrierTests(FixtureCase):
 
 
 class CLITests(FixtureCase):
+    def test_resolve_cli_is_readonly_and_returns_observation_row(self):
+        self.write(self.claude / "sessions/1.json", {"sessionId": SID, "name": "lead-a", "pid": 1})
+        with mock.patch.object(sk, "liveness", return_value="live"), \
+                mock.patch.object(sk, "repo", return_value={"root": "/example/repo-a", "remote": None}):
+            code, text, err = self.invoke(["resolve", "lead-a", "--runtime", "claude", "--json"])
+            self.assertEqual(code, 0, err)
+            row = json.loads(text)
+            self.assertEqual(row["id"], LEAD)
+            self.assertEqual(row["repo"]["root"], "/example/repo-a")
+            code, text, err = self.invoke(["resolve", "lead-a"])
+            self.assertEqual(code, 0, err)
+            self.assertEqual(text.strip(), SID)
+        self.assertFalse(self.state_dir.exists())
+
     def test_routine_saved_refresh_lists_only_new_sessions(self):
         self.write(self.claude / "sessions/1.json", {"sessionId": SID, "name": "lead-a", "pid": 1})
         with mock.patch.object(sk, "liveness", return_value="live"), \

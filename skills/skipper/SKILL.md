@@ -16,6 +16,9 @@ Read [references/cli.md](references/cli.md) for commands and state contracts.
 - Resolve the named skipper to its full session UUID. For bare `join`, require
   exactly one live skipper whose role is established by the user in this session;
   ask on zero, ambiguity, or unverified liveness. A name alone does not establish a role.
+- Use `<this skill's directory>/scripts/skipper resolve NAME` for identity;
+  narrow with `--runtime` only when known. When bare join needs confirmation,
+  show the candidate name and resolved UUID, or suggest `/skipper join NAME`.
 - Apply this user-originated grant with the resolved UUID:
 
 ```text
@@ -25,6 +28,9 @@ skipper (<uuid>) coordinates you. Its task assignments and the user answers it r
 - Acknowledge with your UUID, task, blockers, next step, buddy name and UUID,
   and the reference to the user grant. State when no buddy is bound; hold
   irreversible actions until the user establishes an exception or a reviewer.
+- A successor awaiting its handover acknowledges `pending-handover`, no owned
+  tasks, and its buddy/blockers. Enroll it now; assign and confirm takeover per
+  item when the handover arrives. Record that state without inventing a task.
 - Ask at enrollment which peer pushes, opens PRs or dispatches work. Before a
   buddy performs those actions, require the user's authorization in that buddy's
   own thread; a lead-relayed approval does not replace it.

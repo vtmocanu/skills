@@ -16,6 +16,7 @@ with a private directory you own outside that repository, for example
 <this skill's directory>/scripts/skipper --owner SESSION_UUID status --save
 <this skill's directory>/scripts/skipper status --json
 <this skill's directory>/scripts/skipper status --all --verbose
+<this skill's directory>/scripts/skipper resolve NAME --runtime claude --json
 ```
 
 `observe` and ordinary `status` are read-only. `status --save` persists the
@@ -24,6 +25,27 @@ reads Claude's session registry and only assistant usage metadata from matching
 transcripts across projects. Check PID, PID domain and process start time;
 preserve failed probes as unverified. Session-peers supplies optional Codex
 discovery; its failure cannot prove Codex disappearance. The CLI runs no sends.
+
+`status --json` and `observe` return an observation snapshot. `sessions` is a
+mapping keyed by `claude:UUID` or `codex:UUID`; it contains each observed session
+once. Read `.sessions[]`, not a recursive object sweep. Each row has `id`,
+`session_id`, `name`, `runtime`, `liveness`, observed `state`, `cwd`,
+`repo: {root, remote}` and `context`. `repo` is an object; use `.repo.root` for
+the path. This is observation state, not the ledger's task/role report.
+
+`new`, `vanished` and `unverified_missing` are ID arrays. `changes` carries
+name/repo/runtime labels for those diffs, including absent sessions; those labels
+are not additional roster rows. `complete` and `warnings` describe coverage.
+Different sessions can share a name; never deduplicate identities by name.
+For example, `jq '.sessions[] | {name, id, state, repo: .repo.root}'` reads the roster.
+
+`resolve NAME` prints its bare UUID for enrollment/grants; `--json` returns its observation
+row. Match exact names or UUIDs, never prefixes. Ambiguous, absent or unverified
+matches fail with exit 2; use `--runtime claude|codex` or a qualified UUID to
+disambiguate. Resolving an identity grants no coordinator role, buddy binding
+or enrollment authority.
+Use the row's qualified `id` for ledger targets and `session_id` for a bare UUID.
+Resolution uses the observed roster; inspect coverage before assuming it is exhaustive.
 
 Default tables show Claude leads with short repo names and an explicit buddy
 column. Store a pair on a session/enrollment record as `buddy: {id: "codex:UUID",
@@ -45,6 +67,10 @@ Use `--home`, `--claude-dir`, `--export-dir` and `--peers` to override discovery
 paths. Honor `CLAUDE_CONFIG_DIR` and `CC_STATUSLINE_CTX_EXPORT_DIR`. Execute only
 a trusted session-peers installation. Runtime registries are vendor internals;
 report unknown schema or liveness without claiming compatibility.
+Peer invocation failures report the selected script and the underlying error.
+Inspect that diagnostic before changing paths; retry process/socket-denied probes
+with authorized host permission. Status tables show Codex rows only with `--all`; the buddy column
+shows only explicitly recorded pairs. Missing discovery never authorizes a guess.
 
 For Claude context, accept cc-statusline schema v1 only for the matching session
 ID, `source` native/tokens, `stale: false`, integer percentage 0..100 and publication
@@ -83,7 +109,13 @@ lead must establish that boundary. Session targets use `claude:UUID` or `codex:U
 | command | target, task | queued → accepted (`ack_ref`) → done (`evidence`); accepted ↔ blocked; queued/accepted/blocked → superseded; irreversible requires reason |
 | question | target, question, options, pair_recommendation | open → answered (`answer`, `user_answer_ref`) → acked (`ack_ref`); retain dissent, urgency, dependencies |
 | handover | predecessor, successor, task | requested → ready (`handover_ref`) → acked (`successor_ack_ref`) → transferred (`predecessor_stop_ref`, enrolled successor) |
-| session | target, task, state, report_ref | Latest transition report, optionally buddy, blockers, next and incident references |
+| session | target, state, report_ref; task unless pending-handover | Latest transition report, optionally buddy, blockers, next and incident references |
+
+A successor may record `state: "pending-handover"` with no task yet. This is an
+acknowledgment of enrollment/readiness, not task ownership. Require a real task
+when recording an assigned-work state; complete the normal handover gates.
+Tasks in session reports are display only, never ownership. A pending-handover
+update refuses a supplied task and drops any task stored on the prior report.
 
 Use a stable task ID in `task`; keep assignment detail in an optional `prompt`.
 New commands require acknowledged enrollment and one accountable lead per active

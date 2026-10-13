@@ -278,7 +278,9 @@ def observe(home, claude_dir, export_dir, ledger, now, default_window=None, peer
         try:
             result = run([sys.executable, str(peer_file), "list", "--json"])
             if result.returncode:
-                raise ValueError("peer listing failed")
+                detail = result.stderr.strip()[:200]
+                raise ValueError("peer listing exited %d%s" % (
+                    result.returncode, ": " + detail if detail else ""))
             payload = json.loads(result.stdout)
             if not isinstance(payload, dict):
                 raise ValueError("invalid peer listing")
@@ -310,8 +312,12 @@ def observe(home, claude_dir, export_dir, ledger, now, default_window=None, peer
                                      "cwd": row.get("cwd") or old.get("cwd"),
                                      "observed_at": now, "source": "session-peers"}
             complete["codex"] = payload.get("codex_schema_recognised") is True
-        except (OSError, ValueError, AttributeError, subprocess.TimeoutExpired):
-            warnings.append("session-peers unavailable; Codex discovery is incomplete")
+        except (OSError, ValueError, AttributeError, subprocess.TimeoutExpired) as exc:
+            detail = ("peer listing timed out after %s seconds" % exc.timeout
+                      if isinstance(exc, subprocess.TimeoutExpired)
+                      else "%s: %s" % (type(exc).__name__, exc))
+            warnings.append("session-peers unavailable: %s (script %s); Codex discovery is incomplete"
+                            % (detail, peer_file))
     for item in sessions.values():
         item["repo"] = repo(item["cwd"])
         sid = item["session_id"]
@@ -492,7 +498,13 @@ def record(state, item, now):
             if any(row["target"] != merged["predecessor"] for row in active):
                 raise ValueError("handover predecessor does not own the task")
     else:
-        required(merged, ["target", "task", "state", "report_ref"])
+        required(merged, ["target", "state", "report_ref"])
+        if merged["state"] == "pending-handover":
+            if "task" in item:
+                raise ValueError("pending-handover cannot include a task")
+            merged.pop("task", None)
+        else:
+            required(merged, ["task"])
     merged["updated_at"] = now
     state["records"][key] = merged
     if kind == "handover" and merged["state"] == "transferred":
@@ -556,6 +568,22 @@ def cell(value):
     return "".join(c if c.isprintable() and c != "|" else " " for c in str(value or "?"))[:120]
 
 
+def resolve(snapshot, target, runtime=None):
+    """Resolve identity only; never infer a coordinator role or enrollment."""
+    matches = [item for item in snapshot["sessions"].values()
+               if (runtime is None or item["runtime"] == runtime)
+               and target in (item["name"], item["id"], item["session_id"])]
+    if not matches:
+        raise ValueError("no observed session matches %r; refresh discovery and inspect warnings" % target)
+    if len(matches) != 1:
+        raise ValueError("ambiguous session %r: %s; use --runtime or a qualified UUID" % (
+            target, ", ".join(item["id"] for item in matches)))
+    item = matches[0]
+    if item["liveness"] != "live":
+        raise ValueError("session %s has unverified liveness; retry where process probes are permitted" % item["id"])
+    return item
+
+
 def buddy_name(target, report, snapshot, state):
     buddy = report.get("buddy")
     if not buddy:
@@ -593,7 +621,8 @@ def status(snapshot, state, show_all=False, verbose=False):
         name = item["name"] + (" [" + key + "]" if verbose else "")
         lines.append("| " + " | ".join(cell(v) for v in (
             name, item["repo"]["root"] if verbose else repo_name(item["repo"]),
-            buddy_name(key, report, snapshot, state), pct, state_label, report.get("task", "unknown"))) + " |")
+            buddy_name(key, report, snapshot, state), pct, state_label,
+            report.get("task") or ("awaiting handover" if report.get("state") == "pending-handover" else "unknown"))) + " |")
     for field in ("new", "vanished", "unverified_missing"):
         labels = []
         for key in snapshot[field]:
@@ -631,6 +660,10 @@ def main(argv=None):
     p.add_argument("--save", action="store_true", help="save observation baseline with owner")
     p.add_argument("--all", action="store_true", help="include Codex rows and internal reviewers")
     p.add_argument("--verbose", action="store_true", help="show session IDs and repository paths")
+    p = commands.add_parser("resolve", help="resolve one observed live session by exact name or UUID")
+    p.add_argument("target")
+    p.add_argument("--runtime", choices=("claude", "codex"))
+    p.add_argument("--json", action="store_true")
     p = commands.add_parser("record", help="record a validated JSON object")
     p.add_argument("--file", required=True, help="JSON input file, or - for stdin")
     p = commands.add_parser("barrier", help="coordination holds; never expire automatically")
@@ -645,7 +678,7 @@ def main(argv=None):
         if args.command in {"record", "barrier"} or getattr(args, "save", False):
             if not args.owner:
                 raise ValueError("--owner required for mutations")
-        if args.command in {"observe", "status"}:
+        if args.command in {"observe", "status", "resolve"}:
             raw_window = os.environ.get("SKIPPER_DEFAULT_CONTEXT_WINDOW")
             window = int(raw_window) if raw_window else None
             if window is not None and window <= 0:
@@ -654,7 +687,12 @@ def main(argv=None):
             export = args.export_dir or Path(os.environ.get("CC_STATUSLINE_CTX_EXPORT_DIR", str(
                 Path(os.environ.get("XDG_STATE_HOME", str(args.home / ".local/state"))) / "cc-statusline/ctx")))
             state = load_state(args.state_dir)
-            snapshot = observe(args.home, claude, export, state, now, window, args.peers, args.all)
+            snapshot = observe(args.home, claude, export, state, now, window, args.peers,
+                               getattr(args, "all", False))
+            if args.command == "resolve":
+                item = resolve(snapshot, args.target, args.runtime)
+                print(json.dumps(item, allow_nan=False, sort_keys=True) if args.json else item["session_id"])
+                return 0
             if getattr(args, "save", False):
                 with writer(args.state_dir, args.owner) as state:
                     # Preserve absent sessions when discovery was incomplete.
