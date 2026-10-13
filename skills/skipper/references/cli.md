@@ -62,6 +62,7 @@ Always label transcript values `est`; missing/invalid usage means `unknown`.
 Retain age in JSON; a fresh export publication does not mean a fresh API response.
 Show percentage only in tables and `ctx est` beside the state. Show `?` for unknown
 or Codex context. Never recommend a Codex handover from context.
+Display estimates above 100% as `>100%`; retain the raw percentage in JSON.
 
 ## Records
 
@@ -93,6 +94,8 @@ review, approval gates, transport acknowledgments or the lead's permission polic
 Revocation does not prevent recording an existing command's outcome or superseding
 it. Supersede the old command before assigning that task to another enrolled lead;
 recording an update grants no permission to continue work after revocation.
+After revocation, allow existing-command updates only to `superseded`, `done`
+or `blocked`, within the ordinary transition rules. Refuse `accepted` updates.
 
 ## Barriers
 

@@ -143,6 +143,20 @@ class ContextTests(FixtureCase):
 
 
 class DiscoveryTests(FixtureCase):
+    def test_overfull_estimate_display_keeps_raw_json_value(self):
+        self.registry()
+        for tokens, raw, displayed in ((200000, 100, "100%"), (202000, 101, ">100%"),
+                                        (500000, 250, ">100%")):
+            with self.subTest(raw=raw):
+                self.transcript(usage={"input_tokens": tokens, "cache_read_input_tokens": 0,
+                                       "cache_creation_input_tokens": 0})
+                with mock.patch.object(sk, "liveness", return_value="live"):
+                    snapshot = self.observe()
+                self.assertEqual(snapshot["sessions"][LEAD]["context"]["pct"], raw)
+                table = sk.status(snapshot, self.state)
+                self.assertIn("| " + displayed + " |", table)
+                self.assertEqual(json.loads(json.dumps(snapshot))["sessions"][LEAD]["context"]["pct"], raw)
+
     def test_foreign_pid_domain_never_probes_or_reports_vanished(self):
         self.registry(pidDomain="foreign-domain")
         self.state["observations"] = {"sessions": {LEAD: {"runtime": "claude"}}}
@@ -330,6 +344,31 @@ class DiscoveryTests(FixtureCase):
 
 
 class LedgerTests(FixtureCase):
+    def test_revoked_existing_command_cannot_be_accepted_again(self):
+        self.enroll()
+        sk.record(self.state, {"id": "c1", "kind": "command", "target": LEAD, "task": "task-a"}, NOW)
+        sk.record(self.state, {"id": "c1", "state": "accepted", "ack_ref": "accepted-message"}, NOW)
+        sk.record(self.state, {"id": "enroll-a", "state": "revoked"}, NOW)
+        before = json.dumps(self.state, sort_keys=True)
+        with self.assertRaisesRegex(ValueError, "revoked command updates"):
+            sk.record(self.state, {"id": "c1", "state": "accepted", "ack_ref": "new-message"}, NOW)
+        self.assertEqual(json.dumps(self.state, sort_keys=True), before)
+        sk.record(self.state, {"id": "c1", "state": "blocked"}, NOW)
+        with self.assertRaisesRegex(ValueError, "revoked command updates"):
+            sk.record(self.state, {"id": "c1", "state": "accepted"}, NOW)
+
+    def test_revoked_existing_command_can_record_blocked_done_or_superseded(self):
+        for destination in ("blocked", "done", "superseded"):
+            with self.subTest(destination=destination):
+                self.state = sk.empty_state()
+                self.state["owner"] = OWNER
+                self.enroll()
+                sk.record(self.state, {"id": "c1", "kind": "command", "target": LEAD, "task": "task-a"}, NOW)
+                sk.record(self.state, {"id": "c1", "state": "accepted", "ack_ref": "accepted-message"}, NOW)
+                sk.record(self.state, {"id": "enroll-a", "state": "revoked"}, NOW)
+                result = sk.record(self.state, {"id": "c1", "state": destination, "evidence": "result-ref"}, NOW)
+                self.assertEqual(result["state"], destination)
+
     def test_revoke_supersede_reassign_without_old_lead_enrollment(self):
         successor = "claude:00000000-0000-4000-8000-000000000003"
         self.enroll()
@@ -522,6 +561,30 @@ class BarrierTests(FixtureCase):
 
 
 class CLITests(FixtureCase):
+    def test_routine_saved_refresh_lists_only_new_sessions(self):
+        self.write(self.claude / "sessions/1.json", {"sessionId": SID, "name": "lead-a", "pid": 1})
+        with mock.patch.object(sk, "liveness", return_value="live"), \
+                mock.patch.object(sk, "repo", return_value={"root": "/example/repo-a", "remote": None}):
+            args = ["--owner", OWNER, "status", "--save"]
+            code, first, err = self.invoke(args)
+            self.assertEqual(code, 0, err)
+            self.assertIn("new: lead-a (repo-a)", first)
+            code, second, err = self.invoke(args)
+            self.assertEqual(code, 0, err)
+            self.assertNotIn("new:", second)
+            other = "00000000-0000-4000-8000-000000000003"
+            self.write(self.claude / "sessions/2.json", {"sessionId": other, "name": "lead-b", "pid": 2})
+            before = (self.state_dir / "state.json").read_bytes()
+            code, inspection, err = self.invoke(["status"])
+            self.assertEqual(code, 0, err)
+            self.assertIn("new: lead-b (repo-a)", inspection)
+            self.assertEqual((self.state_dir / "state.json").read_bytes(), before)
+            code, third, err = self.invoke(args)
+            self.assertEqual(code, 0, err)
+            footers = [line for line in third.splitlines() if line.startswith("new:")]
+            self.assertEqual(footers, ["new: lead-b (repo-a)"])
+            self.assertNotIn("new:", self.invoke(args)[1])
+
     def test_status_all_and_verbose_flags(self):
         code, table, err = self.invoke(["status", "--all", "--verbose"])
         self.assertEqual(code, 0, err)
