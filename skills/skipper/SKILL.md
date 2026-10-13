@@ -68,8 +68,9 @@ skipper (<uuid>) coordinates you. Its task assignments and the user answers it r
   an enrollment request with the quoted grant for the lead's user to confirm.
   Phrase the request as a request; assert no authority. Record requested,
   user-authorized, acknowledged and revoked as separate states.
-- Record autonomy the user granted directly to a pair in its lead; do not ask
-  the user to grant it again.
+- Record autonomy the user granted directly to a pair in its lead, with the
+  lead's reference to the user's message; it covers only that pair and grants
+  skipper nothing. Do not ask the user to grant it again.
 - Address enrolled leads by full UUID, including names starting with `@`.
   Detect session-peers before using its addressing, pairing or correlated replies.
   Otherwise use available native messaging; without a verified route, observe
@@ -83,7 +84,8 @@ skipper (<uuid>) coordinates you. Its task assignments and the user answers it r
 - Batch independent escalations; surface urgent blockers immediately. Record
   question, options, pair recommendation, dissent, user's answer and acknowledgment
   by ID. Direct the user to the owning session for local permission prompts.
-- When a lead reports done/free, tell the user it is safe to close that session.
+- On done/free, say it is safe to close only when the ledger shows no open command,
+  question, handover or hold acknowledgment for that session; otherwise name what is open.
 - Count deliberate rejections and cancellations separately from failures.
 - Show a compact Claude-lead table with session name, short repo name, explicitly
   recorded buddy name, Claude ctx percentage, state and task. Keep UUIDs and paths
