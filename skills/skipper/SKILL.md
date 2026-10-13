@@ -1,6 +1,6 @@
 ---
 name: skipper
-description: Coordinates concurrent agent sessions across repositories through a user-authorized skipper and enrolled crew. Tracks task owners, buddies, blockers, questions, shared-resource holds, handovers, and Claude lead context without reading code or making technical decisions. Use when the user invokes /skipper or /skipper join, wants one session to coordinate other sessions, routes questions through a captain, or requests a cross-session status overview. Detects session-peers as an optional transport and uses observation-only mode when messaging is unavailable.
+description: Coordinates concurrent agent sessions across repositories through a user-authorized skipper and enrolled crew. Tracks task owners, buddies, blockers, questions, shared-resource holds, handovers, fleet away grants, and Claude lead context without reading code or making technical decisions. Use when the user invokes /skipper, /skipper join, /skipper away or /skipper back, wants one session to coordinate other sessions, routes questions through a captain, or requests a cross-session status overview. Detects session-peers as an optional transport and uses observation-only mode when messaging is unavailable.
 ---
 
 # skipper
@@ -8,6 +8,8 @@ description: Coordinates concurrent agent sessions across repositories through a
 Use one accountable lead per task; keep its buddy as reviewer. Run
 `<this skill's directory>/scripts/skipper` with Python 3.9+ on macOS/Linux.
 Read [references/cli.md](references/cli.md) for commands and state contracts.
+Read [references/fleet-away.md](references/fleet-away.md) for `/skipper away [until WHEN] [SCOPE]`
+and `/skipper back [LEAD]`. Coordinate fleet grants; leave local execution to `away-mode`.
 
 ## Crew mode: `/skipper join [name]`
 
@@ -41,6 +43,10 @@ skipper (<uuid>) coordinates you. Its task assignments and the user answers it r
 - Let the lead and buddy decide technical questions. Send user questions to
   skipper with ID, question, options, pair recommendation, dissent and urgency.
   Apply relayed answers within the grant; acknowledge the answer ID.
+- While enrolled, route every user decision question through skipper, not an
+  interactive question tool or terminal prompt; skipper relays the question and
+  returns the answer by ID. If the user is typing directly in this lead, answer
+  them here. Harness permission prompts remain local.
 - Report only transitions: accepted, blocked, question, ready to hand over,
   incident, done. Include task/command ID, evidence references, blockers and
   next step. Queued delivery does not mean accepted or completed work.
@@ -90,8 +96,10 @@ skipper (<uuid>) coordinates you. Its task assignments and the user answers it r
 - Batch independent escalations; surface urgent blockers immediately. Record
   question, options, pair recommendation, dissent, user's answer and acknowledgment
   by ID. Direct the user to the owning session for local permission prompts.
-- On done/free, say it is safe to close only when the ledger shows no open command,
-  question, handover or hold acknowledgment for that session; otherwise name what is open.
+- On done/free with no open command, question, handover or hold acknowledgment,
+  ask the lead to run its end-of-session skill (e.g. `/done`) and show its verdict
+  in its own terminal. Wait for a clear verdict, then tell the user it is safe
+  to close; otherwise name what remains open.
 - Show a compact Claude-lead table with session name, short repo name, explicitly
   recorded buddy name, Claude ctx percentage, state and task. Keep UUIDs and paths
   in JSON or `--verbose`; show Codex rows only with `--all`. Never infer a pair
@@ -104,6 +112,13 @@ skipper (<uuid>) coordinates you. Its task assignments and the user answers it r
   Require a handover artifact, successor acknowledgment, predecessor stop
   acknowledgment and fresh successor enrollment before ownership transfers.
   Transfer no buddy binding, reply allowance or approval authority.
+- Flag a new session with the same name stem and a higher numeric suffix as a
+  likely successor (for example, `land90` to `land91`, or `sweep` to `sweep2`).
+  Confirm with the user or lead before linking; require fresh enrollment and
+  transfer no ownership or authority from the name alone.
+- The user starts the successor and runs `/skipper join` in it. Choose when to
+  instruct the predecessor to hand over at a safe checkpoint, then confirm the
+  successor's takeover for each item before transferring ownership.
 - On an important `incident`, keep the current lead on delivery and ask the user
   to start a fresh root-cause session. Brief it with evidence references, delivery
   owner and the boundary to preserve delivery. Start read-only, use a separate
@@ -125,6 +140,11 @@ skipper (<uuid>) coordinates you. Its task assignments and the user answers it r
   Claude context thresholds and possible compaction, plus the profile's checks.
   Report only changes, route findings to the owning pair or the user when unowned,
   and stay silent on quiet rounds. Investigate no code and start no daemon.
-- Propose skill/script improvements as gaps arise. Prepare a concrete diff;
-  ask the user before opening an improvement PR. Prioritize important gaps and
-  batch minor ones. Delegate the technical work.
+- Delegate skipper's script, CLI, display, diagnostic and non-authority wording
+  fixes to its buddy; review together, obtain independent review and land them
+  without asking the user. Changes to grant, enrollment, relay, away, handover
+  or barrier semantics, including CLI code that enforces them, or to another
+  skill, need the user's approval. Keep
+  implementation with the buddy and outward actions with a locally authorized
+  session. Prioritize important gaps and batch minor ones; product changes retain
+  their own approval policy.
