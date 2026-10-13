@@ -143,6 +143,112 @@ class ContextTests(FixtureCase):
 
 
 class DiscoveryTests(FixtureCase):
+    def peer_observation(self, payload, include_internal=False):
+        with mock.patch.object(sk, "find_peers", return_value=Path("fixture.py")), \
+                mock.patch.object(sk, "run", return_value=subprocess.CompletedProcess([], 0, json.dumps(payload), "")), \
+                mock.patch.object(sk, "repo", return_value={"root": "/example/repo-a", "remote": "git@example.com:org/repo-a.git"}):
+            if include_internal:
+                return sk.observe(self.home, self.claude, self.exports, self.state, NOW,
+                                  include_internal=True)
+            return sk.observe(self.home, self.claude, self.exports, self.state, NOW)
+
+    def peer_payload(self, **changes):
+        row = {"id": SID, "name": "buddy-a", "cwd": "/example/repo-a", "holder_pid": 123, "shim_pid": 456}
+        row.update(changes)
+        return {"claude": [{"runtime": "codex", "sessionId": SID, "status": "busy"}],
+                "codex": [row], "codex_unverified": [], "codex_schema_recognised": True}
+
+    def test_default_name_repo_footer_are_short_and_verbose_keeps_ids(self):
+        self.registry()
+        with mock.patch.object(sk, "liveness", return_value="live"):
+            snapshot = self.observe()
+        snapshot["sessions"][LEAD]["repo"] = {"root": "/example/local-checkout", "remote": "git@example.com:org/repo-a.git"}
+        table = sk.status(snapshot, self.state)
+        self.assertIn("| @lead-a | repo-a |", table)
+        self.assertIn("new: @lead-a (repo-a)", table)
+        self.assertNotIn(SID, table)
+        self.assertNotIn("/example/", table)
+        verbose = sk.status(snapshot, self.state, verbose=True)
+        self.assertIn(LEAD, verbose)
+        self.assertIn("/example/local-checkout", verbose)
+        self.assertEqual(sk.repo_name({"root": "/example/local-checkout", "remote": None}), "local-checkout")
+
+    def test_codex_default_hidden_and_explicit_buddy_on_lead_row(self):
+        self.registry()
+        with mock.patch.object(sk, "liveness", return_value="live"):
+            snapshot = self.peer_observation(self.peer_payload())
+        sk.record(self.state, {"id": "report", "kind": "session", "target": LEAD,
+                              "state": "running", "task": "task-a", "report_ref": "message",
+                              "buddy": {"id": "codex:" + SID, "name": "old-name"}}, NOW)
+        table = sk.status(snapshot, self.state)
+        self.assertIn("| buddy-a |", table)
+        self.assertNotIn("| buddy-a | repo-a |", table)
+        self.assertNotIn("buddy-a (repo-a)", table)
+        self.assertIn("| buddy-a | repo-a |", sk.status(snapshot, self.state, show_all=True))
+
+    def test_no_buddy_pair_inferred_from_identical_names(self):
+        self.registry(name="same")
+        with mock.patch.object(sk, "liveness", return_value="live"):
+            snapshot = self.peer_observation(self.peer_payload(name="same"))
+        self.assertIn("| same | repo-a | ? |", sk.status(snapshot, self.state))
+
+    def test_codex_status_from_shim_and_direct_peer_field(self):
+        snapshot = self.peer_observation(self.peer_payload())
+        self.assertEqual(snapshot["sessions"]["codex:" + SID]["state"], "busy")
+        snapshot = self.peer_observation(self.peer_payload(status="idle"))
+        self.assertEqual(snapshot["sessions"]["codex:" + SID]["state"], "idle")
+
+    def test_codex_registry_status_not_overwritten_by_unknown(self):
+        self.registry(entrypoint="codex", status="idle")
+        payload = self.peer_payload()
+        payload["claude"] = []
+        with mock.patch.object(sk, "liveness", return_value="live"):
+            snapshot = self.peer_observation(payload)
+        self.assertEqual(snapshot["sessions"]["codex:" + SID]["state"], "idle")
+
+    def test_guardian_shared_holder_filtered_all_restores_and_no_vanished_noise(self):
+        payload = self.peer_payload()
+        child = "00000000-0000-4000-8000-000000000003"
+        payload["codex"].append({"id": child, "name": "Guardian review", "holder_pid": 123,
+                                 "peer_name": "codex-" + child, "shim_pid": None})
+        self.state["observations"] = {"sessions": {"codex:" + child: {"runtime": "codex"}}}
+        snapshot = self.peer_observation(payload)
+        self.assertNotIn("codex:" + child, snapshot["sessions"])
+        self.assertEqual(snapshot["excluded"]["codex:" + child], "shared-holder-reviewer")
+        self.assertNotIn("codex:" + child, snapshot["vanished"])
+        self.assertIn("codex:" + child, self.peer_observation(payload, include_internal=True)["sessions"])
+
+    def test_parent_alias_filters_renamed_child_without_hiding_same_pid_lead(self):
+        payload = self.peer_payload()
+        child = "11111111-0000-4000-8000-000000000003"
+        payload["codex"].append({"id": child, "name": "internal renamed reviewer", "holder_pid": 123,
+                                 "peer_name": "codex-" + SID, "shim_pid": None})
+        snapshot = self.peer_observation(payload)
+        self.assertEqual(snapshot["excluded"]["codex:" + child], "parent-peer-alias")
+        payload["codex"][-1]["peer_name"] = "codex-" + child
+        payload["codex"][-1]["name"] = "independent lead"
+        self.assertIn("codex:" + child, self.peer_observation(payload)["sessions"])
+
+    def test_title_fallback_preserves_registered_or_attached_guardian(self):
+        child = "11111111-0000-4000-8000-000000000003"
+        payload = self.peer_payload(id=child, name="Guardian review", holder_pid=None, shim_pid=None)
+        self.assertEqual(self.peer_observation(payload)["excluded"]["codex:" + child], "reviewer-title-fallback")
+        for field in ("registered", "shim_pid"):
+            payload["codex"][0][field] = True
+            self.assertIn("codex:" + child, self.peer_observation(payload)["sessions"])
+            payload["codex"][0][field] = None
+
+    def test_vanished_footer_names_survive_saved_baseline(self):
+        self.registry()
+        with mock.patch.object(sk, "liveness", return_value="live"):
+            self.state["observations"] = self.observe()
+        (self.claude / "sessions/1.json").unlink()
+        snapshot = self.observe()
+        self.state["observations"] = snapshot
+        table = sk.status(snapshot, self.state)
+        self.assertIn("vanished: @lead-a (example)", table)
+        self.assertNotIn(SID, table)
+
     def observe(self):
         with mock.patch.object(sk, "find_peers", return_value=None), mock.patch.object(sk, "repo", return_value={"root": "example", "remote": None}):
             return sk.observe(self.home, self.claude, self.exports, self.state, NOW)
@@ -368,6 +474,11 @@ class BarrierTests(FixtureCase):
 
 
 class CLITests(FixtureCase):
+    def test_status_all_and_verbose_flags(self):
+        code, table, err = self.invoke(["status", "--all", "--verbose"])
+        self.assertEqual(code, 0, err)
+        self.assertIn("| buddy |", table)
+
     def invoke(self, args):
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \

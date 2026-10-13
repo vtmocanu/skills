@@ -208,8 +208,43 @@ def repo(cwd):
         return {"root": cwd, "remote": None}
 
 
-def observe(home, claude_dir, export_dir, ledger, now, default_window=None, peers_path=None):
+def repo_name(repository):
+    remote = repository.get("remote")
+    if isinstance(remote, str) and remote:
+        name = remote.rstrip("/").rsplit("/", 1)[-1].rsplit(":", 1)[-1]
+        return name[:-4] if name.endswith(".git") else name
+    root = repository.get("root")
+    return Path(root).name if isinstance(root, str) and root else "?"
+
+
+def internal_reviewers(rows):
+    """Preserve coordinated threads; shared process alone cannot establish a child."""
+    excluded = {}
+    for row in rows:
+        sid = row.get("id")
+        if not sid or row.get("registered") or row.get("shim_pid"):
+            continue
+        pid = row.get("holder_pid")
+        shared = [other for other in rows if other.get("id") != sid
+                  and pid is not None and other.get("holder_pid") == pid
+                  and (other.get("registered") or other.get("shim_pid"))]
+        alias = row.get("peer_name")
+        if isinstance(alias, str) and alias.startswith("codex-"):
+            prefix = alias[6:].replace("-", "")
+            # The usual UUID-derived alias refers to this row, not its parent.
+            parents = [other for other in shared if str(other.get("id", "")).replace("-", "").startswith(prefix)]
+            if prefix and parents and not sid.replace("-", "").startswith(prefix):
+                excluded[sid] = "parent-peer-alias"
+                continue
+        if row.get("name") == "Guardian review":
+            excluded[sid] = "shared-holder-reviewer" if shared else "reviewer-title-fallback"
+    return excluded
+
+
+def observe(home, claude_dir, export_dir, ledger, now, default_window=None, peers_path=None,
+            include_internal=False):
     warnings, sessions, dead = [], {}, set()
+    excluded = {}
     complete = {"claude": True, "codex": False}
     readings = exports(export_dir, now, warnings)
     registry = claude_dir / "sessions"
@@ -246,16 +281,32 @@ def observe(home, claude_dir, export_dir, ledger, now, default_window=None, peer
             payload = json.loads(result.stdout)
             if not isinstance(payload, dict):
                 raise ValueError("invalid peer listing")
+            shim_states = {}
+            for field in ("claude", "claude_unverified"):
+                for row in payload.get(field, []):
+                    if row.get("runtime") == "codex" and row.get("sessionId"):
+                        shim_states[row["sessionId"]] = row.get("status")
+            rows = []
             for field in ("codex", "codex_unverified"):
                 if not isinstance(payload.get(field), list):
                     raise ValueError("unknown peer listing schema")
+                rows.extend(payload[field])
+            if not include_internal:
+                excluded = {"codex:" + sid: why for sid, why in internal_reviewers(rows).items()}
+                for key in excluded:
+                    sessions.pop(key, None)
+            for field in ("codex", "codex_unverified"):
                 for row in payload[field]:
                     sid = identifier(row.get("id"))
                     key = "codex:" + sid
+                    if key in excluded:
+                        continue
+                    old = sessions.get(key, {})
                     sessions[key] = {"id": key, "session_id": sid,
                                      "name": row.get("name") or sid, "runtime": "codex",
                                      "liveness": "live" if field == "codex" else "unverified",
-                                     "state": "unknown", "cwd": row.get("cwd"),
+                                     "state": row.get("status") or row.get("state") or shim_states.get(sid) or old.get("state") or "unknown",
+                                     "cwd": row.get("cwd") or old.get("cwd"),
                                      "observed_at": now, "source": "session-peers"}
             complete["codex"] = payload.get("codex_schema_recognised") is True
         except (OSError, ValueError, AttributeError, subprocess.TimeoutExpired):
@@ -267,12 +318,16 @@ def observe(home, claude_dir, export_dir, ledger, now, default_window=None, peer
                                    readings, now, default_window, warnings)
                            if item["runtime"] == "claude" else {"pct": None, "quality": "unknown"})
     previous = ledger.get("observations", {}).get("sessions", {})
-    vanished = [key for key in previous if key not in sessions
+    vanished = [key for key in previous if key not in sessions and key not in excluded
                 and (key in dead or complete.get(previous[key].get("runtime"), False))]
-    uncertain = [key for key in previous if key not in sessions and key not in vanished]
+    uncertain = [key for key in previous if key not in sessions and key not in vanished and key not in excluded]
+    changed_keys = set(sessions) - set(previous) | set(vanished) | set(uncertain)
+    changes = {key: {field: (sessions.get(key) or previous[key]).get(field)
+                     for field in ("name", "repo", "runtime")} for key in changed_keys}
     return {"sessions": sessions, "new": sorted(set(sessions) - set(previous)),
             "vanished": sorted(vanished), "unverified_missing": sorted(uncertain),
-            "observed_at": now, "complete": complete, "warnings": warnings}
+            "observed_at": now, "complete": complete, "warnings": warnings,
+            "changes": changes, "excluded": excluded}
 
 
 def empty_state():
@@ -494,10 +549,27 @@ def cell(value):
     return "".join(c if c.isprintable() and c != "|" else " " for c in str(value or "?"))[:120]
 
 
-def status(snapshot, state):
-    lines = ["| session | repo | ctx % | state | task |", "|---|---|---|---|---|"]
+def buddy_name(target, report, snapshot, state):
+    buddy = report.get("buddy")
+    if not buddy:
+        enrollments = [row for row in state["records"].values() if row["kind"] == "enrollment"
+                       and row.get("target") == target and row.get("state") == "acked" and row.get("buddy")]
+        if enrollments:
+            buddy = max(enrollments, key=lambda row: row["updated_at"])["buddy"]
+    if isinstance(buddy, dict):
+        key = buddy.get("id")
+        return snapshot["sessions"].get(key, {}).get("name") or buddy.get("name") or "?"
+    if isinstance(buddy, str):
+        return snapshot["sessions"].get(buddy, {}).get("name") or ("?" if ":" in buddy else buddy)
+    return "?"
+
+
+def status(snapshot, state, show_all=False, verbose=False):
+    lines = ["| session | repo | buddy | ctx % | state | task |", "|---|---|---|---|---|---|"]
     reports = [row for row in state["records"].values() if row["kind"] == "session"]
     for key, item in sorted(snapshot["sessions"].items(), key=lambda kv: (kv[1]["repo"]["root"] or "", kv[0])):
+        if item["runtime"] != "claude" and not show_all:
+            continue
         report = max((r for r in reports if r["target"] == key), key=lambda r: r["updated_at"], default={})
         ctx = item["context"]
         pct = str(ctx["pct"]) + "%" if item["runtime"] == "claude" and ctx["pct"] is not None else "?"
@@ -509,12 +581,23 @@ def status(snapshot, state):
             flags.append("liveness unverified")
         if flags:
             state_label = str(state_label) + " (" + ", ".join(flags) + ")"
-        name = item["name"] + " [" + key + "]"
+        name = item["name"] + (" [" + key + "]" if verbose else "")
         lines.append("| " + " | ".join(cell(v) for v in (
-            name, item["repo"]["root"], pct, state_label, report.get("task", "unknown"))) + " |")
+            name, item["repo"]["root"] if verbose else repo_name(item["repo"]),
+            buddy_name(key, report, snapshot, state), pct, state_label, report.get("task", "unknown"))) + " |")
     for field in ("new", "vanished", "unverified_missing"):
-        if snapshot[field]:
-            lines.append(field + ": " + ", ".join(cell(k) for k in snapshot[field]))
+        labels = []
+        for key in snapshot[field]:
+            item = (snapshot["sessions"].get(key) or snapshot.get("changes", {}).get(key)
+                    or state.get("observations", {}).get("sessions", {}).get(key) or {})
+            if item.get("runtime", key.split(":", 1)[0]) != "claude" and not show_all:
+                continue
+            label = cell(item.get("name", "unknown")) + " (" + cell(repo_name(item.get("repo") or {})) + ")"
+            if verbose:
+                label += " [" + cell(key) + "]"
+            labels.append(label)
+        if labels:
+            lines.append(field + ": " + ", ".join(labels))
     for row in state["barriers"].values():
         if row["state"] != "released":
             lines.append("hold " + cell(row["id"]) + ": " + cell(row["resource"]) + " / "
@@ -532,10 +615,13 @@ def main(argv=None):
     parser.add_argument("--peers", help="explicit trusted peers.py path")
     parser.add_argument("--owner", help="skipper session UUID; required for mutations")
     commands = parser.add_subparsers(dest="command", required=True)
-    commands.add_parser("observe", help="read-only discovery and diff as JSON")
+    p = commands.add_parser("observe", help="read-only discovery and diff as JSON")
+    p.add_argument("--all", action="store_true", help="include internal Codex reviewers")
     p = commands.add_parser("status", help="refresh discovery and render a table")
     p.add_argument("--json", action="store_true")
     p.add_argument("--save", action="store_true", help="save observation baseline with owner")
+    p.add_argument("--all", action="store_true", help="include Codex rows and internal reviewers")
+    p.add_argument("--verbose", action="store_true", help="show session IDs and repository paths")
     p = commands.add_parser("record", help="record a validated JSON object")
     p.add_argument("--file", required=True, help="JSON input file, or - for stdin")
     p = commands.add_parser("barrier", help="coordination holds; never expire automatically")
@@ -559,18 +645,19 @@ def main(argv=None):
             export = args.export_dir or Path(os.environ.get("CC_STATUSLINE_CTX_EXPORT_DIR", str(
                 Path(os.environ.get("XDG_STATE_HOME", str(args.home / ".local/state"))) / "cc-statusline/ctx")))
             state = load_state(args.state_dir)
-            snapshot = observe(args.home, claude, export, state, now, window, args.peers)
+            snapshot = observe(args.home, claude, export, state, now, window, args.peers, args.all)
             if getattr(args, "save", False):
                 with writer(args.state_dir, args.owner) as state:
                     # Preserve absent sessions when discovery was incomplete.
                     remembered = dict(state.get("observations", {}).get("sessions", {}))
                     remembered.update(snapshot["sessions"])
-                    for key in snapshot["vanished"]:
+                    for key in set(snapshot["vanished"]) | set(snapshot["excluded"]):
                         remembered.pop(key, None)
                     state["observations"] = dict(snapshot, sessions=remembered)
                     event(state, "observe", "roster", now)
             output = snapshot if args.command == "observe" or getattr(args, "json", False) else None
-            print(json.dumps(output, allow_nan=False, sort_keys=True) if output is not None else status(snapshot, state))
+            print(json.dumps(output, allow_nan=False, sort_keys=True) if output is not None
+                  else status(snapshot, state, args.all, args.verbose))
         elif args.command == "record":
             item = json.load(sys.stdin) if args.file == "-" else read_json(args.file)
             with writer(args.state_dir, args.owner) as state:

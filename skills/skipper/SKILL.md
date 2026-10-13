@@ -70,7 +70,10 @@ skipper (<uuid>) coordinates you. Its task assignments and the user answers it r
 - Batch independent escalations; surface urgent blockers immediately. Record
   question, options, pair recommendation, dissent, user's answer and acknowledgment
   by ID. Direct the user to the owning session for local permission prompts.
-- Show a compact table with session, repo, Claude ctx percentage, state and task.
+- Show a compact Claude-lead table with session name, short repo name, explicitly
+  recorded buddy name, Claude ctx percentage, state and task. Keep UUIDs and paths
+  in JSON or `--verbose`; show Codex rows only with `--all`. Never infer a pair
+  from matching names. Show new/vanished names with repo labels on one line.
   Put only percentages or `?` in the context column. Mark estimates in the state
   column; retain source, timestamp, age and window provenance in JSON. Omit Codex
   context readings. Always show Claude context when suggesting a free lead.

@@ -11,6 +11,7 @@ independent skipper ledger and `--owner SESSION_UUID` for every mutation.
 <this skill's directory>/scripts/skipper observe
 <this skill's directory>/scripts/skipper --owner SESSION_UUID status --save
 <this skill's directory>/scripts/skipper status --json
+<this skill's directory>/scripts/skipper status --all --verbose
 ```
 
 `observe` and ordinary `status` are read-only. `status --save` persists the
@@ -19,6 +20,22 @@ reads Claude's session registry and only assistant usage metadata from matching
 transcripts across projects. Check PID, PID domain and process start time;
 preserve failed probes as unverified. Session-peers supplies optional Codex
 discovery; its failure cannot prove Codex disappearance. The CLI runs no sends.
+
+Default tables show Claude leads with short repo names and an explicit buddy
+column. Store a pair on a session/enrollment record as `buddy: {id: "codex:UUID",
+name: "buddy-name"}`; resolve the displayed name by that ID, never by a name match.
+Keep UUIDs in JSON; `--verbose` shows them and full repo paths. `--all` adds
+Codex rows and internal reviewers. Footers use names and short repo labels and
+follow the table's runtime filter. Preserve Codex state from direct peer fields,
+shim status entries or the registry instead of overwriting it with unknown.
+
+Exclude unattached/unregistered internal reviewer rows by default. Use a parent
+peer alias plus shared holder PID when available; for Guardian review rows use
+the shared holder with an attached parent, falling back to the title when no
+parent relationship is available. A shared PID alone never excludes a thread.
+Retain explicitly registered or shim-attached threads. Record exclusion reasons
+in JSON; `observe --all` includes those rows for inspection. Exclusions are not
+vanished-session events.
 
 Use `--home`, `--claude-dir`, `--export-dir` and `--peers` to override discovery
 paths. Honor `CLAUDE_CONFIG_DIR` and `CC_STATUSLINE_CTX_EXPORT_DIR`. Execute only
