@@ -12,6 +12,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- `session-peers`: ask once about unassigned buddy leadership, recommend Claude leading and Codex implementing, keep planning and investigation shared, and require review by someone other than the diff author.
 - `skipper`: optional repository patrol profiles arm session-only checks, route changed findings to owners and detect session/context transitions without code investigation or background daemons.
 - `skipper`: show overfull context estimates as `>100%`, restrict revoked-command updates to outcomes or holds, and make saved status refreshes and delegation boundaries explicit.
 - `away-mode`: act on a peer's incident or fix notice when it arrives instead of waiting for the next tick.
