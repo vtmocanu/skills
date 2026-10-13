@@ -12,6 +12,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- `skipper`: optional repository patrol profiles arm session-only checks, route changed findings to owners and detect session/context transitions without code investigation or background daemons.
 - `skipper`: show overfull context estimates as `>100%`, restrict revoked-command updates to outcomes or holds, and make saved status refreshes and delegation boundaries explicit.
 - `away-mode`: act on a peer's incident or fix notice when it arrives instead of waiting for the next tick.
 - `session-peers`: write message files with a file-writing tool or a quoted heredoc, since an unquoted heredoc executes the body's command substitutions; delegated work keeps a worker-facing state file that the worker re-reads after a context compaction.
