@@ -4,6 +4,8 @@ Invoke `<this skill's directory>/scripts/skipper` directly. Put global options
 before the subcommand. Use a private state directory outside every repository:
 `${XDG_STATE_HOME:-$HOME/.local/state}/skipper/`. Use `--state-dir PATH` for an
 independent skipper ledger and `--owner SESSION_UUID` for every mutation.
+Use a canonical bare UUID for `--owner` and an enrollment's `skipper` field;
+use qualified `claude:UUID`/`codex:UUID` identities for session targets.
 Refuse state paths with a `.git` entry in the directory or any ancestor. This
 includes a home directory tracked as a dotfiles repository. Use `--state-dir`
 with a private directory you own outside that repository, for example
@@ -163,3 +165,4 @@ Success is exit 0.
 For a successor skipper, obtain fresh user grants and reconcile commands,
 questions and holds with the leads before creating its own ledger. Retain the
 old ledger until recovery is complete. Do not silently rewrite its owner.
+Follow [takeover.md](takeover.md) for a live predecessor and transfer leads individually.

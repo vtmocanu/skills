@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- `skipper`: detect an existing live coordinator at startup and request a user-confirmed takeover with fresh per-lead enrollment, explicit predecessor stops and reconciled work, holds and timers.
+
 ## [0.48.0] - 2026-10-13
 
 ### Added
