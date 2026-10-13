@@ -1,6 +1,6 @@
 ---
 name: skipper
-description: Coordinates concurrent agent sessions across repositories through a user-authorized skipper and enrolled crew. Tracks task owners, buddies, blockers, questions, shared-resource holds, handovers, and Claude lead context without reading code or making technical decisions. Use when the user invokes /skipper or /skipper join, wants one session to coordinate other sessions, routes questions through a captain, or requests a cross-session status overview. Detects session-peers as an optional transport and uses observation-only mode when messaging is unavailable.
+description: Coordinates concurrent agent sessions across repositories through a user-authorized skipper and enrolled crew. Tracks task owners, buddies, blockers, questions, shared-resource holds, handovers, fleet away grants, and Claude lead context without reading code or making technical decisions. Use when the user invokes /skipper, /skipper join, /skipper away or /skipper back, wants one session to coordinate other sessions, routes questions through a captain, or requests a cross-session status overview. Detects session-peers as an optional transport and uses observation-only mode when messaging is unavailable.
 ---
 
 # skipper
@@ -8,6 +8,8 @@ description: Coordinates concurrent agent sessions across repositories through a
 Use one accountable lead per task; keep its buddy as reviewer. Run
 `<this skill's directory>/scripts/skipper` with Python 3.9+ on macOS/Linux.
 Read [references/cli.md](references/cli.md) for commands and state contracts.
+Read [references/fleet-away.md](references/fleet-away.md) for `/skipper away [until WHEN] [SCOPE]`
+and `/skipper back [LEAD]`. Coordinate fleet grants; leave local execution to `away-mode`.
 
 ## Crew mode: `/skipper join [name]`
 
