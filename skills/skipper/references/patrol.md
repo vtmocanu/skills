@@ -3,7 +3,7 @@
 Enable patrol only while coordinating and only for repositories with an optional
 Patrol profile section. Use its positive interval and listed operational checks.
 Other bullets, such as Scope, narrow those checks; they add no checks or authority.
-Without that section, arm no timer. Ask about incomplete or invalid configuration.
+Without that section, arm no patrol timer. Ask about incomplete or invalid configuration.
 
 ## Session timer
 
@@ -26,6 +26,9 @@ Without that section, arm no timer. Ask about incomplete or invalid configuratio
    with your own UUID; reuse its discovery, context readings and new/vanished diff.
 2. Check new, vanished and unverified-missing sessions. Preserve unknown liveness
    as unknown; request enrollment rather than asserting authority over a new lead.
+   Also check confirmed missing bound buddies without an applicable per-lead user
+   waiver. Repeat these user blockers first on every round, naming held work,
+   even unchanged. Confirm with the lead; blank metadata or discovery gaps are unknown.
 3. Check Claude leads against their profile's handover threshold. Recommend a
    safe checkpoint on a new crossing; leave Codex buddies to compact.
 4. Compare successive Claude readings only when model, window, estimate provenance
@@ -43,7 +46,8 @@ Without that section, arm no timer. Ask about incomplete or invalid configuratio
    diagnosis and remediation with that pair.
 
 Track finding identity, evidence freshness, disposition and owner in private
-notes alongside the ledger. Report new, changed and resolved findings once; keep
-unchanged findings quiet. Re-alert on a material change, not on every timer tick.
-A quiet round produces no user-facing report. Report loss of observation or timer
+notes alongside the ledger. Except for recurring missing-buddy blockers, report
+new, changed and resolved findings once; keep unchanged findings quiet. Re-alert
+on a material change, not on every timer tick. A round with no changed findings
+and no missing-buddy blockers produces no user-facing report. Report loss of observation or timer
 coverage once and its recovery once; do not call an unreadable check clean.
