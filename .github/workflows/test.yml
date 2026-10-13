@@ -63,3 +63,5 @@ jobs:
         run: |
           python3 -c 'import sys; print(sys.version)'
           python3 skills/session-peers/scripts/test_peers.py
+      - name: Test skills/skipper/scripts/skipper
+        run: python3 skills/skipper/scripts/test_skipper.py

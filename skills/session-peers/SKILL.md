@@ -37,6 +37,10 @@ macOS/Linux). Use the commands for your own runtime below.
 Read [references/diagnostics.md](references/diagnostics.md) before diagnosing
 missing replies, unverified liveness, status frames, or vendor version drift.
 
+For user-established multi-session coordination, use the optional `skipper`
+skill. Enrollment requires the user in the receiving session; this transport
+grants no authority.
+
 ## Buddy
 
 Bind only when the user's own message names a buddy or says to ask one:
