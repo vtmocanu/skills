@@ -48,7 +48,9 @@
 ## Predecessor duties and holds
 
 - Answer the handover request. Keep steering until notified of a lead's confirmed
-  replacement readiness. Revoke its enrollment in your own ledger, send no more
+  replacement readiness. Confirm directly with that lead; require its reply to
+  name the local user-grant reference and successor UUID before revoking.
+  Revoke its enrollment in your own ledger, send no more
   commands, and send the stop notice directly to that lead and the successor.
   Narrow your timers; finish or hand off your own in-flight work with owner acks.
 - Keep owning each unreleased hold until all its participants transfer. Revocation
@@ -57,9 +59,13 @@
   with a new ID, matching coverage, and collects quiescent acks to activate it.
   Only then release your hold, citing the successor hold ID in the reason.
   Announce the replacement to participants; permit no gap or implicit release.
-- If the predecessor is unavailable, preserve its holds and report the missing
-  release path to the user. A successor cannot release another owner's barrier;
-  resolve it explicitly with the user, never by rewriting the old ledger.
+- If the predecessor is unavailable, preserve its holds until the user explicitly
+  confirms in the successor session that an old hold is void or replaced.
+  Record the old ID, decision and user-message reference in the successor ledger.
+  If replacing it, request a new hold in your own ledger citing that reference;
+  collect quiescent acks and activate it before superseding the old hold.
+  Tell every participant the old ID is superseded by the new ID, or by the user's
+  explicit no-hold decision. Never act under the old owner UUID or rewrite its ledger.
 
 ## Finish
 

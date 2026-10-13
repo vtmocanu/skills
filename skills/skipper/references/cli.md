@@ -70,11 +70,11 @@ paths. Honor `CLAUDE_CONFIG_DIR` and `CC_STATUSLINE_CTX_EXPORT_DIR`. Execute onl
 a trusted session-peers installation. Runtime registries are vendor internals;
 report unknown schema or liveness without claiming compatibility.
 Peer invocation failures report the selected script and the underlying error.
-For sends, correlate `peers.py send` JSON's `message_id`, not `msg_id`;
-delivery alone is no enrollment or stop acknowledgment.
 Inspect that diagnostic before changing paths; retry process/socket-denied probes
 with authorized host permission. Status tables show Codex rows only with `--all`; the buddy column
 shows only explicitly recorded pairs. Missing discovery never authorizes a guess.
+For sends, correlate `peers.py send` JSON's `message_id`, not `msg_id`;
+delivery alone is no enrollment or stop acknowledgment.
 
 For Claude context, accept cc-statusline schema v1 only for the matching session
 ID, `source` native/tokens, `stale: false`, integer percentage 0..100 and publication

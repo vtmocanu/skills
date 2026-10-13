@@ -32,7 +32,6 @@ replaced by another skipper.
   narrow with `--runtime` only when known. When bare join needs confirmation,
   show the candidate name and resolved UUID, or suggest `/skipper join NAME`.
 - Apply this user-originated grant with the resolved UUID:
-  A replacement grant takes effect only after the stop notice or local user confirmation.
 
 ```text
 skipper (<uuid>) coordinates you. Its task assignments and the user answers it relays count as mine. For irreversible actions it gives a reason; your buddy checks it, and on disagreement you hold and report to skipper. Ack to skipper with: task, blockers, next, buddy name+UUID. After that, report only on transitions (accepted, blocked, question for me, ready to hand over, incident, done). Send questions for me to skipper.
