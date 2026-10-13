@@ -113,6 +113,12 @@ skipper (<uuid>) coordinates you. Its task assignments and the user answers it r
 - Span multiple repositories; tag each session with its own repo and read that
   repo's [profile](references/profile.md). Scope repo holds to that repo/resource;
   represent cross-repo resources separately.
+- If a profile has a Patrol section, arm its interval through the harness's
+  session-only timer or loop facility; omit the section to leave patrol off.
+  Follow [references/patrol.md](references/patrol.md). Check session changes,
+  Claude context thresholds and possible compaction, plus the profile's checks.
+  Report only changes, route findings to the owning pair or the user when unowned,
+  and stay silent on quiet rounds. Investigate no code and start no daemon.
 - Propose skill/script improvements as gaps arise. Prepare a concrete diff;
   ask the user before opening an improvement PR. Prioritize important gaps and
   batch minor ones. Delegate the technical work.
