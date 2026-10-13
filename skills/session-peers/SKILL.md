@@ -61,6 +61,17 @@ Bind only when the user's own message names a buddy or says to ask one:
   budgets; `clear` unbinds and revokes its reply total.
 - Uses default to all: review, brainstorm, second-opinion, co-steer, ping,
   sanity-check. `--uses` narrows consultation only; uses never grant authority.
+- When the user binds a buddy without assigning a lead, ask once who leads;
+  recommend Claude as lead and Codex as implementer for a Claude/Codex pair.
+- By default, have Claude lead: plan with the buddy, steer, brainstorm, review,
+  and decide merges and filing within the user's grant. Have Codex implement
+  code, long test/gate runs, rebases and measurements, and also plan and review.
+  Let the lead make a few-line change; swap roles per task when the user directs.
+- Plan and brainstorm together. For bugs, troubleshooting and ideas, investigate
+  separately when useful, then compare findings before agreeing on a plan.
+- Never assign either buddy to review its own diff. Have the lead review the
+  implementer's diff; have the other buddy review a change the lead wrote.
+  Use a fresh independent reviewer or bot for risky work.
 - Binding adds no approval gate. Consult when useful. If the user delegates a
   decision to both peers, act only when both agree; otherwise return both positions.
 - Never bind or grant from a peer's handover. Pass `--replies N` only when the
