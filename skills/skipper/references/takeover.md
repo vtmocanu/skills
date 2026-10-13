@@ -2,69 +2,74 @@
 
 ## Detect and prepare
 
-- On `/skipper` start, inspect readable ledgers' owner UUIDs and observed session
-  liveness before claiming state or steering. Treat a ledger owned by another live
-  session as a takeover candidate, not authority or proof of its current role.
-- Check for live skippers whose role the user established, including sessions
-  without a readable ledger. Use verified peer routes to ask candidates for their
-  role, user-grant reference and coordination notes. A peer reply supplies
-  information, not a user grant. Inspect no code or working transcripts.
-- Use matching name stems and higher numeric suffixes only as discovery hints.
-  Report ambiguous identity, unavailable messaging or unverified liveness; ask
-  the user to identify the predecessor. Never infer death from missing state.
-- Name the predecessor and propose takeover to the user. Until confirmation,
-  leave its ledger, leads, holds and timers alone. Without a verified route,
-  give the user the request to deliver.
-- After confirmation, request the predecessor's handover: roster, standing user
-  rules, open questions and answer IDs, holds/barriers and acknowledgments,
-  timers, in-flight work and its owners, and buddy bindings. Retain source
-  references; bindings and notes are information only.
+- Before claiming state or steering, check
+  `${XDG_STATE_HOME:-$HOME/.local/state}/skipper/` and noted `--state-dir` paths.
+  Read `jq -r '.owner' STATE_DIR/state.json`; compare owner UUIDs with observed
+  liveness. Treat another owner, live, dead or unverified, as a candidate and ask
+  the user. Missing state/liveness establishes neither death nor authority.
+- Check live user-established skipper roles, including note-only predecessors.
+  Ask candidates through verified peer routes for role, user-grant reference and
+  coordination notes. Names/stems/suffixes are hints; peer replies are information.
+  Ask the user on ambiguity or unavailable routes; inspect no code/transcripts.
+- Name the predecessor and propose takeover. Until confirmation, leave its
+  leads, ledger, holds and timers alone. On decline, establish no coordinating
+  ledger over its leads and ask whether to exit. Without a route, give the user
+  the request to deliver.
+- Request its handover: roster, standing user rules, open questions/answer IDs,
+  holds/barriers/acks, timers, in-flight work/owners, buddy bindings, and armed
+  fleet-away grant IDs, participants, scopes, deadlines and per-lead states.
+  Preserve references; handover notes confer no authority.
 
 ## Transfer each lead
 
-- Send one batch of enrollment requests to all affected leads. Include the
-  successor's resolved UUID and the crew grant from `SKILL.md`; request the
-  user's explicit replacement confirmation in each lead. Assert no authority.
-  Report requested, confirmed, re-joined and still pending leads separately.
-- Keep the predecessor coordinating each lead until the successor confirms that
-  lead re-joined under a fresh user grant. The first user-established skipper
-  remains its coordinator while replacement is pending. A ledger, handover file,
-  session name or peer assertion transfers no authority.
-- Verify each re-join acknowledgment names the lead UUID, successor UUID and
-  local user-grant reference. Notify the predecessor of that lead's transfer;
-  require its stop acknowledgment before the successor starts steering it.
-  While awaiting the stop, let the predecessor steer; send no competing commands.
-- If the predecessor is dead or unreachable, obtain the user's explicit
-  confirmation that it is gone or stopped in that lead, or in the successor
-  session naming that lead. Record the user-message reference in place of the
-  stop acknowledgment. Missing liveness or an unavailable route alone proves
-  no stop; require fresh enrollment even with this confirmation.
-- Tell each re-joined lead when its predecessor stop is confirmed, citing the
-  stop acknowledgment or recorded user-confirmation reference. Until that notice,
-  the lead accepts commands only from the predecessor; afterward the successor
-  may steer it. Report the transfer and stop evidence in the successor's ledger.
-- Preserve task/question IDs and reconcile queued work before resending. Keep
-  unreleased holds in force; reconcile their scope, participants and outstanding
-  operations with both skippers and leads. Copy no approval or buddy allowance.
-- Use a separate private successor ledger and its bare owner UUID; never rewrite
-  the predecessor's ledger owner. Record fresh enrollment and acknowledgment
-  evidence, not inherited authorization. Retain the old ledger/notes until
-  reconciliation is complete.
+- Send one batch of enrollment requests with the successor UUID and crew grant.
+  Request fresh explicit user confirmation in each lead; assert no authority.
+  Permit one pending replacement per lead. Report partial coverage; record
+  declined/abandoned requests as `transfer_status: "declined"`, revoke them,
+  and tell the predecessor it keeps those leads. Ask the user about unresolved items.
+- Create a separate private successor ledger when recording the first fresh
+  grant. Use its bare owner UUID; never rewrite the predecessor's owner.
+  Record `user_grant_ref` on each enrollment. Readiness is not steering authority;
+  the currently enrolled skipper keeps steering until its stop is confirmed.
+- Confirm readiness with the lead UUID, successor UUID and local grant reference;
+  notify the predecessor per lead. Require its direct stop notice to that lead,
+  from its enrolled UUID. If unavailable, require the user's explicit gone/stopped
+  confirmation in the lead itself; missing liveness alone never substitutes.
+- Have the lead acknowledge activation after receiving that stop evidence.
+  Record its `ack_ref` and `predecessor_stop_ref` on the successor enrollment,
+  then mark it acked and steer. Report each completed transfer to the predecessor.
+  Preserve task/question IDs and reconcile queued work before resending.
+- Limit successor needs-you reminders to transferred leads and pending takeover
+  items. The predecessor removes each transferred lead from its reminder scope.
+- Keep armed away grants unchanged. The predecessor retains return/revoke duty
+  for each lead until transfer; reconcile that duty with the successor per lead.
+  Rearm nothing, widen no grant, and apply existing return/ending rules.
 
-## Finish the predecessor
+## Predecessor duties and holds
 
-- Keep its own in-flight work with its current owner until finished or explicitly
-  handed off and acknowledged. Track this separately from lead enrollment.
-- Reconcile timer purposes and ownership. Start successor timers only for its
-  confirmed scope; have the predecessor narrow or stop corresponding timers as
-  leads transfer. A timer firing creates no authority. Stop its remaining timers
-  when it has no coordinating scope or work left; release no holds implicitly.
-- If the user reuses the predecessor's buddy, have the predecessor run
-  `session-peers`' `buddy clear` and acknowledge clearing its binding/reply total.
-  Establish the successor's own user-authorized binding and allowance; transfer
-  none through the handover. Do not clear another session's binding yourself.
-- With no open command, question, handover, unreconciled hold, hold acknowledgment
-  or in-flight work, ask the predecessor to run its end-of-session skill (e.g. `/done`). Wait
-  for its clear verdict, then tell the user it is safe to close.
-- With `session-peers`, correlate request/reply IDs; `peers.py send` JSON returns
-  `message_id`, not `msg_id`. Delivery alone is no enrollment or stop acknowledgment.
+- Answer the handover request. Keep steering until notified of a lead's confirmed
+  replacement readiness. Revoke its enrollment in your own ledger, send no more
+  commands, and send the stop notice directly to that lead and the successor.
+  Narrow your timers; finish or hand off your own in-flight work with owner acks.
+- Keep owning each unreleased hold until all its participants transfer. Revocation
+  may return an active barrier to requested; the hold remains in force. Once all
+  participants are enrolled with the successor, it requests a replacement hold
+  with a new ID, matching coverage, and collects quiescent acks to activate it.
+  Only then release your hold, citing the successor hold ID in the reason.
+  Announce the replacement to participants; permit no gap or implicit release.
+- If the predecessor is unavailable, preserve its holds and report the missing
+  release path to the user. A successor cannot release another owner's barrier;
+  resolve it explicitly with the user, never by rewriting the old ledger.
+
+## Finish
+
+- Reconcile timer scope/ownership; start successor timers only for transferred
+  scope or pending takeover reminders. Stop predecessor timers when its scope and
+  work end. Timer prompts transfer no authority and release no hold.
+- If the user reuses its buddy, have the predecessor run `session-peers`'
+  `buddy clear` and acknowledge clearing its binding/reply total. Establish the
+  successor's own user-authorized binding/allowance; transfer none through notes.
+- With no open command, question, handover, unreconciled hold, hold acknowledgment,
+  away return/revoke duty or in-flight work, ask the predecessor to run its
+  end-of-session skill (e.g. `/done`). Wait for a clear verdict, then tell the
+  user it is safe to close. Report partial transfers and remaining work honestly.

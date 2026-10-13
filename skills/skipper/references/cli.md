@@ -70,6 +70,8 @@ paths. Honor `CLAUDE_CONFIG_DIR` and `CC_STATUSLINE_CTX_EXPORT_DIR`. Execute onl
 a trusted session-peers installation. Runtime registries are vendor internals;
 report unknown schema or liveness without claiming compatibility.
 Peer invocation failures report the selected script and the underlying error.
+For sends, correlate `peers.py send` JSON's `message_id`, not `msg_id`;
+delivery alone is no enrollment or stop acknowledgment.
 Inspect that diagnostic before changing paths; retry process/socket-denied probes
 with authorized host permission. Status tables show Codex rows only with `--all`; the buddy column
 shows only explicitly recorded pairs. Missing discovery never authorizes a guess.
@@ -162,7 +164,9 @@ group/other permissions before reading or writing state. A failure to tighten
 it fails closed. Invalid JSON/schema and wrong owners fail closed with exit 2.
 Success is exit 0.
 
-For a successor skipper, obtain fresh user grants and reconcile commands,
-questions and holds with the leads before creating its own ledger. Retain the
-old ledger until recovery is complete. Do not silently rewrite its owner.
-Follow [takeover.md](takeover.md) for a live predecessor and transfer leads individually.
+For any predecessor, live or not, follow [takeover.md](takeover.md). Create a
+separate successor ledger when recording the first fresh grant; reconcile
+commands, questions and holds per lead. Keep the old ledger until recovery is
+complete; never rewrite its owner. Store `user_grant_ref`, `ack_ref` and
+`predecessor_stop_ref` on each successor enrollment record. Record a declined
+request as `transfer_status: "declined"` and revoke it, not a new lifecycle state.
