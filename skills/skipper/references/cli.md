@@ -69,7 +69,7 @@ a trusted session-peers installation. Runtime registries are vendor internals;
 report unknown schema or liveness without claiming compatibility.
 Peer invocation failures report the selected script and the underlying error.
 Inspect that diagnostic before changing paths; retry process/socket-denied probes
-with authorized host permission. Codex rows require `--all`; the buddy column
+with authorized host permission. Status tables show Codex rows only with `--all`; the buddy column
 shows only explicitly recorded pairs. Missing discovery never authorizes a guess.
 
 For Claude context, accept cc-statusline schema v1 only for the matching session
@@ -114,6 +114,8 @@ lead must establish that boundary. Session targets use `claude:UUID` or `codex:U
 A successor may record `state: "pending-handover"` with no task yet. This is an
 acknowledgment of enrollment/readiness, not task ownership. Require a real task
 when recording an assigned-work state; complete the normal handover gates.
+Tasks in session reports are display only, never ownership. A pending-handover
+update refuses a supplied task and drops any task stored on the prior report.
 
 Use a stable task ID in `task`; keep assignment detail in an optional `prompt`.
 New commands require acknowledged enrollment and one accountable lead per active

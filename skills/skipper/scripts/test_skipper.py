@@ -404,6 +404,28 @@ class DiscoveryTests(FixtureCase):
 
 
 class LedgerTests(FixtureCase):
+    def test_pending_handover_clears_task_bearing_report_for_table(self):
+        sk.record(self.state, {"kind": "session", "id": "report", "target": LEAD,
+                              "state": "running", "task": "old-task", "report_ref": "work-report"}, NOW)
+        updated = sk.record(self.state, {"id": "report", "state": "pending-handover"}, NOW)
+        self.assertNotIn("task", updated)
+        snapshot = {"sessions": {LEAD: {"id": LEAD, "name": "lead-a", "runtime": "claude",
+                    "repo": {"root": "/example/repo-a", "remote": None}, "state": "idle",
+                    "liveness": "live", "context": {"pct": None, "quality": "unknown"}}},
+                    "new": [], "vanished": [], "unverified_missing": [], "warnings": []}
+        table = sk.status(snapshot, self.state)
+        self.assertIn("awaiting handover", table)
+        self.assertNotIn("old-task", table)
+
+    def test_pending_handover_refuses_supplied_tasks_without_mutation(self):
+        sk.record(self.state, {"kind": "session", "id": "report", "target": LEAD,
+                              "state": "running", "task": "old-task", "report_ref": "work-report"}, NOW)
+        before = json.dumps(self.state, sort_keys=True)
+        for task in ("new-task", None, ""):
+            with self.subTest(task=task), self.assertRaisesRegex(ValueError, "cannot include a task"):
+                sk.record(self.state, {"id": "report", "state": "pending-handover", "task": task}, NOW)
+        self.assertEqual(json.dumps(self.state, sort_keys=True), before)
+
     def test_pending_handover_ack_requires_no_task_and_grants_no_ownership(self):
         report = sk.record(self.state, {"kind": "session", "id": "ready", "target": LEAD,
                                        "state": "pending-handover", "report_ref": "join-ack"}, NOW)

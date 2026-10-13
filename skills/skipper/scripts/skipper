@@ -499,7 +499,11 @@ def record(state, item, now):
                 raise ValueError("handover predecessor does not own the task")
     else:
         required(merged, ["target", "state", "report_ref"])
-        if merged["state"] != "pending-handover":
+        if merged["state"] == "pending-handover":
+            if "task" in item:
+                raise ValueError("pending-handover cannot include a task")
+            merged.pop("task", None)
+        else:
             required(merged, ["task"])
     merged["updated_at"] = now
     state["records"][key] = merged
