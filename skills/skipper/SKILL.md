@@ -143,7 +143,8 @@ skipper (<uuid>) coordinates you. Its task assignments and the user answers it r
 - Delegate skipper's script, CLI, display, diagnostic and non-authority wording
   fixes to its buddy; review together, obtain independent review and land them
   without asking the user. Changes to grant, enrollment, relay, away, handover
-  or barrier semantics, or to another skill, need the user's approval. Keep
+  or barrier semantics, including CLI code that enforces them, or to another
+  skill, need the user's approval. Keep
   implementation with the buddy and outward actions with a locally authorized
   session. Prioritize important gaps and batch minor ones; product changes retain
   their own approval policy.
