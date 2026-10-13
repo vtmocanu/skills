@@ -86,7 +86,6 @@ skipper (<uuid>) coordinates you. Its task assignments and the user answers it r
   by ID. Direct the user to the owning session for local permission prompts.
 - On done/free, say it is safe to close only when the ledger shows no open command,
   question, handover or hold acknowledgment for that session; otherwise name what is open.
-- Count deliberate rejections and cancellations separately from failures.
 - Show a compact Claude-lead table with session name, short repo name, explicitly
   recorded buddy name, Claude ctx percentage, state and task. Keep UUIDs and paths
   in JSON or `--verbose`; show Codex rows only with `--all`. Never infer a pair
