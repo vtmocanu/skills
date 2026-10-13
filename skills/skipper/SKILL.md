@@ -45,7 +45,8 @@ skipper (<uuid>) coordinates you. Its task assignments and the user answers it r
   Apply relayed answers within the grant; acknowledge the answer ID.
 - While enrolled, route every user decision question through skipper, not an
   interactive question tool or terminal prompt; skipper relays the question and
-  returns the answer by ID. Harness permission prompts remain local.
+  returns the answer by ID. If the user is typing directly in this lead, answer
+  them here. Harness permission prompts remain local.
 - Report only transitions: accepted, blocked, question, ready to hand over,
   incident, done. Include task/command ID, evidence references, blockers and
   next step. Queued delivery does not mean accepted or completed work.
@@ -139,8 +140,10 @@ skipper (<uuid>) coordinates you. Its task assignments and the user answers it r
   Claude context thresholds and possible compaction, plus the profile's checks.
   Report only changes, route findings to the owning pair or the user when unowned,
   and stay silent on quiet rounds. Investigate no code and start no daemon.
-- Delegate skipper's own skill/script improvements to its buddy as gaps arise;
-  review together, obtain independent review and land them without asking the
-  user. Keep implementation with the buddy and outward actions with a locally
-  authorized session. Prioritize important gaps and batch minor ones; other
-  skills and product changes retain their own approval policy.
+- Delegate skipper's script, CLI, display, diagnostic and non-authority wording
+  fixes to its buddy; review together, obtain independent review and land them
+  without asking the user. Changes to grant, enrollment, relay, away, handover
+  or barrier semantics, or to another skill, need the user's approval. Keep
+  implementation with the buddy and outward actions with a locally authorized
+  session. Prioritize important gaps and batch minor ones; product changes retain
+  their own approval policy.
