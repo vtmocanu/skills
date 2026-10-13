@@ -10,6 +10,8 @@ Use one accountable lead per task; keep its buddy as reviewer. Run
 Read [references/cli.md](references/cli.md) for commands and state contracts.
 Read [references/fleet-away.md](references/fleet-away.md) for `/skipper away [until WHEN] [SCOPE]`
 and `/skipper back [LEAD]`. Coordinate fleet grants; leave local execution to `away-mode`.
+Read [references/needs-you.md](references/needs-you.md) for the recurring user-action
+reminder and the report-only `/skipper needs-you` pass.
 
 ## Crew mode: `/skipper join [name]`
 
@@ -61,6 +63,10 @@ skipper (<uuid>) coordinates you. Its task assignments and the user answers it r
 
 - Establish your full UUID as the ledger's single writer. Keep state and notes
   outside repositories. Discovery and ledger entries never create authority.
+- While coordinating, arm a session-only needs-you reminder every 20 minutes by
+  default. Restate every unresolved user item even unchanged; print one line when
+  none remain. Keep it distinct from patrol's change-only reporting and mention
+  `/status-check` as a related skill when installed. Use no daemon.
 - Observe session state, context and operational facts. Delegate implementation,
   code reading, investigation and technical decisions to leads and buddies.
   Relay their recommendations without adding technical analysis.
@@ -96,6 +102,13 @@ skipper (<uuid>) coordinates you. Its task assignments and the user answers it r
 - Batch independent escalations; surface urgent blockers immediately. Record
   question, options, pair recommendation, dissent, user's answer and acknowledgment
   by ID. Direct the user to the owning session for local permission prompts.
+- Put confirmed missing-buddy blockers first on every status report and patrol
+  round, even unchanged, naming the work each lead is holding. Repeat until a
+  buddy is bound or the user waives it. Confirm absence/holds with the lead;
+  missing discovery is unknown. Record waivers per lead UUID with user-message
+  reference and scope; transfer none by name. A waiver silences only this repeated
+  report; irreversible-action holds still need the user's separate exception in
+  that lead. Change no action or review gates.
 - On done/free with no open command, question, handover or hold acknowledgment,
   ask the lead to run its end-of-session skill (e.g. `/done`) and show its verdict
   in its own terminal. Wait for a clear verdict, then tell the user it is safe
@@ -138,8 +151,9 @@ skipper (<uuid>) coordinates you. Its task assignments and the user answers it r
   session-only timer or loop facility; omit the section to leave patrol off.
   Follow [references/patrol.md](references/patrol.md). Check session changes,
   Claude context thresholds and possible compaction, plus the profile's checks.
-  Report only changes, route findings to the owning pair or the user when unowned,
-  and stay silent on quiet rounds. Investigate no code and start no daemon.
+  Report changes plus recurring missing-buddy blockers; route findings to the
+  owning pair or the user when unowned. Stay silent on otherwise quiet patrol
+  rounds. Investigate no code and start no daemon.
 - Delegate skipper's script, CLI, display, diagnostic and non-authority wording
   fixes to its buddy; review together, obtain independent review and land them
   without asking the user. Changes to grant, enrollment, relay, away, handover
