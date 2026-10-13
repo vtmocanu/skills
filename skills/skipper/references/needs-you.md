@@ -19,7 +19,9 @@ even previously announced or after the lead finished its work:
 
 Put missing-buddy blockers first. Record explicit waivers per lead UUID with the
 user-message reference and scope; infer none from absent metadata and transfer
-none to a successor. Unknown binding or held work stays unverified. Make no
+none to a successor. Unknown binding or held work stays unverified. A waiver
+silences only the repeated missing-buddy report. Irreversible-action holds still
+need the user's separate exception in that lead. Make no
 technical decision, repair or new grant during this report. Repeat unresolved
 items, not resolved decisions; name the action still needed and invent no holds.
 

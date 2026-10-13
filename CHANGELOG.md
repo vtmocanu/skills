@@ -13,7 +13,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Changed
 
 - `skipper`: repeat confirmed missing-buddy blockers until resolved or explicitly waived, and keep a separate session-only needs-you reminder for unresolved user actions.
-
 - `session-peers`: ask once about unassigned buddy leadership, recommend Claude leading and Codex implementing, keep planning and investigation shared, and require review by someone other than the diff author.
 - `skipper`: resolve live session identities without ambiguous name matches, document observation JSON, retain peer-discovery failure diagnostics, and acknowledge successors awaiting handover without inventing tasks.
 - `skipper` and `away-mode`: coordinate locally user-enrolled leads through fleet away preparation, partial activation, scoped revocation and consolidated return reports while preserving local grants and holds.

@@ -49,5 +49,6 @@ Track finding identity, evidence freshness, disposition and owner in private
 notes alongside the ledger. Except for recurring missing-buddy blockers, report
 new, changed and resolved findings once; keep unchanged findings quiet. Re-alert
 on a material change, not on every timer tick. A round with no changed findings
-and no missing-buddy blockers produces no user-facing report. Report loss of observation or timer
-coverage once and its recovery once; do not call an unreadable check clean.
+and no missing-buddy blockers produces no user-facing report. Report loss of
+observation or timer coverage once and its recovery once; do not call an
+unreadable check clean.

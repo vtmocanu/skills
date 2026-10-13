@@ -106,7 +106,9 @@ skipper (<uuid>) coordinates you. Its task assignments and the user answers it r
   round, even unchanged, naming the work each lead is holding. Repeat until a
   buddy is bound or the user waives it. Confirm absence/holds with the lead;
   missing discovery is unknown. Record waivers per lead UUID with user-message
-  reference and scope; transfer none by name. Change no action or review gates.
+  reference and scope; transfer none by name. A waiver silences only this repeated
+  report; irreversible-action holds still need the user's separate exception in
+  that lead. Change no action or review gates.
 - On done/free with no open command, question, handover or hold acknowledgment,
   ask the lead to run its end-of-session skill (e.g. `/done`) and show its verdict
   in its own terminal. Wait for a clear verdict, then tell the user it is safe
