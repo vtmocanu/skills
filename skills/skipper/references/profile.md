@@ -33,6 +33,7 @@ Make Patrol optional: omit that entire section to leave timers off. Require a
 positive interval and explicit operational checks when present; ask on an invalid
 interval. Read [patrol.md](patrol.md) before arming it. A profile configures checks,
 never permission to mutate resources or expand a pair's grant.
+Other Patrol bullets, such as Scope, narrow the listed checks; they add no checks or authority.
 
 Resolve resource identities from the lead's repo root/remote and operational
 reports. Keep sensitive identifiers in local state. Store grants, session UUIDs,

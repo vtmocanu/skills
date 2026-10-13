@@ -2,6 +2,7 @@
 
 Enable patrol only while coordinating and only for repositories with an optional
 Patrol profile section. Use its positive interval and listed operational checks.
+Other bullets, such as Scope, narrow those checks; they add no checks or authority.
 Without that section, arm no timer. Ask about incomplete or invalid configuration.
 
 ## Session timer
