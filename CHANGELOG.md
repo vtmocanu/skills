@@ -20,6 +20,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `skipper`: show overfull context estimates as `>100%`, restrict revoked-command updates to outcomes or holds, and make saved status refreshes and delegation boundaries explicit.
 - `away-mode`: act on a peer's incident or fix notice when it arrives instead of waiting for the next tick.
 - `session-peers`: write message files with a file-writing tool or a quoted heredoc, since an unquoted heredoc executes the body's command substitutions; delegated work keeps a worker-facing state file that the worker re-reads after a context compaction.
+- `agent-team`: coder (v19), reviewer (v23) and tester (v20) treat slow integration and end-to-end scenarios, and the fakes they run against, as consumers of a changed state, reason string, ordering or external call: search them even when the diff touches none, update stale expectations and fakes in the same change, run their cheap hermetic checks, and name the affected scenarios left unrun.
 - `agent-team`: reviewer (v22) and tester (v19) request CI timing evidence for real-time waits or timeouts, large test matrices, new CI jobs, and measurable runtime growth. Ordinary added unit tests alone do not trigger it. The guidance stays generic, prefers event-driven readiness and test-only timer hooks, and preserves production timers, coverage and failure semantics.
 
 ### Fixed

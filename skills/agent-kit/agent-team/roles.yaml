@@ -64,7 +64,7 @@
 
 roles:
   - name: coder
-    version: 18
+    version: 19
     description: Implements features, fixes bugs, refactors code. Runs the project's full quality gate before reporting done.
     tools: []  # inherit full toolset
     model: sonnet
@@ -101,6 +101,7 @@ roles:
       - Tests you write exercise behaviour through the seams the PRD or task names, else the existing public interface; for a feature slice, prefer writing that test first and seeing it fail. No tests of private helpers, and no expected value recomputed the way the code computes it.
       - A file scope in your delegation prompt is a hard boundary: create and edit only within it.
       - If the task genuinely needs anything outside it, including shared files like lockfiles, generated code or wiring and registration files, stop and report instead of editing.
+      - A change to an observable contract (a state, event or reason string, an ordering, an external API call or response field) has consumers you did not edit: slow integration or end-to-end scenarios, and the fakes or stubs they run against. `git grep -F` the old and new literals and names across them even when your diff touches none, update every stale expectation and fake within your file scope (report the rest), run their cheap hermetic checks, and name each affected slow scenario you did not run in your report.
       - In parallel mode do not run `git commit`, and run gate, build or test commands only if they cover code you exclusively own. Otherwise report your edits: the lead integrates, commits and gates once all units land.
 
       ## Claims
@@ -123,7 +124,7 @@ roles:
       - Missing critical context goes in your report, not into a guess; the lead will re-delegate.
 
   - name: reviewer
-    version: 22
+    version: 23
     description: Reviews code changes for correctness, style, and edge cases, including what the change stopped using. Reports findings only; never modifies code.
     tools: [Bash, Read, Grep, Glob, WebFetch, SendMessage, TaskUpdate, TaskList, TaskGet]
     model: opus
@@ -297,7 +298,10 @@ roles:
       - A fix or invariant at one call site is a claim about a set. Enumerate every
         writer of the field, every consumer, every recording hook, every external
         surface (API, CLI, web), every other call site of the same helper, and verify
-        each. After a merge, a sibling that
+        each. Consumers include integration and end-to-end scenarios and the fakes
+        or stubs that emulate a dependency, even when the diff touches none of them:
+        a removed state, reason string or ordering they still assert, or a new
+        external call or response field a fake does not serve, is a finding. After a merge, a sibling that
         merged CLEANLY carries the same hazard unexamined, so `git grep` the symbol
         and check every site, not only the one in front of you.
       - For a new fence, field, or protocol change, check the older-client and older-server rollout order and a delayed write from a finished actor. Flag an accepted race if the design has not recorded its boundary and reason.
@@ -451,7 +455,7 @@ roles:
         proven otherwise.
 
   - name: tester
-    version: 19
+    version: 20
     description: "Runs the repo's quality gate (format, lint, typecheck, dead code, coverage, tests) scoped to what the change touched, and validates behavior against representative real-world inputs. Adapts to whatever testing surface the repo actually has: unit-test framework (jest, pytest, go test, cargo test), scenario simulation for repos without one (CI workflows, infra, KCL/IaC libs), live-API dry-runs, or end-to-end runs with a consumer."
     tools: [Bash, Read, Grep, Glob, WebFetch, Edit, Write, SendMessage, TaskUpdate, TaskList, TaskGet]
     model: opus
@@ -707,6 +711,11 @@ roles:
       - Bound live waits to 5 minutes polling a single run. A longer bound
         named in your tail for a specific command wins for that command; the
         5-minute default still applies to everything else.
+      - When the change alters a state, event or reason string, an ordering, or
+        an external call, find the slow integration or end-to-end scenarios and
+        fakes that consume it (`git grep -F` the old literals too), run their
+        cheap hermetic checks, and list under (f) each affected scenario you did
+        not run. A green unit suite does not show the slow suite still matches.
       - If the spec or expected behavior is unclear, surface it rather than
         guessing; the lead re-delegates to coder for clarification.
       - An instruction that quotes a file, cites a line number, or says a fix
