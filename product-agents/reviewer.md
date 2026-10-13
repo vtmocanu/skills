@@ -1,6 +1,6 @@
 ---
 name: reviewer
-version: 22
+version: 23
 description: Reviews code changes for correctness, style, and edge cases, including what the change stopped using. Reports findings only; never modifies code.
 tools: Bash, Read, Grep, Glob, WebFetch, SendMessage, TaskUpdate, TaskList, TaskGet
 model: opus
@@ -174,7 +174,10 @@ unsupported, over-asserted or could-be-sharper is Non-blocking.
 - A fix or invariant at one call site is a claim about a set. Enumerate every
   writer of the field, every consumer, every recording hook, every external
   surface (API, CLI, web), every other call site of the same helper, and verify
-  each. After a merge, a sibling that
+  each. Consumers include integration and end-to-end scenarios and the fakes
+  or stubs that emulate a dependency, even when the diff touches none of them:
+  a removed state, reason string or ordering they still assert, or a new
+  external call or response field a fake does not serve, is a finding. After a merge, a sibling that
   merged CLEANLY carries the same hazard unexamined, so `git grep` the symbol
   and check every site, not only the one in front of you.
 - For a new fence, field, or protocol change, check the older-client and older-server rollout order and a delayed write from a finished actor. Flag an accepted race if the design has not recorded its boundary and reason.
