@@ -108,7 +108,7 @@ class ContextTests(FixtureCase):
         configured = self.ctx(default=600000)
         self.assertEqual((configured["pct"], configured["window_source"]), (25, "configured"))
         builtin = self.ctx()
-        self.assertEqual((builtin["pct"], builtin["window_source"]), (15, "builtin"))
+        self.assertEqual((builtin["pct"], builtin["window_source"], builtin["window"]), (75, "builtin", 200000))
 
     def test_learning_uses_serving_model_and_24_hour_boundary(self):
         self.transcript()
@@ -133,16 +133,24 @@ class ContextTests(FixtureCase):
             stream.write(json.dumps({"type": "assistant", "timestamp": "2028-01-01T00:00:00Z",
                                      "message": {"model": "<synthetic>", "usage": {}}}) + "\n")
             stream.write('{"type":')
-        self.assertEqual(self.ctx()["pct"], 15)
+        self.assertEqual(self.ctx()["pct"], 75)
 
     def test_latest_record_across_projects_wins(self):
         self.transcript(name="a")
         self.transcript(name="b", usage={"input_tokens": 500000, "cache_read_input_tokens": 0,
                                          "cache_creation_input_tokens": 0}, timestamp="2028-01-01T00:00:00Z")
-        self.assertEqual(self.ctx()["pct"], 50)
+        self.assertEqual(self.ctx()["pct"], 250)
 
 
 class DiscoveryTests(FixtureCase):
+    def test_foreign_pid_domain_never_probes_or_reports_vanished(self):
+        self.registry(pidDomain="foreign-domain")
+        self.state["observations"] = {"sessions": {LEAD: {"runtime": "claude"}}}
+        with mock.patch.object(sk.os, "kill", side_effect=AssertionError("must not probe foreign PID")):
+            snapshot = self.observe()
+        self.assertEqual(snapshot["sessions"][LEAD]["liveness"], "unverified")
+        self.assertNotIn(LEAD, snapshot["vanished"])
+
     def peer_observation(self, payload, include_internal=False):
         with mock.patch.object(sk, "find_peers", return_value=Path("fixture.py")), \
                 mock.patch.object(sk, "run", return_value=subprocess.CompletedProcess([], 0, json.dumps(payload), "")), \
@@ -305,7 +313,7 @@ class DiscoveryTests(FixtureCase):
         row = {"pid": 123, "procStart": "expected"}
         with mock.patch.object(sk.os, "kill"), mock.patch.object(sk, "run", return_value=subprocess.CompletedProcess([], 0, "different", "")):
             self.assertEqual(sk.liveness(row), "dead")
-            self.assertEqual(sk.liveness(dict(row, pidDomain="other")), "dead")
+            self.assertEqual(sk.liveness(dict(row, pidDomain="other")), "unverified")
         with mock.patch.object(sk.os, "kill"), mock.patch.object(sk, "run", side_effect=PermissionError()):
             self.assertEqual(sk.liveness(row), "unverified")
         with mock.patch.object(sk.os, "kill", side_effect=ProcessLookupError()):
@@ -316,12 +324,52 @@ class DiscoveryTests(FixtureCase):
         self.transcript()
         with mock.patch.object(sk, "liveness", return_value="live"):
             table = sk.status(self.observe(), self.state)
-        self.assertIn("| 15% |", table)
+        self.assertIn("| 75% |", table)
         self.assertIn("ctx est", table)
         self.assertNotIn("\x1b", table)
 
 
 class LedgerTests(FixtureCase):
+    def test_revoke_supersede_reassign_without_old_lead_enrollment(self):
+        successor = "claude:00000000-0000-4000-8000-000000000003"
+        self.enroll()
+        self.enroll(successor, "enroll-b")
+        sk.record(self.state, {"id": "c1", "kind": "command", "target": LEAD,
+                              "task": "task-a"}, NOW)
+        sk.record(self.state, {"id": "enroll-a", "kind": "enrollment", "state": "revoked"}, NOW)
+        self.assertFalse(sk.enrolled(self.state, LEAD))
+        with self.assertRaises(ValueError):
+            sk.record(self.state, {"id": "premature", "kind": "command", "target": successor,
+                                  "task": "task-a"}, NOW)
+        sk.record(self.state, {"id": "c1", "kind": "command", "state": "superseded"}, NOW)
+        reassigned = sk.record(self.state, {"id": "c2", "kind": "command", "target": successor,
+                                           "task": "task-a"}, NOW)
+        self.assertEqual(reassigned["state"], "queued")
+        with self.assertRaises(ValueError):
+            sk.record(self.state, {"id": "revoked-new", "kind": "command", "target": LEAD,
+                                  "task": "another-task"}, NOW)
+
+    def test_partial_record_update_retains_kind(self):
+        self.enroll()
+        sk.record(self.state, {"id": "c1", "kind": "command", "target": LEAD, "task": "task-a"}, NOW)
+        result = sk.record(self.state, {"id": "c1", "state": "superseded"}, NOW)
+        self.assertEqual((result["kind"], result["state"]), ("command", "superseded"))
+
+    def test_existing_loose_state_directory_tightened(self):
+        self.state_dir.mkdir(mode=0o755)
+        self.state_dir.chmod(0o755)
+        with sk.writer(self.state_dir, OWNER):
+            self.assertEqual(self.state_dir.stat().st_mode & 0o777, 0o700)
+        self.assertEqual(self.state_dir.stat().st_mode & 0o777, 0o700)
+
+    def test_failed_directory_tightening_does_not_write_state(self):
+        self.state_dir.mkdir(mode=0o755)
+        self.state_dir.chmod(0o755)
+        with mock.patch.object(Path, "chmod", side_effect=PermissionError("fixture denied")):
+            with self.assertRaises(PermissionError), sk.writer(self.state_dir, OWNER):
+                pass
+        self.assertFalse((self.state_dir / "state.json").exists())
+
     def test_active_task_cannot_be_assigned_to_two_leads(self):
         other = "claude:00000000-0000-4000-8000-000000000003"
         self.enroll()

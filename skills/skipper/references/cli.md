@@ -4,6 +4,10 @@ Invoke `<this skill's directory>/scripts/skipper` directly. Put global options
 before the subcommand. Use a private state directory outside every repository:
 `${XDG_STATE_HOME:-$HOME/.local/state}/skipper/`. Use `--state-dir PATH` for an
 independent skipper ledger and `--owner SESSION_UUID` for every mutation.
+Refuse state paths with a `.git` entry in the directory or any ancestor. This
+includes a home directory tracked as a dotfiles repository. Use `--state-dir`
+with a private directory you own outside that repository, for example
+`--state-dir /absolute/private/non-repo/skipper`; do not bypass the parent check.
 
 ## Observation
 
@@ -51,7 +55,9 @@ Otherwise sum the latest non-synthetic assistant's input, cache-read and
 cache-creation tokens. Require all three nonnegative finite fields. Select the
 window from a valid native/tokens export for the same serving model published
 within 24 hours, then `SKIPPER_DEFAULT_CONTEXT_WINDOW` (positive integer), then
-1000000. Record `learned-export`, `configured` or `builtin` window provenance.
+200000, the conservative built-in fallback window. It errs high when the actual
+window is larger; the learned and configured windows still take precedence.
+Record `learned-export`, `configured` or `builtin` window provenance.
 Always label transcript values `est`; missing/invalid usage means `unknown`.
 Retain age in JSON; a fresh export publication does not mean a fresh API response.
 Show percentage only in tables and `ctx est` beside the state. Show `?` for unknown
@@ -64,7 +70,8 @@ or Codex context. Never recommend a Codex handover from context.
 ```
 
 Pass one JSON object; use `--file -` for stdin. Supply a stable `id` to update a
-record; omission creates a UUID. Record evidence references, not complete
+record; omission creates a UUID. An update may omit `kind` and retain the existing
+record kind. Record evidence references, not complete
 transcripts, logs, code or credentials. The CLI records reported authorization;
 it cannot authenticate that a grant really came from the user. The receiving
 lead must establish that boundary. Session targets use `claude:UUID` or `codex:UUID`.
@@ -78,11 +85,14 @@ lead must establish that boundary. Session targets use `claude:UUID` or `codex:U
 | session | target, task, state, report_ref | Latest transition report, optionally buddy, blockers, next and incident references |
 
 Use a stable task ID in `task`; keep assignment detail in an optional `prompt`.
-Commands require acknowledged enrollment and one accountable lead per active
+New commands require acknowledged enrollment and one accountable lead per active
 task. A transferred handover supersedes the predecessor's pending commands;
 create a new command ID for the successor. Changes to command intent require
 superseding it and creating another ID. State recording does not replace buddy
 review, approval gates, transport acknowledgments or the lead's permission policy.
+Revocation does not prevent recording an existing command's outcome or superseding
+it. Supersede the old command before assigning that task to another enrolled lead;
+recording an update grants no permission to continue work after revocation.
 
 ## Barriers
 
@@ -98,6 +108,8 @@ participants. An acknowledgment must name remaining in-flight work as a JSON
 array; an empty array explicitly means quiescent. Activate only after all
 participants acknowledge with no work remaining. A later nonempty acknowledgment
 returns the hold to requested, as does revoking a participant's enrollment.
+Returning to requested is not a release: the hold stays in force while its
+acknowledgments and coverage are reconciled. Resume only after explicit release.
 Release explicitly with a reason, including when
 cancelling a requested barrier. A released ID cannot be reused. No expiration,
 automatic release, broadcast or forge-side enforcement occurs.
@@ -107,8 +119,11 @@ automatic release, broadcast or forge-side enforcement occurs.
 Keep one skipper owner per ledger. Mutations take a nonblocking advisory file
 lock, validate state, then fsync a private temporary file and atomically replace
 `state.json`. Keep the latest 200 metadata events in the same snapshot. Retain
-records and unreleased holds; no automatic pruning erases pending work. Invalid
-JSON/schema and wrong owners fail closed with exit 2. Success is exit 0.
+records and unreleased holds; no automatic pruning erases pending work. Keep
+the state directory at mode 0700; mutations tighten an existing directory with
+group/other permissions before reading or writing state. A failure to tighten
+it fails closed. Invalid JSON/schema and wrong owners fail closed with exit 2.
+Success is exit 0.
 
 For a successor skipper, obtain fresh user grants and reconcile commands,
 questions and holds with the leads before creating its own ledger. Retain the

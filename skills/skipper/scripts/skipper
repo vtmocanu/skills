@@ -9,6 +9,7 @@ import math
 import os
 from pathlib import Path
 import re
+import stat
 import subprocess
 import sys
 import tempfile
@@ -65,7 +66,7 @@ def liveness(record):
     if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
         return "unverified"
     if record.get("pidDomain", sys.platform) != sys.platform:
-        return "dead"
+        return "unverified"
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -176,7 +177,7 @@ def context(sid, paths, readings, now, default_window, warnings):
         best = max(learned, key=lambda item: item["ts"])
         window, source = best["context_window_size"], "learned-export"
     else:
-        window, source = (default_window, "configured") if default_window else (1000000, "builtin")
+        window, source = (default_window, "configured") if default_window else (200000, "builtin")
     return {"pct": math.floor(usage["tokens"] * 100 / window), "quality": "est",
             "source": usage["path"], "ts": usage["ts"], "age": now - usage["ts"],
             "tokens": usage["tokens"], "window": window, "window_source": source,
@@ -355,6 +356,8 @@ def writer(directory, owner):
     if any((parent / ".git").exists() for parent in (directory,) + tuple(directory.parents)):
         raise ValueError("state directory must be outside repositories")
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if stat.S_IMODE(directory.stat().st_mode) & 0o077:
+        directory.chmod(0o700)
     fd = os.open(str(directory / ".lock"), os.O_CREAT | os.O_RDWR, 0o600)
     with os.fdopen(fd, "a") as lock:
         try:
@@ -399,16 +402,17 @@ def enrolled(state, target):
 def record(state, item, now):
     if not isinstance(item, dict):
         raise ValueError("record must be a JSON object")
-    kind = item.get("kind")
-    if kind not in set(STATES) | {"session"}:
-        raise ValueError("unknown record kind")
     key = identifier(item.get("id") or str(uuid.uuid4()))
     old = state["records"].get(key)
+    kind = item.get("kind") or (old["kind"] if old else None)
+    if kind not in set(STATES) | {"session"}:
+        raise ValueError("unknown record kind")
     if old and old["kind"] != kind:
         raise ValueError("record kind is immutable")
     merged = dict(old or {})
     merged.update(item)
     merged["id"] = key
+    merged["kind"] = kind
     for field in ("target", "predecessor", "successor"):
         if field in merged:
             session_identity(merged[field])
@@ -431,7 +435,7 @@ def record(state, item, now):
             required(merged, ["ack_ref"])
     elif kind == "command":
         required(merged, ["target", "task"])
-        if not enrolled(state, merged["target"]):
+        if old is None and not enrolled(state, merged["target"]):
             raise ValueError("command target is not enrolled")
         if not isinstance(merged["task"], str):
             raise ValueError("task must be a stable task identifier")
