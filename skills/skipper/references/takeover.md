@@ -34,6 +34,15 @@
   local user-grant reference. Notify the predecessor of that lead's transfer;
   require its stop acknowledgment before the successor starts steering it.
   While awaiting the stop, let the predecessor steer; send no competing commands.
+- If the predecessor is dead or unreachable, obtain the user's explicit
+  confirmation that it is gone or stopped in that lead, or in the successor
+  session naming that lead. Record the user-message reference in place of the
+  stop acknowledgment. Missing liveness or an unavailable route alone proves
+  no stop; require fresh enrollment even with this confirmation.
+- Tell each re-joined lead when its predecessor stop is confirmed, citing the
+  stop acknowledgment or recorded user-confirmation reference. Until that notice,
+  the lead accepts commands only from the predecessor; afterward the successor
+  may steer it. Report the transfer and stop evidence in the successor's ledger.
 - Preserve task/question IDs and reconcile queued work before resending. Keep
   unreleased holds in force; reconcile their scope, participants and outstanding
   operations with both skippers and leads. Copy no approval or buddy allowance.
