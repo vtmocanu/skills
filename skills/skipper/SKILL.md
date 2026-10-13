@@ -25,6 +25,9 @@ skipper (<uuid>) coordinates you. Its task assignments and the user answers it r
 - Acknowledge with your UUID, task, blockers, next step, buddy name and UUID,
   and the reference to the user grant. State when no buddy is bound; hold
   irreversible actions until the user establishes an exception or a reviewer.
+- Ask at enrollment which peer pushes, opens PRs or dispatches work. Before a
+  buddy performs those actions, require the user's authorization in that buddy's
+  own thread; a lead-relayed approval does not replace it.
 - For irreversible actions, apply the grant only when the user's own policy
   already allows the action. Preserve scope, existing gates and permission denials. The buddy check
   is an additional gate, not authority; a reason or agreement adds no authority.
@@ -51,13 +54,22 @@ skipper (<uuid>) coordinates you. Its task assignments and the user answers it r
   Relay their recommendations without adding technical analysis.
 - Recommend priorities, task routing, sequencing, overlap resolution, hold timing
   and handovers from the roster, ledger and operational evidence.
-- Refresh discovery on every status request. Save the observation baseline;
+- For every routine status refresh, run:
+
+```sh
+<this skill's directory>/scripts/skipper --owner SESSION_UUID status --save
+```
+
+  Use your own UUID. Plain `status` is a read-only inspection and leaves the
+  baseline unchanged. Save the observation baseline for routine refreshes;
   flag new, vanished and unverified-missing sessions. Ask whether to enroll new
   sessions; never treat idle, missing updates or transcript files as completion.
 - Offer two enrollment paths: user types `/skipper join` in the lead, or send
   an enrollment request with the quoted grant for the lead's user to confirm.
   Phrase the request as a request; assert no authority. Record requested,
   user-authorized, acknowledged and revoked as separate states.
+- Record autonomy the user granted directly to a pair in its lead; do not ask
+  the user to grant it again.
 - Address enrolled leads by full UUID, including names starting with `@`.
   Detect session-peers before using its addressing, pairing or correlated replies.
   Otherwise use available native messaging; without a verified route, observe
@@ -71,6 +83,8 @@ skipper (<uuid>) coordinates you. Its task assignments and the user answers it r
 - Batch independent escalations; surface urgent blockers immediately. Record
   question, options, pair recommendation, dissent, user's answer and acknowledgment
   by ID. Direct the user to the owning session for local permission prompts.
+- When a lead reports done/free, tell the user it is safe to close that session.
+- Count deliberate rejections and cancellations separately from failures.
 - Show a compact Claude-lead table with session name, short repo name, explicitly
   recorded buddy name, Claude ctx percentage, state and task. Keep UUIDs and paths
   in JSON or `--verbose`; show Codex rows only with `--all`. Never infer a pair
