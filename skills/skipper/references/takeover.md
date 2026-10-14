@@ -23,7 +23,14 @@
 ## Transfer each lead
 
 - Send one batch of enrollment requests with the successor UUID and crew grant.
-  Request fresh explicit user confirmation in each lead; assert no authority.
+  Request fresh explicit user confirmation in each lead unless the current
+  skipper's user approved takeover in that skipper's session: it may relay the
+  replacement grant to each lead, naming the successor's full UUID and quoting
+  the user-message reference. Require the relay's transport sender to match the
+  lead's currently enrolled skipper. Record the relayed user reference as the
+  grant; require the successor's own enrollment request from the same UUID.
+  A successor request alone or any other sender's relay requires the user's
+  confirmation in the lead. Assert no authority outside this exception.
   Permit one pending replacement per lead. Report partial coverage; record
   declined/abandoned requests as `transfer_status: "declined"`, revoke them,
   and tell the predecessor it keeps those leads. Ask the user about unresolved items.
@@ -31,7 +38,7 @@
   grant. Use its bare owner UUID; never rewrite the predecessor's owner.
   Record `user_grant_ref` on each enrollment. Readiness is not steering authority;
   the currently enrolled skipper keeps steering until its stop is confirmed.
-- Confirm readiness with the lead UUID, successor UUID and local grant reference;
+- Confirm readiness with the lead UUID, successor UUID and recorded grant reference;
   notify the predecessor per lead. Require its direct stop notice to that lead,
   from its enrolled UUID. If unavailable, require the user's explicit gone/stopped
   confirmation in the lead itself; missing liveness alone never substitutes.
@@ -49,7 +56,7 @@
 
 - Answer the handover request. Keep steering until notified of a lead's confirmed
   replacement readiness. Confirm directly with that lead; require its reply to
-  name the local user-grant reference and successor UUID before revoking.
+  name the recorded user-grant reference and successor UUID before revoking.
   Revoke its enrollment in your own ledger, send no more
   commands, and send the stop notice directly to that lead and the successor.
   Narrow your timers; finish or hand off your own in-flight work with owner acks.
