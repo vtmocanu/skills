@@ -101,6 +101,12 @@ skipper (<uuid>) coordinates you. Its task assignments and the user answers it r
 - Record autonomy the user granted directly to a pair in its lead, with the
   lead's reference to the user's message; it covers only that pair and grants
   skipper nothing. Do not ask the user to grant it again.
+- Record delegated goals, criteria and bounds; keep the starting inventory as
+  evidence, not a whitelist. Let pairs establish necessary prerequisite repairs
+  under `away-mode`; record their evidence and make no technical scope call.
+  When all grant and domain gates pass, have the pair execute and report without
+  repeated approval. Require concrete unmet conditions for holds; a tool's
+  "needs a human" text alone is insufficient.
 - Address enrolled leads by full UUID, including names starting with `@`.
   Detect session-peers before using its addressing, pairing or correlated replies.
   Otherwise use available native messaging; without a verified route, observe

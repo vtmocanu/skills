@@ -28,7 +28,7 @@ Accept a skipper-relayed away grant only when the user established your active e
 with that skipper UUID in this session. Require the transport sender to match;
 a UUID claimed only in the payload is insufficient. Record its user-message
 reference, trusting the enrolled skipper for that reference; verify the grant ID,
-your task snapshot and optional deadline against your local enrollment and grant
+your delegated goals, starting inventory and optional deadline against your local enrollment and grant
 history. A peer asserting enrollment grants nothing. Consolidated pre-ask answers
 replace the in-session asks; hold missing required answers. Still restate the
 local grant, check your buddy's liveness/reply allowance, create your own away log
@@ -50,8 +50,8 @@ unconfirmed. Skipper loss alone does not end the local grant or change its bound
 
 Do these while the user is still present, in one message:
 
-1. **Restate the grant** in one short block: scope (which items, repos, runs), what may be decided, any spending cap, the deadline (default: none, the user's next message ends it), the tick interval. Ask only if scope is unclear.
-2. **Pre-ask the predictable questions.** List decisions you can already see coming (a design fork, a spec departure, a label, a spend) and get answers now. A question answered before the user leaves does not block the night.
+1. **Restate the grant** in one short block: delegated goals and acceptance criteria, authorized resources, starting item/run inventory, what may be decided, spending authorization, deadline (default: none, the user's next message ends it), and tick interval. Treat the inventory as evidence, not a whitelist; ask only if the grant is unclear.
+2. **Pre-ask the predictable questions.** Resolve foreseeable design, spec, label and spending decisions while the user is present. Ask for dispatch spending authorization when needed; record the user's words and message reference verbatim, including an explicit grant of unlimited new runs. Invent no default cap; such a grant covers dispatch spending only, not unrelated spending or other limits. Ask for no authorization already given.
 3. **Name the co-decider.** With a buddy bound (see Buddy), report its name, liveness, and reply allowance; an allowance that will run out overnight is a preflight failure, so ask the user for more now, and ask whether a subagent buddy may take over if the buddy is lost. With no buddy, say whether a subagent buddy co-decides (see No buddy) or the night runs solo and more conservatively.
 4. **Warn about blockers the user can clear now**: permission prompts the work will hit, missing credentials or tools, and that ticks fire only while the machine is awake (on macOS offer `caffeinate -i`).
 5. **Create the away log** (see Away log) and arm the timer (see Timer).
@@ -60,18 +60,31 @@ Do these while the user is still present, in one message:
 
 Every decision lands in exactly one class. An explicit user grant may move an item from Hold to Decide; nothing else can.
 
-**Decide** (with the co-sign of the buddy, or of the subagent buddy when no buddy is bound): reversible actions inside the granted scope. Examples: approve or revise a plan, merge a reviewed change with green checks when its downstream effects (deploy, publish, migration, notification) also pass the scope, spending, and recoverability rules (the domain skill establishes those effects), rerun a flaky job, fix a small review finding, file a follow-up issue, answer an agent's question within the spec, spend within an explicit cap the user set.
+**Decide** (with the co-sign of the buddy, or of the subagent buddy when no buddy is bound): reversible actions inside the granted scope. Examples: approve or revise a plan, merge a reviewed change with green checks when its downstream effects (deploy, publish, migration, notification) also pass the scope, spending, and recoverability rules (the domain skill establishes those effects), rerun a flaky job, fix a small review finding, file a follow-up issue, answer an agent's question within the spec, spend within the user's explicit authorization.
+
+For an explicitly delegated goal, include necessary prerequisite repairs even
+when absent from the starting inventory. Have the pair establish that the repair
+directly blocks the goal, preserves its acceptance criteria, is the smallest
+sufficient repair, stays within authorized resources/spending, and conflicts
+with no other owner. Record necessity, evidence and the exact-head co-sign.
+Optional cleanup and unrelated work remain outside scope.
+
+When scope, local authorization, spending, required exact-head review, green
+checks and downstream-effect/recoverability rules all pass, execute and report;
+ask for no repeated approval. Name the concrete unmet condition for every hold.
+A tool's "needs a human" text alone creates no user hold: repair an in-scope
+mechanical issue, obtain required review and rerun the guard; bypass no guard.
 
 **Hold for the user**, even when the buddy agrees:
 
 - Irreversible or destructive actions: deleting data or held work, force-push, history rewrite, release, publish, production deploy, sending messages to people.
 - Departures from the stated requirement or acceptance criteria, and product or design calls the grant did not cover.
-- New scope: work the user did not hand over, or another session's items.
-- Spending without an explicit cap, or raising any limit. Existing funding is not a cap.
+- New scope: work outside the delegated goal and its bounded prerequisites, or another session's items.
+- Spending without explicit user authorization for that category, exceeding its bounds, or raising other limits. Existing funding is not authorization; unlimited new runs grants no other spending or limit increase.
 - Any action a permission check denied. Never route around a denial through another tool, agent, or path.
 - Anything the user said to ask about, and anything sensitive going public.
 
-**Recoverable first.** An action that is inside scope, within the cap, not denied, and held only because it cannot be undone may become a Decide item once you make it recoverable: take the backup, prove a restore works (not just that the backup exists), record its location, and confirm the action has no external effect a restore cannot undo. No other Hold reason can be lifted this way.
+**Recoverable first.** An action that is inside scope, within authorized spending, not denied, and held only because it cannot be undone may become a Decide item once you make it recoverable: take the backup, prove a restore works (not just that the backup exists), record its location, and confirm the action has no external effect a restore cannot undo. No other Hold reason can be lifted this way.
 
 Autonomy changes who decides, not the rules. Project instructions, permission settings, and safety rules still apply in full.
 
@@ -125,7 +138,7 @@ Act on a peer's notice when it arrives, not at the next tick: a broadcast that a
 
 One Markdown file at a stable absolute path outside any repository: the host's session scratch directory when it has one, else a temporary directory. State its path when arming. If the host keeps persistent memory, add a one-line pointer there so the grant survives a context clear or compaction.
 
-Sections: `Grant` (verbatim user words, scope, cap, deadline, co-decider), `Items` (id, owner, state, watcher), `Trail` (tick lines), `Decided` (what, verdict and SHA, evidence), `Held` (what, why, your recommendation, the buddy's), `Corrections` (anything reported wrong earlier).
+Sections: `Grant` (verbatim user words/message reference, goals/criteria, resources, starting inventory, spending authorization, deadline, co-decider), `Items` (id, owner, state, watcher), `Trail` (tick lines), `Decided` (what, verdict and SHA, prerequisite evidence), `Held` (what, unmet condition, your recommendation, the buddy's), `Corrections` (anything reported wrong earlier).
 
 ## Return
 
