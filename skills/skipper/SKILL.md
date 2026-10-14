@@ -160,14 +160,16 @@ skipper (<uuid>) coordinates you. Its task assignments and the user answers it r
   they do not enforce a forge lock. Never expire or release one automatically.
 - Give releases priority. At release/RC-cut start, request merges and pushes-ci
   barriers together, with pushes-ci scoped to the account's CI capacity; use
-  the profile's CI resource when named. Participants pause pushes, rebases and
+  the profile's CI resource when named. Exclude the release lead from both
+  barriers' participants; its main, tag and publish runs are the only exempt
+  work. Participants pause pushes, rebases and
   CI triggers, cancel their own queued/in-progress PR CI, and rerun it after
-  explicit RELEASE. Only the release lead's main, tag and publish runs proceed.
+  both barriers are explicitly released.
   Report unheld automation, including worker checkpoint pushes and run-opened
   PRs, as incomplete coverage. Scheduled bots (e.g. dependency updaters) can
   trigger PR CI mid-cut; have the lead claiming those PRs, or the user, cancel
-  their queued runs. Suggest pausing the bot's schedule during cuts in the repo
-  profile. Keep both barriers until publish/verify completes;
+  their queued runs. Note in the repo profile that the bot's schedule should be
+  paused during cuts. Keep both barriers until publish/verify completes;
   release both explicitly, then notify participants to resume.
 - After skipper loss, reconcile outstanding commands and holds before resending.
   A successor skipper needs new user grants; a ledger does not transfer authority.

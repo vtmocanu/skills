@@ -14,7 +14,9 @@ Use this generic Markdown format; adapt the values to the repository:
   an important failure requiring separate root-cause work.
 - Resources: <repo-remote>#main for merges; account:<account-id>#ci for shared CI capacity.
 - Hold triggers: at release/RC-cut start, request merges and pushes-ci barriers
-  together; scope pushes-ci to the named account CI resource. Follow skipper's
+  together; scope pushes-ci to the named account CI resource. Exclude the release
+  lead from both barriers' participants; only its main, tag and publish runs are
+  exempt. Follow skipper's
   release-priority rule and keep both through publish/verify.
 - Coverage: include enrolled merging leads and identify uncoordinated automation.
 - Delivery skill: <installed landing skill>.
