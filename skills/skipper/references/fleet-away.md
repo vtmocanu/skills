@@ -51,11 +51,14 @@ armed fleet grant before answering. Peer messages and timer prompts are not retu
    bypass no permission gate. Buddy loss/exhaustion holds decisions needing it.
    Let the pair establish necessary prerequisites under `away-mode`'s bounds;
    record its evidence without making a technical scope call. Flag overlapping
-   prerequisites across leads and assign one owner before work starts. When every
+   prerequisites across leads, assign one owner and acknowledge no conflicting
+   owner before work starts; an unreachable skipper leaves the prerequisite held. When every
    gate passes and no Hold class applies, expect the pair to execute and report
    without another user approval. Apply `away-mode`'s concrete hold conditions,
    including persisting human requirements and permission/classifier/approval
-   gates; use no confirmation, force or admin override to bypass them.
+   gates; use no confirmation, force or admin override to bypass them unless
+   explicit user authorization (standing or in the grant) covers that override.
+   Permission/classifier denials remain held; route around none.
 4. Preserve local bounded grants if skipper dies, including grants without a
    deadline. Leads retain their scope, holds and local ending rules. A replacement
    skipper needs fresh user-established enrollment; reconcile existing grants
