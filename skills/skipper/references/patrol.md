@@ -38,10 +38,13 @@ Without that section, arm no patrol timer. Ask about incomplete or invalid confi
    model, stale reading or source. Wait for confirmation before changing ownership.
 5. Run due profile checks as read-only operational observations. Preserve failed
    or incomplete lookups as unknown; missing visibility never proves an orphan,
-   duplicate, exhausted capacity or clean state. Make no repair, dispatch, claim,
+   duplicate, exhausted capacity or clean state. Make no repair, run dispatch, claim,
    merge, cancellation, schedule deletion or code investigation during patrol.
 6. Route each new or materially changed finding to its accountable lead/buddy pair;
-   send an unowned finding to the user. Include evidence references and the owning
+   assign read-only investigation of an unowned finding to an enrolled lead pair
+   with capacity (prefer the pair holding the evidence) without asking the user,
+   and report its verdict to the user. If none has capacity, report it as unassigned.
+   Include evidence references and the owning
    resource. Escalate user decisions with the pair's recommendation; keep technical
    diagnosis and remediation with that pair.
 

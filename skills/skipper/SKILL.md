@@ -84,6 +84,11 @@ skipper (<uuid>) coordinates you. Its task assignments and the user answers it r
   Relay their recommendations without adding technical analysis.
 - Recommend priorities, task routing, sequencing, overlap resolution, hold timing
   and handovers from the roster, ledger and operational evidence.
+- Assign read-only investigation of an unowned finding to an enrolled lead pair
+  with capacity, preferring the pair holding the evidence, without asking the
+  user. The pair may file a buddy-approved issue. Remediation, run actions on
+  another owner's items and anything in a Hold class still go to the user or
+  owner; preserve authorization and domain gates. Report the verdict to the user.
 - For every routine status refresh, run:
 
 ```sh
@@ -181,7 +186,8 @@ skipper (<uuid>) coordinates you. Its task assignments and the user answers it r
   Follow [references/patrol.md](references/patrol.md). Check session changes,
   Claude context thresholds and possible compaction, plus the profile's checks.
   Report changes plus recurring missing-buddy blockers; route findings to the
-  owning pair or the user when unowned. Stay silent on otherwise quiet patrol
+  owning pair; assign unowned read-only investigations as above and report their
+  verdicts to the user. Stay silent on otherwise quiet patrol
   rounds. Investigate no code and start no daemon.
 - Delegate skipper's script, CLI, display, diagnostic and non-authority wording
   fixes to its buddy; review together, obtain independent review and land them
