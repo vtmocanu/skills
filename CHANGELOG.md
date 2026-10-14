@@ -8,7 +8,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- `skipper`: accept a user-approved successor grant relayed by the lead's currently enrolled skipper with exact sender/successor UUID matching, while retaining per-lead stop notices and unchanged buddy bindings.
+- `skipper`: accept a user-approved standard successor grant relayed first by the lead's enrolled skipper, verify transport identities via header UUIDs or resolved native senders, and count it as user-established enrollment while retaining per-lead stops and unchanged buddy bindings.
 - `skipper`: assign read-only investigation of unowned findings to an enrolled pair with capacity without asking the user; the pair may file a buddy-approved issue, while remediation, other owners' items and Hold classes stay with the user or owner.
 - `skipper`: prioritize releases with joint merge/account-CI barriers through publish/verify, pause participant CI triggers, have participants cancel their own queued and in-progress PR CI, and report unheld automation as incomplete coverage.
 - `away-mode` and `skipper`: scope fleet autonomy by delegated goals and bounded prerequisite repairs, record explicit dispatch spending grants including unlimited new runs, execute already-authorized decisions without repeated approval, and require holds to name a concrete unmet condition rather than a tool's "needs a human" text.
