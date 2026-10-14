@@ -69,14 +69,20 @@
 - Answer the handover request. Keep steering until notified of a lead's confirmed
   replacement readiness. Confirm directly with that lead; require its reply to
   name the recorded user-grant reference and successor UUID before revoking.
-  Revoke its enrollment in your own ledger, send no more
-  commands, and send the stop notice directly to that lead and the successor.
+  Stop commands and send the stop notice directly to that lead and the successor.
+  Revoke its enrollment when no active barrier still includes it; otherwise defer
+  revocation through the hold replacement below. Retained ledger enrollment is
+  hold-participation metadata, not continuing steering authority.
   Narrow your timers; finish or hand off your own in-flight work with owner acks.
-- Keep owning each unreleased hold until all its participants transfer. Revocation
-  may return an active barrier to requested; the hold remains in force. Once all
+- For lead succession within one ledger, use `barrier replace-participant` before
+  revoking the predecessor. Require the successor's own acknowledged enrollment;
+  supply its quiescent acknowledgment atomically to retain an active barrier,
+  or keep the requested hold in force until it acknowledges and activation completes.
+- During skipper succession, keep owning each unreleased hold until all its participants transfer. Once all
   participants are enrolled with the successor, it requests a replacement hold
   with a new ID, matching coverage, and collects quiescent acks to activate it.
-  Only then release your hold, citing the successor hold ID in the reason.
+  Only then release your hold, citing the successor hold ID in the reason, and
+  revoke deferred enrollments. Never use participant replacement across ledger owners.
   Announce the replacement to participants; permit no gap or implicit release.
 - If the predecessor is unavailable, preserve its holds until the user explicitly
   confirms in the successor session that an old hold is void or replaced.
