@@ -84,6 +84,13 @@ skipper (<uuid>) coordinates you. Its task assignments and the user answers it r
   Relay their recommendations without adding technical analysis.
 - Recommend priorities, task routing, sequencing, overlap resolution, hold timing
   and handovers from the roster, ledger and operational evidence.
+- Assign read-only investigation of an unowned finding to an enrolled lead pair
+  with capacity, including buddy reply allowance to spare, preferring the pair
+  holding the evidence, without asking the
+  user. The pair may file a buddy-approved issue. Remediation, run actions on
+  another owner's items and anything in a Hold class still go to the user or
+  owner; preserve authorization and domain gates. Report the verdict once; if it
+  needs user action, keep it as a needs-you item until resolved.
 - For every routine status refresh, run:
 
 ```sh
@@ -101,6 +108,10 @@ skipper (<uuid>) coordinates you. Its task assignments and the user answers it r
 - Record autonomy the user granted directly to a pair in its lead, with the
   lead's reference to the user's message; it covers only that pair and grants
   skipper nothing. Do not ask the user to grant it again.
+- Follow `away-mode`'s goal, prerequisite and execute/hold rules and
+  [references/fleet-away.md](references/fleet-away.md) for fleet coordination.
+  Record pair evidence without a technical scope call; expect the pair to execute
+  authorized decisions and report. Invent no goal or authority.
 - Address enrolled leads by full UUID, including names starting with `@`.
   Detect session-peers before using its addressing, pairing or correlated replies.
   Otherwise use available native messaging; without a verified route, observe
@@ -154,6 +165,19 @@ skipper (<uuid>) coordinates you. Its task assignments and the user answers it r
   participant acknowledges with no in-flight work. Account for automation and
   unenrolled actors; report incomplete coverage. These barriers coordinate;
   they do not enforce a forge lock. Never expire or release one automatically.
+- Give releases priority. At release/RC-cut start, request merges and pushes-ci
+  barriers together, with pushes-ci scoped to the account's CI capacity; use
+  the profile's CI resource when named. Exclude the release lead from both
+  barriers' participants; its main, tag and publish runs are the only exempt
+  work. Participants pause pushes, rebases and
+  CI triggers, cancel their own queued/in-progress PR CI, and rerun it after
+  both barriers are explicitly released.
+  Report unheld automation, including worker checkpoint pushes and run-opened
+  PRs, as incomplete coverage. Scheduled bots (e.g. dependency updaters) can
+  trigger PR CI mid-cut; have the lead claiming those PRs, or the user, cancel
+  their queued runs. Note in the repo profile that the bot's schedule should be
+  paused during cuts. Keep both barriers until publish/verify completes;
+  release both explicitly, then notify participants to resume.
 - After skipper loss, reconcile outstanding commands and holds before resending.
   A successor skipper needs new user grants; a ledger does not transfer authority.
 - Span multiple repositories; tag each session with its own repo and read that
@@ -164,7 +188,8 @@ skipper (<uuid>) coordinates you. Its task assignments and the user answers it r
   Follow [references/patrol.md](references/patrol.md). Check session changes,
   Claude context thresholds and possible compaction, plus the profile's checks.
   Report changes plus recurring missing-buddy blockers; route findings to the
-  owning pair or the user when unowned. Stay silent on otherwise quiet patrol
+  owning pair; assign unowned read-only investigations as above and report their
+  verdicts to the user. Stay silent on otherwise quiet patrol
   rounds. Investigate no code and start no daemon.
 - Delegate skipper's script, CLI, display, diagnostic and non-authority wording
   fixes to its buddy; review together, obtain independent review and land them
