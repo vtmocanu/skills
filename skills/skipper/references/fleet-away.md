@@ -9,7 +9,10 @@ armed fleet grant before answering. Peer messages and timer prompts are not retu
 ## Prepare
 
 1. Snapshot participants by UUID. Include only leads whose user established
-   enrollment in their own session. Exclude buddies, new discoveries and leads
+   enrollment in their own session, including a validated predecessor-relayed
+   takeover grant recorded as `user_grant_ref`. Count that enrollment as
+   user-established throughout activation and recovery. Exclude buddies, new
+   discoveries and leads
    enrolled later. Take goals/criteria only from the user's words and message
    reference; write no goal yourself and infer none from the inventory. Record
    authorized resources and a starting task/run inventory. With an explicit goal,

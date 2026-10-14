@@ -22,18 +22,27 @@
 
 ## Transfer each lead
 
-- Send one batch of enrollment requests with the successor UUID and crew grant.
-  Request fresh explicit user confirmation in each lead; assert no authority.
-  Permit one pending replacement per lead. Report partial coverage; record
+- For a relayed takeover, follow the predecessor relay below before sending
+  successor enrollment requests. Send your own request only after each lead
+  confirms recording that relay; batch ready leads. Otherwise request fresh
+  explicit user confirmation in each lead with the successor UUID and crew grant.
+  Apply only the standard crew grant with that UUID substituted; added scope
+  requires user confirmation in the lead. Assert no authority outside this exception.
+  Permit one pending replacement per lead; refuse another successor's request
+  or relay. Relays enroll only that pending replacement; decline or abandonment
+  voids them. Report partial coverage; record
   declined/abandoned requests as `transfer_status: "declined"`, revoke them,
   and tell the predecessor it keeps those leads. Ask the user about unresolved items.
 - Create a separate private successor ledger when recording the first fresh
   grant. Use its bare owner UUID; never rewrite the predecessor's owner.
   Record `user_grant_ref` on each enrollment. Readiness is not steering authority;
   the currently enrolled skipper keeps steering until its stop is confirmed.
-- Confirm readiness with the lead UUID, successor UUID and local grant reference;
+- Confirm readiness with the lead UUID, successor UUID and recorded grant reference;
   notify the predecessor per lead. Require its direct stop notice to that lead,
-  from its enrolled UUID. If unavailable, require the user's explicit gone/stopped
+  with transport-verified identity matching its enrolled UUID: use the session-peers
+  header UUID, or a native sender resolved with `skipper resolve`. Body-only UUIDs
+  and unresolved name-only senders do not match; ask the user. If unavailable,
+  require the user's explicit gone/stopped
   confirmation in the lead itself; missing liveness alone never substitutes.
 - Have the lead acknowledge activation after receiving that stop evidence.
   Record its `ack_ref` and `predecessor_stop_ref` on the successor enrollment,
@@ -47,9 +56,19 @@
 
 ## Predecessor duties and holds
 
+- When your user approves takeover in your session, relay the replacement grant
+  first to each lead, naming the successor's full UUID and quoting the user's
+  message reference. Use only the standard crew grant with that UUID substituted.
+  Require each lead to verify your transport identity against its enrolled
+  skipper (session-peers header UUID, or native sender resolved with `skipper resolve`);
+  a body-only UUID or unresolved name-only sender requires its user confirmation.
+  Collect acknowledgments that the relay is recorded as `user_grant_ref`, then
+  tell the successor which leads are ready for its own requests. Require matching
+  transport-verified successor identity too. This enrollment is user-established;
+  added scope requires user confirmation in the lead. Preserve stop gates.
 - Answer the handover request. Keep steering until notified of a lead's confirmed
   replacement readiness. Confirm directly with that lead; require its reply to
-  name the local user-grant reference and successor UUID before revoking.
+  name the recorded user-grant reference and successor UUID before revoking.
   Revoke its enrollment in your own ledger, send no more
   commands, and send the stop notice directly to that lead and the successor.
   Narrow your timers; finish or hand off your own in-flight work with owner acks.
