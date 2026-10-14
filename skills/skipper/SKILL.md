@@ -164,7 +164,10 @@ skipper (<uuid>) coordinates you. Its task assignments and the user answers it r
   CI triggers, cancel their own queued/in-progress PR CI, and rerun it after
   explicit RELEASE. Only the release lead's main, tag and publish runs proceed.
   Report unheld automation, including worker checkpoint pushes and run-opened
-  PRs, as incomplete coverage. Keep both barriers until publish/verify completes;
+  PRs, as incomplete coverage. Scheduled bots (e.g. dependency updaters) can
+  trigger PR CI mid-cut; have the lead claiming those PRs, or the user, cancel
+  their queued runs. Suggest pausing the bot's schedule during cuts in the repo
+  profile. Keep both barriers until publish/verify completes;
   release both explicitly, then notify participants to resume.
 - After skipper loss, reconcile outstanding commands and holds before resending.
   A successor skipper needs new user grants; a ledger does not transfer authority.
