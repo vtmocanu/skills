@@ -13,8 +13,9 @@ Use this generic Markdown format; adapt the values to the repository:
 - Terms: delivery means completing the assigned pull request; incident means
   an important failure requiring separate root-cause work.
 - Resources: <repo-remote>#main for merges; account:<account-id>#ci for shared CI capacity.
-- Hold triggers: release owner requests a merges barrier before cutting a tag;
-  request a separate pushes-ci barrier when new CI would delay release validation.
+- Hold triggers: at release/RC-cut start, request merges and pushes-ci barriers
+  together; scope pushes-ci to the named account CI resource. Follow skipper's
+  release-priority rule and keep both through publish/verify.
 - Coverage: include enrolled merging leads and identify uncoordinated automation.
 - Delivery skill: <installed landing skill>.
 - Root-cause brief: evidence references, delivery owner, read-only first;
@@ -35,6 +36,8 @@ interval. Read [patrol.md](patrol.md) before arming it. A profile configures che
 never permission to mutate resources or expand a pair's grant.
 Other Patrol bullets, such as Scope, narrow the listed checks; they add no checks or authority.
 The needs-you reminder is independent of Patrol configuration.
+Name the account CI resource in the profile when known; release priority requests
+both barriers at cut start, not only after release CI queues.
 
 Resolve resource identities from the lead's repo root/remote and operational
 reports. Keep sensitive identifiers in local state. Store grants, session UUIDs,

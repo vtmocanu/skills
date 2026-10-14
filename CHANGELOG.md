@@ -8,6 +8,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- `skipper`: prioritize releases with joint merge/account-CI barriers through publish/verify, pause participant CI triggers and report unheld automation as incomplete coverage.
 - `away-mode` and `skipper`: scope fleet autonomy by delegated goals and bounded prerequisite repairs, record explicit dispatch spending grants including unlimited new runs, execute already-authorized decisions without repeated approval, and require holds to name a concrete unmet condition rather than a tool's "needs a human" text.
 - `skipper`: detect an existing live coordinator at startup and request a user-confirmed takeover with fresh per-lead enrollment, explicit predecessor stops and reconciled work, holds and timers.
 

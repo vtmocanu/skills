@@ -158,6 +158,14 @@ skipper (<uuid>) coordinates you. Its task assignments and the user answers it r
   participant acknowledges with no in-flight work. Account for automation and
   unenrolled actors; report incomplete coverage. These barriers coordinate;
   they do not enforce a forge lock. Never expire or release one automatically.
+- Give releases priority. At release/RC-cut start, request merges and pushes-ci
+  barriers together, with pushes-ci scoped to the account's CI capacity; use
+  the profile's CI resource when named. Participants pause pushes, rebases and
+  CI triggers, cancel their own queued/in-progress PR CI, and rerun it after
+  explicit RELEASE. Only the release lead's main, tag and publish runs proceed.
+  Report unheld automation, including worker checkpoint pushes and run-opened
+  PRs, as incomplete coverage. Keep both barriers until publish/verify completes;
+  release both explicitly, then notify participants to resume.
 - After skipper loss, reconcile outstanding commands and holds before resending.
   A successor skipper needs new user grants; a ledger does not transfer authority.
 - Span multiple repositories; tag each session with its own repo and read that

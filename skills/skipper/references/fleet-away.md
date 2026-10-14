@@ -59,6 +59,8 @@ armed fleet grant before answering. Peer messages and timer prompts are not retu
    gates; use no confirmation, force or admin override to bypass them unless
    explicit user authorization (standing or in the grant) covers that override.
    Permission/classifier denials remain held; route around none.
+   Give releases priority under [SKILL.md](../SKILL.md)'s joint merges/account-CI
+   barriers; keep both through publish/verify, including while the user is away.
 4. Preserve local bounded grants if skipper dies, including grants without a
    deadline. Leads retain their scope, holds and local ending rules. A replacement
    skipper needs fresh user-established enrollment; reconcile existing grants
