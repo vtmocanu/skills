@@ -70,7 +70,7 @@
   replacement readiness. Confirm directly with that lead; require its reply to
   name the recorded user-grant reference and successor UUID before revoking.
   Stop commands and send the stop notice directly to that lead and the successor.
-  Revoke its enrollment when no active barrier still includes it; otherwise defer
+  Revoke its enrollment when no unreleased barrier still includes it; otherwise defer
   revocation through the hold replacement below. Retained ledger enrollment is
   hold-participation metadata, not continuing steering authority.
   Narrow your timers; finish or hand off your own in-flight work with owner acks.

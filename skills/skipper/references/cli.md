@@ -126,7 +126,9 @@ update refuses a supplied task and drops any task stored on the prior report.
 With no session report, an enrolled target's table task falls back to its latest
 accepted/queued command, then its latest incoming nonsuperseded handover. This
 display grants no ownership. A queued command completed directly uses its evidence
-as the implicit `ack_ref`; preserve enrollment and action-authorization gates.
+as the implicit `ack_ref`; require nonblank string evidence for that implicit
+acknowledgment. Only existing commands can transition to done; never create one
+directly in done. Preserve enrollment and action-authorization gates.
 Superseding a handover voids it without transferring tasks; require a nonblank
 text reason. Transferred handovers cannot be superseded.
 
@@ -157,7 +159,8 @@ participants. An acknowledgment must name remaining in-flight work as a JSON
 array; an empty array explicitly means quiescent. Activate only after all
 participants acknowledge with no work remaining. A later nonempty acknowledgment
 returns the hold to requested. Refuse enrollment revocation while the target
-participates in an active barrier; use `replace-participant` before revoking.
+participates in any unreleased barrier (requested or active); use
+`replace-participant` before revoking.
 Returning to requested is not a release: the hold stays in force while its
 acknowledgments and coverage are reconciled. Resume only after explicit release.
 Release explicitly with a reason, including when

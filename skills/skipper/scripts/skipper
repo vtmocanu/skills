@@ -442,12 +442,14 @@ def record(state, item, now):
             required(merged, ["ack_ref"])
         if merged["state"] == "revoked":
             holds = [hold["id"] for hold in state["barriers"].values()
-                     if hold["state"] == "active" and merged["target"] in hold["participants"]]
+                     if hold["state"] != "released" and merged["target"] in hold["participants"]]
             if holds:
-                raise ValueError("cannot revoke an active barrier participant; use barrier replace-participant first: "
+                raise ValueError("cannot revoke an unreleased barrier participant; use barrier replace-participant first: "
                                  + ", ".join(holds))
     elif kind == "command":
         required(merged, ["target", "task"])
+        if old is None and merged["state"] == "done":
+            raise ValueError("done requires an existing command record")
         authorized = enrolled(state, merged["target"])
         if old is None and not authorized:
             raise ValueError("command target is not enrolled")
@@ -474,6 +476,8 @@ def record(state, item, now):
         if merged["state"] == "done" and before == "queued":
             required(merged, ["evidence"])
             if not merged.get("ack_ref"):
+                if not isinstance(merged["evidence"], str) or not merged["evidence"].strip():
+                    raise ValueError("implicit acceptance requires nonblank string evidence")
                 merged["ack_ref"] = merged["evidence"]
         if merged["state"] in {"accepted", "done"}:
             required(merged, ["ack_ref"])
