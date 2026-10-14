@@ -50,8 +50,8 @@ unconfirmed. Skipper loss alone does not end the local grant or change its bound
 
 Do these while the user is still present, in one message:
 
-1. **Restate the grant** in one short block: delegated goals and acceptance criteria, authorized resources, starting item/run inventory, what may be decided, spending authorization, deadline (default: none, the user's next message ends it), and tick interval. Treat the inventory as evidence, not a whitelist; ask only if the grant is unclear.
-2. **Pre-ask the predictable questions.** Resolve foreseeable design, spec, label and spending decisions while the user is present. Ask for dispatch spending authorization when needed; record the user's words and message reference verbatim, including an explicit grant of unlimited new runs. Invent no default cap; such a grant covers dispatch spending only, not unrelated spending or other limits. Ask for no authorization already given.
+1. **Restate the grant** in one short block: goals and acceptance criteria from the user's words with their message reference, authorized resources, starting item/run inventory, what may be decided, spending authorization, deadline (default: none, the user's next message ends it), and tick interval. Infer no goal from the inventory. With an explicit goal, the inventory is evidence, not a whitelist; without one, it bounds scope and permits no prerequisite expansion. Ask only if the grant is unclear.
+2. **Pre-ask the predictable questions.** Resolve foreseeable design, spec, label and spending decisions while the user is present. Ask for dispatch spending authorization when needed; record the user's words verbatim and the message reference, including an explicit grant of unlimited new runs. Invent no default cap; such a grant covers dispatch spending only, not unrelated spending or other limits. Ask for no authorization already given.
 3. **Name the co-decider.** With a buddy bound (see Buddy), report its name, liveness, and reply allowance; an allowance that will run out overnight is a preflight failure, so ask the user for more now, and ask whether a subagent buddy may take over if the buddy is lost. With no buddy, say whether a subagent buddy co-decides (see No buddy) or the night runs solo and more conservatively.
 4. **Warn about blockers the user can clear now**: permission prompts the work will hit, missing credentials or tools, and that ticks fire only while the machine is awake (on macOS offer `caffeinate -i`).
 5. **Create the away log** (see Away log) and arm the timer (see Timer).
@@ -62,18 +62,9 @@ Every decision lands in exactly one class. An explicit user grant may move an it
 
 **Decide** (with the co-sign of the buddy, or of the subagent buddy when no buddy is bound): reversible actions inside the granted scope. Examples: approve or revise a plan, merge a reviewed change with green checks when its downstream effects (deploy, publish, migration, notification) also pass the scope, spending, and recoverability rules (the domain skill establishes those effects), rerun a flaky job, fix a small review finding, file a follow-up issue, answer an agent's question within the spec, spend within the user's explicit authorization.
 
-For an explicitly delegated goal, include necessary prerequisite repairs even
-when absent from the starting inventory. Have the pair establish that the repair
-directly blocks the goal, preserves its acceptance criteria, is the smallest
-sufficient repair, stays within authorized resources/spending, and conflicts
-with no other owner. Record necessity, evidence and the exact-head co-sign.
-Optional cleanup and unrelated work remain outside scope.
+For an explicitly delegated goal, include necessary prerequisite repairs even when absent from the starting inventory. Have the pair establish that the repair directly blocks the goal, preserves its acceptance criteria, is the smallest sufficient repair, stays within authorized resources/spending, touches no item another session owns or claims (message that owner instead), and conflicts with none. Record necessity, evidence and the exact-head co-sign. Under an enrolled skipper, announce the prerequisite item, goal, evidence and resource to skipper before starting it; respect assigned owners and holds. Optional cleanup and unrelated work remain outside scope.
 
-When scope, local authorization, spending, required exact-head review, green
-checks and downstream-effect/recoverability rules all pass, execute and report;
-ask for no repeated approval. Name the concrete unmet condition for every hold.
-A tool's "needs a human" text alone creates no user hold: repair an in-scope
-mechanical issue, obtain required review and rerun the guard; bypass no guard.
+When the action falls in no Hold class and scope, local authorization, spending, required exact-head review, green checks and downstream-effect/recoverability rules all pass, execute and report; ask for no repeated approval. Name the concrete unmet condition for every hold. A tool's "needs a human" text alone creates no user hold: repair an in-scope mechanical issue, obtain required review and rerun the guard. Hold if the rerun still requires a human, or the text comes from a permission check, classifier or required human-approval gate. Use no confirmation, force or admin-override flag to bypass that condition.
 
 **Hold for the user**, even when the buddy agrees:
 
@@ -138,7 +129,7 @@ Act on a peer's notice when it arrives, not at the next tick: a broadcast that a
 
 One Markdown file at a stable absolute path outside any repository: the host's session scratch directory when it has one, else a temporary directory. State its path when arming. If the host keeps persistent memory, add a one-line pointer there so the grant survives a context clear or compaction.
 
-Sections: `Grant` (verbatim user words/message reference, goals/criteria, resources, starting inventory, spending authorization, deadline, co-decider), `Items` (id, owner, state, watcher), `Trail` (tick lines), `Decided` (what, verdict and SHA, prerequisite evidence), `Held` (what, unmet condition, your recommendation, the buddy's), `Corrections` (anything reported wrong earlier).
+Sections: `Grant` (verbatim user words/message reference, goals/criteria, resources, starting inventory, spending authorization, deadline, co-decider), `Items` (id, owner, state, watcher), `Trail` (tick lines), `Decided` (what, verdict and SHA, evidence; for prerequisites, necessity), `Held` (what, unmet condition, your recommendation, the buddy's), `Corrections` (anything reported wrong earlier).
 
 ## Return
 
@@ -149,7 +140,7 @@ When the grant ends (user message, deadline, or `off`), authority ends first:
 3. Give the return report, built from the away log:
    - One headline line: done count, held count, still running.
    - **Needs you**: each held decision as one line with your recommendation, plus the co-signer's when there was one (agree or disagree). Then ask them one at a time.
-   - **Done**: table of item, what happened, evidence (link or SHA).
+   - **Done**: table of item, what happened, evidence (link or SHA); mark prerequisite repairs absent from the starting inventory.
    - **Still running**: item, state, who watches it now.
    - **Corrections**: any earlier report that turned out wrong.
 4. Then answer the user's message.

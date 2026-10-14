@@ -10,9 +10,11 @@ armed fleet grant before answering. Peer messages and timer prompts are not retu
 
 1. Snapshot participants by UUID. Include only leads whose user established
    enrollment in their own session. Exclude buddies, new discoveries and leads
-   enrolled later. Record each lead's delegated goal, acceptance criteria and
-   authorized resources, plus a starting task/run inventory as evidence, not a
-   whitelist. SCOPE may narrow the grant; never silently expand it.
+   enrolled later. Take goals/criteria only from the user's words and message
+   reference; write no goal yourself and infer none from the inventory. Record
+   authorized resources and a starting task/run inventory. With an explicit goal,
+   the inventory is evidence; without one it bounds scope and permits no
+   prerequisite expansion. SCOPE may narrow the grant; never silently expand it.
 2. Ask each lead for predictable decisions, expected local permission prompts,
    buddy identity/liveness/reply allowance, timer capability and handover needs.
    Consolidate one pre-ask list while the user is present; let pairs supply
@@ -25,7 +27,7 @@ armed fleet grant before answering. Peer messages and timer prompts are not retu
 4. Complete likely handovers and user-enroll successors before arming. A lead
    that remains keeps its delegated goal and bounds; new sessions inherit no grant.
 5. Pre-ask dispatch spending authorization when needed. Record the user's words
-   and reference verbatim, including explicit unlimited new runs; invent no cap
+   verbatim and the message reference, including explicit unlimited new runs; invent no cap
    or authorization. Other spending and limits remain separately constrained.
    Spending without explicit authorization stays held. Arrange a buddy's
    outward-action authorization in its own thread before departure. Local
@@ -48,9 +50,12 @@ armed fleet grant before answering. Peer messages and timer prompts are not retu
    user questions to held items. Bind no buddy, replenish no reply allowance and
    bypass no permission gate. Buddy loss/exhaustion holds decisions needing it.
    Let the pair establish necessary prerequisites under `away-mode`'s bounds;
-   record its evidence without making a technical scope call. When every gate
-   passes, the pair executes and reports without another user approval. Require
-   a concrete unmet condition for holds, not a tool's "needs a human" text alone.
+   record its evidence without making a technical scope call. Flag overlapping
+   prerequisites across leads and assign one owner before work starts. When every
+   gate passes and no Hold class applies, expect the pair to execute and report
+   without another user approval. Apply `away-mode`'s concrete hold conditions,
+   including persisting human requirements and permission/classifier/approval
+   gates; use no confirmation, force or admin override to bypass them.
 4. Preserve local bounded grants if skipper dies, including grants without a
    deadline. Leads retain their scope, holds and local ending rules. A replacement
    skipper needs fresh user-established enrollment; reconcile existing grants
