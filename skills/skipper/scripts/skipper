@@ -19,12 +19,12 @@ import uuid
 ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 SCOPES = {"merges", "pushes-ci", "dispatches"}
 STATES = {
-    "command": {"queued": {"accepted", "superseded"},
+    "command": {"queued": {"accepted", "done", "superseded"},
                 "accepted": {"blocked", "done", "superseded"},
                 "blocked": {"accepted", "superseded"}, "done": set(), "superseded": set()},
     "question": {"open": {"answered"}, "answered": {"acked"}, "acked": set()},
-    "handover": {"requested": {"ready"}, "ready": {"acked"},
-                 "acked": {"transferred"}, "transferred": set()},
+    "handover": {"requested": {"ready", "superseded"}, "ready": {"acked", "superseded"},
+                 "acked": {"transferred", "superseded"}, "transferred": set(), "superseded": set()},
     "enrollment": {"requested": {"authorized", "revoked"},
                    "authorized": {"acked", "revoked"}, "acked": {"revoked"}, "revoked": set()},
 }
@@ -372,7 +372,8 @@ def writer(directory, owner):
             raise ValueError("another ledger writer is active")
         state = load_state(directory)
         if state["owner"] not in (None, owner):
-            raise ValueError("ledger belongs to another skipper; reconcile authority before using a new ledger")
+            raise ValueError("ledger owner %r differs from --owner %r; reconcile authority before using a new ledger"
+                             % (state["owner"], owner))
         state["owner"] = owner
         yield state
         temporary_fd, temporary = tempfile.mkstemp(prefix=".state-", dir=str(directory))
@@ -439,8 +440,16 @@ def record(state, item, now):
             required(merged, ["user_grant_ref"])
         if merged["state"] == "acked":
             required(merged, ["ack_ref"])
+        if merged["state"] == "revoked":
+            holds = [hold["id"] for hold in state["barriers"].values()
+                     if hold["state"] != "released" and merged["target"] in hold["participants"]]
+            if holds:
+                raise ValueError("cannot revoke an unreleased barrier participant; use barrier replace-participant first: "
+                                 + ", ".join(holds))
     elif kind == "command":
         required(merged, ["target", "task"])
+        if old is None and merged["state"] == "done":
+            raise ValueError("done requires an existing command record")
         authorized = enrolled(state, merged["target"])
         if old is None and not authorized:
             raise ValueError("command target is not enrolled")
@@ -464,6 +473,12 @@ def record(state, item, now):
             raise ValueError("command intent is immutable; supersede and create a new command")
         if merged.get("irreversible"):
             required(merged, ["reason"])
+        if merged["state"] == "done" and before == "queued":
+            required(merged, ["evidence"])
+            if not merged.get("ack_ref"):
+                if not isinstance(merged["evidence"], str) or not merged["evidence"].strip():
+                    raise ValueError("implicit acceptance requires nonblank string evidence")
+                merged["ack_ref"] = merged["evidence"]
         if merged["state"] in {"accepted", "done"}:
             required(merged, ["ack_ref"])
         if merged["state"] == "done":
@@ -485,7 +500,10 @@ def record(state, item, now):
             raise ValueError("handover requires a different successor")
         if old and any(merged[field] != old[field] for field in ("predecessor", "successor", "task")):
             raise ValueError("handover identities and task are immutable")
-        if merged["state"] != "requested":
+        if merged["state"] == "superseded":
+            if not isinstance(merged.get("reason"), str) or not merged["reason"].strip():
+                raise ValueError("superseded handover requires a reason")
+        if merged["state"] in {"ready", "acked", "transferred"}:
             required(merged, ["handover_ref"])
         if merged["state"] in {"acked", "transferred"}:
             required(merged, ["successor_ack_ref"])
@@ -512,17 +530,12 @@ def record(state, item, now):
             command["state"] = "superseded"
             command["handover_id"] = key
             command["updated_at"] = now
-    if kind == "enrollment" and merged["state"] == "revoked":
-        for hold in state["barriers"].values():
-            if hold["state"] == "active" and merged["target"] in hold["participants"]:
-                hold["state"] = "requested"
-                hold["updated_at"] = now
     event(state, kind, key, now)
     return merged
 
 
 def barrier(state, action, key, owner, now, resource=None, scope=None, participants=None,
-            reason=None, participant=None, inflight=None, ack_ref=None):
+            reason=None, participant=None, inflight=None, ack_ref=None, successor=None):
     if action == "request":
         key = identifier(key or str(uuid.uuid4()))
         if key in state["barriers"]:
@@ -540,7 +553,32 @@ def barrier(state, action, key, owner, now, resource=None, scope=None, participa
             raise ValueError("unknown barrier or wrong owner")
         if row["state"] == "released":
             raise ValueError("barrier already released")
-        if action == "ack":
+        if action == "replace-participant":
+            if participant not in row["participants"]:
+                raise ValueError("old participant is not in this barrier")
+            session_identity(successor)
+            if successor in row["participants"] or not enrolled(state, successor):
+                raise ValueError("successor must be a different, newly participating lead with acknowledged enrollment")
+            if not isinstance(reason, str) or not reason.strip():
+                raise ValueError("replace-participant requires a reason")
+            if (ack_ref is None) != (inflight is None):
+                raise ValueError("supply both ack-ref and inflight, or neither")
+            if ack_ref is not None and (not isinstance(ack_ref, str) or not ack_ref.strip()
+                                        or not isinstance(inflight, list)):
+                raise ValueError("replacement ack requires a reference and explicit in-flight array")
+            next_participants = [successor if p == participant else p for p in row["participants"]]
+            next_acks = dict(row["acks"])
+            next_acks.pop(participant, None)
+            next_acks.pop(successor, None)
+            if ack_ref is not None:
+                next_acks[successor] = {"ref": ack_ref, "inflight": inflight, "ts": now}
+            keep_active = (row["state"] == "active" and ack_ref is not None and inflight == []
+                           and set(next_acks) == set(next_participants)
+                           and not any(ack["inflight"] for ack in next_acks.values())
+                           and all(enrolled(state, p) for p in next_participants))
+            row.update(participants=next_participants, acks=next_acks,
+                       state="active" if keep_active else "requested")
+        elif action == "ack":
             if participant not in row["participants"] or not ack_ref or inflight is None:
                 raise ValueError("ack requires participant, evidence and explicit in-flight list")
             row["acks"][participant] = {"ref": ack_ref, "inflight": inflight, "ts": now}
@@ -561,6 +599,8 @@ def barrier(state, action, key, owner, now, resource=None, scope=None, participa
             raise ValueError("unknown barrier action")
     row["updated_at"] = now
     event(state, "barrier-" + action, key, now)
+    if action == "replace-participant":
+        state["events"][-1].update(old=participant, new=successor, reason=reason)
     return row
 
 
@@ -606,6 +646,14 @@ def status(snapshot, state, show_all=False, verbose=False):
         if item["runtime"] != "claude" and not show_all:
             continue
         report = max((r for r in reports if r["target"] == key), key=lambda r: r["updated_at"], default={})
+        task = report.get("task") or ("awaiting handover" if report.get("state") == "pending-handover" else "unknown")
+        if not report and enrolled(state, key):
+            candidates = [r for r in state["records"].values() if r["kind"] == "command"
+                          and r["target"] == key and r["state"] in {"accepted", "queued"}]
+            if not candidates:
+                candidates = [r for r in state["records"].values() if r["kind"] == "handover"
+                              and r["successor"] == key and r["state"] != "superseded"]
+            task = max(candidates, key=lambda r: r["updated_at"], default={}).get("task", "unknown")
         ctx = item["context"]
         pct = "?"
         if item["runtime"] == "claude" and ctx["pct"] is not None:
@@ -622,7 +670,7 @@ def status(snapshot, state, show_all=False, verbose=False):
         lines.append("| " + " | ".join(cell(v) for v in (
             name, item["repo"]["root"] if verbose else repo_name(item["repo"]),
             buddy_name(key, report, snapshot, state), pct, state_label,
-            report.get("task") or ("awaiting handover" if report.get("state") == "pending-handover" else "unknown"))) + " |")
+            task)) + " |")
     for field in ("new", "vanished", "unverified_missing"):
         labels = []
         for key in snapshot[field]:
@@ -646,7 +694,9 @@ def status(snapshot, state, show_all=False, verbose=False):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--state-dir", type=Path, default=Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local/state"))) / "skipper")
+    default_state = Path(os.environ.get("SKIPPER_STATE_DIR") or str(
+        Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local/state"))) / "skipper")).expanduser()
+    parser.add_argument("--state-dir", type=Path, default=default_state)
     parser.add_argument("--home", type=Path, default=Path.home())
     parser.add_argument("--claude-dir", type=Path)
     parser.add_argument("--export-dir", type=Path)
@@ -667,8 +717,8 @@ def main(argv=None):
     p = commands.add_parser("record", help="record a validated JSON object")
     p.add_argument("--file", required=True, help="JSON input file, or - for stdin")
     p = commands.add_parser("barrier", help="coordination holds; never expire automatically")
-    p.add_argument("action", choices=("request", "ack", "active", "release"))
-    for flag in ("id", "resource", "scope", "reason", "participant", "ack-ref"):
+    p.add_argument("action", choices=("request", "ack", "active", "release", "replace-participant"))
+    for flag in ("id", "resource", "scope", "reason", "participant", "successor", "ack-ref"):
         p.add_argument("--" + flag)
     p.add_argument("--participants", nargs="+")
     p.add_argument("--inflight", help="JSON array; pass [] explicitly when quiescent")
@@ -703,6 +753,9 @@ def main(argv=None):
                     state["observations"] = dict(snapshot, sessions=remembered)
                     event(state, "observe", "roster", now)
             output = snapshot if args.command == "observe" or getattr(args, "json", False) else None
+            if args.command == "status" and not args.owner:
+                print("note: ledger owner=%s state_dir=%s" % (
+                    json.dumps(state.get("owner") or "unowned"), json.dumps(str(args.state_dir.resolve()))), file=sys.stderr)
             print(json.dumps(output, allow_nan=False, sort_keys=True) if output is not None
                   else status(snapshot, state, args.all, args.verbose))
         elif args.command == "record":
@@ -717,7 +770,7 @@ def main(argv=None):
             with writer(args.state_dir, args.owner) as state:
                 result = barrier(state, args.action, args.id, args.owner, now, args.resource,
                                  args.scope, args.participants, args.reason, args.participant,
-                                 inflight, args.ack_ref)
+                                 inflight, args.ack_ref, args.successor)
             print(json.dumps(result, allow_nan=False, sort_keys=True))
         return 0
     except (OSError, ValueError, TypeError, KeyError) as exc:

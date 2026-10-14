@@ -404,6 +404,126 @@ class DiscoveryTests(FixtureCase):
 
 
 class LedgerTests(FixtureCase):
+    def test_done_cannot_create_command_or_bypass_accountable_lead(self):
+        self.enroll()
+        other = "claude:00000000-0000-4000-8000-000000000003"
+        self.enroll(other, "enroll-other")
+        sk.record(self.state, {"id": "owned", "kind": "command", "target": LEAD, "task": "owned-task"}, NOW)
+        before = json.dumps(self.state, sort_keys=True)
+        for target, task in ((LEAD, "new-task"), (other, "owned-task")):
+            with self.subTest(target=target):
+                self.state = json.loads(before)
+                with self.assertRaisesRegex(ValueError, "existing command"):
+                    sk.record(self.state, {"id": "new-done", "kind": "command", "target": target,
+                                          "task": task, "state": "done", "evidence": "result"}, NOW + 1)
+                self.assertEqual(json.dumps(self.state, sort_keys=True), before)
+
+        sk.record(self.state, {"id": "h", "kind": "handover", "predecessor": LEAD,
+                              "successor": other, "task": "owned-task"}, NOW + 2)
+        sk.record(self.state, {"id": "h", "state": "ready", "handover_ref": "artifact"}, NOW + 3)
+        sk.record(self.state, {"id": "h", "state": "acked", "successor_ack_ref": "ack"}, NOW + 4)
+        sk.record(self.state, {"id": "h", "state": "transferred", "predecessor_stop_ref": "stop"}, NOW + 5)
+        before = json.dumps(self.state, sort_keys=True)
+        with self.assertRaisesRegex(ValueError, "existing command"):
+            sk.record(self.state, {"id": "new-done", "kind": "command", "target": LEAD,
+                                  "task": "owned-task", "state": "done", "evidence": "late-result"}, NOW + 6)
+        with self.assertRaises(ValueError):
+            sk.record(self.state, {"id": "owned", "state": "done", "evidence": "late-result"}, NOW + 6)
+        self.assertEqual(json.dumps(self.state, sort_keys=True), before)
+
+    def test_implicit_ack_requires_nonblank_text_evidence(self):
+        self.enroll()
+        sk.record(self.state, {"id": "c", "kind": "command", "target": LEAD, "task": "task-a"}, NOW)
+        before = json.dumps(self.state, sort_keys=True)
+        for evidence in (None, "", " ", {"sha": "result"}, ["result"], True, 42):
+            with self.subTest(evidence=evidence):
+                self.state = json.loads(before)
+                with self.assertRaises(ValueError):
+                    sk.record(self.state, {"id": "c", "state": "done", "evidence": evidence}, NOW + 1)
+                self.assertEqual(json.dumps(self.state, sort_keys=True), before)
+        self.state = json.loads(before)
+        result = sk.record(self.state, {"id": "c", "state": "done", "ack_ref": "explicit-ack",
+                                       "evidence": {"sha": "result"}}, NOW + 1)
+        self.assertEqual(result["ack_ref"], "explicit-ack")
+
+    def test_queued_command_done_uses_evidence_as_implicit_acceptance(self):
+        self.enroll()
+        sk.record(self.state, {"id": "c", "kind": "command", "target": LEAD, "task": "task-a"}, NOW)
+        before = json.dumps(self.state, sort_keys=True)
+        with self.assertRaises(ValueError):
+            sk.record(self.state, {"id": "c", "state": "done"}, NOW)
+        self.assertEqual(json.dumps(self.state, sort_keys=True), before)
+        done = sk.record(self.state, {"id": "c", "state": "done", "evidence": "completion-message"}, NOW + 1)
+        self.assertEqual(done["state"], "done")
+        self.assertEqual(done["ack_ref"], "completion-message")
+        self.assertEqual(sk.record(self.state, {"id": "c", "state": "done"}, NOW + 2)["state"], "done")
+
+    def test_unfinished_handovers_can_be_superseded_with_reason(self):
+        successor = "claude:00000000-0000-4000-8000-000000000003"
+        for stage in ("requested", "ready", "acked"):
+            with self.subTest(stage=stage):
+                key = "void-" + stage
+                sk.record(self.state, {"id": key, "kind": "handover", "predecessor": LEAD,
+                                      "successor": successor, "task": "task-a"}, NOW)
+                if stage != "requested":
+                    sk.record(self.state, {"id": key, "state": "ready", "handover_ref": "artifact"}, NOW)
+                if stage == "acked":
+                    sk.record(self.state, {"id": key, "state": "acked", "successor_ack_ref": "ack"}, NOW)
+                before = json.dumps(self.state, sort_keys=True)
+                with self.assertRaises(ValueError):
+                    sk.record(self.state, {"id": key, "state": "superseded"}, NOW)
+                self.assertEqual(json.dumps(self.state, sort_keys=True), before)
+                result = sk.record(self.state, {"id": key, "state": "superseded", "reason": "wrong successor"}, NOW + 1)
+                self.assertEqual(result["state"], "superseded")
+                self.assertFalse(sk.enrolled(self.state, successor))
+                with self.assertRaises(ValueError):
+                    sk.record(self.state, {"id": key, "state": "ready", "handover_ref": "late"}, NOW + 2)
+
+    def test_owner_conflict_names_both_owners_and_preserves_ledger(self):
+        self.write(self.state_dir / "state.json", self.state)
+        before = (self.state_dir / "state.json").read_bytes()
+        with self.assertRaises(ValueError) as raised:
+            with sk.writer(self.state_dir, SID):
+                pass
+        self.assertIn(OWNER, str(raised.exception))
+        self.assertIn(SID, str(raised.exception))
+        self.assertEqual((self.state_dir / "state.json").read_bytes(), before)
+
+    def task_table(self):
+        snapshot = {"sessions": {LEAD: {"name": "lead-a", "runtime": "claude",
+                    "repo": {"root": "/example/repo-a", "remote": None}, "state": "idle",
+                    "liveness": "live", "context": {"pct": None, "quality": "unknown"}}},
+                    "new": [], "vanished": [], "unverified_missing": [], "warnings": []}
+        return sk.status(snapshot, self.state)
+
+    def test_status_falls_back_to_latest_open_command_for_enrolled_lead(self):
+        self.enroll()
+        sk.record(self.state, {"id": "older", "kind": "command", "target": LEAD, "task": "older-task"}, NOW)
+        sk.record(self.state, {"id": "older", "state": "accepted", "ack_ref": "ack"}, NOW)
+        sk.record(self.state, {"id": "newer", "kind": "command", "target": LEAD, "task": "newer-task"}, NOW + 1)
+        self.assertIn("| newer-task |", self.task_table())
+        sk.record(self.state, {"id": "newer", "state": "superseded"}, NOW + 2)
+        self.assertIn("| older-task |", self.task_table())
+        sk.record(self.state, {"id": "enroll-a", "state": "revoked"}, NOW + 3)
+        self.assertNotIn("older-task", self.task_table())
+
+    def test_status_falls_back_to_incoming_handover_but_not_void(self):
+        self.enroll()
+        predecessor = "claude:00000000-0000-4000-8000-000000000003"
+        sk.record(self.state, {"id": "h", "kind": "handover", "predecessor": predecessor,
+                              "successor": LEAD, "task": "incoming-task"}, NOW)
+        self.assertIn("| incoming-task |", self.task_table())
+        sk.record(self.state, {"id": "h", "state": "superseded", "reason": "abandoned"}, NOW + 1)
+        self.assertNotIn("incoming-task", self.task_table())
+
+    def test_explicit_session_report_wins_over_command_fallback(self):
+        self.enroll()
+        sk.record(self.state, {"id": "c", "kind": "command", "target": LEAD, "task": "command-task"}, NOW)
+        sk.record(self.state, {"id": "r", "kind": "session", "target": LEAD,
+                              "state": "pending-handover", "report_ref": "report"}, NOW)
+        self.assertIn("awaiting handover", self.task_table())
+        self.assertNotIn("command-task", self.task_table())
+
     def test_pending_handover_clears_task_bearing_report_for_table(self):
         sk.record(self.state, {"kind": "session", "id": "report", "target": LEAD,
                               "state": "running", "task": "old-task", "report_ref": "work-report"}, NOW)
@@ -608,14 +728,120 @@ class LedgerTests(FixtureCase):
 
 
 class BarrierTests(FixtureCase):
-    def test_revocation_returns_active_hold_to_requested(self):
+    def test_requested_participant_cannot_be_revoked_until_replaced_or_released(self):
+        successor = self.replace_setup(active=False)
+        before = json.dumps(self.state, sort_keys=True)
+        with self.assertRaisesRegex(ValueError, "replace-participant"):
+            sk.record(self.state, {"id": "enroll-a", "state": "revoked"}, NOW + 1)
+        self.assertEqual(json.dumps(self.state, sort_keys=True), before)
+        sk.barrier(self.state, "replace-participant", "hold", OWNER, NOW + 2,
+                   participant=LEAD, successor=successor, reason="handover")
+        self.assertEqual(sk.record(self.state, {"id": "enroll-a", "state": "revoked"}, NOW + 3)["state"], "revoked")
+        with self.assertRaisesRegex(ValueError, "replace-participant"):
+            sk.record(self.state, {"id": "enroll-b", "state": "revoked"}, NOW + 4)
+        sk.barrier(self.state, "release", "hold", OWNER, NOW + 5, reason="finished")
+        self.assertEqual(sk.record(self.state, {"id": "enroll-b", "state": "revoked"}, NOW + 6)["state"], "revoked")
+
+    def test_revocation_of_active_participant_requires_replacement(self):
         self.request()
         sk.barrier(self.state, "ack", "hold", OWNER, NOW, participant=LEAD, inflight=[], ack_ref="ack")
         sk.barrier(self.state, "active", "hold", OWNER, NOW)
-        sk.record(self.state, {"id": "enroll-a", "kind": "enrollment", "state": "revoked"}, NOW)
-        self.assertEqual(self.state["barriers"]["hold"]["state"], "requested")
-        with self.assertRaises(ValueError):
+        before = json.dumps(self.state, sort_keys=True)
+        with self.assertRaisesRegex(ValueError, "replace-participant"):
+            sk.record(self.state, {"id": "enroll-a", "kind": "enrollment", "state": "revoked"}, NOW)
+        self.assertEqual(json.dumps(self.state, sort_keys=True), before)
+
+    def replace_setup(self, active=True):
+        successor = "claude:00000000-0000-4000-8000-000000000003"
+        self.request()
+        self.enroll(successor, "enroll-b")
+        if active:
+            sk.barrier(self.state, "ack", "hold", OWNER, NOW, participant=LEAD, inflight=[], ack_ref="old-ack")
             sk.barrier(self.state, "active", "hold", OWNER, NOW)
+        return successor
+
+    def test_replace_without_ack_stays_held_until_successor_ack(self):
+        successor = self.replace_setup()
+        row = sk.barrier(self.state, "replace-participant", "hold", OWNER, NOW + 1,
+                         participant=LEAD, successor=successor, reason="handover")
+        self.assertEqual((row["participants"], row["state"], row["acks"]), ([successor], "requested", {}))
+        sk.record(self.state, {"id": "enroll-a", "state": "revoked"}, NOW + 2)
+        with self.assertRaises(ValueError):
+            sk.barrier(self.state, "active", "hold", OWNER, NOW + 2)
+        sk.barrier(self.state, "ack", "hold", OWNER, NOW + 3, participant=successor, inflight=[], ack_ref="new-ack")
+        self.assertEqual(sk.barrier(self.state, "active", "hold", OWNER, NOW + 4)["state"], "active")
+
+    def test_replace_with_quiescent_ack_preserves_active_and_event(self):
+        successor = self.replace_setup()
+        row = sk.barrier(self.state, "replace-participant", "hold", OWNER, NOW + 1,
+                         participant=LEAD, successor=successor, reason="handover", ack_ref="new-ack", inflight=[])
+        self.assertEqual((row["state"], row["participants"]), ("active", [successor]))
+        self.assertEqual(row["acks"], {successor: {"ref": "new-ack", "inflight": [], "ts": NOW + 1}})
+        event = self.state["events"][-1]
+        self.assertEqual((event["kind"], event["old"], event["new"], event["reason"]),
+                         ("barrier-replace-participant", LEAD, successor, "handover"))
+        sk.record(self.state, {"id": "enroll-a", "state": "revoked"}, NOW + 2)
+        self.assertEqual(row["state"], "active")
+        with self.assertRaisesRegex(ValueError, "replace-participant"):
+            sk.record(self.state, {"id": "enroll-b", "state": "revoked"}, NOW + 3)
+
+    def test_replace_never_auto_activates_requested_or_busy_holds(self):
+        successor = self.replace_setup(active=False)
+        row = sk.barrier(self.state, "replace-participant", "hold", OWNER, NOW + 1,
+                         participant=LEAD, successor=successor, reason="handover", ack_ref="ack", inflight=[])
+        self.assertEqual(row["state"], "requested")
+        sk.barrier(self.state, "active", "hold", OWNER, NOW + 2)
+        row = sk.barrier(self.state, "replace-participant", "hold", OWNER, NOW + 3,
+                         participant=successor, successor=LEAD, reason="return",
+                         ack_ref="busy-ack", inflight=["push pending"])
+        self.assertEqual(row["state"], "requested")
+        self.assertEqual(row["acks"][LEAD]["inflight"], ["push pending"])
+        with self.assertRaises(ValueError):
+            sk.barrier(self.state, "active", "hold", OWNER, NOW + 4)
+
+    def test_replace_preserves_other_participants_and_acknowledgments(self):
+        successor = self.replace_setup(active=False)
+        other = "claude:00000000-0000-4000-8000-000000000004"
+        self.enroll(other, "enroll-other")
+        sk.barrier(self.state, "request", "multi", OWNER, NOW, "repo#main", "merges", [LEAD, other], "release")
+        for member in (LEAD, other):
+            sk.barrier(self.state, "ack", "multi", OWNER, NOW, participant=member, inflight=[], ack_ref=member + "-ack")
+        sk.barrier(self.state, "active", "multi", OWNER, NOW)
+        unchanged = dict(self.state["barriers"]["multi"]["acks"][other])
+        row = sk.barrier(self.state, "replace-participant", "multi", OWNER, NOW + 1,
+                         participant=LEAD, successor=successor, reason="handover", ack_ref="new-ack", inflight=[])
+        self.assertEqual(row["participants"], [successor, other])
+        self.assertEqual(row["acks"][other], unchanged)
+        self.assertEqual((row["state"], row["resource"], row["scope"], row["reason"]),
+                         ("active", "repo#main", "merges", "release"))
+
+    def test_replace_refuses_invalid_identity_evidence_and_released_hold(self):
+        successor = self.replace_setup()
+        before = json.dumps(self.state, sort_keys=True)
+        options = {"participant": LEAD, "successor": successor, "reason": "handover"}
+        for changes in ({"participant": successor}, {"successor": LEAD}, {"successor": "invalid"},
+                        {"reason": ""}, {"reason": " "}, {"reason": None}, {"ack_ref": "partial"},
+                        {"inflight": []}, {"ack_ref": "", "inflight": []}, {"ack_ref": "ref", "inflight": "[]"}):
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                sk.barrier(self.state, "replace-participant", "hold", OWNER, NOW + 1, **dict(options, **changes))
+            self.assertEqual(json.dumps(self.state, sort_keys=True), before)
+        with self.assertRaises(ValueError):
+            sk.barrier(self.state, "replace-participant", "hold", SID, NOW + 1, **options)
+        for changes in ({"state": "requested"}, {"skipper": SID}):
+            self.state["records"]["enroll-b"].update(changes)
+            snapshot = json.dumps(self.state, sort_keys=True)
+            with self.assertRaises(ValueError):
+                sk.barrier(self.state, "replace-participant", "hold", OWNER, NOW + 1, **options)
+            self.assertEqual(json.dumps(self.state, sort_keys=True), snapshot)
+            self.state = json.loads(before)
+        sk.barrier(self.state, "request", "two", OWNER, NOW, "repo#main", "merges", [LEAD, successor], "release")
+        with self.assertRaises(ValueError):
+            sk.barrier(self.state, "replace-participant", "two", OWNER, NOW + 1, **options)
+        sk.barrier(self.state, "release", "hold", OWNER, NOW + 2, reason="finished")
+        before = json.dumps(self.state, sort_keys=True)
+        with self.assertRaises(ValueError):
+            sk.barrier(self.state, "replace-participant", "hold", OWNER, NOW + 3, **options)
+        self.assertEqual(json.dumps(self.state, sort_keys=True), before)
 
     def request(self):
         self.enroll()
@@ -653,6 +879,52 @@ class BarrierTests(FixtureCase):
 
 
 class CLITests(FixtureCase):
+    def test_replace_cli_and_revoke_guard_are_atomic(self):
+        successor = "claude:00000000-0000-4000-8000-000000000003"
+        self.enroll()
+        self.enroll(successor, "enroll-b")
+        sk.barrier(self.state, "request", "hold", OWNER, NOW, "repo#main", "merges", [LEAD], "release")
+        sk.barrier(self.state, "ack", "hold", OWNER, NOW, participant=LEAD, inflight=[], ack_ref="ack")
+        sk.barrier(self.state, "active", "hold", OWNER, NOW)
+        self.write(self.state_dir / "state.json", self.state)
+        revoke = self.write(self.root / "revoke.json", {"id": "enroll-a", "state": "revoked"})
+        before = (self.state_dir / "state.json").read_bytes()
+        code, _, err = self.invoke(["--owner", OWNER, "record", "--file", str(revoke)])
+        self.assertEqual(code, 2)
+        self.assertIn("replace-participant", err)
+        self.assertEqual((self.state_dir / "state.json").read_bytes(), before)
+        code, output, err = self.invoke(["--owner", OWNER, "barrier", "replace-participant", "--id", "hold",
+                                        "--participant", LEAD, "--successor", successor, "--reason", "handover",
+                                        "--ack-ref", "new-ack", "--inflight", "[]"])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(output)["state"], "active")
+        self.assertEqual(self.invoke(["--owner", OWNER, "record", "--file", str(revoke)])[0], 0)
+
+    def test_env_state_directory_and_explicit_override(self):
+        other = self.root / "env-state"
+        env = {"SKIPPER_STATE_DIR": str(other)}
+        code, _, err = self.invoke(["--owner", OWNER, "status", "--save"], env, explicit_state=False)
+        self.assertEqual(code, 0, err)
+        self.assertTrue((other / "state.json").exists())
+        self.assertFalse(self.state_dir.exists())
+        code, _, err = self.invoke(["--owner", OWNER, "status", "--save"], env)
+        self.assertEqual(code, 0, err)
+        self.assertTrue((self.state_dir / "state.json").exists())
+
+    def test_readonly_status_names_owner_and_path_without_breaking_json(self):
+        self.write(self.state_dir / "state.json", self.state)
+        before = (self.state_dir / "state.json").read_bytes()
+        for args in (["status"], ["status", "--json"]):
+            with self.subTest(args=args):
+                code, output, err = self.invoke(args)
+                self.assertEqual(code, 0, err)
+                self.assertIn(OWNER, err)
+                self.assertIn(str(self.state_dir.resolve()), err)
+                self.assertEqual(len(err.strip().splitlines()), 1)
+                if "--json" in args:
+                    self.assertIn("sessions", json.loads(output))
+        self.assertEqual((self.state_dir / "state.json").read_bytes(), before)
+
     def test_resolve_cli_is_readonly_and_returns_observation_row(self):
         self.write(self.claude / "sessions/1.json", {"sessionId": SID, "name": "lead-a", "pid": 1})
         with mock.patch.object(sk, "liveness", return_value="live"), \
@@ -696,13 +968,16 @@ class CLITests(FixtureCase):
         self.assertEqual(code, 0, err)
         self.assertIn("| buddy |", table)
 
-    def invoke(self, args):
+    def invoke(self, args, env=None, explicit_state=True):
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
                 mock.patch.object(sk, "find_peers", return_value=None), \
                 mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(self.claude),
-                                            "CC_STATUSLINE_CTX_EXPORT_DIR": str(self.exports)}, clear=True):
-            code = sk.main(["--home", str(self.home), "--state-dir", str(self.state_dir)] + args)
+                                            "CC_STATUSLINE_CTX_EXPORT_DIR": str(self.exports),
+                                            "XDG_STATE_HOME": str(self.root / "xdg-state"),
+                                            **(env or {})}, clear=True):
+            state_args = ["--state-dir", str(self.state_dir)] if explicit_state else []
+            code = sk.main(["--home", str(self.home)] + state_args + args)
         return code, out.getvalue(), err.getvalue()
 
     def test_observe_readonly_and_status_save_baseline(self):

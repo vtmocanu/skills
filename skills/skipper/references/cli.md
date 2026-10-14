@@ -2,7 +2,8 @@
 
 Invoke `<this skill's directory>/scripts/skipper` directly. Put global options
 before the subcommand. Use a private state directory outside every repository:
-`${XDG_STATE_HOME:-$HOME/.local/state}/skipper/`. Use `--state-dir PATH` for an
+`SKIPPER_STATE_DIR` when nonempty, otherwise `${XDG_STATE_HOME:-$HOME/.local/state}/skipper/`.
+Use `--state-dir PATH` to override either default for an
 independent skipper ledger and `--owner SESSION_UUID` for every mutation.
 Use a canonical bare UUID for `--owner` and an enrollment's `skipper` field;
 use qualified `claude:UUID`/`codex:UUID` identities for session targets.
@@ -34,6 +35,8 @@ once. Read `.sessions[]`, not a recursive object sweep. Each row has `id`,
 `session_id`, `name`, `runtime`, `liveness`, observed `state`, `cwd`,
 `repo: {root, remote}` and `context`. `repo` is an object; use `.repo.root` for
 the path. This is observation state, not the ledger's task/role report.
+Without `--owner`, `status` prints a one-line ledger owner/path note to stderr;
+JSON stdout stays parseable. Mutations refuse a different owner and name both UUIDs.
 
 `new`, `vanished` and `unverified_missing` are ID arrays. `changes` carries
 name/repo/runtime labels for those diffs, including absent sessions; those labels
@@ -110,9 +113,9 @@ lead must establish that boundary. Session targets use `claude:UUID` or `codex:U
 | kind | Required fields | Lifecycle and evidence |
 |---|---|---|
 | enrollment | target, skipper, scope | requested → authorized (`user_grant_ref`) → acked (`ack_ref`) → revoked; identities/scope immutable |
-| command | target, task | queued → accepted (`ack_ref`) → done (`evidence`); accepted ↔ blocked; queued/accepted/blocked → superseded; irreversible requires reason |
+| command | target, task | queued → accepted (`ack_ref`) → done (`evidence`); queued → done (`evidence`, implicit accept); accepted ↔ blocked; queued/accepted/blocked → superseded; irreversible requires reason |
 | question | target, question, options, pair_recommendation | open → answered (`answer`, `user_answer_ref`) → acked (`ack_ref`); retain dissent, urgency, dependencies |
-| handover | predecessor, successor, task | requested → ready (`handover_ref`) → acked (`successor_ack_ref`) → transferred (`predecessor_stop_ref`, enrolled successor) |
+| handover | predecessor, successor, task | requested → ready (`handover_ref`) → acked (`successor_ack_ref`) → transferred (`predecessor_stop_ref`, enrolled successor); requested/ready/acked → superseded (`reason`) |
 | session | target, state, report_ref; task unless pending-handover | Latest transition report, optionally buddy, blockers, next and incident references |
 
 A successor may record `state: "pending-handover"` with no task yet. This is an
@@ -120,6 +123,14 @@ acknowledgment of enrollment/readiness, not task ownership. Require a real task
 when recording an assigned-work state; complete the normal handover gates.
 Tasks in session reports are display only, never ownership. A pending-handover
 update refuses a supplied task and drops any task stored on the prior report.
+With no session report, an enrolled target's table task falls back to its latest
+accepted/queued command, then its latest incoming nonsuperseded handover. This
+display grants no ownership. A queued command completed directly uses its evidence
+as the implicit `ack_ref`; require nonblank string evidence for that implicit
+acknowledgment. Only existing commands can transition to done; never create one
+directly in done. Preserve enrollment and action-authorization gates.
+Superseding a handover voids it without transferring tasks; require a nonblank
+text reason. Transferred handovers cannot be superseded.
 
 Use a stable task ID in `task`; keep assignment detail in an optional `prompt`.
 New commands require acknowledged enrollment and one accountable lead per active
@@ -139,6 +150,7 @@ or `blocked`, within the ordinary transition rules. Refuse `accepted` updates.
 <this skill's directory>/scripts/skipper --owner SESSION_UUID barrier request --id HOLD_ID --resource example-repo#main --scope merges --participants claude:LEAD_UUID --reason 'Release checkpoint'
 <this skill's directory>/scripts/skipper --owner SESSION_UUID barrier ack --id HOLD_ID --participant claude:LEAD_UUID --inflight '[]' --ack-ref MESSAGE_ID
 <this skill's directory>/scripts/skipper --owner SESSION_UUID barrier active --id HOLD_ID
+<this skill's directory>/scripts/skipper --owner SESSION_UUID barrier replace-participant --id HOLD_ID --participant claude:OLD_UUID --successor claude:NEW_UUID --reason 'Lead handover' --ack-ref MESSAGE_ID --inflight '[]'
 <this skill's directory>/scripts/skipper --owner SESSION_UUID barrier release --id HOLD_ID --reason 'Release finished'
 ```
 
@@ -146,12 +158,25 @@ Use scopes `merges`, `pushes-ci` or `dispatches`. Request with unique enrolled
 participants. An acknowledgment must name remaining in-flight work as a JSON
 array; an empty array explicitly means quiescent. Activate only after all
 participants acknowledge with no work remaining. A later nonempty acknowledgment
-returns the hold to requested, as does revoking a participant's enrollment.
+returns the hold to requested. Refuse enrollment revocation while the target
+participates in any unreleased barrier (requested or active); use
+`replace-participant` before revoking.
 Returning to requested is not a release: the hold stays in force while its
 acknowledgments and coverage are reconciled. Resume only after explicit release.
 Release explicitly with a reason, including when
 cancelling a requested barrier. A released ID cannot be reused. No expiration,
 automatic release, broadcast or forge-side enforcement occurs.
+
+`replace-participant` requires an existing non-released hold, its current OLD
+participant, a different NEW participant with acknowledged enrollment under this
+ledger's owner, and a nonblank `--reason`. Refuse duplicate participants. Drop
+OLD's acknowledgment; never inherit it. An active hold stays active only with
+NEW's quiescent `--ack-ref REF --inflight '[]'` in the same call and complete
+remaining coverage. Supply both acknowledgment options or neither; a nonempty
+in-flight list records pending work. Otherwise return to requested, still in
+force; collect NEW's normal `barrier ack`, then explicitly activate again.
+A requested hold never auto-activates. Record OLD, NEW and reason in the event.
+Only this ledger's owner mutates it; replacement transfers no skipper authority.
 
 ## Persistence and recovery
 

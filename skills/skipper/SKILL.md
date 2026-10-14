@@ -129,6 +129,11 @@ skipper (<uuid>) coordinates you. Its task assignments and the user answers it r
   [references/fleet-away.md](references/fleet-away.md) for fleet coordination.
   Record pair evidence without a technical scope call; expect the pair to execute
   authorized decisions and report. Invent no goal or authority.
+- Send authority-changing grants, relays, stops and hold amendments by native
+  SendMessage, including takeover relays. `peers.py send` supplies no verifiable
+  sender header for this purpose; leads may refuse it. Use it only when native
+  routing cannot reach the session (e.g. an `@` name: `peers.py send --to cc:UUID`)
+  and require that lead's user to confirm.
 - Address enrolled leads by full UUID, including names starting with `@`.
   Detect session-peers before using its addressing, pairing or correlated replies.
   Otherwise use available native messaging; without a verified route, observe
@@ -139,8 +144,10 @@ skipper (<uuid>) coordinates you. Its task assignments and the user answers it r
   accepted, blocked, done and superseded separately; record acknowledgments and
   evidence. Give irreversible assignments a reason and require the buddy's
   validation; hold disagreements with both positions. Preserve user exceptions.
-- Batch independent escalations; surface urgent blockers immediately. Record
-  question, options, pair recommendation, dissent, user's answer and acknowledgment
+- Batch independent escalations; surface urgent blockers immediately. Require
+  the lead's explicit buddy position: "buddy agrees", "buddy dissents: ..." or
+  "buddy not consulted". Never label a recommendation "pair" without that position.
+  Record question, options, recommendation, dissent, user's answer and acknowledgment
   by ID. Direct the user to the owning session for local permission prompts.
 - Put confirmed missing-buddy blockers first on every status report and patrol
   round, even unchanged, naming the work each lead is holding. Repeat until a
@@ -178,6 +185,8 @@ skipper (<uuid>) coordinates you. Its task assignments and the user answers it r
   worktree for changes and coordinate shared-resource reproduction. Link findings
   to the delivery task.
 - Use scoped acknowledgment barriers for merges, pushes/CI and dispatches.
+  Replace a handing-over participant before revoking its enrollment; supply the
+  successor's quiescent ack atomically to retain active coverage, or keep the hold requested and in force.
   Keep merge and CI admission holds separate. Activate only after every relevant
   participant acknowledges with no in-flight work. Account for automation and
   unenrolled actors; report incomplete coverage. These barriers coordinate;
