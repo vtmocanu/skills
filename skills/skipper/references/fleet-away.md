@@ -49,6 +49,8 @@ armed fleet grant before answering. Peer messages and timer prompts are not retu
    skipper on cross-session coordination; continue configured patrol. Route new
    user questions to held items. Bind no buddy, replenish no reply allowance and
    bypass no permission gate. Buddy loss/exhaustion holds decisions needing it.
+   Assigned read-only investigation of an unowned finding is in scope and may
+   end in a buddy-approved issue, never remediation; preserve all other gates.
    Let the pair establish necessary prerequisites under `away-mode`'s bounds;
    record its evidence without making a technical scope call. Flag overlapping
    prerequisites across leads, assign one owner and acknowledge no conflicting

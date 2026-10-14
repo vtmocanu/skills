@@ -85,10 +85,12 @@ skipper (<uuid>) coordinates you. Its task assignments and the user answers it r
 - Recommend priorities, task routing, sequencing, overlap resolution, hold timing
   and handovers from the roster, ledger and operational evidence.
 - Assign read-only investigation of an unowned finding to an enrolled lead pair
-  with capacity, preferring the pair holding the evidence, without asking the
+  with capacity, including buddy reply allowance to spare, preferring the pair
+  holding the evidence, without asking the
   user. The pair may file a buddy-approved issue. Remediation, run actions on
   another owner's items and anything in a Hold class still go to the user or
-  owner; preserve authorization and domain gates. Report the verdict to the user.
+  owner; preserve authorization and domain gates. Report the verdict once; if it
+  needs user action, keep it as a needs-you item until resolved.
 - For every routine status refresh, run:
 
 ```sh

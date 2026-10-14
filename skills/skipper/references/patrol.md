@@ -42,8 +42,10 @@ Without that section, arm no patrol timer. Ask about incomplete or invalid confi
    merge, cancellation, schedule deletion or code investigation during patrol.
 6. Route each new or materially changed finding to its accountable lead/buddy pair;
    assign read-only investigation of an unowned finding to an enrolled lead pair
-   with capacity (prefer the pair holding the evidence) without asking the user,
-   and report its verdict to the user. If none has capacity, report it as unassigned.
+   with capacity, including buddy reply allowance to spare (prefer the pair
+   holding the evidence), without asking the user. Report its verdict once;
+   if user action is needed, keep it as a needs-you item until resolved.
+   If none has capacity, report it as unassigned.
    Include evidence references and the owning
    resource. Escalate user decisions with the pair's recommendation; keep technical
    diagnosis and remediation with that pair.
