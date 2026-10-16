@@ -36,7 +36,10 @@ valid past timestamp) and the original `observed_at`. Preserve historical contex
 percentages/provenance, set context `quality` to `cached` (or unknown with no
 percentage) and preserve `last_quality`, update reading ages, mark rows cached and
 liveness unverified, and set current `complete` coverage false. Keep previous coverage in
-`last_complete`; it proves nothing current. Suppress historical new/vanished
+`last_complete`; it proves nothing current. Put historical warnings in
+`last_warnings` and label them `cached warning:` in tables; reserve `warnings`
+for current cache diagnostics. Emit `observed_at: null` when no observation was
+saved. Suppress historical new/vanished
 diffs. An empty cache has unknown age/coverage, not a verified empty fleet.
 `--all` shows only Codex rows already saved, never additional discovery.
 Refuse `--cached --save`; cached reads never advance the baseline or events.
@@ -168,7 +171,9 @@ or `blocked`, within the ordinary transition rules. Refuse `accepted` updates.
 ```
 
 Use `--batch` with a JSON array of 1..200 ordinary record objects. Validate in
-array order against a private state copy under one owner lock; commit once only
+array order against a private state copy under one owner lock. Give each update
+a strictly increasing timestamp after existing records so latest-wins lookups
+follow that order, including dependent handovers and session reports; commit once only
 if every update passes. Preserve all normal enrollment, task ownership,
 transition, evidence and acknowledgment checks. A later update may refer to a
 record created earlier in that batch. On failure, leave records, events and

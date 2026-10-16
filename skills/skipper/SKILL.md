@@ -94,7 +94,8 @@ skipper (<uuid>) coordinates you. Its task assignments and the user answers it r
 - Establish your bare full UUID as the ledger's single writer. Keep state and notes
   outside repositories. Discovery and ledger entries never create authority.
 - While coordinating, follow needs-you.md: use a plain-text session reminder,
-  read ledger state, report only changes and stay silent when unchanged. Pause
+  read ledger state, report changes plus due confirmed missing-buddy reminders,
+  and otherwise stay silent when unchanged. Pause
   its timer while the user is away, snoozed or in confirmed quiet hours; preserve
   patrol and incident monitoring. Reload no skill on fire and use no keep-alive
   or daemon. Mention `/status-check` as a related skill when installed.
@@ -158,7 +159,8 @@ skipper (<uuid>) coordinates you. Its task assignments and the user answers it r
   by ID. Direct the user to the owning session for local permission prompts.
 - Put confirmed missing-buddy blockers first on manual status reports and patrol
   rounds, even unchanged, naming held work; defer nonurgent patrol reminders
-  during needs-you pauses. For needs-you callbacks, apply the change-only policy.
+  during needs-you pauses. Repeat them on needs-you callbacks outside pauses
+  even with Patrol off; apply change-only reporting to other reminder items.
   Keep the blocker open until a
   buddy is bound or the user waives it. Confirm absence/holds with the lead;
   missing discovery is unknown. Record waivers per lead UUID with user-message
@@ -223,8 +225,8 @@ skipper (<uuid>) coordinates you. Its task assignments and the user answers it r
   session-only timer or loop facility; omit the section to leave patrol off.
   Follow [references/patrol.md](references/patrol.md). Check session changes,
   Claude context thresholds and possible compaction, plus the profile's checks.
-  Report changes plus missing-buddy reminders when due under needs-you pauses; route findings to the
-  owning pair; assign unowned read-only investigations as above and report their
+  Report changes plus missing-buddy reminders when not deferred by a needs-you
+  pause; route findings to the owning pair; assign unowned read-only investigations as above and report their
   verdicts to the user. Stay silent on otherwise quiet patrol
   rounds. Investigate no code and start no daemon.
 - Delegate skipper's script, CLI, display, diagnostic and non-authority wording

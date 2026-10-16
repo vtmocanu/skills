@@ -29,5 +29,6 @@ Never mark a grant, enrollment, command acceptance, question answer, review,
 handover, stop, hold acknowledgment or release as no-reply. Keep their exact
 identity, evidence, verdict and acknowledgment requirements. A compact report
 records only the gates actually satisfied; queued transport proves no acceptance.
-Use `record --batch` for already-received independent ledger updates, retaining
+Use `record --batch` for already-received ledger updates in order, including
+dependent chains whose required evidence has arrived, retaining
 one validated event per update. Never fabricate an acknowledgment to fill a batch.

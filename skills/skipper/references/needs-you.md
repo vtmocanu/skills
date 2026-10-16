@@ -33,15 +33,17 @@ Track unresolved user items by stable ID, action owed and material state:
 - Leads past the handover threshold, successor status and the user action owed.
 - New unenrolled sessions and known local permission blockers, with their owner.
 
-Report new, materially changed or resolved items only. If nothing changed,
-produce no user-facing output, including when nothing needs the user. Keep open
+Report new, materially changed or resolved items only, except confirmed missing-
+buddy blockers: repeat those every reminder interval outside pauses until bound
+or explicitly waived, even with Patrol off. If nothing changed and no such
+repeat is due, produce no user-facing output. Keep open
 items in the ledger; silence never resolves them. Compare action/state, not
 changing timestamps or observation ages. Include the complete outstanding list
 on explicit user status requests and once on return/resume. Put missing-buddy
 blockers first whenever a report is due. Confirm their absence and held work
 with the lead; missing metadata stays unknown. Record waivers per lead UUID with
 the user-message reference and scope; transfer none to successors. A waiver only
-silences the missing-buddy report; irreversible actions still need the user's
+silences the repeated missing-buddy report; irreversible actions still need the user's
 separate exception in that lead. Make no technical decision, repair or grant.
 
 Keep this timer separate from patrol and from `/status-check`, when installed,

@@ -1176,5 +1176,56 @@ class EfficiencyTests(FixtureCase):
         self.assertIn("coverage unknown", table)
 
 
+    def test_batch_handover_chain_uses_last_successor(self):
+        second = "claude:00000000-0000-4000-8000-000000000003"
+        third = "claude:00000000-0000-4000-8000-000000000004"
+        for n, target in enumerate((LEAD, second, third)):
+            self.enroll(target, "enroll-%d" % n)
+        items = []
+        for n, (old, new) in enumerate(((LEAD, second), (second, third))):
+            key = "h%d" % n
+            items.extend([
+                {"id": "c%d" % n, "kind": "command", "target": old, "task": "task-a"},
+                {"id": key, "kind": "handover", "predecessor": old,
+                 "successor": new, "task": "task-a"},
+                {"id": key, "state": "ready", "handover_ref": "artifact-%d" % n},
+                {"id": key, "state": "acked", "successor_ack_ref": "ack-%d" % n},
+                {"id": key, "state": "transferred", "predecessor_stop_ref": "stop-%d" % n}])
+        sk.record_batch(self.state, items, NOW)
+        with self.assertRaisesRegex(ValueError, "acknowledged successor"):
+            sk.record(self.state, {"kind": "command", "target": second, "task": "task-a"}, NOW + 1)
+        final = sk.record(self.state, {"kind": "command", "target": third, "task": "task-a"}, NOW + 1)
+        self.assertEqual(final["target"], third)
+        self.assertGreater(self.state["records"]["h1"]["updated_at"],
+                           self.state["records"]["h0"]["updated_at"])
+        stamps = [event["ts"] for event in self.state["events"][-11:-1]]
+        self.assertTrue(all(a < b for a, b in zip(stamps, stamps[1:])))
+
+    def test_batch_session_reports_display_last_task(self):
+        self.state["observations"] = {"sessions": {LEAD: {"id": LEAD, "session_id": SID,
+            "name": "lead-a", "runtime": "claude", "repo": {"root": None, "remote": None},
+            "state": "idle", "context": {"pct": None, "quality": "unknown"}}}, "observed_at": NOW}
+        sk.record_batch(self.state, [
+            {"id": "r1", "kind": "session", "target": LEAD, "state": "busy",
+             "task": "old-task", "report_ref": "msg-old"},
+            {"id": "r2", "kind": "session", "target": LEAD, "state": "busy",
+             "task": "latest-task", "report_ref": "msg-new"}], NOW)
+        table = sk.status(sk.cached_observation(self.state, NOW + 1), self.state)
+        self.assertIn("latest-task", table)
+        self.assertNotIn("old-task", table)
+
+    def test_cached_warnings_are_historical_and_empty_timestamp_explicit(self):
+        self.state["observations"] = {"observed_at": NOW - 60, "sessions": {},
+                                      "warnings": ["session-peers unavailable: prior outage"]}
+        cached = sk.cached_observation(self.state, NOW)
+        self.assertEqual(cached["warnings"], [])
+        self.assertEqual(cached["last_warnings"], self.state["observations"]["warnings"])
+        table = sk.status(cached, self.state)
+        self.assertIn("cached warning: session-peers unavailable: prior outage", table)
+        empty = sk.cached_observation(sk.empty_state(), NOW)
+        self.assertIn("observed_at", empty)
+        self.assertIsNone(empty["observed_at"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

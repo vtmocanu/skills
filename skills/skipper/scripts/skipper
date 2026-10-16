@@ -352,9 +352,11 @@ def cached_observation(state, now):
                     last_complete=saved.get("complete", {}),
                     complete={"claude": False, "codex": False},
                     new=[], vanished=[], unverified_missing=[], changes={})
+    snapshot.setdefault("observed_at", None)
     snapshot.setdefault("sessions", {})
     snapshot.setdefault("excluded", {})
-    snapshot.setdefault("warnings", [])
+    snapshot["last_warnings"] = snapshot.pop("warnings", [])
+    snapshot["warnings"] = []
     for row in snapshot["sessions"].values():
         row["liveness"] = "unverified"
         row["cached"] = True
@@ -576,8 +578,12 @@ def record_batch(state, items, now):
         raise ValueError("batch must be a JSON array of 1..200 records")
     candidate = copy.deepcopy(state)
     receipts = []
+    stamp = max([now] + [row["updated_at"] for row in candidate["records"].values()
+                         if number(row.get("updated_at"))])
     for item in items:
-        row = record(candidate, item, now)
+        # Latest-wins lookups must follow batch order, even at float precision.
+        stamp = math.nextafter(stamp, math.inf)
+        row = record(candidate, item, stamp)
         receipts.append(receipt(candidate, row))
     state.clear()
     state.update(candidate)
@@ -742,6 +748,7 @@ def status(snapshot, state, show_all=False, verbose=False):
         if row["state"] != "released":
             lines.append("hold " + cell(row["id"]) + ": " + cell(row["resource"]) + " / "
                          + row["scope"] + " / " + row["state"])
+    lines.extend("cached warning: " + cell(w) for w in snapshot.get("last_warnings", []))
     lines.extend("warning: " + cell(w) for w in snapshot["warnings"])
     return "\n".join(lines)
 
