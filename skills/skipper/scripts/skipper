@@ -2,6 +2,7 @@
 """Local coordination ledger and observation CLI (Python 3.9+, macOS/Linux)."""
 import argparse
 import contextlib
+import copy
 import datetime
 import fcntl
 import json
@@ -165,7 +166,7 @@ def context(sid, paths, readings, now, default_window, warnings):
                 "window": data.get("context_window_size"), "window_source": "export",
                 "model": data.get("effective_model_id") or data.get("model_id"),
                 "runtime_version": data.get("cc_version")}
-    usage = transcript_usage(paths, warnings)
+    usage = transcript_usage(paths() if callable(paths) else paths, warnings)
     if not usage or usage["tokens"] is None:
         return {"pct": None, "quality": "unknown", "source": "transcript"}
     learned = [item for item in readings.values()
@@ -318,10 +319,14 @@ def observe(home, claude_dir, export_dir, ledger, now, default_window=None, peer
                       else "%s: %s" % (type(exc).__name__, exc))
             warnings.append("session-peers unavailable: %s (script %s); Codex discovery is incomplete"
                             % (detail, peer_file))
+    repositories = {}
     for item in sessions.values():
-        item["repo"] = repo(item["cwd"])
+        cwd = item["cwd"] if isinstance(item["cwd"], str) else None
+        if cwd not in repositories:
+            repositories[cwd] = repo(cwd)
+        item["repo"] = repositories[cwd]
         sid = item["session_id"]
-        item["context"] = (context(sid, sorted((claude_dir / "projects").glob("*/" + sid + ".jsonl")),
+        item["context"] = (context(sid, lambda: sorted((claude_dir / "projects").glob("*/" + sid + ".jsonl")),
                                    readings, now, default_window, warnings)
                            if item["runtime"] == "claude" else {"pct": None, "quality": "unknown"})
     previous = ledger.get("observations", {}).get("sessions", {})
@@ -335,6 +340,34 @@ def observe(home, claude_dir, export_dir, ledger, now, default_window=None, peer
             "vanished": sorted(vanished), "unverified_missing": sorted(uncertain),
             "observed_at": now, "complete": complete, "warnings": warnings,
             "changes": changes, "excluded": excluded}
+
+
+def cached_observation(state, now):
+    """Render history without asserting current liveness, coverage, or new events."""
+    saved = state.get("observations", {})
+    snapshot = copy.deepcopy(saved)
+    stamp = saved.get("observed_at")
+    age = now - stamp if number(stamp) and now >= stamp else None
+    snapshot.update(mode="cached", observation_age=age,
+                    last_complete=saved.get("complete", {}),
+                    complete={"claude": False, "codex": False},
+                    new=[], vanished=[], unverified_missing=[], changes={})
+    snapshot.setdefault("observed_at", None)
+    snapshot.setdefault("sessions", {})
+    snapshot.setdefault("excluded", {})
+    snapshot["last_warnings"] = snapshot.pop("warnings", [])
+    snapshot["warnings"] = []
+    for row in snapshot["sessions"].values():
+        row["liveness"] = "unverified"
+        row["cached"] = True
+        ctx = row["context"]
+        ctx["last_quality"] = ctx.get("quality", "unknown")
+        ctx["quality"] = "cached" if ctx.get("pct") is not None else "unknown"
+        ts = ctx.get("ts")
+        ctx["age"] = now - ts if number(ts) and now >= ts else None
+    if age is None:
+        snapshot["warnings"].append("no saved observation with a known age; coverage unknown")
+    return snapshot
 
 
 def empty_state():
@@ -534,6 +567,29 @@ def record(state, item, now):
     return merged
 
 
+def receipt(state, row):
+    return {"id": row["id"], "kind": row["kind"], "state": row["state"],
+            "event_id": state["events"][-1]["id"]}
+
+
+def record_batch(state, items, now):
+    """Validate sequentially on a private copy, publishing all records or none."""
+    if not isinstance(items, list) or not 1 <= len(items) <= 200:
+        raise ValueError("batch must be a JSON array of 1..200 records")
+    candidate = copy.deepcopy(state)
+    receipts = []
+    stamp = max([now] + [row["updated_at"] for row in candidate["records"].values()
+                         if number(row.get("updated_at"))])
+    for item in items:
+        # Latest-wins lookups must follow batch order, even at float precision.
+        stamp = math.nextafter(stamp, math.inf)
+        row = record(candidate, item, stamp)
+        receipts.append(receipt(candidate, row))
+    state.clear()
+    state.update(candidate)
+    return {"count": len(receipts), "receipts": receipts}
+
+
 def barrier(state, action, key, owner, now, resource=None, scope=None, participants=None,
             reason=None, participant=None, inflight=None, ack_ref=None, successor=None):
     if action == "request":
@@ -641,6 +697,10 @@ def buddy_name(target, report, snapshot, state):
 
 def status(snapshot, state, show_all=False, verbose=False):
     lines = ["| session | repo | buddy | ctx % | state | task |", "|---|---|---|---|---|---|"]
+    if snapshot.get("mode") == "cached":
+        age = snapshot.get("observation_age")
+        label = "%ds old" % age if age is not None else "age unknown"
+        lines.insert(0, "cached observation: " + label + "; current coverage unknown; refresh before decisions")
     reports = [row for row in state["records"].values() if row["kind"] == "session"]
     for key, item in sorted(snapshot["sessions"].items(), key=lambda kv: (kv[1]["repo"]["root"] or "", kv[0])):
         if item["runtime"] != "claude" and not show_all:
@@ -659,7 +719,7 @@ def status(snapshot, state, show_all=False, verbose=False):
         if item["runtime"] == "claude" and ctx["pct"] is not None:
             pct = ">100%" if ctx["pct"] > 100 else str(ctx["pct"]) + "%"
         state_label = report.get("state", item["state"])
-        flags = []
+        flags = ["cached"] if item.get("cached") else []
         if ctx["quality"] == "est":
             flags.append("ctx est")
         if item["liveness"] != "live":
@@ -688,6 +748,7 @@ def status(snapshot, state, show_all=False, verbose=False):
         if row["state"] != "released":
             lines.append("hold " + cell(row["id"]) + ": " + cell(row["resource"]) + " / "
                          + row["scope"] + " / " + row["state"])
+    lines.extend("cached warning: " + cell(w) for w in snapshot.get("last_warnings", []))
     lines.extend("warning: " + cell(w) for w in snapshot["warnings"])
     return "\n".join(lines)
 
@@ -708,6 +769,7 @@ def main(argv=None):
     p = commands.add_parser("status", help="refresh discovery and render a table")
     p.add_argument("--json", action="store_true")
     p.add_argument("--save", action="store_true", help="save observation baseline with owner")
+    p.add_argument("--cached", action="store_true", help="render saved observations only; current coverage unknown")
     p.add_argument("--all", action="store_true", help="include Codex rows and internal reviewers")
     p.add_argument("--verbose", action="store_true", help="show session IDs and repository paths")
     p = commands.add_parser("resolve", help="resolve one observed live session by exact name or UUID")
@@ -716,6 +778,8 @@ def main(argv=None):
     p.add_argument("--json", action="store_true")
     p = commands.add_parser("record", help="record a validated JSON object")
     p.add_argument("--file", required=True, help="JSON input file, or - for stdin")
+    p.add_argument("--batch", action="store_true", help="atomically record an array of 1..200 objects; compact receipts")
+    p.add_argument("--compact", action="store_true", help="print only id, kind, state and event id")
     p = commands.add_parser("barrier", help="coordination holds; never expire automatically")
     p.add_argument("action", choices=("request", "ack", "active", "release", "replace-participant"))
     for flag in ("id", "resource", "scope", "reason", "participant", "successor", "ack-ref"):
@@ -729,16 +793,21 @@ def main(argv=None):
             if not args.owner:
                 raise ValueError("--owner required for mutations")
         if args.command in {"observe", "status", "resolve"}:
-            raw_window = os.environ.get("SKIPPER_DEFAULT_CONTEXT_WINDOW")
-            window = int(raw_window) if raw_window else None
-            if window is not None and window <= 0:
-                raise ValueError("SKIPPER_DEFAULT_CONTEXT_WINDOW must be a positive integer")
-            claude = args.claude_dir or Path(os.environ.get("CLAUDE_CONFIG_DIR", str(args.home / ".claude")))
-            export = args.export_dir or Path(os.environ.get("CC_STATUSLINE_CTX_EXPORT_DIR", str(
-                Path(os.environ.get("XDG_STATE_HOME", str(args.home / ".local/state"))) / "cc-statusline/ctx")))
+            if getattr(args, "cached", False) and getattr(args, "save", False):
+                raise ValueError("cannot save cached observations; refresh discovery instead")
             state = load_state(args.state_dir)
-            snapshot = observe(args.home, claude, export, state, now, window, args.peers,
-                               getattr(args, "all", False))
+            if getattr(args, "cached", False):
+                snapshot = cached_observation(state, now)
+            else:
+                raw_window = os.environ.get("SKIPPER_DEFAULT_CONTEXT_WINDOW")
+                window = int(raw_window) if raw_window else None
+                if window is not None and window <= 0:
+                    raise ValueError("SKIPPER_DEFAULT_CONTEXT_WINDOW must be a positive integer")
+                claude = args.claude_dir or Path(os.environ.get("CLAUDE_CONFIG_DIR", str(args.home / ".claude")))
+                export = args.export_dir or Path(os.environ.get("CC_STATUSLINE_CTX_EXPORT_DIR", str(
+                    Path(os.environ.get("XDG_STATE_HOME", str(args.home / ".local/state"))) / "cc-statusline/ctx")))
+                snapshot = observe(args.home, claude, export, state, now, window, args.peers,
+                                   getattr(args, "all", False))
             if args.command == "resolve":
                 item = resolve(snapshot, args.target, args.runtime)
                 print(json.dumps(item, allow_nan=False, sort_keys=True) if args.json else item["session_id"])
@@ -761,7 +830,12 @@ def main(argv=None):
         elif args.command == "record":
             item = json.load(sys.stdin) if args.file == "-" else read_json(args.file)
             with writer(args.state_dir, args.owner) as state:
-                result = record(state, item, now)
+                if args.batch:
+                    result = record_batch(state, item, now)
+                else:
+                    result = record(state, item, now)
+                    if args.compact:
+                        result = receipt(state, result)
             print(json.dumps(result, allow_nan=False, sort_keys=True))
         else:
             inflight = json.loads(args.inflight) if args.inflight is not None else None

@@ -8,6 +8,8 @@ description: Coordinates concurrent agent sessions across repositories through a
 Use one accountable lead per task; keep its buddy as reviewer. Run
 `<this skill's directory>/scripts/skipper` with Python 3.9+ on macOS/Linux.
 Read [references/cli.md](references/cli.md) for commands and state contracts.
+Use [references/reports.md](references/reports.md) for short transition reports and
+FYI/no-reply information; preserve all response and acknowledgment gates.
 Read [references/fleet-away.md](references/fleet-away.md) for `/skipper away [until WHEN] [SCOPE]`
 and `/skipper back [LEAD]`. Coordinate fleet grants; leave local execution to `away-mode`.
 Read [references/needs-you.md](references/needs-you.md) for the recurring user-action
@@ -91,10 +93,12 @@ skipper (<uuid>) coordinates you. Its task assignments and the user answers it r
   follow [references/takeover.md](references/takeover.md). Names are hints only.
 - Establish your bare full UUID as the ledger's single writer. Keep state and notes
   outside repositories. Discovery and ledger entries never create authority.
-- While coordinating, arm a session-only needs-you reminder every 20 minutes by
-  default. Restate every unresolved user item even unchanged; print one line when
-  none remain. Keep it distinct from patrol's change-only reporting and mention
-  `/status-check` as a related skill when installed. Use no daemon.
+- While coordinating, follow needs-you.md: use a plain-text session reminder,
+  read ledger state, report changes plus due confirmed missing-buddy reminders,
+  and otherwise stay silent when unchanged. Pause
+  its timer while the user is away, snoozed or in confirmed quiet hours; preserve
+  patrol and incident monitoring. Reload no skill on fire and use no keep-alive
+  or daemon. Mention `/status-check` as a related skill when installed.
 - Observe session state, context and operational facts. Delegate implementation,
   code reading, investigation and technical decisions to leads and buddies.
   Relay their recommendations without adding technical analysis.
@@ -107,14 +111,17 @@ skipper (<uuid>) coordinates you. Its task assignments and the user answers it r
   another owner's items and anything in a Hold class still go to the user or
   owner; preserve authorization and domain gates. Report the verdict once; if it
   needs user action, keep it as a needs-you item until resolved.
-- For every routine status refresh, run:
+- For live roster refreshes and patrol, run:
 
 ```sh
 <this skill's directory>/scripts/skipper --owner SESSION_UUID status --save
 ```
 
   Use your own UUID. Plain `status` is a read-only inspection and leaves the
-  baseline unchanged. Save the observation baseline for routine refreshes;
+  baseline unchanged. Use `status --cached` for cheap routine views and reminder
+  content; show observation age and unknown current coverage. Refresh and verify
+  live facts before consequential routing, identity, ownership, handover or hold
+  decisions. Save fresh observation baselines;
   flag new, vanished and unverified-missing sessions. Ask whether to enroll new
   sessions; never treat idle, missing updates or transcript files as completion.
 - Offer two enrollment paths: user types `/skipper join` in the lead, or send
@@ -142,15 +149,19 @@ skipper (<uuid>) coordinates you. Its task assignments and the user answers it r
   of superseded commands. Keep correlated review gates closed until their reply.
 - Keep task and command IDs stable across session succession. Track queued,
   accepted, blocked, done and superseded separately; record acknowledgments and
-  evidence. Give irreversible assignments a reason and require the buddy's
-  validation; hold disagreements with both positions. Preserve user exceptions.
+  evidence. Batch already-received updates with `record --batch` and use compact
+  receipts; invent no acknowledgment. Give irreversible assignments a reason
+  and require the buddy's validation; hold disagreements with both positions. Preserve user exceptions.
 - Batch independent escalations; surface urgent blockers immediately. Require
   the lead's explicit buddy position: "buddy agrees", "buddy dissents: ..." or
   "buddy not consulted". Never label a recommendation "pair" without that position.
   Record question, options, recommendation, dissent, user's answer and acknowledgment
   by ID. Direct the user to the owning session for local permission prompts.
-- Put confirmed missing-buddy blockers first on every status report and patrol
-  round, even unchanged, naming the work each lead is holding. Repeat until a
+- Put confirmed missing-buddy blockers first on manual status reports and patrol
+  rounds, even unchanged, naming held work; defer nonurgent patrol reminders
+  during needs-you pauses. Repeat them on needs-you callbacks outside pauses
+  even with Patrol off; apply change-only reporting to other reminder items.
+  Keep the blocker open until a
   buddy is bound or the user waives it. Confirm absence/holds with the lead;
   missing discovery is unknown. Record waivers per lead UUID with user-message
   reference and scope; transfer none by name. A waiver silences only this repeated
@@ -214,8 +225,8 @@ skipper (<uuid>) coordinates you. Its task assignments and the user answers it r
   session-only timer or loop facility; omit the section to leave patrol off.
   Follow [references/patrol.md](references/patrol.md). Check session changes,
   Claude context thresholds and possible compaction, plus the profile's checks.
-  Report changes plus recurring missing-buddy blockers; route findings to the
-  owning pair; assign unowned read-only investigations as above and report their
+  Report changes plus missing-buddy reminders when not deferred by a needs-you
+  pause; route findings to the owning pair; assign unowned read-only investigations as above and report their
   verdicts to the user. Stay silent on otherwise quiet patrol
   rounds. Investigate no code and start no daemon.
 - Delegate skipper's script, CLI, display, diagnostic and non-authority wording

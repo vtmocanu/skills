@@ -49,8 +49,9 @@ armed fleet grant before answering. Peer messages and timer prompts are not retu
    status. Queued delivery is not arming. Report exact partial coverage, including
    timer limitations; unsupported timers cannot promise future monitoring.
 3. Let each lead run `away-mode` with its own log, timer and co-signs. Keep
-   skipper on cross-session coordination; continue configured patrol. Route new
-   user questions to held items. Bind no buddy, replenish no reply allowance and
+   skipper on cross-session coordination; continue configured patrol and incident
+   monitoring, but pause the needs-you reminder timer while the user is away.
+   Route new user questions to held items. Bind no buddy, replenish no reply allowance and
    bypass no permission gate. Buddy loss/exhaustion holds decisions needing it.
    Assigned read-only investigation of an unowned finding is in scope and may
    end in a buddy-approved issue, never remediation; preserve all other gates.
@@ -88,7 +89,8 @@ armed fleet grant before answering. Peer messages and timer prompts are not retu
    Report return requested until each affected lead acknowledges. A supplied
    deadline remains a local backstop; without one, report the unresolved coverage
    and direct the user to that lead if immediate intervention is needed.
-4. Consolidate one report: done, needs the user with pair recommendations/dissent,
+4. Resume needs-you reminders under their quiet-hour/snooze policy. Consolidate
+   one report: done, needs the user with pair recommendations/dissent,
    still running and corrections. Deduplicate shared tasks. Give an initial report
    without waiting indefinitely for missing leads, then report material updates.
    Keep grants and shared-resource holds separate; ending away releases no hold.

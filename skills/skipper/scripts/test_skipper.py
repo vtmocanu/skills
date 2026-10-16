@@ -998,5 +998,234 @@ class CLITests(FixtureCase):
         self.assertFalse((self.state_dir / "state.json").exists())
 
 
+class EfficiencyTests(FixtureCase):
+    invoke = CLITests.invoke
+
+    def test_cached_status_never_discovers_and_marks_all_coverage_unknown(self):
+        snapshot = {"sessions": {LEAD: {"id": LEAD, "session_id": SID, "name": "lead-a",
+                    "runtime": "claude", "repo": {"root": "/example/repo-a", "remote": None},
+                    "liveness": "live", "state": "busy", "observed_at": NOW - 60,
+                    "context": {"pct": 42, "quality": "exact", "ts": NOW - 70, "age": 10}}},
+                    "observed_at": NOW - 60, "complete": {"claude": True, "codex": True},
+                    "new": [LEAD], "vanished": [], "unverified_missing": [], "warnings": [], "excluded": {}}
+        self.state["observations"] = snapshot
+        self.write(self.state_dir / "state.json", self.state)
+        before = (self.state_dir / "state.json").read_bytes()
+        with mock.patch.object(sk, "observe", side_effect=AssertionError("live discovery")), \
+                mock.patch.object(sk.time, "time", return_value=NOW):
+            code, output, err = self.invoke(["status", "--cached", "--json"])
+            self.assertEqual(code, 0, err)
+            cached = json.loads(output)
+            self.assertEqual(cached["observation_age"], 60)
+            self.assertEqual(cached["mode"], "cached")
+            self.assertEqual(cached["complete"], {"claude": False, "codex": False})
+            self.assertEqual(cached["last_complete"], snapshot["complete"])
+            self.assertEqual(cached["sessions"][LEAD]["liveness"], "unverified")
+            self.assertEqual(cached["sessions"][LEAD]["context"]["age"], 70)
+            self.assertEqual(cached["sessions"][LEAD]["context"]["quality"], "cached")
+            self.assertEqual(cached["sessions"][LEAD]["context"]["last_quality"], "exact")
+            self.assertEqual(cached["new"], [])
+            code, table, err = self.invoke(["status", "--cached"])
+            self.assertEqual(code, 0, err)
+            self.assertIn("cached observation: 60s old", table)
+            self.assertIn("coverage unknown", table)
+            self.assertIn("42%", table)
+            self.assertIn("cached", table)
+            self.assertNotIn("new:", table)
+        self.assertEqual((self.state_dir / "state.json").read_bytes(), before)
+        self.assertEqual(sk.load_state(self.state_dir)["observations"], snapshot)
+
+    def test_cached_empty_or_future_snapshot_is_unknown_and_cannot_save(self):
+        with mock.patch.object(sk, "observe", side_effect=AssertionError("live discovery")):
+            code, text, err = self.invoke(["status", "--cached", "--json"])
+            self.assertEqual(code, 0, err)
+            self.assertIsNone(json.loads(text)["observation_age"])
+            self.assertEqual(json.loads(text)["sessions"], {})
+            code, _, err = self.invoke(["--owner", OWNER, "status", "--cached", "--save"])
+            self.assertEqual(code, 2)
+            self.assertIn("cannot save", err)
+        self.assertFalse(self.state_dir.exists())
+        self.state["observations"] = {"observed_at": NOW + 60, "sessions": {}}
+        self.assertIsNone(sk.cached_observation(self.state, NOW)["observation_age"])
+
+    def test_fresh_export_does_not_glob_transcripts_and_repos_memoized_per_refresh(self):
+        for n in (1, 2):
+            sid = "00000000-0000-4000-8000-%012d" % n
+            self.write(self.claude / ("sessions/%d.json" % n),
+                       {"sessionId": sid, "cwd": "/example/repo-a", "name": "lead-%d" % n})
+            self.write(self.exports / (sid + ".json"), self.reading(session_id=sid))
+        original = Path.glob
+        def checked_glob(path, pattern):
+            if path.name == "projects":
+                raise AssertionError("unneeded transcript glob")
+            return original(path, pattern)
+        with mock.patch.object(sk, "liveness", return_value="live"), \
+                mock.patch.object(sk, "find_peers", return_value=None), \
+                mock.patch.object(sk, "repo", return_value={"root": "/example/repo-a", "remote": None}) as lookup, \
+                mock.patch.object(Path, "glob", checked_glob):
+            snapshot = sk.observe(self.home, self.claude, self.exports, self.state, NOW)
+            self.assertEqual(len(snapshot["sessions"]), 2)
+            self.assertTrue(all(row["context"]["quality"] == "exact" for row in snapshot["sessions"].values()))
+            self.assertEqual(lookup.call_count, 1)
+            sk.observe(self.home, self.claude, self.exports, self.state, NOW)
+            self.assertEqual(lookup.call_count, 2)  # no cross-refresh stale repository cache
+
+    def test_batch_sequential_validation_compact_receipts_and_individual_events(self):
+        self.enroll()
+        self.write(self.state_dir / "state.json", self.state)
+        batch = [{"id": "c1", "kind": "command", "target": LEAD, "task": "task-a"},
+                 {"id": "c1", "state": "done", "evidence": "lead-completion-message"}]
+        file = self.write(self.root / "batch.json", batch)
+        code, output, err = self.invoke(["--owner", OWNER, "record", "--batch", "--file", str(file)])
+        self.assertEqual(code, 0, err)
+        receipt = json.loads(output)
+        self.assertEqual(receipt["count"], 2)
+        self.assertEqual([r["state"] for r in receipt["receipts"]], ["queued", "done"])
+        state = sk.load_state(self.state_dir)
+        self.assertEqual(state["records"]["c1"]["ack_ref"], "lead-completion-message")
+        self.assertEqual([e["id"] for e in state["events"][-2:]],
+                         [r["event_id"] for r in receipt["receipts"]])
+        self.assertNotIn("task-a", output)
+
+    def test_batch_rolls_back_earlier_records_and_events_on_invalid_ack(self):
+        self.enroll()
+        self.write(self.state_dir / "state.json", self.state)
+        before = (self.state_dir / "state.json").read_bytes()
+        file = self.write(self.root / "batch.json", [
+            {"id": "c1", "kind": "command", "target": LEAD, "task": "task-a"},
+            {"id": "c1", "state": "accepted"}])
+        code, output, err = self.invoke(["--owner", OWNER, "record", "--batch", "--file", str(file)])
+        self.assertEqual(code, 2)
+        self.assertEqual(output, "")
+        self.assertIn("ack_ref", err)
+        self.assertEqual((self.state_dir / "state.json").read_bytes(), before)
+        original = json.dumps(self.state, sort_keys=True)
+        with self.assertRaises(ValueError):
+            sk.record_batch(self.state, json.loads(file.read_text()), NOW)
+        self.assertEqual(json.dumps(self.state, sort_keys=True), original)
+
+    def test_batch_rejects_bad_shape_empty_oversized_and_conflicting_tasks(self):
+        self.enroll()
+        other = "claude:00000000-0000-4000-8000-000000000003"
+        self.enroll(other, "enroll-b")
+        for payload in ({}, [], [None], [{}] * 201, [
+                {"kind": "command", "target": LEAD, "task": "same"},
+                {"kind": "command", "target": other, "task": "same"}]):
+            with self.subTest(payload_type=type(payload).__name__):
+                before = json.dumps(self.state, sort_keys=True)
+                with self.assertRaises(ValueError):
+                    sk.record_batch(self.state, payload, NOW)
+                self.assertEqual(json.dumps(self.state, sort_keys=True), before)
+
+    def test_compact_single_record_keeps_normal_record_output_compatible(self):
+        file = self.write(self.root / "report.json", {"kind": "session", "id": "r1", "target": LEAD,
+                                                    "state": "busy", "task": "task-a", "report_ref": "msg-a"})
+        args = ["--owner", OWNER, "record", "--file", str(file)]
+        self.assertEqual(json.loads(self.invoke(args)[1])["task"], "task-a")
+        code, text, err = self.invoke(args + ["--compact"])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(set(json.loads(text)), {"id", "kind", "state", "event_id"})
+
+
+    def test_batch_preserves_owner_and_hold_guards_and_commits_once(self):
+        self.enroll()
+        sk.barrier(self.state, "request", "hold-a", OWNER, NOW,
+                   resource="example#main", scope="merges", participants=[LEAD], reason="release")
+        self.write(self.state_dir / "state.json", self.state)
+        before = (self.state_dir / "state.json").read_bytes()
+        payload = [{"id": "report", "kind": "session", "target": LEAD, "state": "busy",
+                    "task": "task-a", "report_ref": "msg"},
+                   {"id": "enroll-a", "state": "revoked"}]
+        file = self.write(self.root / "batch.json", payload)
+        args = ["--owner", OWNER, "record", "--batch", "--file", str(file)]
+        code, _, err = self.invoke(args)
+        self.assertEqual(code, 2)
+        self.assertIn("unreleased barrier", err)
+        self.assertEqual((self.state_dir / "state.json").read_bytes(), before)
+        self.write(file, payload[:1])
+        code, _, err = self.invoke(["--owner", SID] + args[2:])
+        self.assertEqual(code, 2)
+        self.assertIn("differs", err)
+        self.assertEqual((self.state_dir / "state.json").read_bytes(), before)
+        with mock.patch.object(sk.os, "replace", wraps=sk.os.replace) as replace:
+            self.assertEqual(self.invoke(args)[0], 0)
+            self.assertEqual(replace.call_count, 1)
+
+    def test_batch_retains_every_new_event_at_retention_limit(self):
+        items = [{"id": "r%d" % i, "kind": "session", "target": LEAD,
+                  "state": "busy", "task": "task-a", "report_ref": "msg-%d" % i} for i in range(200)]
+        sk.event(self.state, "old", "old", NOW - 1)
+        result = sk.record_batch(self.state, items, NOW)
+        self.assertEqual(len(self.state["events"]), 200)
+        self.assertEqual([r["event_id"] for r in result["receipts"]],
+                         [e["id"] for e in self.state["events"]])
+
+    def test_cached_mode_ignores_live_discovery_configuration_and_shows_current_tasks(self):
+        self.state["observations"] = {"sessions": {LEAD: {"id": LEAD, "session_id": SID,
+            "name": "lead-a", "runtime": "claude", "repo": {"root": None, "remote": None},
+            "state": "idle", "context": {"pct": None, "quality": "unknown"}}}, "observed_at": NOW}
+        sk.record(self.state, {"id": "r1", "kind": "session", "target": LEAD,
+                              "state": "busy", "task": "new-task", "report_ref": "msg"}, NOW)
+        self.write(self.state_dir / "state.json", self.state)
+        with mock.patch.object(sk, "run", side_effect=AssertionError("external discovery")), \
+                mock.patch.object(sk, "exports", side_effect=AssertionError("exports")):
+            code, table, err = self.invoke(["status", "--cached"],
+                                            {"SKIPPER_DEFAULT_CONTEXT_WINDOW": "invalid"})
+        self.assertEqual(code, 0, err)
+        self.assertIn("new-task", table)
+        self.assertIn("coverage unknown", table)
+
+
+    def test_batch_handover_chain_uses_last_successor(self):
+        second = "claude:00000000-0000-4000-8000-000000000003"
+        third = "claude:00000000-0000-4000-8000-000000000004"
+        for n, target in enumerate((LEAD, second, third)):
+            self.enroll(target, "enroll-%d" % n)
+        items = []
+        for n, (old, new) in enumerate(((LEAD, second), (second, third))):
+            key = "h%d" % n
+            items.extend([
+                {"id": "c%d" % n, "kind": "command", "target": old, "task": "task-a"},
+                {"id": key, "kind": "handover", "predecessor": old,
+                 "successor": new, "task": "task-a"},
+                {"id": key, "state": "ready", "handover_ref": "artifact-%d" % n},
+                {"id": key, "state": "acked", "successor_ack_ref": "ack-%d" % n},
+                {"id": key, "state": "transferred", "predecessor_stop_ref": "stop-%d" % n}])
+        sk.record_batch(self.state, items, NOW)
+        with self.assertRaisesRegex(ValueError, "acknowledged successor"):
+            sk.record(self.state, {"kind": "command", "target": second, "task": "task-a"}, NOW + 1)
+        final = sk.record(self.state, {"kind": "command", "target": third, "task": "task-a"}, NOW + 1)
+        self.assertEqual(final["target"], third)
+        self.assertGreater(self.state["records"]["h1"]["updated_at"],
+                           self.state["records"]["h0"]["updated_at"])
+        stamps = [event["ts"] for event in self.state["events"][-11:-1]]
+        self.assertTrue(all(a < b for a, b in zip(stamps, stamps[1:])))
+
+    def test_batch_session_reports_display_last_task(self):
+        self.state["observations"] = {"sessions": {LEAD: {"id": LEAD, "session_id": SID,
+            "name": "lead-a", "runtime": "claude", "repo": {"root": None, "remote": None},
+            "state": "idle", "context": {"pct": None, "quality": "unknown"}}}, "observed_at": NOW}
+        sk.record_batch(self.state, [
+            {"id": "r1", "kind": "session", "target": LEAD, "state": "busy",
+             "task": "old-task", "report_ref": "msg-old"},
+            {"id": "r2", "kind": "session", "target": LEAD, "state": "busy",
+             "task": "latest-task", "report_ref": "msg-new"}], NOW)
+        table = sk.status(sk.cached_observation(self.state, NOW + 1), self.state)
+        self.assertIn("latest-task", table)
+        self.assertNotIn("old-task", table)
+
+    def test_cached_warnings_are_historical_and_empty_timestamp_explicit(self):
+        self.state["observations"] = {"observed_at": NOW - 60, "sessions": {},
+                                      "warnings": ["session-peers unavailable: prior outage"]}
+        cached = sk.cached_observation(self.state, NOW)
+        self.assertEqual(cached["warnings"], [])
+        self.assertEqual(cached["last_warnings"], self.state["observations"]["warnings"])
+        table = sk.status(cached, self.state)
+        self.assertIn("cached warning: session-peers unavailable: prior outage", table)
+        empty = sk.cached_observation(sk.empty_state(), NOW)
+        self.assertIn("observed_at", empty)
+        self.assertIsNone(empty["observed_at"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
