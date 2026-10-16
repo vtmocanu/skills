@@ -87,6 +87,11 @@ Bind only when the user's own message names a buddy or says to ask one:
   conflict warning instead of rebinding repeatedly. "replies left" can include
   a grant the shim has not applied yet.
 
+- A new owner can reclaim a total only from verified-dead sessions or sessions
+  absent from the completely readable configured registry. Output names the
+  evidence; live or unverified owners block reclamation. Successors get a fresh total,
+  while retries of the same binding keep replies already spent.
+
 Read [references/budgets.md](references/budgets.md) before granting/resetting a
 supervised loop, changing a reply total, or releasing a held reply. Never extend
 an unattended loop.
