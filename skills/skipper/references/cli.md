@@ -17,17 +17,33 @@ with a private directory you own outside that repository, for example
 ```sh
 <this skill's directory>/scripts/skipper observe
 <this skill's directory>/scripts/skipper --owner SESSION_UUID status --save
-<this skill's directory>/scripts/skipper status --json
+<this skill's directory>/scripts/skipper status --cached --json
 <this skill's directory>/scripts/skipper status --all --verbose
 <this skill's directory>/scripts/skipper resolve NAME --runtime claude --json
 ```
 
 `observe` and ordinary `status` are read-only. `status --save` persists the
-baseline for the next new/vanished diff. Use it for routine refreshes. Discovery
+baseline for the next new/vanished diff. Use it for patrol and live refreshes. Discovery
 reads Claude's session registry and only assistant usage metadata from matching
 transcripts across projects. Check PID, PID domain and process start time;
 preserve failed probes as unverified. Session-peers supplies optional Codex
 discovery; its failure cannot prove Codex disappearance. The CLI runs no sends.
+
+`status --cached` reads only the saved ledger, with no process, peer, git,
+export or transcript discovery. Render current ledger task reports over the saved
+roster. Report `mode: "cached"`, `observation_age` in seconds (null without a
+valid past timestamp) and the original `observed_at`. Preserve historical context
+percentages/provenance, set context `quality` to `cached` (or unknown with no
+percentage) and preserve `last_quality`, update reading ages, mark rows cached and
+liveness unverified, and set current `complete` coverage false. Keep previous coverage in
+`last_complete`; it proves nothing current. Suppress historical new/vanished
+diffs. An empty cache has unknown age/coverage, not a verified empty fleet.
+`--all` shows only Codex rows already saved, never additional discovery.
+Refuse `--cached --save`; cached reads never advance the baseline or events.
+Use fresh discovery and verify the relevant facts before consequential decisions;
+never use this view for identity resolution, ownership transfers or hold coverage.
+Fresh observation memoizes repo lookup per cwd only for that refresh; a trusted
+fresh context export avoids transcript globbing entirely.
 
 `status --json` and `observe` return an observation snapshot. `sessions` is a
 mapping keyed by `claude:UUID` or `codex:UUID`; it contains each observed session
@@ -143,6 +159,28 @@ it. Supersede the old command before assigning that task to another enrolled lea
 recording an update grants no permission to continue work after revocation.
 After revocation, allow existing-command updates only to `superseded`, `done`
 or `blocked`, within the ordinary transition rules. Refuse `accepted` updates.
+
+## Batch recording and receipts
+
+```sh
+<this skill's directory>/scripts/skipper --owner SESSION_UUID record --batch --file /absolute/private/updates.json
+<this skill's directory>/scripts/skipper --owner SESSION_UUID record --compact --file /absolute/private/update.json
+```
+
+Use `--batch` with a JSON array of 1..200 ordinary record objects. Validate in
+array order against a private state copy under one owner lock; commit once only
+if every update passes. Preserve all normal enrollment, task ownership,
+transition, evidence and acknowledgment checks. A later update may refer to a
+record created earlier in that batch. On failure, leave records, events and
+persisted state unchanged and return exit 2 with no success receipt. Barriers
+still use their separate commands; a batch sends nothing and invents no acks.
+
+Return `{"count": N, "receipts": [{"id": ID, "kind": KIND, "state": STATE,
+"event_id": EVENT_ID}]}` in input order. Keep one event per update within the
+existing 200-event retention bound; the batch limit keeps all its events in the
+committed snapshot. `--compact` returns the same four-field receipt for one
+record; the default single-record output remains the full record. Receipts mean
+ledger validation/persistence, never transport delivery or worker acceptance.
 
 ## Barriers
 
