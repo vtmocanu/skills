@@ -8,6 +8,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- `skipper`: add cached roster views with age and unknown current coverage, defer transcript discovery behind fresh context exports and reuse repo lookups per refresh, atomically batch validated ledger records with compact receipts, shorten transition/FYI reports, and pause change-only user reminders during away, snooze and quiet hours while preserving patrol and incident monitoring.
+
 - `skipper`: accept a user-approved standard successor grant relayed first by the lead's enrolled skipper, verify transport identities via header UUIDs or resolved native senders, and count it as user-established enrollment while retaining per-lead stops and unchanged buddy bindings.
 - `skipper`: assign read-only investigation of unowned findings to an enrolled pair with capacity without asking the user; the pair may file a buddy-approved issue, while remediation, other owners' items and Hold classes stay with the user or owner.
 - `skipper`: prioritize releases with joint merge/account-CI barriers through publish/verify, pause participant CI triggers, have participants cancel their own queued and in-progress PR CI, and report unheld automation as incomplete coverage.
