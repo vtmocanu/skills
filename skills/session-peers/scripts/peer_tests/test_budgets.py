@@ -13,6 +13,7 @@ import stat
 import sys
 import threading
 import time
+from unittest import mock
 from datetime import timezone
 from .support import (
     strip_origin,
@@ -872,6 +873,216 @@ class TestRestartAndBuddyReplies(BuddyBase):
         self.consume(self.shim)
         self.assertIsNone(self.shim.reply_budget.binding)
         self.assertEqual(self.bind("--replies", "5", owner=other)[0], 0)
+
+    def gone_owner(self, **changes):
+        self.assertEqual(self.bind("--replies", "6")[0], 0)
+        self.consume(self.shim)
+        self.shim.reply_budget.binding["spent"] = 4
+        self.shim._save_state()
+        old = json.loads(self.record_path(self.owner).read_text())
+        path = self.sessions / ("%d.json" % os.getpid())
+        if changes:
+            record = json.loads(path.read_text())
+            record.update(changes)
+            path.write_text(json.dumps(record))
+        else:
+            path.unlink()
+        return old
+
+    def assert_reclaimed(self, evidence):
+        rc, _out, err = self.bind("--replies", "5", owner="cc:" + self.sid_b)
+        self.assertEqual(rc, 0, err)
+        self.assertIn(self.sid_a, err)
+        self.assertIn(evidence, err)
+        retired = json.loads(self.record_path(self.owner).read_text())
+        self.assertNotIn("bind_id", retired)
+        self.assertNotIn("replies", retired)
+        self.assertEqual(retired["buddy"]["uuid"], self.tid)
+        self.consume(self.shim)
+        self.assertEqual((self.shim.reply_budget.binding["sid"],
+                          self.shim.reply_budget.binding["total"],
+                          self.shim.reply_budget.binding["spent"]), (self.sid_b, 5, 0))
+        binding_id = self.shim.reply_budget.binding["bind_id"]
+        self.shim.reply_budget.binding["spent"] = 2
+        self.shim._save_state()
+        self.assertEqual(self.bind("--replies", "3", owner="cc:" + self.sid_b)[0], 0)
+        self.consume(self.shim)
+        self.assertEqual((self.shim.reply_budget.binding["bind_id"],
+                          self.shim.reply_budget.binding["total"],
+                          self.shim.reply_budget.binding["spent"]), (binding_id, 5, 2))
+
+    def test_a_completely_unregistered_owner_is_reclaimed(self):
+        self.gone_owner()
+        self.assert_reclaimed("unregistered after complete registry scan")
+
+    def test_a_dead_pid_owner_is_reclaimed(self):
+        self.gone_owner(pid=919191)
+        real = sp_claude.sp_process.pid_alive
+        with mock.patch.object(sp_claude.sp_process, "pid_alive",
+                               side_effect=lambda pid: False if pid == 919191 else real(pid)):
+            self.assert_reclaimed("pid gone")
+
+    def test_a_reused_pid_owner_is_reclaimed(self):
+        self.gone_owner(procStart="a different process start")
+        self.assert_reclaimed("procStart mismatch")
+
+    def test_a_foreign_pid_domain_owner_is_reclaimed(self):
+        self.gone_owner(pidDomain="other-domain")
+        self.assert_reclaimed("pidDomain mismatch")
+
+    def test_unverified_owner_liveness_blocks_reclaim(self):
+        for mode in ("no procStart", "ps denied"):
+            with self.subTest(mode=mode):
+                if mode == "no procStart":
+                    self.gone_owner(procStart=None)
+                    rc, _out, err = self.bind("--replies", "5", owner="cc:" + self.sid_b)
+                else:
+                    # Restore a real record before exercising probe denial.
+                    self.write_record(os.getpid(), "cc-a", self.sid_a, self.listener_a.path)
+                    with mock.patch.object(sp_claude.sp_process, "proc_start_checked", return_value=(None, "ps denied")):
+                        rc, _out, err = self.bind("--replies", "5", owner="cc:" + self.sid_b)
+                self.assertEqual(rc, 1, err)
+                self.assertIn("unverified", err)
+                self.assertIn(mode, err)
+                self.assertIn(self.sid_a, err)
+                self.assertIn("bind_id", json.loads(self.record_path(self.owner).read_text()))
+
+    def test_registry_read_failures_cannot_prove_absence(self):
+        self.gone_owner()
+        real_listdir = os.listdir
+        for mode in ("missing directory", "denied directory", "malformed record", "denied record", "indeterminate record"):
+            with self.subTest(mode=mode):
+                extra = self.sessions / "unknown.json"
+                if mode == "malformed record":
+                    extra.write_text("{")
+                elif mode == "indeterminate record":
+                    extra.write_text('{"pid": 1}')
+                def listing(path):
+                    if str(path) == str(self.sessions) and mode.endswith("directory"):
+                        if mode == "missing directory":
+                            raise FileNotFoundError("registry missing")
+                        raise PermissionError("registry denied")
+                    return real_listdir(path)
+                real_open = open
+                def opening(path, *args, **kwargs):
+                    if mode == "denied record" and str(path) == str(self.sessions / ("%d.json" % os.getppid())):
+                        raise PermissionError("record denied")
+                    return real_open(path, *args, **kwargs)
+                with mock.patch.object(os, "listdir", side_effect=listing), mock.patch("builtins.open", side_effect=opening):
+                    rc, _out, err = self.bind("--replies", "5", owner="cc:" + self.sid_b)
+                extra.unlink(missing_ok=True)
+                self.assertEqual(rc, 1, err)
+                self.assertIn("unverified", err)
+                self.assertIn("bind_id", json.loads(self.record_path(self.owner).read_text()))
+
+    def test_all_matching_records_must_be_dead(self):
+        self.gone_owner(procStart="old process")
+        record = json.loads((self.sessions / ("%d.json" % os.getppid())).read_text())
+        record["sessionId"] = self.sid_a
+        (self.sessions / "second-owner-record.json").write_text(json.dumps(record))
+        rc, _out, err = self.bind("--replies", "5", owner="cc:" + self.sid_b)
+        self.assertEqual(rc, 1, err)
+        self.assertIn("live", err)
+        self.assertIn("procStart mismatch", err)
+
+    def test_a_live_second_holder_blocks_all_reclamation(self):
+        self.gone_owner()
+        third = new_uuid()
+        rec = {"owner": {"kind": "cc", "uuid": self.sid_b},
+               "buddy": {"kind": "codex", "uuid": self.tid}, "bind_id": "other", "replies": 6}
+        sp_runtime.write_json_atomic(str(self.record_path("cc:" + self.sid_b)), rec)
+        rc, _out, err = self.bind("--replies", "5", owner="cc:" + third)
+        self.assertEqual(rc, 1, err)
+        self.assertIn(self.sid_a, err)
+        self.assertIn(self.sid_b, err)
+        self.assertIn("live", err)
+        self.assertIn("bind_id", json.loads(self.record_path(self.owner).read_text()))
+
+    def test_a_stale_clear_cannot_clobber_a_successor_grant_or_state(self):
+        old = self.gone_owner()
+        marker = {"sid": self.sid_b, "bind_id": "successor", "total": 5, "at": sp_runtime.now_iso()}
+        sp_runtime.write_json_atomic(sp_storage.budget_binding_path(self.tid), marker)
+        with sp_storage.binding_lock(self.tid):
+            sp_buddy._revoke_binding({"kind": "cc", "uuid": self.sid_a}, old)
+        self.assertEqual(sp_runtime.read_json(sp_storage.budget_binding_path(self.tid)), marker)
+        self.consume(self.shim)
+        self.assertEqual(self.shim.reply_budget.binding["sid"], self.sid_b)
+        with sp_storage.binding_lock(self.tid):
+            sp_buddy._revoke_binding({"kind": "cc", "uuid": self.sid_a}, old)
+        self.assertFalse(os.path.exists(sp_storage.budget_binding_path(self.tid)))
+        self.consume(self.shim)
+        self.assertEqual(self.shim.reply_budget.binding["sid"], self.sid_b)
+
+    def test_a_busy_retired_owner_lock_changes_nothing(self):
+        self.gone_owner()
+        old_record = self.record_path(self.owner).read_bytes()
+        old_state = pathlib.Path(sp_storage.thread_state_path(self.tid)).read_bytes()
+        with sp_storage.owner_lock(self.sid_a):
+            rc, _out, err = self.bind("--replies", "5", owner="cc:" + self.sid_b, prove=False)
+        self.assertEqual(rc, 1, err)
+        self.assertIn("lock", err)
+        self.assertEqual(self.record_path(self.owner).read_bytes(), old_record)
+        self.assertEqual(pathlib.Path(sp_storage.thread_state_path(self.tid)).read_bytes(), old_state)
+        self.assertFalse(self.record_path("cc:" + self.sid_b).exists())
+        self.assert_reclaimed("unregistered after complete registry scan")
+
+    def test_a_failed_reclaim_publication_keeps_the_old_record(self):
+        old = self.gone_owner()
+        restore = self.fail_writes(".budget-binding")
+        rc, _out, err = self.bind("--replies", "5", owner="cc:" + self.sid_b)
+        self.assertEqual(rc, 1, err)
+        self.assertEqual(json.loads(self.record_path(self.owner).read_text()), old)
+        self.assertEqual(sp_runtime.read_json(sp_storage.thread_state_path(self.tid))["binding"]["spent"], 4)
+        restore()
+        self.assert_reclaimed("unregistered after complete registry scan")
+
+    def test_a_failed_retirement_retry_keeps_successor_spent_count(self):
+        self.gone_owner()
+        restore = self.fail_writes("cc-%s.json" % self.sid_a)
+        rc, _out, err = self.bind("--replies", "5", owner="cc:" + self.sid_b)
+        self.assertEqual(rc, 1, err)
+        self.consume(self.shim)
+        binding_id = self.shim.reply_budget.binding["bind_id"]
+        self.shim.reply_budget.binding["spent"] = 2
+        self.shim._save_state()
+        restore()
+        self.assertEqual(self.bind("--replies", "5", owner="cc:" + self.sid_b)[0], 0)
+        self.consume(self.shim)
+        self.assertEqual((self.shim.reply_budget.binding["bind_id"],
+                          self.shim.reply_budget.binding["spent"]), (binding_id, 2))
+        self.assertNotIn("bind_id", json.loads(self.record_path(self.owner).read_text()))
+
+    def test_two_successors_reclaiming_yield_one_total(self):
+        self.gone_owner()
+        checked, go = threading.Event(), threading.Event()
+        real = sp_buddy._binding_conflict
+        calls = []
+        def paused(owner, buddy):
+            result = real(owner, buddy)
+            calls.append(owner["uuid"])
+            if len(calls) == 1:
+                checked.set()
+                self.assertTrue(go.wait(10))
+            return result
+        results = {}
+        first_owner, second_owner = "cc:" + self.sid_b, "cc:" + new_uuid()
+        with mock.patch.object(sp_buddy, "_binding_conflict", side_effect=paused), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            first = threading.Thread(target=self.run_buddy_set, args=(first_owner, results))
+            second = threading.Thread(target=self.run_buddy_set, args=(second_owner, results))
+            first.start()
+            try:
+                self.assertTrue(checked.wait(10))
+                second.start()
+            finally:
+                go.set()
+                first.join(20)
+                if second.ident is not None:
+                    second.join(20)
+        self.assertEqual(results, {first_owner: 0, second_owner: 1})
+        marker = sp_runtime.read_json(sp_storage.budget_binding_path(self.tid))
+        self.assertEqual(marker["sid"], self.sid_b)
+        self.assertNotIn("bind_id", json.loads(self.record_path(self.owner).read_text()))
 
     def run_buddy_set(self, owner, results):
         args = argparse.Namespace(

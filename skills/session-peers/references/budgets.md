@@ -7,9 +7,9 @@
   across sequences (another peer, a direct Codex turn, 30 idle minutes) and
   shim restarts. It is never replenished; once spent, the default cap of 3 per
   sequence applies again. It is bound to this session and that buddy, and a
-  thread carries one owner's total at a time (a second owner is refused until
-  the first clears). `buddy clear` or binding another buddy revokes it and
-  fails, keeping the binding, if the revoke cannot be written; `budget reset`,
+  thread carries one owner's total at a time. A second owner is refused while
+  the first is live or unverified. `buddy clear` or binding another buddy revokes
+  it and fails, keeping the binding, if the revoke cannot be written; `budget reset`,
   `up` and `restart` leave it. `buddy` shows "replies left". An explicit
   `--replies N` exits 1 unless a running (or attachable) shim is proven to read
   it: `peers.py restart <uuid>`, then bind again. The default is best-effort:
@@ -18,6 +18,15 @@
   total recorded" (`reply_total_recorded: false` in `--json`). With no running
   shim, a rebind that keeps an already recorded total does not warn; capability
   and conflict warnings still apply when a shim runs.
+
+**Dead-owner reclamation.** Binding can replace a verified-dead owner's total,
+or an owner's total when a complete configured-registry scan proves it unregistered.
+Missing/unreadable registries, malformed records and unavailable process probes
+cannot prove absence or death. The command reports evidence for each holder.
+Reclamation starts a fresh successor binding and retires only the old total's
+metadata; it preserves unrelated buddy settings. A stale clear cannot revoke a
+successor's grant, and a retry never replenishes that binding's spent replies.
+A busy retired-owner lock refuses the bind without changes; retry later.
 
 **Longer loops.** A bound Codex buddy's total usually covers a whole working
 session. For another peer, or a buddy bound without a total, raise the reply

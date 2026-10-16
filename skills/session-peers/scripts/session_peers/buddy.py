@@ -1,6 +1,7 @@
 """Buddy for the session-peers CLI."""
 
 from __future__ import annotations
+import contextlib
 import json
 import os
 import shlex
@@ -483,12 +484,19 @@ def _bind_buddy_record(owner, buddy, uses, grant, explicit, path):
                 locked.add(buddy["uuid"])
             if not same and _revocable_thread(owner, old):
                 locked.add(old["buddy"]["uuid"])
-            with sp_storage._binding_locks(*locked):
+            with sp_storage._binding_locks(*locked), contextlib.ExitStack() as retired_locks:
                 # The conflict check and every write below share the
                 # locks, so a competing owner cannot slip between check
                 # and publish.
+                reclaimed = {}
                 if grant is not None:
-                    conflict = _binding_conflict(owner, buddy)
+                    conflict, reclaimed = _binding_conflict(owner, buddy)
+                    if not conflict and reclaimed:
+                        # Never wait for another owner while holding a thread lock:
+                        # a resumed owner may already be waiting for this thread.
+                        for sid in sorted(reclaimed):
+                            retired_locks.enter_context(sp_storage.owner_lock(sid, timeout=0))
+                        conflict, reclaimed = _binding_conflict(owner, buddy)
                     if conflict and explicit:
                         sys.stderr.write("error: %s\n" % conflict)
                         return 1
@@ -538,6 +546,21 @@ def _bind_buddy_record(owner, buddy, uses, grant, explicit, path):
                             },
                             mode=0o600,
                         )
+                    if grant is not None:
+                        # Publish first. A failed publication must leave the old
+                        # owner's record and spent count intact for a retry.
+                        for sid, (evidence, records) in reclaimed.items():
+                            for stale_path, snapshot in records:
+                                current = _binding_json(stale_path)
+                                if current is None:  # GC already removed this dead record.
+                                    continue
+                                if current != snapshot:
+                                    raise OSError("stale buddy record changed; retry")
+                                retired = dict(current)
+                                retired.pop("bind_id", None)
+                                retired.pop("replies", None)
+                                sp_runtime.write_json_atomic(stale_path, retired, mode=0o600)
+                            sys.stderr.write("reclaimed reply total from %s: %s\n" % (sid, evidence))
                 except OSError as exc:
                     sys.stderr.write(
                         "error: could not bind the buddy (%s); retry "
@@ -591,47 +614,81 @@ def _check_buddy_replies(replies, owner, buddy, attach=True):
     return None
 
 
-def _binding_conflict(owner, buddy):
-    """A message when another session already holds a reply total on this thread.
+def _binding_json(path):
+    """Read optional binding metadata without mistaking read errors for absence."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            value = json.load(fh)
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError, UnicodeError) as exc:
+        raise OSError("unverified binding metadata %s: %s" % (path, exc)) from exc
+    if not isinstance(value, dict):
+        raise OSError("unverified binding metadata: %s" % path)
+    return value
 
-    A shim keeps one binding per thread, so a second owner would overwrite the
-    first one's spent count or revoke. Checked from the pending marker, the
-    shim's saved binding and the other owners' buddy records. The caller holds
-    the target thread's binding lock through this check and publication.
+
+def _binding_conflict(owner, buddy):
+    """(refusal, reclaimable owners) under the target thread's binding lock.
+
+    Every holder must be verified dead or absent from a completely read registry.
+    Reclamation retires only that exact owner/thread's total, after publication.
     """
     tid = buddy["uuid"]
-    holders = set()
-    marker = sp_runtime.read_json(sp_storage.budget_binding_path(tid), None)
-    if isinstance(marker, dict) and isinstance(marker.get("sid"), str):
-        holders.add(marker["sid"])
-    state = sp_runtime.read_json(sp_storage.thread_state_path(tid), None)
-    binding = state.get("binding") if isinstance(state, dict) else None
-    if isinstance(binding, dict) and isinstance(binding.get("sid"), str):
-        holders.add(binding["sid"])
+    holders, records = set(), {}
     try:
-        names = os.listdir(sp_storage.buddies_dir())
-    except OSError:
-        names = []
-    for name in names:
-        rec = sp_runtime.read_json(os.path.join(sp_storage.buddies_dir(), name), None)
-        if not isinstance(rec, dict) or not rec.get("bind_id"):
-            continue
-        rec_buddy, rec_owner = rec.get("buddy"), rec.get("owner")
-        if (
-            isinstance(rec_buddy, dict)
-            and rec_buddy.get("uuid") == tid
-            and isinstance(rec_owner, dict)
-            and isinstance(rec_owner.get("uuid"), str)
-        ):
-            holders.add(rec_owner["uuid"])
+        marker = _binding_json(sp_storage.budget_binding_path(tid))
+        state = _binding_json(sp_storage.thread_state_path(tid))
+        binding = state.get("binding") if state else None
+        for item in (marker, binding):
+            if item is not None:
+                if not isinstance(item, dict) or not sp_runtime.is_uuid(item.get("sid")):
+                    raise OSError("unverified reply-total owner")
+                holders.add(item["sid"])
+        directory = sp_storage.buddies_dir()
+        for name in sorted(os.listdir(directory)):
+            if not name.endswith(".json"):
+                continue
+            path = os.path.join(directory, name)
+            rec = _binding_json(path)
+            if not rec or not rec.get("bind_id"):
+                continue
+            rec_buddy, rec_owner = rec.get("buddy"), rec.get("owner")
+            if isinstance(rec_buddy, dict) and rec_buddy.get("uuid") == tid:
+                if (not isinstance(rec_owner, dict) or rec_owner.get("kind") != "cc"
+                        or not sp_runtime.is_uuid(rec_owner.get("uuid"))):
+                    raise OSError("unverified buddy record owner: %s" % path)
+                sid = rec_owner["uuid"]
+                holders.add(sid)
+                records.setdefault(sid, []).append((path, rec))
+    except OSError as exc:
+        return "unverified reply-total holders: %s" % exc, {}
     holders.discard(owner["uuid"])
-    if holders:
-        return (
-            "another session (%s) already holds a reply total on this Codex "
-            "thread; a thread carries one at a time. It must `buddy clear` (or "
-            "bind another buddy) first" % sorted(holders)[0]
-        )
-    return None
+    if not holders:
+        return None, {}
+    registry, error = sp_claude.read_claude_records_checked()
+    evidence, reclaimable = [], {}
+    refused = False
+    for sid in sorted(holders):
+        matching = [r for r in registry if r["sessionId"] == sid]
+        if error:
+            decisions = [("unverified", error)]
+        elif not matching:
+            decisions = [("unregistered", "complete registry scan")]
+        else:
+            decisions = [sp_claude.record_liveness_evidence(r) for r in matching]
+        detail = "; ".join(("%s after %s" if status == "unregistered" else "%s: %s")
+                           % (status, reason) for status, reason in decisions)
+        evidence.append("%s: %s" % (sid, detail))
+        if any(status not in ("dead", "unregistered") for status, _reason in decisions):
+            refused = True
+        reclaimable[sid] = (detail, records.get(sid, []))
+    if refused:
+        return ("another session (%s) already holds a reply total on this Codex "
+                "thread; a thread carries one at a time. Live or unverified "
+                "owners must clear first. Evidence: %s" %
+                (sorted(holders)[0], " | ".join(evidence))), {}
+    return None, reclaimable
 
 
 def _revocable_thread(owner, old):
@@ -654,8 +711,25 @@ def _revoke_binding(owner, old):
     """
     if _revocable_thread(owner, old) is None:
         return
+    tid = old["buddy"]["uuid"]
+    # The caller holds the thread lock. Never overwrite a successor's pending
+    # grant, nor enqueue an obsolete revoke after its grant was consumed.
+    marker = _binding_json(sp_storage.budget_binding_path(tid))
+    if marker is not None:
+        current = marker
+    else:
+        state = _binding_json(sp_storage.thread_state_path(tid))
+        current = state.get("binding") if state else None
+    if current is not None and (not isinstance(current, dict)
+                                or not sp_runtime.is_uuid(current.get("sid"))
+                                or not isinstance(current.get("bind_id"), str)
+                                or not current["bind_id"]):
+        raise OSError("unverified reply-total owner during revocation")
+    if current is not None and (current.get("sid") != owner["uuid"]
+                                or current.get("bind_id") != old["bind_id"]):
+        return
     sp_runtime.write_json_atomic(
-        sp_storage.budget_binding_path(old["buddy"]["uuid"]),
+        sp_storage.budget_binding_path(tid),
         {
             "sid": owner["uuid"],
             "bind_id": old["bind_id"],

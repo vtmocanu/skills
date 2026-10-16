@@ -32,6 +32,30 @@ def read_claude_records():
     return out
 
 
+def read_claude_records_checked():
+    """(records, error); only a complete registry read can prove absence.
+
+    Missing directories, disappearing files and malformed/indeterminate records
+    are unknown, unlike the best-effort reader used for ordinary discovery.
+    """
+    directory = sp_storage.claude_sessions_dir()
+    records = []
+    try:
+        for name in sorted(os.listdir(directory)):
+            if not name.endswith(".json"):
+                continue
+            path = os.path.join(directory, name)
+            with open(path, encoding="utf-8") as fh:
+                rec = json.load(fh)
+            if (not isinstance(rec, dict) or not isinstance(rec.get("sessionId"), str)
+                    or not rec["sessionId"] or type(rec.get("pid")) is not int or rec["pid"] <= 0):
+                return [], "indeterminate registry record: %s" % path
+            records.append({**rec, "_path": path})
+    except (OSError, ValueError, UnicodeError) as exc:
+        return [], "registry read incomplete: %s" % exc
+    return records, None
+
+
 def record_liveness(rec) -> str:
     """Pid alive, pidDomain equal, procStart equal to `ps -o lstart=`.
 
@@ -41,21 +65,26 @@ def record_liveness(rec) -> str:
     A missing process-start value is unverified because it cannot rule out PID
     reuse; a present value must match when the probe is available.
     """
+    return record_liveness_evidence(rec)[0]
+
+
+def record_liveness_evidence(rec):
+    """The same liveness decision with an auditable process-probe reason."""
     pid = rec.get("pid")
     if not isinstance(pid, int) or not sp_process.pid_alive(pid):
-        return "dead"
+        return "dead", "pid gone: %s" % pid
     domain = rec.get("pidDomain")
     if domain is not None and domain != sp_process.pid_domain():
-        return "dead"
+        return "dead", "pidDomain mismatch"
     recorded = rec.get("procStart")
     if not recorded:
-        return "unverified"
+        return "unverified", "no procStart"
     actual, error = sp_process.proc_start_checked(pid)
     if error is not None:
-        return "unverified"
+        return "unverified", "process probe unavailable: %s" % error
     if actual.strip() != str(recorded).strip():
-        return "dead"
-    return "live"
+        return "dead", "procStart mismatch"
+    return "live", "pid %s and procStart match" % pid
 
 
 def record_is_live(rec) -> bool:

@@ -274,8 +274,10 @@ def owner_lock(owner_uuid, timeout=None):
     """Exclusive per-owner-session lock over its whole buddy record operation.
 
     `buddy set` and `buddy clear` read the owner's record and act on it under
-    this lock. Lock order everywhere: the owner lock first, then thread locks
-    in sorted order; the shim only ever takes a thread lock.
+    this lock. Normal lock order: the owner lock first, then thread locks
+    in sorted order; the shim only ever takes a thread lock. Reclamation may
+    try retired owners' locks after the thread lock without waiting: a busy
+    owner refuses the bind rather than introducing a lock-order deadlock.
     """
     return _flock_file(
         os.path.join(state_dir(), "%s.owner-lock" % owner_uuid), timeout,
