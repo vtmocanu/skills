@@ -3,8 +3,9 @@
 #
 # Reads a session JSONL (default: the newest one for the current project) and
 # emits EXACT token sums — the numbers the API itself logged, not estimates.
-# Every assistant turn's usage block is summed across the four token fields;
-# each is reported as a share of the grand total. Also reports the context
+# Count the first usage row per nonempty assistant message ID, in log order.
+# Rows without an ID count individually. Sum the four token fields and report
+# each as a share of the grand total. Also report the context
 # size (input side) on the first and last turn, and the prompt-cache TTL the
 # session actually used (5m vs 1h), so a caller can compare cron/loop
 # intervals against a measured cache lifetime rather than an assumed one.
@@ -64,15 +65,21 @@ fi
 echo "log: $LOG"
 
 jq -s '
-  # Keep assistant turns that carry a usage block; retain the sidechain flag so
-  # subagent turns can be handled separately.
-  [ .[] | select(.type=="assistant" and (.message.usage != null))
-    | {u: .message.usage, side: (.isSidechain // false)} ] as $all
+  # Content-block rows can repeat complete usage for one response. Deduplicate by
+  # message ID, preserving first-occurrence order for context endpoints.
+  reduce (.[] | select(.type=="assistant" and (.message.usage != null))) as $row
+    ({seen: {}, rows: []};
+      ($row.message.id | if type == "string" and length > 0 then . else null end) as $id
+      | if $id != null and .seen[$id] then .
+        else .rows += [{u: $row.message.usage, side: ($row.isSidechain // false)}]
+          | if $id != null then .seen[$id] = true else . end
+        end)
+  | .rows as $all
   | ($all | length) as $turns
   | if $turns == 0 then
       {error: "no assistant turns with usage in this log"}
     else
-      # Token sums cover ALL turns = total session spend, subagents included.
+      # Token sums cover unique responses recorded here, including sidechains.
       ($all | map(.u))                             as $u
       # Context size is a main-thread property, so exclude sidechain turns for
       # first/last; fall back to all turns if the log is somehow all-sidechain.
@@ -109,7 +116,7 @@ jq -s '
         context_last_turn:  $ctx_last,
         context_basis: (if $mturns > 0 then "main-thread turns" else "all turns (no main-thread turn found)" end),
         cache_ttl_in_use:   $ttl,
-        note: "sums cover all turns (subagents included); context sizes exclude sidechain turns"
+        note: "sums count first usage per assistant message ID; missing IDs count individually; recorded sidechains included; context sizes exclude sidechains"
       }
     end
 ' "$LOG"

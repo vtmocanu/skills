@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- `token-audit`: count repeated assistant usage rows once per message ID while preserving log order, sidechain accounting and separate responses without IDs.
+
 ### Changed
 
 - `skipper`: add cached roster views with age and unknown current coverage, defer transcript discovery behind fresh context exports and reuse repo lookups per refresh, atomically batch validated ledger records with compact receipts, shorten transition/FYI reports, and pause change-only user reminders during away, snooze and quiet hours while preserving patrol, incident monitoring and due missing-buddy reminders outside pauses.
