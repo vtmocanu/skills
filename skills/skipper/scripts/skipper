@@ -18,6 +18,7 @@ import time
 import uuid
 
 ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+OPENCODE_ID = re.compile(r"ses_[A-Za-z0-9]{8,64}")
 SCOPES = {"merges", "pushes-ci", "dispatches"}
 STATES = {
     "command": {"queued": {"accepted", "done", "superseded"},
@@ -39,12 +40,25 @@ def identifier(value):
 
 def session_identity(value):
     if not isinstance(value, str) or ":" not in value:
-        raise ValueError("session target must be runtime:UUID")
+        raise ValueError("session target must be runtime:session-id")
     runtime, sid = value.split(":", 1)
+    if runtime == "opencode":
+        if not OPENCODE_ID.fullmatch(sid):
+            raise ValueError("OpenCode target requires a native ses_ id")
+        identifier(sid)
+        return value
     if runtime not in {"claude", "codex"}:
         raise ValueError("unknown session runtime")
     if str(uuid.UUID(sid)) != sid:
         raise ValueError("session target requires a canonical UUID")
+    return value
+
+
+def owner_identity(value):
+    """Preserve native ids, including the legacy bare UUID ledger owners."""
+    identifier(value)
+    if not OPENCODE_ID.fullmatch(value) and str(uuid.UUID(value)) != value:
+        raise ValueError("owner must be a canonical session UUID or native OpenCode ses_ id")
     return value
 
 
@@ -247,7 +261,7 @@ def observe(home, claude_dir, export_dir, ledger, now, default_window=None, peer
             include_internal=False):
     warnings, sessions, dead = [], {}, set()
     excluded = {}
-    complete = {"claude": True, "codex": False}
+    complete = {"claude": True, "codex": False, "opencode": False}
     readings = exports(export_dir, now, warnings)
     registry = claude_dir / "sessions"
     try:
@@ -313,7 +327,28 @@ def observe(home, claude_dir, export_dir, ledger, now, default_window=None, peer
                                      "cwd": row.get("cwd") or old.get("cwd"),
                                      "observed_at": now, "source": "session-peers"}
             complete["codex"] = payload.get("codex_schema_recognised") is True
-        except (OSError, ValueError, AttributeError, subprocess.TimeoutExpired) as exc:
+            try:
+                oc_rows = payload.get("opencode")
+                oc_error = payload.get("opencode_error")
+                if not isinstance(oc_rows, list) or oc_error:
+                    raise ValueError(oc_error or "session-peers lacks OpenCode support")
+                # Validate atomically: malformed discovery must not leave routable rows.
+                oc_sessions = {}
+                for row in oc_rows:
+                    key = session_identity("opencode:" + row["id"])
+                    if row.get("runtime") != "opencode" or row.get("state") not in {"running", "idle", "unknown"}:
+                        raise ValueError("invalid OpenCode peer record")
+                    oc_sessions[key] = {"id": key, "session_id": row["id"],
+                                        "name": row.get("title") or row["id"], "runtime": "opencode",
+                                        "liveness": "unverified", "identity_verified": True,
+                                        "route": "available", "state": row["state"],
+                                        "cwd": row.get("directory"), "observed_at": now,
+                                        "source": "session-peers"}
+                sessions.update(oc_sessions)
+                complete["opencode"] = True
+            except (ValueError, KeyError, TypeError, AttributeError) as exc:
+                warnings.append("OpenCode discovery incomplete: " + str(exc))
+        except (OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.TimeoutExpired) as exc:
             detail = ("peer listing timed out after %s seconds" % exc.timeout
                       if isinstance(exc, subprocess.TimeoutExpired)
                       else "%s: %s" % (type(exc).__name__, exc))
@@ -331,7 +366,8 @@ def observe(home, claude_dir, export_dir, ledger, now, default_window=None, peer
                            if item["runtime"] == "claude" else {"pct": None, "quality": "unknown"})
     previous = ledger.get("observations", {}).get("sessions", {})
     vanished = [key for key in previous if key not in sessions and key not in excluded
-                and (key in dead or complete.get(previous[key].get("runtime"), False))]
+                and (key in dead or (previous[key].get("runtime") != "opencode"
+                                     and complete.get(previous[key].get("runtime"), False)))]
     uncertain = [key for key in previous if key not in sessions and key not in vanished and key not in excluded]
     changed_keys = set(sessions) - set(previous) | set(vanished) | set(uncertain)
     changes = {key: {field: (sessions.get(key) or previous[key]).get(field)
@@ -350,7 +386,7 @@ def cached_observation(state, now):
     age = now - stamp if number(stamp) and now >= stamp else None
     snapshot.update(mode="cached", observation_age=age,
                     last_complete=saved.get("complete", {}),
-                    complete={"claude": False, "codex": False},
+                    complete={"claude": False, "codex": False, "opencode": False},
                     new=[], vanished=[], unverified_missing=[], changes={})
     snapshot.setdefault("observed_at", None)
     snapshot.setdefault("sessions", {})
@@ -359,6 +395,9 @@ def cached_observation(state, now):
     snapshot["warnings"] = []
     for row in snapshot["sessions"].values():
         row["liveness"] = "unverified"
+        row.pop("identity_verified", None)
+        if row.get("runtime") == "opencode":
+            row["route"] = "unverified"
         row["cached"] = True
         ctx = row["context"]
         ctx["last_quality"] = ctx.get("quality", "unknown")
@@ -388,9 +427,7 @@ def load_state(directory):
 
 @contextlib.contextmanager
 def writer(directory, owner):
-    identifier(owner)
-    if str(uuid.UUID(owner)) != owner:
-        raise ValueError("owner must be a canonical session UUID")
+    owner_identity(owner)
     directory = directory.resolve()
     if any((parent / ".git").exists() for parent in (directory,) + tuple(directory.parents)):
         raise ValueError("state directory must be outside repositories")
@@ -672,10 +709,12 @@ def resolve(snapshot, target, runtime=None):
     if not matches:
         raise ValueError("no observed session matches %r; refresh discovery and inspect warnings" % target)
     if len(matches) != 1:
-        raise ValueError("ambiguous session %r: %s; use --runtime or a qualified UUID" % (
+        raise ValueError("ambiguous session %r: %s; use --runtime or a qualified id" % (
             target, ", ".join(item["id"] for item in matches)))
     item = matches[0]
-    if item["liveness"] != "live":
+    oc_reachable = (item.get("runtime") == "opencode" and item.get("identity_verified") is True
+                    and item.get("route") == "available" and snapshot.get("mode") != "cached")
+    if item["liveness"] != "live" and not oc_reachable:
         raise ValueError("session %s has unverified liveness; retry where process probes are permitted" % item["id"])
     return item
 
@@ -703,7 +742,7 @@ def status(snapshot, state, show_all=False, verbose=False):
         lines.insert(0, "cached observation: " + label + "; current coverage unknown; refresh before decisions")
     reports = [row for row in state["records"].values() if row["kind"] == "session"]
     for key, item in sorted(snapshot["sessions"].items(), key=lambda kv: (kv[1]["repo"]["root"] or "", kv[0])):
-        if item["runtime"] != "claude" and not show_all:
+        if item["runtime"] not in {"claude", "opencode"} and not show_all:
             continue
         report = max((r for r in reports if r["target"] == key), key=lambda r: r["updated_at"], default={})
         task = report.get("task") or ("awaiting handover" if report.get("state") == "pending-handover" else "unknown")
@@ -736,7 +775,7 @@ def status(snapshot, state, show_all=False, verbose=False):
         for key in snapshot[field]:
             item = (snapshot["sessions"].get(key) or snapshot.get("changes", {}).get(key)
                     or state.get("observations", {}).get("sessions", {}).get(key) or {})
-            if item.get("runtime", key.split(":", 1)[0]) != "claude" and not show_all:
+            if item.get("runtime", key.split(":", 1)[0]) not in {"claude", "opencode"} and not show_all:
                 continue
             label = cell(item.get("name", "unknown")) + " (" + cell(repo_name(item.get("repo") or {})) + ")"
             if verbose:
@@ -762,7 +801,7 @@ def main(argv=None):
     parser.add_argument("--claude-dir", type=Path)
     parser.add_argument("--export-dir", type=Path)
     parser.add_argument("--peers", help="explicit trusted peers.py path")
-    parser.add_argument("--owner", help="skipper session UUID; required for mutations")
+    parser.add_argument("--owner", help="skipper native session id (UUID or ses_ id); required for mutations")
     commands = parser.add_subparsers(dest="command", required=True)
     p = commands.add_parser("observe", help="read-only discovery and diff as JSON")
     p.add_argument("--all", action="store_true", help="include internal Codex reviewers")
@@ -772,9 +811,9 @@ def main(argv=None):
     p.add_argument("--cached", action="store_true", help="render saved observations only; current coverage unknown")
     p.add_argument("--all", action="store_true", help="include Codex rows and internal reviewers")
     p.add_argument("--verbose", action="store_true", help="show session IDs and repository paths")
-    p = commands.add_parser("resolve", help="resolve one observed live session by exact name or UUID")
+    p = commands.add_parser("resolve", help="resolve one observed reachable session by exact name or native id")
     p.add_argument("target")
-    p.add_argument("--runtime", choices=("claude", "codex"))
+    p.add_argument("--runtime", choices=("claude", "codex", "opencode"))
     p.add_argument("--json", action="store_true")
     p = commands.add_parser("record", help="record a validated JSON object")
     p.add_argument("--file", required=True, help="JSON input file, or - for stdin")

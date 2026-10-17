@@ -22,6 +22,8 @@ NOW = 1800000000
 SID = "00000000-0000-4000-8000-000000000001"
 LEAD = "claude:" + SID
 OWNER = "00000000-0000-4000-8000-000000000002"
+OC_SID = "ses_aaaaaaaaaaaaAAAAAAAAAAAAAA"
+OC_LEAD = "opencode:" + OC_SID
 
 
 class FixtureCase(unittest.TestCase):
@@ -69,6 +71,83 @@ class FixtureCase(unittest.TestCase):
         sk.record(self.state, common, NOW)
         sk.record(self.state, dict(common, state="authorized", user_grant_ref="user-message"), NOW)
         sk.record(self.state, dict(common, state="acked", ack_ref="lead-message"), NOW)
+
+
+class OpenCodeTests(FixtureCase):
+    def observe(self, **changes):
+        payload = {"claude": [], "codex": [], "codex_unverified": [],
+                   "codex_schema_recognised": True, "opencode_error": None,
+                   "opencode": [{"runtime": "opencode", "id": OC_SID, "title": "oc-lead",
+                                 "directory": str(self.home), "state": "idle"}]}
+        payload.update(changes)
+        with mock.patch.object(sk, "find_peers", return_value=Path("fixture.py")), \
+                mock.patch.object(sk, "run", return_value=subprocess.CompletedProcess([], 0, json.dumps(payload), "")), \
+                mock.patch.object(sk, "repo", return_value={"root": "example", "remote": None}):
+            return sk.observe(self.home, self.claude, self.exports, self.state, NOW)
+
+    def test_native_owner_persists_and_refuses_another_owner(self):
+        with sk.writer(self.state_dir, OC_SID) as state:
+            self.assertEqual(state["owner"], OC_SID)
+        self.assertEqual(sk.load_state(self.state_dir)["owner"], OC_SID)
+        with self.assertRaisesRegex(ValueError, "differs"):
+            with sk.writer(self.state_dir, OWNER):
+                pass
+
+    def test_opencode_target_needs_its_own_enrollment(self):
+        self.assertEqual(sk.session_identity(OC_LEAD), OC_LEAD)
+        command = {"id": "oc-task", "kind": "command", "target": OC_LEAD, "task": "example"}
+        with self.assertRaisesRegex(ValueError, "not enrolled"):
+            sk.record(self.state, command, NOW)
+        self.enroll(OC_LEAD)
+        sk.record(self.state, command, NOW)
+        sk.barrier(self.state, "request", "oc-hold", OWNER, NOW, resource="example#main",
+                   scope="merges", participants=[OC_LEAD], reason="checkpoint")
+        with self.assertRaisesRegex(ValueError, "acknowledg"):
+            sk.barrier(self.state, "active", "oc-hold", OWNER, NOW)
+
+    def test_invalid_session_ids_are_rejected(self):
+        for target in ("opencode:ses_x/y", "opencode:" + SID, "claude:" + OC_SID):
+            with self.subTest(target=target), self.assertRaises(ValueError):
+                sk.session_identity(target)
+
+    def test_idle_identity_resolves_without_claiming_attachment(self):
+        snapshot = self.observe()
+        self.assertTrue(snapshot["complete"]["opencode"])
+        row = sk.resolve(snapshot, "oc-lead", "opencode")
+        self.assertEqual(row["id"], OC_LEAD)
+        self.assertEqual(row["liveness"], "unverified")
+        self.assertIsNone(row["context"]["pct"])
+        self.assertIn("oc-lead", sk.status(snapshot, self.state))
+
+    def test_disappearance_from_recent_list_is_never_death(self):
+        self.state["observations"] = {"sessions": {OC_LEAD: {"runtime": "opencode"}}}
+        snapshot = self.observe(opencode=[])
+        self.assertNotIn(OC_LEAD, snapshot["vanished"])
+        self.assertIn(OC_LEAD, snapshot["unverified_missing"])
+
+    def test_failed_or_old_transport_reports_incomplete_coverage(self):
+        for changes in ({"opencode_error": "service unavailable"}, {"opencode": None}):
+            with self.subTest(changes=changes):
+                snapshot = self.observe(**changes)
+                self.assertFalse(snapshot["complete"]["opencode"])
+                self.assertNotIn(OC_LEAD, snapshot["sessions"])
+
+    def test_malformed_opencode_preserves_codex_coverage_and_attribution(self):
+        codex_id = "00000000-0000-4000-8000-000000000099"
+        snapshot = self.observe(codex=[{"id": codex_id, "name": "fixture-codex"}],
+                                opencode=[{"id": OC_SID, "runtime": "opencode", "state": "invalid"}])
+        self.assertIn("codex:" + codex_id, snapshot["sessions"])
+        self.assertTrue(snapshot["complete"]["codex"])
+        self.assertFalse(snapshot["complete"]["opencode"])
+        self.assertTrue(any(w.startswith("OpenCode discovery incomplete:") for w in snapshot["warnings"]))
+        self.assertFalse(any("Codex discovery is incomplete" in w for w in snapshot["warnings"]))
+
+    def test_cached_identity_cannot_resolve(self):
+        self.state["observations"] = self.observe()
+        snapshot = sk.cached_observation(self.state, NOW + 10)
+        self.assertFalse(snapshot["complete"]["opencode"])
+        with self.assertRaisesRegex(ValueError, "unverified liveness"):
+            sk.resolve(snapshot, OC_LEAD)
 
 
 class ContextTests(FixtureCase):
@@ -1018,7 +1097,7 @@ class EfficiencyTests(FixtureCase):
             cached = json.loads(output)
             self.assertEqual(cached["observation_age"], 60)
             self.assertEqual(cached["mode"], "cached")
-            self.assertEqual(cached["complete"], {"claude": False, "codex": False})
+            self.assertEqual(cached["complete"], {"claude": False, "codex": False, "opencode": False})
             self.assertEqual(cached["last_complete"], snapshot["complete"])
             self.assertEqual(cached["sessions"][LEAD]["liveness"], "unverified")
             self.assertEqual(cached["sessions"][LEAD]["context"]["age"], 70)

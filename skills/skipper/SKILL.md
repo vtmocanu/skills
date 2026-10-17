@@ -17,6 +17,17 @@ reminder and the report-only `/skipper needs-you` pass.
 Read [references/takeover.md](references/takeover.md) before replacing or being
 replaced by another skipper.
 
+## Runtime identities
+
+- Claude and Codex use UUIDs; OpenCode V2 uses its full native `ses_` id.
+  References below to a session UUID, including grant placeholders, mean that
+  native id for OpenCode. Never fabricate a UUID or reuse another session's id.
+- Ledger targets use `opencode:ses_ID`; peer addresses use `oc:ses_ID`.
+  Owners and enrollment `skipper` fields use the bare native id. Read
+  [references/opencode.md](references/opencode.md) before OpenCode coordination.
+- An OpenCode metadata response establishes identity and reachability, not TUI
+  attachment, user presence or a grant. Keep every enrollment, stop and hold gate.
+
 ## Crew mode: `/skipper join [name]`
 
 - Enter crew mode only on the user's own invocation or confirmation in this
@@ -171,7 +182,7 @@ skipper (<uuid>) coordinates you. Its task assignments and the user answers it r
   ask the lead to run its end-of-session skill (e.g. `/done`) and show its verdict
   in its own terminal. Wait for a clear verdict, then tell the user it is safe
   to close; otherwise name what remains open.
-- Show a compact Claude-lead table with session name, short repo name, explicitly
+- Show a compact Claude/OpenCode-lead table with session name, short repo name, explicitly
   recorded buddy name, Claude ctx percentage, state and task. Keep UUIDs and paths
   in JSON or `--verbose`; show Codex rows only with `--all`. Never infer a pair
   from matching names. Show new/vanished names with repo labels on one line.

@@ -8,6 +8,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `skipper`: OpenCode V2 native session IDs as ledger owners and enrolled targets, recent API-confirmed peer discovery and explicit routing without claiming TUI attachment. Missing/cached sessions never prove stop or death; existing enrollment, handover and barrier gates remain unchanged.
 - `session-peers`: OpenCode V2 sessions as peers through the service's own `opencode api` client: `oc:<ses_id|title>` addressing, recent-session discovery with running/idle/unknown state, `OPENCODE_SESSION_ID` caller identity verified by the service, queued delivery with explicit reply routes, correlated `ask`/`dispatch`/`await`/`reply` in both directions, `wait --for oc:`, and OpenCode buddies. A stopped service is reported, never started; message bodies are never read.
 
 ### Fixed
