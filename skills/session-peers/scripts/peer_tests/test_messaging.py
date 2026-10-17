@@ -10,6 +10,7 @@ import subprocess
 import threading
 import time
 import uuid as uuidlib
+from unittest import mock
 from .support import (
     strip_origin,
     Base,
@@ -24,6 +25,40 @@ from .support import (
     sp_storage,
     wait_for,
 )
+
+
+class TestExclusiveReplyWrite(Base):
+    def test_permissions_are_restored_before_content_is_written(self):
+        path = self.root / "private.reply.json"
+        real_fchmod = os.fchmod
+
+        def set_permissions(fd, mode):
+            self.assertEqual(path.stat().st_size, 0)
+            real_fchmod(fd, mode)
+
+        old_umask = os.umask(0o777)
+        try:
+            with mock.patch.object(sp_runtime.os, "fchmod", side_effect=set_permissions):
+                self.assertTrue(sp_runtime.write_json_exclusive(str(path), {}, mode=0o600))
+        finally:
+            os.umask(old_umask)
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        self.assertFalse(sp_runtime.write_json_exclusive(str(path), {"overwrite": True}))
+        self.assertEqual(json.loads(path.read_text()), {})
+
+    def test_consumer_can_remove_complete_reply_before_writer_returns(self):
+        path = self.root / "consumed.reply.json"
+        payload = {"reply": "delivered"}
+        real_fsync = os.fsync
+
+        def consume_reply(fd):
+            real_fsync(fd)
+            self.assertEqual(json.loads(path.read_text()), payload)
+            path.unlink()
+
+        with mock.patch.object(sp_runtime.os, "fsync", side_effect=consume_reply):
+            self.assertTrue(sp_runtime.write_json_exclusive(str(path), payload))
+        self.assertFalse(path.exists())
 
 
 class TestSendToCodex(Base):

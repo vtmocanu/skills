@@ -13,6 +13,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `session-peers`: avoid reporting a delivered correlated reply as failed when its consumer removes the mailbox before the writer returns.
 - `token-audit`: count repeated assistant usage rows once per message ID while preserving log order, sidechain accounting and separate responses without IDs.
 
 ### Changed
