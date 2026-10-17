@@ -6,8 +6,10 @@ Use the V2 API through the running service's authenticated CLI.
 
 - Every call runs `opencode api <operationId>`, the CLI's authenticated client
   for the background service. No auth, state or database file is read.
-- Read only: `session.get`, `session.list` (`parentID=null`), `session.active`.
-  Never `session.message.*`, `export` or `log`: no conversation bodies.
+- Discovery reads only `session.get`, `session.list` (`parentID=null`) and
+  `session.active`. The explicit inbox command additionally reads
+  `session.inbox.list`, restricted to the caller's own queued peer input.
+  Never `session.message.*`, `export` or `log`: no conversation history.
 - Write only: `session.prompt` with `delivery: "queue"` and correlation in
   `metadata.session_peers` (`message_id`, `request_id`, `from`). No message
   `id` is supplied: the API requires `msg_` ids and orders them.
@@ -60,6 +62,42 @@ Use the V2 API through the running service's authenticated CLI.
   `peers.py reply --request ...` run from its own shell; the mailbox checks the
   replying session id against the target.
 - OpenCode buddies get no reply total: no shim auto-replies for them.
+
+## Own-session inbox checkpoints
+
+Use `peers.py inbox list --json` to inspect peer input queued for this session.
+The API returns not-yet-delivered items in enqueue order, without pagination.
+A `resume: false` item can remain queued during a long turn; reading it does not
+consume it. Once OpenCode delivers it, it disappears from the inbox. This command
+is not a history reader, background monitor or delivery guarantee.
+
+- No target or identity override is accepted. The shell's `OPENCODE_SESSION_ID`
+  must identify an existing OpenCode session without ambiguous runtime identity.
+- Only items with `payload.metadata.session_peers` are shown. Output includes
+  sender, logical message UUID, native inbox ID, age, correlation and body.
+  Human output strips terminal controls and caps each body at 4,000 characters;
+  JSON preserves the text as an escaped string. Read failures are errors, not an
+  empty inbox. Valid sender syntax is attribution, never authentication.
+- `inbox handled SENDER MESSAGE_ID` explicitly records a handled pair after the
+  action; `inbox status SENDER MESSAGE_ID` checks it during later native delivery.
+  Use the typed `from` address and logical UUID, not the native `msg_` inbox ID.
+  A reused UUID from a different sender is not hidden. Missing or invalid sender
+  metadata is flagged unverified and never hidden automatically.
+- `inbox list` omits locally handled pairs; `--all` includes them. Native queued
+  delivery is unchanged: it can still arrive later. The marker only avoids a
+  duplicate action; it never consumes, cancels, acknowledges or edits native input.
+- Markers contain only sender/message IDs and timestamps, in a mode-0600
+  per-session file under `$CODEX_HOME/session-peers/opencode-inbox/` (default
+  `~/.codex`). Keep the same `CODEX_HOME` between checks. Markers expire after
+  14 days and are pruned only on an explicit handled write. List/status create
+  no files and never mark anything handled.
+- Correlated requests are annotated `pending`, `replied` or `expired` from
+  existing mailbox records, read without cleanup or consumption. Missing or
+  undiscoverable records are `unknown`, not proof of expiry or completion.
+  Ambiguous/corrupt records fail the check. Never reply to expired/replied
+  requests or retry a superseded request; preserve its exact correlation and
+  follow the existing reply contract for a pending one. `unknown` requires
+  reconciliation, not an ordinary queued-reply fallback.
 
 ## Consented reply wake
 

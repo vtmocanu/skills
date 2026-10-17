@@ -27,6 +27,7 @@ python3 -m unittest peer_tests.test_messaging
 | test_commands | Version pins, doctor, hooks, config readers, and CLI surface |
 | test_topics | Shared topic logs and cursors |
 | test_upgrade | Source digests and replacing an installed copy under a running shim |
+| test_inbox | Own-session queued peer reads, handled sender/message pairs, safe display and read-only request states |
 
 Keep shared fixture roots, fake binaries, listeners, builders, and base classes
 in `support.py`. `HERE` points to the scripts directory, so fixtures invoke the
