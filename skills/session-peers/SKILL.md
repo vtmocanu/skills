@@ -220,7 +220,8 @@ An OpenCode V2 session has no peer socket: every direction is an explicit
   Attachment is unknown, so never report it as live or answered.
 - In OpenCode, `OPENCODE_SESSION_ID` is the caller identity: `send`, `ask`,
   `dispatch`, `await`, `buddy` and `reply` need no `--as`.
-- A send to OpenCode parks input by default; a bound buddy or `--wake` permits
+- A send to OpenCode does not wake idle sessions by default (active drains may
+  consume queued input); a bound buddy or `--wake` permits
   headless execution. Correlated requests require that wake permission. A message
   from OpenCode names the route back: `send --to oc:<ses_id>`. Use it instead
   of SendMessage or a Codex final message.

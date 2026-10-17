@@ -169,6 +169,12 @@ class OpenCodeSendTests(OpenCodeBase):
         self.assertEqual(rc, 0, err)
         self.assertTrue(self.oc_calls("session.prompt")[0]["data"]["resume"])
 
+    def test_non_woken_human_send_reports_idle_parking(self):
+        rc, out, err = self.cli("send", "--to", "oc:%s" % OC_B, "--message", "x")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("resume false", out)
+        self.assertIn("idle", out)
+
     def test_send_to_an_unknown_session_fails_without_queueing(self):
         rc, _out, err = self.cli("send", "--to", "oc:ses_zzzzzzzzzzzzzzzz", "--message", "x")
         self.assertEqual(rc, 1)
@@ -307,6 +313,7 @@ class OpenCodeRequestTests(OpenCodeBase):
         self.assertEqual(rc, 0, err)
         payload = json.loads(out)
         request_id = payload["request_id"]
+        self.assertEqual(payload["status"], "queued")
         self.assertEqual(payload["target_session_id"], OC_B)
         prompt = self.oc_calls("session.prompt")[0]
         self.assertEqual(prompt["data"]["metadata"]["session_peers"]["request_id"], request_id)

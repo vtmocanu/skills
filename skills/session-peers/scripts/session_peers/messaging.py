@@ -182,8 +182,9 @@ def _send_opencode(target, args):
             "reply_capable": bool(address),
             "resume": resume,
         },
-        "queued to OpenCode session %s (%s, %s), message %s"
-        % (session.get("title") or "(untitled)", session["id"], state, msg_id),
+        "queued to OpenCode session %s (%s, %s), message %s%s"
+        % (session.get("title") or "(untitled)", session["id"], state, msg_id,
+           "" if resume else "; resume false: idle sessions wait for resume; an active drain may consume it"),
     )
     return 0
 
@@ -615,7 +616,7 @@ def cmd_dispatch(args):
         % (request.request_id, request.record.get("name") or request.record.get("sessionId"), request.timeout)
     )
     payload = {
-        "status": "socket_write_succeeded",
+        "status": "queued" if request.record.get("_runtime") == "opencode" else "socket_write_succeeded",
         "request_id": request.request_id,
         "request_message_id": message_id,
         "requester_thread_id": request.meta["requester_thread_id"],

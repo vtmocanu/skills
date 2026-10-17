@@ -43,7 +43,8 @@ Use the V2 API through the running service's authenticated CLI.
 
 ## Delivery semantics
 
-- Ordinary sends set `resume: false`: they park input until the session resumes.
+- Ordinary sends set `resume: false`: they do not start an idle session. An
+  already-running drain may consume queued input; this is not a delivery hold.
   A bound OpenCode buddy or an explicit `--wake` sets `resume: true`, allowing
   the service to run a turn without a TUI under the session's own permissions.
   Queue delivery never steers a running turn. Use `--wake` only when the user
