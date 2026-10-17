@@ -83,7 +83,8 @@ def cleanup_expired_requests(now=None, dry_run=False):
                 _unlink_quiet(path)
             if request_id not in removed:
                 removed.append(request_id)
-    return removed
+    from . import reply_wake
+    return removed + reply_wake.cleanup(now, dry_run=dry_run)
 
 
 def _request_envelope(request_id, message, timeout):

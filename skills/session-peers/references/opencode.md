@@ -60,3 +60,40 @@ Use the V2 API through the running service's authenticated CLI.
   `peers.py reply --request ...` run from its own shell; the mailbox checks the
   replying session id against the target.
 - OpenCode buddies get no reply total: no shim auto-replies for them.
+
+## Consented reply wake
+
+For an asynchronous request whose reply should wake this OpenCode session,
+obtain user consent and send with `--allow-reply-wake` (600-second default) or
+`--allow-reply-wake=1800` (maximum 3600). This changes only the return route,
+not whether the outbound request wakes its recipient. It works with Claude,
+Codex (including Claude-facing shim aliases) and OpenCode peers.
+
+The generated route includes `send --to oc:SESSION_ID --in-reply-to MESSAGE_ID
+--message-file PATH` (keep the actual command on one line). Follow it exactly.
+The matching peer's first reply consumes the expiring grant and queues with
+`resume: true`. An ordinary send without that reference stays non-waking unless
+the existing buddy or explicit `--wake` policy applies. A hint alone is not
+consent: the local grant must exist and match both exact session identities.
+
+- Grants are private, single-use records alongside request mailboxes. Cleanup
+  removes expired grants; no scheduler, daemon or timer is created.
+- `reply-wake revoke MESSAGE_ID`, run by the issuing OpenCode session in its
+  original `CODEX_HOME`, revokes unused consent; already absent is a no-op.
+- Missing, used, expired, mismatched or ambiguous grants refuse the reply without
+  queueing. Resend without `--in-reply-to` to queue normally, adding `--wake`
+  only if separately user-authorized. Mismatched callers do not consume consent.
+- Consent is consumed before delivery. If delivery fails, it stays spent: reissue
+  consent or explicitly resend with separately authorized `--wake`; no automatic
+  retry or duplicate wake is promised.
+- Do not combine `--in-reply-to` with `--wake`, sender overrides or
+  `--allow-reply-wake`; it is only for `send` to OpenCode. It cannot create a
+  recursive wake grant. `ask`/`dispatch`/`await` retain their nonqueue mailbox
+  contract and do not use this mechanism.
+- Lookup searches the existing configured and shim-recorded `CODEX_HOME` set.
+  Two copies of the same grant refuse as ambiguous. Two non-default homes with
+  no shared discovery record may not find each other's grant; this fails closed.
+- Same-user identity is attribution, not protection against a malicious local
+  process. Consent controls accidental/stale wakes, not task authority, review
+  gates, reply budgets or permission prompts. It never authorizes periodic
+  keep-alives, unrelated tasks or a standing wake loop.

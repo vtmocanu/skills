@@ -1,6 +1,9 @@
 """OpenCode V2 sessions as peers: discovery, identity, send, requests, buddy."""
 
 from peer_tests.support import *  # noqa: F401,F403
+from unittest import mock
+from session_peers import reply_wake as sp_reply_wake
+from session_peers import messaging as sp_messaging
 
 OC_A = "ses_aaaaaaaaaaaaAAAAAAAAAAAAAA"
 OC_B = "ses_bbbbbbbbbbbbBBBBBBBBBBBBBB"
@@ -54,6 +57,220 @@ class OpenCodeBase(Base):
     def as_claude(self, listener_rec):
         os.environ["CLAUDE_CODE_MESSAGING_SOCKET"] = listener_rec["messagingSocketPath"]
         os.environ["CLAUDE_CODE_SESSION_ID"] = listener_rec["sessionId"]
+
+
+class OpenCodeReplyWakeTests(OpenCodeBase):
+    def grant(self, recipient=None, owner=OC_A, seconds=600):
+        mid = new_uuid()
+        peer = recipient or "cc:" + new_uuid()
+        data = sp_reply_wake.issue(mid, "oc:" + owner, peer, seconds)
+        return mid, peer, data
+
+    def test_expired_and_wrong_target_refused_without_consuming(self):
+        mid, peer, _data = self.grant(seconds=1)
+        with self.assertRaisesRegex(ValueError, "match"):
+            sp_reply_wake.consume(mid, "oc:" + OC_B, peer)
+        self.assertTrue(pathlib.Path(sp_reply_wake.path_for(mid)).exists())
+        with mock.patch.object(sp_reply_wake.time, "time", return_value=time.time() + 2):
+            with self.assertRaisesRegex(ValueError, "expired"):
+                sp_reply_wake.consume(mid, "oc:" + OC_A, peer)
+        self.assertTrue(pathlib.Path(sp_reply_wake.path_for(mid)).exists())
+
+    def test_racing_consumers_have_exactly_one_winner(self):
+        mid, peer, _data = self.grant()
+        barrier = threading.Barrier(2)
+        results = []
+        def consume():
+            barrier.wait()
+            try:
+                sp_reply_wake.consume(mid, "oc:" + OC_A, peer)
+                results.append(True)
+            except ValueError:
+                results.append(False)
+        threads = [threading.Thread(target=consume) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        self.assertEqual(sorted(results), [False, True])
+
+    def test_gc_removes_expired_grants_only_and_dry_run_preserves(self):
+        mid, _peer, data = self.grant()
+        future = data["expires_at"] + 1
+        self.assertIn(mid, sp_requests.cleanup_expired_requests(now=future, dry_run=True))
+        self.assertTrue(pathlib.Path(sp_reply_wake.path_for(mid)).exists())
+        self.assertNotIn(mid, sp_requests.cleanup_expired_requests(now=time.time()))
+        self.assertIn(mid, sp_requests.cleanup_expired_requests(now=future))
+        self.assertFalse(pathlib.Path(sp_reply_wake.path_for(mid)).exists())
+
+    def test_revoke_only_issuer_and_idempotent(self):
+        mid, _peer, _data = self.grant()
+        self.as_opencode(OC_B)
+        rc, _out, _err = self.cli("reply-wake", "revoke", mid)
+        self.assertNotEqual(rc, 0)
+        self.as_opencode(OC_A)
+        for expected in ("revoked", "absent"):
+            rc, out, err = self.cli("reply-wake", "revoke", mid)
+            self.assertEqual(rc, 0, err)
+            self.assertEqual(json.loads(out)["status"], expected)
+
+    def test_cross_home_lookup_and_duplicate_fail_closed(self):
+        mid, peer, _data = self.grant()
+        home = pathlib.Path(sp_storage.codex_home())
+        other = self.root / "other-codex"
+        with mock.patch.object(sp_storage, "candidate_homes", return_value=[str(other), str(home)]):
+            path = sp_reply_wake.find(mid)
+            duplicate = other / "session-peers/requests" / (mid + sp_reply_wake.SUFFIX)
+            duplicate.parent.mkdir(parents=True)
+            duplicate.write_bytes(pathlib.Path(path).read_bytes())
+            with self.assertRaisesRegex(ValueError, "ambiguous"):
+                sp_reply_wake.consume(mid, "oc:" + OC_A, peer)
+            self.assertTrue(pathlib.Path(path).exists())
+            duplicate.unlink()
+            sp_reply_wake.consume(mid, "oc:" + OC_A, peer)
+
+    def test_invalid_id_missing_and_nonfinite_lifetimes_refused(self):
+        for mid in ("../outside", new_uuid()):
+            with self.assertRaises(ValueError):
+                sp_reply_wake.consume(mid, "oc:" + OC_A, "cc:" + new_uuid())
+        for seconds in (0, -1, 3601, float("nan"), float("inf")):
+            with self.assertRaises(ValueError):
+                self.grant(seconds=seconds)
+
+    def test_claimed_copy_is_rechecked(self):
+        mid, peer, _data = self.grant()
+        rename = os.rename
+        def replace_before_claim(source, target):
+            data = json.loads(pathlib.Path(source).read_text())
+            data["recipient"] = "cc:" + new_uuid()
+            pathlib.Path(source).write_text(json.dumps(data))
+            rename(source, target)
+        with mock.patch.object(sp_reply_wake.os, "rename", side_effect=replace_before_claim):
+            with self.assertRaisesRegex(ValueError, "consumed during validation"):
+                sp_reply_wake.consume(mid, "oc:" + OC_A, peer)
+        self.assertFalse(pathlib.Path(sp_reply_wake.path_for(mid)).exists())
+
+    def test_flags_refuse_overrides_recursion_and_non_opencode_targets(self):
+        _listener, rec = self.add_listener(session_id=new_uuid())
+        self.as_claude(rec)
+        rc, _out, _err = self.cli("send", "--to", "oc:" + OC_A,
+                                 "--message", "x", "--allow-reply-wake")
+        self.assertNotEqual(rc, 0)
+        for extra in (["--wake"], ["--from-sid", new_uuid()],
+                      ["--from-thread", new_uuid()], ["--from-name", "spoof"],
+                      ["--from-socket", "/fake"], ["--allow-reply-wake"]):
+            rc, _out, _err = self.cli("send", "--to", "oc:" + OC_A,
+                                     "--message", "x", "--in-reply-to", new_uuid(), *extra)
+            self.assertNotEqual(rc, 0)
+        for target in ("cc:" + new_uuid(), "codex:" + new_uuid()):
+            rc, _out, _err = self.cli("send", "--to", target, "--message", "x",
+                                     "--in-reply-to", new_uuid())
+            self.assertNotEqual(rc, 0)
+        self.assertEqual(self.oc_calls("session.prompt"), [])
+
+    def test_failed_reply_delivery_spends_grant_and_reports_it(self):
+        sid = new_uuid()
+        _listener, rec = self.add_listener(session_id=sid)
+        self.as_claude(rec)
+        mid, _peer, _data = self.grant(recipient="cc:" + sid)
+        with mock.patch.object(sp_opencode, "deliver", side_effect=sp_opencode.OpenCodeError("offline")):
+            rc, _out, err = self.cli("send", "--to", "oc:" + OC_A,
+                                     "--message", "reply", "--in-reply-to", mid)
+        self.assertNotEqual(rc, 0)
+        self.assertIn("grant consumed; delivery failed", err)
+        self.assertFalse(pathlib.Path(sp_reply_wake.path_for(mid)).exists())
+
+    def test_codex_alias_grant_matches_codex_reply_identity(self):
+        tid, _rollout = self.one_thread()
+        self.as_opencode()
+        with mock.patch.object(sp_messaging, "_codex_shim_thread", return_value=tid):
+            rc, out, err = self.cli("send", "--to", "cc:" + tid, "--message", "review",
+                                    "--allow-reply-wake", "--json")
+        self.assertEqual(rc, 0, err)
+        mid = json.loads(out)["message_id"]
+        grant = json.loads(pathlib.Path(sp_reply_wake.path_for(mid)).read_text())
+        self.assertEqual(grant["recipient"], "codex:" + tid)
+        self.assertEqual(pathlib.Path(sp_reply_wake.path_for(mid)).stat().st_mode & 0o777, 0o600)
+        self.assertIn("--in-reply-to " + mid, self.queue_calls()[0][-1])
+        # OpenCode has no shim socket: queueing must leave consent unconsumed.
+        self.assertTrue(pathlib.Path(sp_reply_wake.path_for(mid)).exists())
+        os.environ.pop("OPENCODE_SESSION_ID")
+        os.environ["CODEX_THREAD_ID"] = tid
+        rc, out, err = self.cli("send", "--to", "oc:" + OC_A, "--message", "reviewed",
+                                "--in-reply-to", mid, "--json")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(json.loads(out)["wake_grant"], "consumed")
+
+    def test_failed_outbound_send_removes_unused_grant(self):
+        tid, _rollout = self.one_thread()
+        self.as_opencode()
+        with mock.patch.object(sp_codex, "codex_queue", side_effect=sp_codex.QueueError("failed")):
+            rc, _out, _err = self.cli("send", "--to", "codex:" + tid, "--message", "x",
+                                     "--allow-reply-wake")
+        self.assertNotEqual(rc, 0)
+        self.assertEqual(list(pathlib.Path(sp_storage.request_dir()).glob("*" + sp_reply_wake.SUFFIX)), [])
+
+    def test_unverified_issuer_and_sender_override_cannot_issue(self):
+        sid = new_uuid()
+        self.add_listener(session_id=sid)
+        self.as_opencode()
+        for extra in (["--from-name", "override"], []):
+            if not extra:
+                self.as_opencode("ses_missing0000000000000000")
+            rc, _out, _err = self.cli("send", "--to", "cc:" + sid, "--message", "x",
+                                     "--allow-reply-wake", *extra)
+            self.assertNotEqual(rc, 0)
+        self.assertEqual(list(pathlib.Path(sp_storage.request_dir()).glob("*" + sp_reply_wake.SUFFIX)), [])
+
+    def test_reply_hint_only_granted_and_outbound_resume_unchanged(self):
+        self.as_opencode()
+        for consent in ([], ["--allow-reply-wake"]):
+            rc, out, err = self.cli("send", "--to", "oc:" + OC_B,
+                                    "--message", "request", "--json", *consent)
+            self.assertEqual(rc, 0, err)
+            payload = json.loads(out)
+            self.assertFalse(payload["resume"])
+            text = self.oc_calls("session.prompt")[-1]["data"]["text"]
+            self.assertEqual("--in-reply-to" in text, bool(consent))
+            self.assertNotIn("--wake", text)
+            self.assertNotIn("--allow-reply-wake", text)
+
+    def test_consented_request_reply_wakes_once_without_explicit_wake(self):
+        sid = new_uuid()
+        _listener, rec = self.add_listener(name="reviewer", session_id=sid)
+        self.as_opencode()
+        rc, out, err = self.cli("send", "--to", "cc:" + sid,
+                                "--message", "Review this", "--allow-reply-wake", "--json")
+        self.assertEqual(rc, 0, err)
+        mid = json.loads(out)["message_id"]
+        os.environ.pop("OPENCODE_SESSION_ID")
+        self.as_claude(rec)
+        rc, out, err = self.cli("send", "--to", "oc:" + OC_A,
+                                "--message", "APPROVE", "--in-reply-to", mid, "--json")
+        self.assertEqual(rc, 0, err)
+        self.assertTrue(json.loads(out)["resume"])
+        before = len(self.oc_calls("session.prompt"))
+        rc, _out, _err = self.cli("send", "--to", "oc:" + OC_A,
+                                 "--message", "again", "--in-reply-to", mid, "--json")
+        self.assertNotEqual(rc, 0)
+        self.assertEqual(len(self.oc_calls("session.prompt")), before)
+
+    def test_consent_does_not_allow_another_peer_to_wake(self):
+        sid = new_uuid()
+        _listener, other_rec = self.add_listener(name="reviewer", session_id=sid)
+        self.as_opencode()
+        rc, out, err = self.cli("send", "--to", "cc:" + sid,
+                                "--message", "Review", "--allow-reply-wake", "--json")
+        self.assertEqual(rc, 0, err)
+        mid = json.loads(out)["message_id"]
+        os.environ.pop("OPENCODE_SESSION_ID")
+        other_rec["sessionId"] = new_uuid()
+        (self.sessions / ("%s.json" % other_rec["pid"])).write_text(json.dumps(other_rec))
+        self.as_claude(other_rec)
+        rc, _out, _err = self.cli("send", "--to", "oc:" + OC_A,
+                                 "--message", "unsolicited", "--in-reply-to", mid)
+        self.assertNotEqual(rc, 0)
+        self.assertEqual(self.oc_calls("session.prompt"), [])
 
 
 class OpenCodeDiscoveryTests(OpenCodeBase):

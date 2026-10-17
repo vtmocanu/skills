@@ -10,8 +10,37 @@ import uuid as uuidlib
 from . import constants as sp_constants, protocol as sp_protocol, rollout as sp_rollout, runtime as sp_runtime
 from . import claude as sp_claude, codex as sp_codex, diagnostics as sp_diagnostics, requests as sp_requests, storage as sp_storage
 from . import buddy as sp_buddy, identity as sp_identity, opencode as sp_opencode
+from . import reply_wake as sp_reply_wake
+
+
+def _validate_reply_wake(args):
+    consent = getattr(args, "allow_reply_wake", None)
+    reply = getattr(args, "in_reply_to", None)
+    overrides = any(getattr(args, name, None) for name in
+                    ("from_thread", "from_name", "from_sid", "from_socket"))
+    if reply and (getattr(args, "wake", False) or overrides or consent is not None):
+        raise ValueError("--in-reply-to cannot combine with --wake, --from-* or --allow-reply-wake")
+    if reply and not args.to.startswith("oc:"):
+        raise ValueError("--in-reply-to requires an oc: target")
+    if consent is not None:
+        if overrides or _opencode_sender(args) is None:
+            raise ValueError("--allow-reply-wake requires this verified OpenCode sender, without --from-* overrides")
+        import math
+        if not math.isfinite(consent):
+            raise ValueError("reply-wake lifetime must be finite")
+        sp_requests._bounded_timeout(consent)
+
+
+def _issue_reply_wake(args, oc_sender, recipient, message_id):
+    if getattr(args, "allow_reply_wake", None) is None:
+        return None
+    grant = sp_reply_wake.issue(message_id, "oc:" + oc_sender["id"], recipient, args.allow_reply_wake)
+    args.reply_wake_result = {"message_id": message_id, "expires_at": grant["expires_at"]}
+    return message_id
 
 def _print_send_result(args, payload, human):
+    if getattr(args, "reply_wake_result", None):
+        payload["reply_wake"] = args.reply_wake_result
     if getattr(args, "json", False):
         print(json.dumps(payload, sort_keys=True))
     else:
@@ -35,6 +64,7 @@ def cmd_send(args):
         return failed
     try:
         args.message = sp_runtime.message_from_args(args)
+        _validate_reply_wake(args)
     except ValueError as exc:
         sys.stderr.write("error: %s\n" % exc)
         return 1
@@ -152,21 +182,42 @@ def _send_opencode(target, args):
             "from a Claude, Codex or OpenCode session's own shell"
         )
     msg_id = str(uuidlib.uuid4())
+    try:
+        reply_id = _issue_reply_wake(args, oc_sender, "oc:" + session["id"], msg_id)
+    except (ValueError, OSError) as exc:
+        sys.stderr.write("error: %s\n" % exc)
+        return 1
     ident = address.partition(":")[2] if address else None
     lines = [
         sp_protocol.build_tag(from_name, ident, None, msg_id),
         sp_protocol.build_origin(runtime, from_name, ident),
     ]
     if address:
-        lines.append(sp_protocol.reply_route_hint(address))
+        lines.append(sp_protocol.reply_route_hint(address, reply_id))
     text = "\n".join(lines + [args.message])
     state = sp_opencode.state_of(session["id"])
     resume = _may_wake_opencode(args, session["id"])
+    in_reply_to = getattr(args, "in_reply_to", None)
+    if in_reply_to:
+        try:
+            caller = sp_identity.caller_identity(args)
+            caller_address = "%s:%s" % (caller["kind"], caller["uuid"])
+            if caller_address != address:
+                raise ValueError("reply sender identity is absent or ambiguous")
+            sp_reply_wake.consume(in_reply_to, "oc:" + session["id"], caller_address)
+        except (ValueError, OSError) as exc:
+            sys.stderr.write("error: %s; nothing queued. Resend without --in-reply-to, and use --wake only if authorized.\n" % exc)
+            return 1
+        resume = True
     try:
         inbox_id = sp_opencode.deliver(
             session["id"], text, {"message_id": msg_id, "from": address}, resume=resume
         )
     except (sp_opencode.OpenCodeError, ValueError) as exc:
+        if reply_id:
+            sp_reply_wake.forget(reply_id)
+        if in_reply_to:
+            sys.stderr.write("error: reply-wake grant consumed; delivery failed; reissue consent or resend with --wake only if authorized.\n")
         sys.stderr.write("error: could not queue to OpenCode session %s: %s\n" % (session["id"], exc))
         return 1
     _print_send_result(
@@ -181,10 +232,12 @@ def _send_opencode(target, args):
             "inbox_id": inbox_id,
             "reply_capable": bool(address),
             "resume": resume,
+            **({"wake_grant": "consumed"} if in_reply_to else {}),
         },
         "queued to OpenCode session %s (%s, %s), message %s%s"
         % (session.get("title") or "(untitled)", session["id"], state, msg_id,
-           "" if resume else "; resume false: idle sessions wait for resume; an active drain may consume it"),
+            ("; woke via reply grant %s" % in_reply_to) if in_reply_to else
+            ("" if resume else "; resume false: idle sessions wait for resume; an active drain may consume it")),
     )
     return 0
 
@@ -243,13 +296,21 @@ def _send_codex(target, args, oc_sender=None):
         # No socket: the Codex shim cannot forward the final message back, so
         # the body names the explicit route instead.
         msg_id = str(uuidlib.uuid4())
+        try:
+            reply_id = _issue_reply_wake(args, oc_sender, "codex:" + thread["id"], msg_id)
+        except (ValueError, OSError) as exc:
+            sys.stderr.write("error: %s\n" % exc)
+            return 1
         text = "\n".join([
             sp_protocol.build_tag(oc_sender.get("title"), oc_sender["id"], None, msg_id),
             sp_protocol.build_origin("opencode", oc_sender.get("title"), oc_sender["id"]),
-            sp_protocol.reply_route_hint("oc:%s" % oc_sender["id"]),
+            sp_protocol.reply_route_hint("oc:%s" % oc_sender["id"], reply_id),
             args.message,
         ])
-        return _queue_codex(thread, text, msg_id, args)
+        result = _queue_codex(thread, text, msg_id, args)
+        if result and reply_id:
+            sp_reply_wake.forget(reply_id)
+        return result
     from_socket = args.from_socket or os.environ.get(
         "CLAUDE_CODE_MESSAGING_SOCKET"
     )
@@ -309,16 +370,24 @@ def _queue_codex(thread, text, msg_id, args):
 
 
 def _send_claude(target, args, oc_sender=None):
+    reply_id = None
     try:
         rec = sp_claude._resolve_claude_record(target)
+        if oc_sender and getattr(args, "allow_reply_wake", None) is not None:
+            reply_id = _issue_reply_wake(args, oc_sender, "cc:" + rec["sessionId"], str(uuidlib.uuid4()))
+            oc_sender = dict(oc_sender, reply_wake_id=reply_id)
         thread_id = None if oc_sender else sp_identity._thread_from_args(args)
         msg_id, reply_capable = sp_claude._deliver_claude(
             rec, args.message, thread_id, opencode_sender=oc_sender
         )
     except (sp_codex.ResolveError, ValueError) as exc:
+        if reply_id:
+            sp_reply_wake.forget(reply_id)
         sys.stderr.write("error: %s\n" % exc)
         return 1
     except OSError as exc:
+        if reply_id:
+            sp_reply_wake.forget(reply_id)
         sys.stderr.write("error: could not reach %s: %s\n" % (target, exc))
         return 1
     if thread_id and not reply_capable:

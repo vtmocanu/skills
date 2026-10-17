@@ -71,13 +71,14 @@ def build_origin(runtime, name, ident):
     return "[session-peers from %s%s]" % (label, " " + who if who else "")
 
 
-def reply_route_hint(address) -> str:
+def reply_route_hint(address, message_id=None) -> str:
     """How to answer a sender no native reply route reaches.
 
     OpenCode exposes no peer socket, so between it and the other runtimes a
     reply is an explicit `send` to this typed address.
     """
-    return "[session-peers reply route: peers.py send --to %s --message-file PATH]" % address
+    reply = " --in-reply-to %s" % message_id if message_id else ""
+    return "[session-peers reply route: peers.py send --to %s%s --message-file PATH]" % (address, reply)
 
 
 def parse_tag(text):
