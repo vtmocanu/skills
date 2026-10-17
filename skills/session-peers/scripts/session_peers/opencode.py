@@ -81,7 +81,7 @@ def api(operation, params=None, data=None):
     if rc != 0:
         tag = body.get("_tag") if isinstance(body, dict) else None
         detail = (body.get("message") if isinstance(body, dict) else None) or err.strip() or "rc %d" % rc
-        if tag == "SessionNotFoundError" or "404" in err:
+        if tag == "SessionNotFoundError":
             raise OpenCodeNotFound(detail)
         raise OpenCodeError("opencode api %s failed: %s" % (operation, detail))
     if not isinstance(body, dict):

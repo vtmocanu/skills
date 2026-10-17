@@ -458,6 +458,11 @@ class OpenCodeBuddyTests(OpenCodeBase):
         self.set_oc(sessions=[oc_session(OC_A, "oc-lead")])
         self.assertEqual(sp_maintenance.gc_buddy_records(days=1, verbose=False), [path.name])
 
+    def test_generic_404_never_proves_an_opencode_owner_is_gone(self):
+        owner = {"kind": "oc", "uuid": OC_A}
+        self.set_oc(get_error_tag="NotFound")
+        self.assertFalse(sp_maintenance._owner_verified_gone(owner))
+
     def test_parse_typed_accepts_opencode_ids_and_rejects_others(self):
         from session_peers import identity as sp_identity
         self.assertEqual(sp_identity.parse_typed("oc:%s" % OC_A), {"kind": "oc", "uuid": OC_A})

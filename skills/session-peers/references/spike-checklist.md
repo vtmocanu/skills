@@ -240,3 +240,8 @@ Partial live check: 2026-09-09, Claude Code 2.1.266, Codex CLI 0.153.4.
     session, `send --to cc:NAME` and `dispatch --to cc:NAME`, then `await`.
     From Claude, `dispatch --to oc:SESSION_ID --wake`; the OpenCode session
     answers with `reply --request REQUEST_ID`. Bind buddies both ways. Record versions.
+29. **Wake semantics.** On OpenCode 2.0.30, `resume: false` leaves an idle
+    session inactive with input retained in `session.inbox.list`. A later
+    `resume: true` prompt drains it. An already-running drain also consumes
+    `resume: false` queued input before becoming idle. Verify all three cases
+    on a session created for this probe; never treat resume false as a hold.

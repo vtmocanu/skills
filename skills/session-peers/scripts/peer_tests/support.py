@@ -180,6 +180,8 @@ if state.get("stopped"):
     fail("Started", "api ran against a stopped service", "500 Internal Server Error")
 sessions = state.get("sessions", {})
 if op == "session.get":
+    if state.get("get_error_tag"):
+        fail(state["get_error_tag"], "metadata route unavailable", "404 Not Found")
     sid = params.get("sessionID")
     if sid not in sessions:
         fail("SessionNotFoundError", "Session not found: %s" % sid, "404 Not Found")
