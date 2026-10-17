@@ -5,8 +5,10 @@ before the subcommand. Use a private state directory outside every repository:
 `SKIPPER_STATE_DIR` when nonempty, otherwise `${XDG_STATE_HOME:-$HOME/.local/state}/skipper/`.
 Use `--state-dir PATH` to override either default for an
 independent skipper ledger and `--owner SESSION_UUID` for every mutation.
-Use a canonical bare UUID for `--owner` and an enrollment's `skipper` field;
-use qualified `claude:UUID`/`codex:UUID` identities for session targets.
+Use a canonical bare UUID (Claude/Codex) or native `ses_` id (OpenCode) for
+`--owner` and an enrollment's `skipper` field. Session targets use
+`claude:UUID`, `codex:UUID` or `opencode:ses_ID`; peer addressing instead uses
+`oc:ses_ID`. SESSION_UUID in the examples also accepts the bare OpenCode id.
 Refuse state paths with a `.git` entry in the directory or any ancestor. This
 includes a home directory tracked as a dotfiles repository. Use `--state-dir`
 with a private directory you own outside that repository, for example
@@ -49,7 +51,7 @@ Fresh observation memoizes repo lookup per cwd only for that refresh; a trusted
 fresh context export avoids transcript globbing entirely.
 
 `status --json` and `observe` return an observation snapshot. `sessions` is a
-mapping keyed by `claude:UUID` or `codex:UUID`; it contains each observed session
+mapping keyed by `claude:UUID`, `codex:UUID` or `opencode:ses_ID`; it contains each observed session
 once. Read `.sessions[]`, not a recursive object sweep. Each row has `id`,
 `session_id`, `name`, `runtime`, `liveness`, observed `state`, `cwd`,
 `repo: {root, remote}` and `context`. `repo` is an object; use `.repo.root` for
@@ -63,15 +65,19 @@ are not additional roster rows. `complete` and `warnings` describe coverage.
 Different sessions can share a name; never deduplicate identities by name.
 For example, `jq '.sessions[] | {name, id, state, repo: .repo.root}'` reads the roster.
 
-`resolve NAME` prints its bare UUID for enrollment/grants; `--json` returns its observation
+`resolve NAME` prints its bare native id for enrollment/grants; `--json` returns its observation
 row. Match exact names or UUIDs, never prefixes. Ambiguous, absent or unverified
-matches fail with exit 2; use `--runtime claude|codex` or a qualified UUID to
+matches fail with exit 2; use `--runtime claude|codex|opencode` or a qualified id to
 disambiguate. Resolving an identity grants no coordinator role, buddy binding
 or enrollment authority.
 Use the row's qualified `id` for ledger targets and `session_id` for a bare UUID.
 Resolution uses the observed roster; inspect coverage before assuming it is exhaustive.
 
-Default tables show Claude leads with short repo names and an explicit buddy
+OpenCode resolution accepts freshly API-confirmed identity/reachability without
+claiming TUI attachment; cached or missing observations cannot establish it.
+See [OpenCode](opencode.md) for coverage and timer limits.
+
+Default tables show Claude and OpenCode leads with short repo names and an explicit buddy
 column. Store a pair on a session/enrollment record as `buddy: {id: "codex:UUID",
 name: "buddy-name"}`; resolve the displayed name by that ID, never by a name match.
 Keep UUIDs in JSON; `--verbose` shows them and full repo paths. `--all` adds
@@ -127,7 +133,7 @@ record; omission creates a UUID. An update may omit `kind` and retain the existi
 record kind. Record evidence references, not complete
 transcripts, logs, code or credentials. The CLI records reported authorization;
 it cannot authenticate that a grant really came from the user. The receiving
-lead must establish that boundary. Session targets use `claude:UUID` or `codex:UUID`.
+lead must establish that boundary. Session targets also accept `opencode:ses_ID`.
 
 | kind | Required fields | Lifecycle and evidence |
 |---|---|---|
