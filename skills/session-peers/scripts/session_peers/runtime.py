@@ -105,11 +105,12 @@ def write_json_exclusive(path, data, mode=0o600):
         return False
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            # Restore any umask-narrowed bits before a consumer can read/unlink.
+            os.fchmod(fh.fileno(), mode)
             json.dump(data, fh, sort_keys=True)
             fh.write("\n")
             fh.flush()
             os.fsync(fh.fileno())
-        os.chmod(path, mode)
     except BaseException:
         try:
             os.unlink(path)
