@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import sys
 from . import constants as sp_constants
+from . import reply_wake as sp_reply_wake
 from . import diagnostics as sp_diagnostics, lifecycle as sp_lifecycle
 from . import shim as sp_shim
 from . import buddy as sp_buddy, diagnostics as sp_diagnostics, hooks as sp_hooks, maintenance as sp_maintenance, messaging as sp_messaging, topics as sp_topics
@@ -72,7 +73,15 @@ def _register_messaging(sub):
     )
     p_send.add_argument("--json", action="store_true", help="machine-readable result")
     p_send.add_argument("--wake", action="store_true", help="allow an OpenCode recipient to run without a TUI")
+    p_send.add_argument("--allow-reply-wake", nargs="?", const=600, type=float, metavar="SECONDS",
+                        help="consent to one matching reply waking this OpenCode sender (default 600s, max 3600s)")
+    p_send.add_argument("--in-reply-to", metavar="MESSAGE_ID", help="consume an exact request's one-shot reply-wake grant")
     p_send.set_defaults(func=sp_messaging.cmd_send)
+
+    p_revoke = sub.add_parser("reply-wake", help="revoke requester-consented reply wake")
+    p_revoke.add_argument("action", choices=["revoke"])
+    p_revoke.add_argument("message_id")
+    p_revoke.set_defaults(func=sp_reply_wake.cmd_revoke)
 
     p_ask = sub.add_parser(
         "ask", help="send a correlated request to Claude or OpenCode and wait for its reply"

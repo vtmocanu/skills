@@ -227,6 +227,13 @@ An OpenCode V2 session has no peer socket: every direction is an explicit
   of SendMessage or a Codex final message.
 - A `<session-peers-request ...>` reaching OpenCode is answered only with its
   included `reply --request` command.
+- With the user's consent, initiate an asynchronous request using
+  `send --allow-reply-wake[=SECONDS]`. Its generated reply route includes
+  `--in-reply-to MESSAGE_ID`: one reply from that exact peer may wake this
+  session without a separate `--wake`. Default expiry is 600 seconds, maximum
+  3600; revoke unused consent with `reply-wake revoke MESSAGE_ID` from the
+  issuing session. Follow the generated route; do not replace it with a bare
+  send. See [reply-wake limits](references/opencode.md#consented-reply-wake).
 - `opencode api` would start a stopped service; peers.py checks first and
   reports it stopped.
 

@@ -8,11 +8,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `session-peers`: opt-in, expiring one-shot OpenCode reply wakes, bound to an initiated message and exact peer; generated reply routes, issuer revocation and fail-closed replay protection leave unsolicited sends and correlated mailboxes unchanged.
 - `skipper`: OpenCode V2 native session IDs as ledger owners and enrolled targets, recent API-confirmed peer discovery and explicit routing without claiming TUI attachment. Missing/cached sessions never prove stop or death; existing enrollment, handover and barrier gates remain unchanged.
 - `session-peers`: OpenCode V2 sessions as peers through the service's own `opencode api` client: `oc:<ses_id|title>` addressing, recent-session discovery with running/idle/unknown state, `OPENCODE_SESSION_ID` caller identity verified by the service, queued delivery with explicit reply routes, correlated `ask`/`dispatch`/`await`/`reply` in both directions, `wait --for oc:`, and OpenCode buddies. A stopped service is reported, never started; message bodies are never read.
 
 ### Fixed
 
+- `session-peers`: reject non-finite correlated-request timeouts rather than admitting an unusable `nan` lifetime.
 - `session-peers`: avoid reporting a delivered correlated reply as failed when its consumer removes the mailbox before the writer returns.
 - `token-audit`: count repeated assistant usage rows once per message ID while preserving log order, sidechain accounting and separate responses without IDs.
 

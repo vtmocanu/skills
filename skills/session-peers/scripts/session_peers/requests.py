@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 import os
+import math
 import shlex
 import sys
 import time
@@ -25,7 +26,7 @@ def warn_short_lifetime(timeout):
 
 def _bounded_timeout(value):
     timeout = sp_constants.REQUEST_TIMEOUT_DEFAULT if value is None else float(value)
-    if timeout <= 0 or timeout > sp_constants.REQUEST_TIMEOUT_MAX:
+    if not math.isfinite(timeout) or timeout <= 0 or timeout > sp_constants.REQUEST_TIMEOUT_MAX:
         raise ValueError(
             "timeout must be greater than 0 and at most %.0f seconds"
             % sp_constants.REQUEST_TIMEOUT_MAX
@@ -83,6 +84,8 @@ def cleanup_expired_requests(now=None, dry_run=False):
                 _unlink_quiet(path)
             if request_id not in removed:
                 removed.append(request_id)
+    from . import reply_wake
+    reply_wake.cleanup(now, dry_run=dry_run)
     return removed
 
 

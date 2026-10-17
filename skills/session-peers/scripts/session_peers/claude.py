@@ -312,7 +312,7 @@ def _deliver_claude(rec, message, thread_id=None, reply_route=True, opencode_sen
         # mailbox, so it carries no `send` hint that would invite a stale turn.
         lines = [sp_protocol.build_origin("opencode", opencode_sender.get("title"), opencode_sender["id"])]
         if reply_route:
-            lines.append(sp_protocol.reply_route_hint("oc:%s" % opencode_sender["id"]))
+            lines.append(sp_protocol.reply_route_hint("oc:%s" % opencode_sender["id"], opencode_sender.get("reply_wake_id")))
         body = "\n".join(lines + [message])
         if len(body) > sp_constants.MAX_TEXT_CHARS or sp_runtime.utf8_len(body) > sp_constants.MAX_TEXT_CHARS:
             raise ValueError(
@@ -320,6 +320,8 @@ def _deliver_claude(rec, message, thread_id=None, reply_route=True, opencode_sen
                 % sp_constants.MAX_TEXT_CHARS
             )
         frame = sp_protocol.build_user_frame(body, None)
+        if opencode_sender.get("reply_wake_id"):
+            frame["msg_id"] = opencode_sender["reply_wake_id"]
         send_frame(rec["messagingSocketPath"], frame, auth_token=peer_token_for(rec))
         return frame["msg_id"], False
     thread_name = None
