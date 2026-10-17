@@ -327,11 +327,11 @@ def observe(home, claude_dir, export_dir, ledger, now, default_window=None, peer
                                      "cwd": row.get("cwd") or old.get("cwd"),
                                      "observed_at": now, "source": "session-peers"}
             complete["codex"] = payload.get("codex_schema_recognised") is True
-            oc_rows = payload.get("opencode")
-            oc_error = payload.get("opencode_error")
-            if not isinstance(oc_rows, list) or oc_error:
-                warnings.append("OpenCode discovery incomplete: " + str(oc_error or "session-peers lacks OpenCode support"))
-            else:
+            try:
+                oc_rows = payload.get("opencode")
+                oc_error = payload.get("opencode_error")
+                if not isinstance(oc_rows, list) or oc_error:
+                    raise ValueError(oc_error or "session-peers lacks OpenCode support")
                 # Validate atomically: malformed discovery must not leave routable rows.
                 oc_sessions = {}
                 for row in oc_rows:
@@ -346,6 +346,8 @@ def observe(home, claude_dir, export_dir, ledger, now, default_window=None, peer
                                         "source": "session-peers"}
                 sessions.update(oc_sessions)
                 complete["opencode"] = True
+            except (ValueError, KeyError, TypeError, AttributeError) as exc:
+                warnings.append("OpenCode discovery incomplete: " + str(exc))
         except (OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.TimeoutExpired) as exc:
             detail = ("peer listing timed out after %s seconds" % exc.timeout
                       if isinstance(exc, subprocess.TimeoutExpired)

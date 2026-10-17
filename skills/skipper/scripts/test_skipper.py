@@ -132,6 +132,16 @@ class OpenCodeTests(FixtureCase):
                 self.assertFalse(snapshot["complete"]["opencode"])
                 self.assertNotIn(OC_LEAD, snapshot["sessions"])
 
+    def test_malformed_opencode_preserves_codex_coverage_and_attribution(self):
+        codex_id = "00000000-0000-4000-8000-000000000099"
+        snapshot = self.observe(codex=[{"id": codex_id, "name": "fixture-codex"}],
+                                opencode=[{"id": OC_SID, "runtime": "opencode", "state": "invalid"}])
+        self.assertIn("codex:" + codex_id, snapshot["sessions"])
+        self.assertTrue(snapshot["complete"]["codex"])
+        self.assertFalse(snapshot["complete"]["opencode"])
+        self.assertTrue(any(w.startswith("OpenCode discovery incomplete:") for w in snapshot["warnings"]))
+        self.assertFalse(any("Codex discovery is incomplete" in w for w in snapshot["warnings"]))
+
     def test_cached_identity_cannot_resolve(self):
         self.state["observations"] = self.observe()
         snapshot = sk.cached_observation(self.state, NOW + 10)
