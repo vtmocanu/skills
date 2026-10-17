@@ -5,6 +5,7 @@ import argparse
 import sys
 from . import constants as sp_constants
 from . import reply_wake as sp_reply_wake
+from . import inbox as sp_inbox
 from . import diagnostics as sp_diagnostics, lifecycle as sp_lifecycle
 from . import shim as sp_shim
 from . import buddy as sp_buddy, diagnostics as sp_diagnostics, hooks as sp_hooks, maintenance as sp_maintenance, messaging as sp_messaging, topics as sp_topics
@@ -22,6 +23,7 @@ def build_parser():
     sub = p.add_subparsers(dest="command")
 
     _register_list(sub)
+    _register_inbox(sub)
 
     _register_messaging(sub)
 
@@ -52,6 +54,21 @@ def _register_list(sub):
     p_list = sub.add_parser("list", help="live Claude sessions, Codex threads and recent OpenCode sessions")
     p_list.add_argument("--json", action="store_true", help="machine-readable output")
     p_list.set_defaults(func=sp_diagnostics.cmd_list)
+
+
+def _register_inbox(sub):
+    parser = sub.add_parser("inbox", help="check this OpenCode session's queued peer input")
+    commands = parser.add_subparsers(dest="inbox_cmd", required=True)
+    listing = commands.add_parser("list", help="read queued peers without consuming input")
+    listing.add_argument("--all", action="store_true", help="include locally handled messages")
+    listing.add_argument("--json", action="store_true")
+    listing.set_defaults(func=sp_inbox.cmd_inbox)
+    for name in ("handled", "status"):
+        command = commands.add_parser(name, help="mark or check a local handled sender/message pair")
+        command.add_argument("sender", help="typed sender address from the message metadata")
+        command.add_argument("message_id", help="logical peer message UUID, not native msg_ id")
+        command.add_argument("--json", action="store_true")
+        command.set_defaults(func=sp_inbox.cmd_inbox)
 
 
 def _register_messaging(sub):

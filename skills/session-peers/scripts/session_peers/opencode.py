@@ -2,9 +2,10 @@
 
 Every call goes through `opencode api <operationId>`, the CLI's own
 authenticated client for the background service, so no auth or state file is
-read here. Only session metadata (`session.get`, `session.list`,
-`session.active`) is read; message bodies never are. `opencode api` starts a
-stopped service (measured on 2.0.30, `service.ensure`), so `service status` is
+read here. Discovery reads only session metadata (`session.get`, `session.list`,
+`session.active`); the explicit inbox command reads this session's queued peer
+input via `session.inbox.list`, never conversation history. `opencode api` starts a
+stopped service, so `service status` is
 checked first and a stopped service is reported, never started.
 """
 
