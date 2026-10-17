@@ -221,3 +221,27 @@ Partial live check: 2026-09-09, Claude Code 2.1.266, Codex CLI 0.153.4.
     of order do not cross. Record versions.
     - Not yet run live; unit tests cover every case above (see
       `TestNonblockingDispatchAwait`).
+
+## OpenCode side
+
+27. **Service API and identity.** `opencode service status` prints the service
+    URL (or `stopped`); `opencode api GET /openapi.json` lists `session.get`,
+    `session.list`, `session.active` and `session.prompt`. A shell command run by
+    an OpenCode session sees `OPENCODE_SESSION_ID` equal to that session's id.
+    With the service stopped (isolated `HOME`), `opencode api session.active`
+    must still try to start it: if not, the status pre-check can be dropped.
+    - 2026-10-17, OpenCode 2.0.30: all four operations present; env var set by
+      the shell tool; `opencode api` ran `service.ensure` against a stopped
+      service; errors print the JSON body on stdout and `HTTP <status>` on stderr
+      with rc 1.
+28. **Send, request and buddy end to end.** From a Claude session,
+    `send --to oc:SESSION_ID --wake`; the OpenCode session runs a queued turn
+    showing the tag, provenance and reply-route lines. From that OpenCode
+    session, `send --to cc:NAME` and `dispatch --to cc:NAME`, then `await`.
+    From Claude, `dispatch --to oc:SESSION_ID --wake`; the OpenCode session
+    answers with `reply --request REQUEST_ID`. Bind buddies both ways. Record versions.
+29. **Wake semantics.** On OpenCode 2.0.30, `resume: false` leaves an idle
+    session inactive with input retained in `session.inbox.list`. A later
+    `resume: true` prompt drains it. An already-running drain also consumes
+    `resume: false` queued input before becoming idle. Verify all three cases
+    on a session created for this probe; never treat resume false as a hold.

@@ -1,6 +1,6 @@
 ---
 name: session-peers
-description: 'Messages between Claude Code sessions and Codex CLI threads on one machine, including correlated request/reply without stale queued turns, blocking (ask) or nonblocking (dispatch then await). Registers Codex as a Claude peer, delivers asynchronous messages through codex queue, and provides ask/dispatch/await/reply/wait commands for supervised multi-round work. Binds a named buddy peer for review and brainstorming. Use when sending cross-session messages or handoffs, requesting peer review, dispatching correlated work without blocking, waiting on a peer, listing live sessions, or diagnosing a stuck, paused, or dead peer. Triggers include "message codex", "ask claude", "dispatch to claude", "reply to the session", "@codex", "session peers", "peer review", "buddy: @name", "your buddy is", "ask your buddy".'
+description: 'Messages between Claude Code sessions, Codex CLI threads and OpenCode V2 sessions on one machine, including correlated request/reply without stale queued turns, blocking (ask) or nonblocking (dispatch then await). Registers Codex as a Claude peer, delivers asynchronous messages through codex queue, and provides ask/dispatch/await/reply/wait commands for supervised multi-round work. Binds a named buddy peer for review and brainstorming. Use when sending cross-session messages or handoffs, requesting peer review, dispatching correlated work without blocking, waiting on a peer, listing live sessions, or diagnosing a stuck, paused, or dead peer. Triggers include "message codex", "message opencode", "ask claude", "dispatch to claude", "reply to the session", "@codex", "session peers", "peer review", "buddy: @name", "your buddy is", "ask your buddy".'
 ---
 
 # session-peers
@@ -10,7 +10,8 @@ macOS/Linux). Use the commands for your own runtime below.
 
 ## Identity and delivery
 
-- Address consequential requests by full UUID; names are mutable aliases.
+- Address consequential requests by full UUID (OpenCode: full `ses_` id);
+  names are mutable aliases.
 - A Claude session registers itself natively. Do not add a Claude registration
   hook. A Codex thread may have a generated title or a user `/rename` alias;
   its shim exposes it as a Claude peer. No shim means no automatic reply route.
@@ -209,6 +210,28 @@ Choose the response path:
 
 Read [references/messaging.md](references/messaging.md) before using detailed
 request/mailbox contracts or shell sender overrides.
+
+## OpenCode
+
+An OpenCode V2 session has no peer socket: every direction is an explicit
+`peers.py` command, run from a shell.
+
+- Address it as `oc:<ses_id>`; `list` shows recent sessions, `busy`/`idle`.
+  Attachment is unknown, so never report it as live or answered.
+- In OpenCode, `OPENCODE_SESSION_ID` is the caller identity: `send`, `ask`,
+  `dispatch`, `await`, `buddy` and `reply` need no `--as`.
+- A send to OpenCode does not wake idle sessions by default (active drains may
+  consume queued input); a bound buddy or `--wake` permits
+  headless execution. Correlated requests require that wake permission. A message
+  from OpenCode names the route back: `send --to oc:<ses_id>`. Use it instead
+  of SendMessage or a Codex final message.
+- A `<session-peers-request ...>` reaching OpenCode is answered only with its
+  included `reply --request` command.
+- `opencode api` would start a stopped service; peers.py checks first and
+  reports it stopped.
+
+Read [references/opencode.md](references/opencode.md) before diagnosing an
+OpenCode route, identity refusal or liveness question.
 
 ## Other operations and limits
 

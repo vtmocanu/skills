@@ -306,8 +306,13 @@ def buddies_dir():
 
 
 def buddy_path(owner):
-    if owner.get("kind") not in sp_constants.BUDDY_KINDS or not sp_runtime.is_uuid(owner.get("uuid")):
-        raise ValueError("a buddy owner must be cc:<uuid> or codex:<uuid>")
+    kind, ident = owner.get("kind"), owner.get("uuid")
+    valid = (
+        bool(sp_constants.OPENCODE_SESSION_ID_RE.match(ident or "")) if kind == "oc"
+        else kind in sp_constants.BUDDY_KINDS and sp_runtime.is_uuid(ident)
+    )
+    if not valid:
+        raise ValueError("a buddy owner must be cc:<uuid>, codex:<uuid> or oc:<ses_id>")
     return os.path.join(buddies_dir(), "%s-%s.json" % (owner["kind"], owner["uuid"]))
 
 

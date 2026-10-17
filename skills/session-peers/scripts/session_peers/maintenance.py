@@ -6,7 +6,7 @@ import sys
 import time
 from . import constants as sp_constants, runtime as sp_runtime
 from . import claude as sp_claude, codex as sp_codex, lifecycle as sp_lifecycle, requests as sp_requests, storage as sp_storage
-from . import topics as sp_topics
+from . import opencode as sp_opencode, topics as sp_topics
 
 def _bridge_thread_ids():
     """UUIDs represented by registrations or per-thread bridge artifacts."""
@@ -150,6 +150,16 @@ def _owner_verified_gone(owner):
             if r.get("sessionId") == owner["uuid"]
         ]
         return all(state == "dead" for state in states)
+    if owner["kind"] == "oc":
+        # A session that exists is never gone; only the service saying it
+        # does not exist proves it, and a stopped service proves nothing.
+        try:
+            sp_opencode.get_session(owner["uuid"])
+        except sp_opencode.OpenCodeNotFound:
+            return True
+        except sp_opencode.OpenCodeError:
+            return False
+        return False
     try:
         thread = sp_codex.resolve_thread(owner["uuid"], require_live=False)
     except sp_codex.ResolveError:
@@ -172,7 +182,7 @@ def gc_buddy_records(days=sp_constants.GC_DAYS_DEFAULT, dry_run=False, verbose=T
         if not sep or kind not in sp_constants.BUDDY_KINDS or not rest.endswith(".json"):
             continue
         ident = rest[: -len(".json")]
-        if not sp_runtime.is_uuid(ident):
+        if not (sp_opencode.is_session_id(ident) if kind == "oc" else sp_runtime.is_uuid(ident)):
             continue
         path = os.path.join(sp_storage.buddies_dir(), name)
         try:

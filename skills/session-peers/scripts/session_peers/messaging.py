@@ -9,7 +9,7 @@ import time
 import uuid as uuidlib
 from . import constants as sp_constants, protocol as sp_protocol, rollout as sp_rollout, runtime as sp_runtime
 from . import claude as sp_claude, codex as sp_codex, diagnostics as sp_diagnostics, requests as sp_requests, storage as sp_storage
-from . import buddy as sp_buddy, identity as sp_identity
+from . import buddy as sp_buddy, identity as sp_identity, opencode as sp_opencode
 
 def _print_send_result(args, payload, human):
     if getattr(args, "json", False):
@@ -39,15 +39,154 @@ def cmd_send(args):
         sys.stderr.write("error: %s\n" % exc)
         return 1
     target = args.to
+    if target.startswith("oc:"):
+        return _send_opencode(target[len("oc:") :], args)
+    try:
+        oc_sender = _opencode_sender(args)
+    except ValueError as exc:
+        sys.stderr.write("error: %s\n" % exc)
+        return 2
     if target.startswith("codex:"):
-        return _send_codex(target[len("codex:") :], args)
+        return _send_codex(target[len("codex:") :], args, oc_sender)
     if target.startswith("cc:"):
         shim_thread = _codex_shim_thread(target[len("cc:") :], args)
         if shim_thread:
-            return _send_codex(shim_thread, args)
-        return _send_claude(target[len("cc:") :], args)
-    sys.stderr.write("error: --to must start with codex: or cc:\n")
+            return _send_codex(shim_thread, args, oc_sender)
+        return _send_claude(target[len("cc:") :], args, oc_sender)
+    sys.stderr.write("error: --to must start with codex:, cc: or oc:\n")
     return 2
+
+
+def _opencode_sender(args):
+    """The verified OpenCode session running this command, or None.
+
+    Explicit sender flags keep their meaning. OpenCode's id beside a Claude or
+    Codex id was inherited by one agent from the other, so it is refused
+    rather than guessed; an id the service cannot confirm is refused too.
+    """
+    sid = sp_opencode.current_session_id()
+    explicit = any(
+        getattr(args, name, None)
+        for name in ("from_thread", "from_name", "from_sid", "from_socket")
+    )
+    if not sid or explicit:
+        return None
+    if (os.environ.get("CLAUDE_CODE_SESSION_ID")
+            or os.environ.get("CLAUDE_CODE_MESSAGING_SOCKET")
+            or sp_identity._thread_from_args(args)):
+        raise ValueError(
+            "this environment names OpenCode session %s and a Claude or Codex "
+            "session; pass explicit --from-* flags" % sid
+        )
+    try:
+        session = sp_opencode.get_session(sid)
+    except sp_opencode.OpenCodeError as exc:
+        raise ValueError("cannot verify OpenCode session %s: %s" % (sid, exc))
+    return {"id": sid, "title": session.get("title")}
+
+
+def _caller_view(args, oc_sender=None):
+    """(runtime, name, typed address) of a non-OpenCode-target sender.
+
+    Used where the recipient has no native route back: the address goes into
+    an explicit reply hint. Unknown senders return ("unknown", None, None).
+    """
+    if oc_sender:
+        return "opencode", oc_sender.get("title"), "oc:%s" % oc_sender["id"]
+    sock = os.environ.get("CLAUDE_CODE_MESSAGING_SOCKET")
+    rec = sp_claude.claude_record_by_socket(sock) if sock else None
+    if rec is None:
+        sid = os.environ.get("CLAUDE_CODE_SESSION_ID")
+        if sp_runtime.is_uuid(sid):
+            matches = sp_claude.claude_record_by_target(sid)
+            rec = matches[0] if len(matches) == 1 else None
+    if rec is not None and rec.get("sessionId"):
+        runtime = sp_protocol.sender_runtime(rec)
+        kind = "codex" if runtime == "codex" else "cc"
+        return runtime, rec.get("name"), "%s:%s" % (kind, rec["sessionId"])
+    tid = sp_identity._thread_from_args(args)
+    if tid:
+        state = sp_runtime.read_json(sp_storage.thread_state_path(tid), {}) or {}
+        return "codex", state.get("name"), "codex:%s" % tid
+    return "unknown", None, None
+
+
+def _may_wake_opencode(args, session_id, owner=None):
+    """Only an explicit wake or this caller's bound buddy starts a headless turn."""
+    if getattr(args, "wake", False):
+        return True
+    try:
+        owner = owner or sp_identity.caller_identity(args)
+    except ValueError:
+        return False
+    binding = sp_buddy.read_buddy(owner)
+    return bool(binding and binding["buddy"]["kind"] == "oc"
+                and binding["buddy"]["uuid"] == session_id)
+
+
+def _send_opencode(target, args):
+    """Queue one message as an OpenCode session's next turn.
+
+    Waking requires a bound buddy or explicit opt-in; `delivery: queue`
+    never steers a running turn. OpenCode has no reply socket, so the
+    body names the sender's typed address for an explicit `send` back.
+    """
+    try:
+        oc_sender = _opencode_sender(args)
+        runtime, from_name, address = _caller_view(args, oc_sender)
+    except ValueError as exc:
+        sys.stderr.write("error: %s\n" % exc)
+        return 2
+    exclude = oc_sender["id"] if oc_sender else None
+    try:
+        session = sp_opencode.resolve_session(target, exclude=exclude)
+    except sp_codex.ResolveError as exc:
+        sys.stderr.write("error: %s\n" % exc)
+        return 1
+    if exclude and session["id"] == exclude:
+        sys.stderr.write("error: an OpenCode session cannot message itself\n")
+        return 2
+    if address is None:
+        sp_runtime.log(
+            "sender identity absent: the OpenCode session cannot reply; send "
+            "from a Claude, Codex or OpenCode session's own shell"
+        )
+    msg_id = str(uuidlib.uuid4())
+    ident = address.partition(":")[2] if address else None
+    lines = [
+        sp_protocol.build_tag(from_name, ident, None, msg_id),
+        sp_protocol.build_origin(runtime, from_name, ident),
+    ]
+    if address:
+        lines.append(sp_protocol.reply_route_hint(address))
+    text = "\n".join(lines + [args.message])
+    state = sp_opencode.state_of(session["id"])
+    resume = _may_wake_opencode(args, session["id"])
+    try:
+        inbox_id = sp_opencode.deliver(
+            session["id"], text, {"message_id": msg_id, "from": address}, resume=resume
+        )
+    except (sp_opencode.OpenCodeError, ValueError) as exc:
+        sys.stderr.write("error: could not queue to OpenCode session %s: %s\n" % (session["id"], exc))
+        return 1
+    _print_send_result(
+        args,
+        {
+            "status": "queued",
+            "target": "opencode",
+            "session_id": session["id"],
+            "session_name": session.get("title"),
+            "session_state": state,
+            "message_id": msg_id,
+            "inbox_id": inbox_id,
+            "reply_capable": bool(address),
+            "resume": resume,
+        },
+        "queued to OpenCode session %s (%s, %s), message %s%s"
+        % (session.get("title") or "(untitled)", session["id"], state, msg_id,
+           "" if resume else "; resume false: idle sessions wait for resume; an active drain may consume it"),
+    )
+    return 0
 
 
 def _codex_shim_thread(target, args):
@@ -68,7 +207,7 @@ def _codex_shim_thread(target, args):
     return None
 
 
-def _send_codex(target, args):
+def _send_codex(target, args, oc_sender=None):
     try:
         thread = sp_codex.resolve_thread(target)
     except sp_codex.ResolveError as exc:
@@ -100,6 +239,17 @@ def _send_codex(target, args):
                 "but drains only when its user types the next prompt" % thread["id"]
             )
     from_name, from_sid = args.from_name, args.from_sid
+    if oc_sender:
+        # No socket: the Codex shim cannot forward the final message back, so
+        # the body names the explicit route instead.
+        msg_id = str(uuidlib.uuid4())
+        text = "\n".join([
+            sp_protocol.build_tag(oc_sender.get("title"), oc_sender["id"], None, msg_id),
+            sp_protocol.build_origin("opencode", oc_sender.get("title"), oc_sender["id"]),
+            sp_protocol.reply_route_hint("oc:%s" % oc_sender["id"]),
+            args.message,
+        ])
+        return _queue_codex(thread, text, msg_id, args)
     from_socket = args.from_socket or os.environ.get(
         "CLAUDE_CODE_MESSAGING_SOCKET"
     )
@@ -132,6 +282,10 @@ def _send_codex(target, args):
         sp_protocol.sender_runtime(rec if from_socket else None), from_name, from_sid
     )
     text = "%s\n%s\n%s" % (tag, origin, args.message)
+    return _queue_codex(thread, text, msg_id, args)
+
+
+def _queue_codex(thread, text, msg_id, args):
     try:
         sp_codex.codex_queue(
             thread["id"], text, cwd=thread.get("cwd"), home=thread.get("codex_home")
@@ -154,11 +308,13 @@ def _send_codex(target, args):
     return 0
 
 
-def _send_claude(target, args):
+def _send_claude(target, args, oc_sender=None):
     try:
         rec = sp_claude._resolve_claude_record(target)
-        thread_id = sp_identity._thread_from_args(args)
-        msg_id, reply_capable = sp_claude._deliver_claude(rec, args.message, thread_id)
+        thread_id = None if oc_sender else sp_identity._thread_from_args(args)
+        msg_id, reply_capable = sp_claude._deliver_claude(
+            rec, args.message, thread_id, opencode_sender=oc_sender
+        )
     except (sp_codex.ResolveError, ValueError) as exc:
         sys.stderr.write("error: %s\n" % exc)
         return 1
@@ -179,6 +335,7 @@ def _send_claude(target, args):
             "session_name": rec.get("name"),
             "message_id": msg_id,
             "from_thread": thread_id,
+            "from_opencode": oc_sender["id"] if oc_sender else None,
             "reply_capable": reply_capable,
         },
         "sent to %s (pid %s), message %s" % (target, rec.get("pid"), msg_id),
@@ -187,8 +344,49 @@ def _send_claude(target, args):
 
 
 _RequestSetup = collections.namedtuple(
-    "_RequestSetup", "message timeout thread_id record request_id meta_path reply_path expires_at meta"
+    "_RequestSetup",
+    "message timeout requester oc_sender record request_id meta_path reply_path expires_at meta",
 )
+
+
+def _requester(args, target_kind):
+    """(typed requester, verified OpenCode sender or None) for ask/dispatch/await.
+
+    A Claude target is asked by a Codex thread (`--from-thread` or its env) or
+    an OpenCode session; an OpenCode target by any of the three runtimes.
+    Raises ValueError with the reason.
+    """
+    explicit = getattr(args, "from_thread", None)
+    if explicit or target_kind == "cc" and not sp_opencode.current_session_id():
+        tid = sp_identity._thread_from_args(args, required=True)
+        return {"kind": "codex", "uuid": tid}, None
+    try:
+        caller = sp_identity.caller_identity(args)
+    except ValueError:
+        if target_kind == "cc":
+            raise
+        raise ValueError(
+            "a request needs a Claude session, Codex thread or OpenCode session "
+            "as its origin; run it from that session's shell"
+        )
+    if caller["kind"] == "cc" and target_kind == "cc":
+        raise ValueError(
+            "a request needs --from-thread or CODEX_THREAD_ID so its origin is explicit"
+        )
+    oc_sender = None
+    if caller["kind"] == "oc":
+        try:
+            session = sp_opencode.get_session(caller["uuid"])
+        except sp_opencode.OpenCodeError as exc:
+            raise ValueError("cannot verify OpenCode session %s: %s" % (caller["uuid"], exc))
+        oc_sender = {"id": caller["uuid"], "title": session.get("title")}
+    return caller, oc_sender
+
+
+def _opencode_record(target, exclude=None):
+    """An OpenCode session in the shape the request code reads from a Claude record."""
+    session = sp_opencode.resolve_session(target, exclude=exclude)
+    return {"_runtime": "opencode", "sessionId": session["id"], "name": session.get("title")}
 
 
 def _prepare_request(args, purpose):
@@ -197,19 +395,30 @@ def _prepare_request(args, purpose):
     failed = _expand_buddy_arg(args, "to", purpose)
     if failed is not None:
         return failed
-    if not args.to.startswith("cc:"):
-        sys.stderr.write("error: %s --to must start with cc:\n" % purpose)
+    kind, _sep, target = args.to.partition(":")
+    if kind not in ("cc", "oc") or not _sep:
+        sys.stderr.write("error: %s --to must start with cc: or oc:\n" % purpose)
         return 2
     try:
         message = sp_runtime.message_from_args(args)
         timeout = sp_requests._bounded_timeout(args.timeout)
-        thread_id = sp_identity._thread_from_args(args, required=True)
+        requester, oc_sender = _requester(args, kind)
     except ValueError as exc:
         sys.stderr.write("error: %s\n" % exc)
         return 2
     sp_requests.warn_short_lifetime(timeout)
     try:
-        rec = sp_claude._resolve_claude_record(args.to[len("cc:") :])
+        if kind == "oc":
+            exclude = requester["uuid"] if requester["kind"] == "oc" else None
+            rec = _opencode_record(target, exclude=exclude)
+            if rec["sessionId"] == exclude:
+                sys.stderr.write("error: an OpenCode session cannot ask itself\n")
+                return 2
+            if not _may_wake_opencode(args, rec["sessionId"], requester):
+                sys.stderr.write("error: an OpenCode request needs a bound buddy or --wake; no request was queued\n")
+                return 2
+        else:
+            rec = sp_claude._resolve_claude_record(target)
     except sp_codex.ResolveError as exc:
         sys.stderr.write("error: %s\n" % exc)
         return 1
@@ -225,17 +434,38 @@ def _prepare_request(args, purpose):
     meta_path = sp_storage.request_path(request_id)
     reply_path = sp_storage.request_reply_path(request_id)
     expires_at = time.time() + timeout
-    meta = sp_requests._request_meta(request_id, thread_id, rec, expires_at, reply_path)
+    meta = sp_requests._request_meta(request_id, requester, rec, expires_at, reply_path)
     sp_runtime.write_json_atomic(meta_path, meta)
-    return _RequestSetup(message, timeout, thread_id, rec, request_id, meta_path, reply_path, expires_at, meta)
+    return _RequestSetup(
+        message, timeout, requester, oc_sender, rec, request_id, meta_path, reply_path, expires_at, meta
+    )
 
 
 def _send_prepared_request(request):
+    envelope = sp_requests._request_envelope(request.request_id, request.message, request.timeout)
+    requester = request.requester
+    if request.record.get("_runtime") == "opencode":
+        runtime = {"cc": "claude", "codex": "codex", "oc": "opencode"}[requester["kind"]]
+        name = request.oc_sender.get("title") if request.oc_sender else None
+        if requester["kind"] == "cc":
+            matches = sp_claude.claude_record_by_target(requester["uuid"])
+            name = matches[0].get("name") if len(matches) == 1 else None
+        elif requester["kind"] == "codex":
+            state = sp_runtime.read_json(sp_storage.thread_state_path(requester["uuid"]), {}) or {}
+            name = state.get("name")
+        text = "%s\n%s" % (sp_protocol.build_origin(runtime, name, requester["uuid"]), envelope)
+        inbox_id = sp_opencode.deliver(
+            request.record["sessionId"], text,
+            {"request_id": request.request_id, "from": "%s:%s" % (requester["kind"], requester["uuid"])},
+            resume=True,
+        )
+        return inbox_id, False
     return sp_claude._deliver_claude(
         request.record,
-        sp_requests._request_envelope(request.request_id, request.message, request.timeout),
-        request.thread_id,
+        envelope,
+        requester["uuid"] if requester["kind"] == "codex" else None,
         reply_route=False,
+        opencode_sender=request.oc_sender,
     )
 
 
@@ -247,7 +477,7 @@ def cmd_ask(args):
     try:
         try:
             message_id, _reply_capable = _send_prepared_request(request)
-        except (OSError, ValueError) as exc:
+        except (OSError, ValueError, sp_opencode.OpenCodeError) as exc:
             sys.stderr.write("error: could not send request to %s: %s\n" % (args.to, exc))
             return 1
         sp_runtime.log(
@@ -305,17 +535,21 @@ def cmd_reply(args):
         sp_requests.cleanup_expired_requests()
         sys.stderr.write("error: request %s is expired\n" % args.request)
         return 1
-    sid = sp_claude._current_claude_session_id()
+    noun = "OpenCode session" if meta.get("target_kind") == "oc" else "Claude session"
+    if meta.get("target_kind") == "oc":
+        sid = sp_opencode.current_session_id()
+    else:
+        sid = sp_claude._current_claude_session_id()
     if not sid:
         sys.stderr.write(
-            "error: reply must run inside the target Claude session so its "
-            "session id can be verified\n"
+            "error: reply must run inside the target %s so its "
+            "session id can be verified\n" % noun
         )
         return 1
     if sid != meta.get("target_session_id"):
         sys.stderr.write(
-            "error: request %s belongs to Claude session %s, not %s\n"
-            % (args.request, meta.get("target_session_id"), sid)
+            "error: request %s belongs to %s %s, not %s\n"
+            % (args.request, noun, meta.get("target_session_id"), sid)
         )
         return 1
     payload = {
@@ -358,7 +592,7 @@ def cmd_dispatch(args):
         return request
     try:
         message_id, _reply_capable = _send_prepared_request(request)
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, sp_opencode.OpenCodeError) as exc:
         # Delivery failed, so no reply can ever arrive: do not leave an orphan
         # mailbox that a later `await` would poll until it expired.
         sp_requests._unlink_quiet(request.meta_path)
@@ -382,10 +616,11 @@ def cmd_dispatch(args):
         % (request.request_id, request.record.get("name") or request.record.get("sessionId"), request.timeout)
     )
     payload = {
-        "status": "socket_write_succeeded",
+        "status": "queued" if request.record.get("_runtime") == "opencode" else "socket_write_succeeded",
         "request_id": request.request_id,
         "request_message_id": message_id,
-        "requester_thread_id": request.thread_id,
+        "requester_thread_id": request.meta["requester_thread_id"],
+        "requester": request.meta["requester"],
         "target_session_id": request.record.get("sessionId"),
         "target_session_name": request.record.get("name"),
         "created_at": request.meta["created_at"],
@@ -425,7 +660,6 @@ def cmd_await(args):
     try:
         meta_path, reply_path = sp_storage.request_paths(args.request)
         timeout = sp_requests._bounded_timeout(args.timeout)
-        thread_id = sp_identity._thread_from_args(args, required=True)
     except ValueError as exc:
         sys.stderr.write("error: %s\n" % exc)
         return 2
@@ -436,12 +670,33 @@ def cmd_await(args):
         # Expired-and-collected, already consumed, or never dispatched. Without
         # a durable terminal marker (deferred to a later slice) these cannot be
         # told apart, so all three report the terminal `expired` state.
+        # Still check who is asking, so a malformed call fails as before.
+        any_kind = (sp_opencode.current_session_id() or sp_claude._current_claude_session_id())
+        try:
+            _requester(args, "oc" if any_kind and not getattr(args, "from_thread", None) else "cc")
+        except ValueError as exc:
+            sys.stderr.write("error: %s\n" % exc)
+            return 2
         return _await_expired(args, "unknown, already consumed, or expired")
-    if thread_id != meta.get("requester_thread_id"):
-        sys.stderr.write(
-            "error: request %s was dispatched by thread %s, not %s\n"
-            % (args.request, meta.get("requester_thread_id"), thread_id)
-        )
+    # A mailbox written before typed requesters names only a Codex thread.
+    recorded = meta.get("requester") or "codex:%s" % meta.get("requester_thread_id")
+    try:
+        requester, _oc_sender = _requester(args, meta.get("target_kind") or "cc")
+    except ValueError as exc:
+        sys.stderr.write("error: %s\n" % exc)
+        return 2
+    caller = "%s:%s" % (requester["kind"], requester["uuid"])
+    if caller != recorded:
+        if recorded.startswith("codex:") and requester["kind"] == "codex":
+            sys.stderr.write(
+                "error: request %s was dispatched by thread %s, not %s\n"
+                % (args.request, recorded[len("codex:"):], requester["uuid"])
+            )
+        else:
+            sys.stderr.write(
+                "error: request %s was dispatched by %s, not %s\n"
+                % (args.request, recorded, caller)
+            )
         return 1
     target_sid = meta.get("target_session_id")
     try:
@@ -505,8 +760,10 @@ def cmd_wait_peer(args):
     failed = _expand_buddy_arg(args, "for_peer", "wait")
     if failed is not None:
         return failed
+    if args.for_peer.startswith("oc:"):
+        return _wait_opencode(args)
     if not args.for_peer.startswith("cc:"):
-        sys.stderr.write("error: wait --for must start with cc:\n")
+        sys.stderr.write("error: wait --for must start with cc: or oc:\n")
         return 2
     target = args.for_peer[len("cc:") :]
     try:
@@ -543,6 +800,44 @@ def cmd_wait_peer(args):
                 else:
                     print("%s is %s" % (current.get("name") or sid, args.state))
                 return 0
+        time.sleep(interval)
+    sys.stderr.write(
+        "error: %s did not become %s within %.0f seconds\n"
+        % (args.for_peer, args.state, timeout)
+    )
+    return 124
+
+
+def _wait_opencode(args):
+    """Wait for an OpenCode session's agent loop to be idle or running (busy).
+
+    Polls `session.active`; an unreadable service is not a state change.
+    """
+    try:
+        timeout = sp_requests._bounded_timeout(args.timeout)
+        session = sp_opencode.resolve_session(args.for_peer[len("oc:") :])
+    except ValueError as exc:
+        sys.stderr.write("error: %s\n" % exc)
+        return 2
+    except sp_codex.ResolveError as exc:
+        sys.stderr.write("error: %s\n" % exc)
+        return 1
+    want = {"idle": "idle", "busy": "running"}[args.state]
+    deadline = time.monotonic() + timeout
+    interval = sp_runtime._float_env(
+        "SESSION_PEERS_WAIT_POLL_INTERVAL", sp_constants.WAIT_POLL_INTERVAL_DEFAULT
+    )
+    if interval <= 0:
+        interval = sp_constants.WAIT_POLL_INTERVAL_DEFAULT
+    while time.monotonic() < deadline:
+        if sp_opencode.state_of(session["id"]) == want:
+            payload = {"status": args.state, "session_id": session["id"],
+                       "session_name": session.get("title")}
+            if args.json:
+                print(json.dumps(payload, sort_keys=True))
+            else:
+                print("%s is %s" % (session.get("title") or session["id"], args.state))
+            return 0
         time.sleep(interval)
     sys.stderr.write(
         "error: %s did not become %s within %.0f seconds\n"

@@ -50,13 +50,15 @@ def sender_runtime(record):
 def build_origin(runtime, name, ident):
     """One provenance line naming the true runtime of a relayed message.
 
-    ``runtime`` is "claude", "codex" or "unknown" (sender not verified). The
+    ``runtime`` is "claude", "codex", "opencode" or "unknown" (sender not
+    verified). The
     line sits after the tag (Codex side) or first in the body (Claude side).
     Fields are sanitised so a name cannot end the line or forge a second one.
     """
     label = {
         "claude": "Claude Code session",
         "codex": "Codex thread",
+        "opencode": "OpenCode session",
         "unknown": "peer of unverified runtime",
     }[runtime]
 
@@ -67,6 +69,15 @@ def build_origin(runtime, name, ident):
     name, ident = clean(name), clean(ident)
     who = " ".join(x for x in (name, "(%s)" % ident if ident else "") if x)
     return "[session-peers from %s%s]" % (label, " " + who if who else "")
+
+
+def reply_route_hint(address) -> str:
+    """How to answer a sender no native reply route reaches.
+
+    OpenCode exposes no peer socket, so between it and the other runtimes a
+    reply is an explicit `send` to this typed address.
+    """
+    return "[session-peers reply route: peers.py send --to %s --message-file PATH]" % address
 
 
 def parse_tag(text):

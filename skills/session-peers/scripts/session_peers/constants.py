@@ -11,6 +11,7 @@ import re
 # D11: pins, not requirements. A newer install warns, never fails.
 CLAUDE_CODE_TESTED = "2.1.263"
 CODEX_TESTED = "0.153.4"
+OPENCODE_TESTED = "2.0.30"
 
 PEER_PROTOCOL = 1
 PEER_FEATURES = ["notify_idle"]
@@ -108,7 +109,10 @@ THREAD_ARTIFACT_SUFFIXES = (".json", ".log", ".pid", ".budget-reset", ".budget-a
 
 # What a buddy is for. Advisory scope only: nothing grants a permission from it.
 BUDDY_USES = ("review", "brainstorm", "second-opinion", "co-steer", "ping", "sanity-check")
-BUDDY_KINDS = ("cc", "codex")
+BUDDY_KINDS = ("cc", "codex", "oc")
+# An OpenCode session id as the V2 API issues it (`Session.ID` pattern `^ses`),
+# restricted so it is safe in a file name, a tag field and an argv.
+OPENCODE_SESSION_ID_RE = re.compile(r"^ses_[A-Za-z0-9]{8,64}$")
 
 
 Turn = collections.namedtuple(

@@ -184,7 +184,7 @@ class TestBuddyRecords(BuddyBase):
         owner = "cc:%s" % new_uuid()
         rc, _out, err = self.buddy(owner, "set", "nobody")
         self.assertEqual(rc, 1)
-        self.assertIn("no Claude session or Codex thread named 'nobody'", err)
+        self.assertIn("no Claude session, Codex thread or OpenCode session named 'nobody'", err)
 
     def test_a_session_cannot_be_its_own_buddy(self):
         tid, _rollout = self.one_thread(name="self-codex")
@@ -341,7 +341,7 @@ class TestBuddyRouting(BuddyBase):
             rc, _out, err = self.cli(*argv)
             self.assertEqual(rc, 2, argv)
             self.assertIn(
-                "ask/dispatch/wait need a Claude buddy; use send (asynchronous)", err
+                "ask/dispatch/wait need a Claude or OpenCode buddy; use send (asynchronous)", err
             )
         self.assertEqual(self.queue_calls(), [])
         self.assertEqual(os.listdir(sp_storage.request_dir()), [])

@@ -9,7 +9,7 @@ import sys
 import time
 import uuid as uuidlib
 from . import constants as sp_constants, rollout as sp_rollout, runtime as sp_runtime
-from . import claude as sp_claude, codex as sp_codex, lifecycle as sp_lifecycle, requests as sp_requests, storage as sp_storage
+from . import claude as sp_claude, codex as sp_codex, lifecycle as sp_lifecycle, opencode as sp_opencode, requests as sp_requests, storage as sp_storage
 from . import identity as sp_identity
 
 class BuddyError(Exception):
@@ -140,10 +140,8 @@ def read_buddy(owner):
     if not isinstance(rec, dict):
         return None
     buddy = rec.get("buddy")
-    if (
-        not isinstance(buddy, dict)
-        or buddy.get("kind") not in sp_constants.BUDDY_KINDS
-        or not sp_runtime.is_uuid(buddy.get("uuid"))
+    if not isinstance(buddy, dict) or not sp_identity.valid_ident(
+        buddy.get("kind"), buddy.get("uuid")
     ):
         return None
     return rec
@@ -181,9 +179,9 @@ def expand_buddy(value, args, purpose):
             % (owner["kind"], owner["uuid"])
         )
     buddy = rec["buddy"]
-    if purpose in ("ask", "dispatch", "wait") and buddy["kind"] != "cc":
+    if purpose in ("ask", "dispatch", "wait") and buddy["kind"] == "codex":
         raise BuddyError(
-            "ask/dispatch/wait need a Claude buddy; use send (asynchronous)", 2
+            "ask/dispatch/wait need a Claude or OpenCode buddy; use send (asynchronous)", 2
         )
     if purpose == "budget" and buddy["kind"] != "codex":
         raise BuddyError(
@@ -253,9 +251,35 @@ def _codex_status(uuid, attach):
     return status
 
 
+def _opencode_status(session_id):
+    """A durable OpenCode session: it exists or not; attachment is unknown.
+
+    The V2 API reports a running agent loop, never whether a TUI is watching,
+    so `live` stays None for a session that exists.
+    """
+    status = {"name": None, "live": None, "registered": None, "shim_pid": None,
+              "status": None, "paused": None}
+    try:
+        session = sp_opencode.get_session(session_id)
+    except sp_opencode.OpenCodeNotFound:
+        status["live"] = False
+        status["route"] = "unavailable: no OpenCode session with that id"
+        return status
+    except sp_opencode.OpenCodeError as exc:
+        status["route"] = "unavailable: %s" % exc
+        return status
+    status["name"] = session.get("title")
+    state = sp_opencode.state_of(session_id)
+    status["status"] = {"running": "busy", "idle": "idle"}.get(state)
+    status["route"] = "available"
+    return status
+
+
 def buddy_status(buddy, attach=False):
     """Observed facts about a bound buddy; unknown values stay None."""
-    if buddy["kind"] == "cc":
+    if buddy["kind"] == "oc":
+        status = _opencode_status(buddy["uuid"])
+    elif buddy["kind"] == "cc":
         status = _claude_status(buddy["uuid"])
     else:
         status = _codex_status(buddy["uuid"], attach)
@@ -287,7 +311,7 @@ def _buddy_line(rec, status):
     line = "buddy = %s (%s, %s) %s; %s; uses: %s" % (
         name,
         status["kind"],
-        status["uuid"][:8],
+        status["uuid"][:12] if status["kind"] == "oc" else status["uuid"][:8],
         ", ".join(parts),
         route_text,
         ", ".join(rec.get("uses") or []),
