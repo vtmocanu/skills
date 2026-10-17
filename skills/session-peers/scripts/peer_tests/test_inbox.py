@@ -43,7 +43,7 @@ class OpenCodeInboxTests(Base):
 
     def test_unverified_metadata_never_hidden(self):
         for values in ({"from": "bad"}, {"message_id": "../bad"}, {"from": None}):
-            self.assertFalse(self.listing([self.item(**values)])[0]["verified_sender"])
+            self.assertFalse(self.listing([self.item(**values)])[0]["sender_well_formed"])
         with self.assertRaises(ValueError):
             inbox.mark_handled(SID, "bad", self.mid)
 

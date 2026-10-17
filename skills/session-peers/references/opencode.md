@@ -82,7 +82,7 @@ is not a history reader, background monitor or delivery guarantee.
   action; `inbox status SENDER MESSAGE_ID` checks it during later native delivery.
   Use the typed `from` address and logical UUID, not the native `msg_` inbox ID.
   A reused UUID from a different sender is not hidden. Missing or invalid sender
-  metadata is flagged unverified and never hidden automatically.
+  metadata is flagged not well-formed and never hidden automatically.
 - `inbox list` omits locally handled pairs; `--all` includes them. Native queued
   delivery is unchanged: it can still arrive later. The marker only avoids a
   duplicate action; it never consumes, cancels, acknowledges or edits native input.

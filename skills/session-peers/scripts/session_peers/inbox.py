@@ -145,7 +145,7 @@ def list_items(sid, include_handled=False):
                        "request_id": rid, "in_reply_to": peer.get("in_reply_to"),
                        "request_state": request_state(rid, sid) if rid else None,
                        "age_seconds": max(0, time.time() - created / 1000) if _timestamp(created) else None,
-                       "verified_sender": verified, "handled": done, "text": payload["text"]})
+                       "sender_well_formed": verified, "handled": done, "text": payload["text"]})
     return result
 
 
