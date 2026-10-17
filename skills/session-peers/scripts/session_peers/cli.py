@@ -71,6 +71,7 @@ def _register_messaging(sub):
         "--from-socket", metavar="PATH", help="sender socket for the reply tag"
     )
     p_send.add_argument("--json", action="store_true", help="machine-readable result")
+    p_send.add_argument("--wake", action="store_true", help="allow an OpenCode recipient to run without a TUI")
     p_send.set_defaults(func=sp_messaging.cmd_send)
 
     p_ask = sub.add_parser(
@@ -91,6 +92,7 @@ def _register_messaging(sub):
         help="seconds to wait (default: 600; maximum: 3600)",
     )
     p_ask.add_argument("--json", action="store_true", help="machine-readable result")
+    p_ask.add_argument("--wake", action="store_true", help="allow a non-buddy OpenCode recipient to run")
     p_ask.set_defaults(func=sp_messaging.cmd_ask)
 
     p_reply = sub.add_parser(
@@ -123,6 +125,7 @@ def _register_messaging(sub):
         "--json", action="store_true", help="machine-readable result"
     )
     p_dispatch.set_defaults(func=sp_messaging.cmd_dispatch)
+    p_dispatch.add_argument("--wake", action="store_true", help="allow a non-buddy OpenCode recipient to run")
 
     p_await = sub.add_parser(
         "await", help="consume the reply to a dispatched request by its id"

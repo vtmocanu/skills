@@ -60,6 +60,10 @@ def caller_identity(args):
                 "this environment names OpenCode session %s and a Claude or Codex "
                 "session; pass --as" % oc_sid
             )
+        try:
+            sp_opencode.get_session(oc_sid)
+        except sp_opencode.OpenCodeError as exc:
+            raise ValueError("cannot verify OpenCode session %s: %s" % (oc_sid, exc))
         return {"kind": "oc", "uuid": oc_sid}
     sid = sp_claude._current_claude_session_id()
     if sid:

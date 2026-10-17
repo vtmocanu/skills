@@ -234,10 +234,9 @@ Partial live check: 2026-09-09, Claude Code 2.1.266, Codex CLI 0.153.4.
       the shell tool; `opencode api` ran `service.ensure` against a stopped
       service; errors print the JSON body on stdout and `HTTP <status>` on stderr
       with rc 1.
-28. **Send, request and buddy end to end.** From a Claude session, `send --to
-    oc:<ses_id>`; the OpenCode session runs a queued turn showing the tag,
-    provenance and reply-route lines. From that OpenCode session, `send --to
-    cc:<name>` and `dispatch --to cc:<name>`, then `await`. From Claude,
-    `dispatch --to oc:<ses_id>`; the OpenCode session answers with `reply
-    --request`. Bind buddies both ways. Record versions.
-    - Pending live run (see references/opencode.md).
+28. **Send, request and buddy end to end.** From a Claude session,
+    `send --to oc:SESSION_ID --wake`; the OpenCode session runs a queued turn
+    showing the tag, provenance and reply-route lines. From that OpenCode
+    session, `send --to cc:NAME` and `dispatch --to cc:NAME`, then `await`.
+    From Claude, `dispatch --to oc:SESSION_ID --wake`; the OpenCode session
+    answers with `reply --request REQUEST_ID`. Bind buddies both ways. Record versions.

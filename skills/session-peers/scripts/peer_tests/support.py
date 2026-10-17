@@ -188,7 +188,12 @@ elif op == "session.list":
     rows = list(sessions.values())
     if params.get("parentID") == "null":
         rows = [r for r in rows if not r.get("parentID")]
-    print(json.dumps({"data": rows}))
+    start = int(params.get("cursor", "0"))
+    size = state.get("page_size", int(params.get("limit", "100")))
+    next_cursor = str(start + size) if start + size < len(rows) else None
+    if state.get("repeat_cursor"):
+        next_cursor = "1"
+    print(json.dumps({"data": rows[start:start + size], "cursor": {"next": next_cursor, "previous": None}}))
 elif op == "session.active":
     print(json.dumps({"data": {sid: {"type": "running"} for sid in state.get("active", [])}}))
 elif op == "session.prompt":

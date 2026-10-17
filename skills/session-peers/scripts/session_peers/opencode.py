@@ -17,8 +17,7 @@ from . import codex as sp_codex
 
 SESSION_ID_RE = sp_constants.OPENCODE_SESSION_ID_RE
 API_TIMEOUT = 15.0
-# The operations this transport needs; a server missing one is not used.
-REQUIRED_OPERATIONS = ("session.get", "session.list", "session.active", "session.prompt")
+MAX_SESSION_PAGES = 50
 
 
 class OpenCodeError(Exception):
@@ -124,19 +123,39 @@ def recent_sessions(hours=None):
     """Top-level sessions updated within ``hours`` (newest first)."""
     if hours is None:
         hours = sp_runtime._float_env("SESSION_PEERS_OPENCODE_RECENT_HOURS", 24.0)
-    data = api("session.list", {"parentID": "null", "order": "desc", "limit": "100"}).get("data")
-    if not isinstance(data, list):
-        raise OpenCodeError("session.list returned an unexpected shape")
     cutoff_ms = (time.time() - hours * 3600.0) * 1000.0
     out = []
-    for info in data:
-        if not isinstance(info, dict) or not is_session_id(info.get("id")):
-            continue
-        view = _view(info)
-        if isinstance(view["updated_ms"], (int, float)) and view["updated_ms"] < cutoff_ms:
-            continue
-        out.append(view)
-    return out
+    cursor, seen_cursors, seen_ids = None, set(), set()
+    for _page in range(MAX_SESSION_PAGES):
+        params = {"parentID": "null", "limit": "100"}
+        if cursor is None:
+            params["order"] = "desc"
+        else:
+            params["cursor"] = cursor
+        body = api("session.list", params)
+        data, page_cursor = body.get("data"), body.get("cursor")
+        if not isinstance(data, list) or not isinstance(page_cursor, dict):
+            raise OpenCodeError("session.list returned an unexpected pagination shape")
+        for info in data:
+            if not isinstance(info, dict) or not is_session_id(info.get("id")):
+                raise OpenCodeError("session.list returned an invalid session record")
+            view = _view(info)
+            if view["parent_id"] is not None or view["id"] in seen_ids:
+                continue
+            seen_ids.add(view["id"])
+            if isinstance(view["updated_ms"], (int, float)) and view["updated_ms"] < cutoff_ms:
+                continue
+            out.append(view)
+        # Cursor order is opaque: an old row cannot prove later rows are old.
+        if "next" not in page_cursor:
+            raise OpenCodeError("session.list returned no next cursor")
+        cursor = page_cursor["next"]
+        if cursor is None:
+            return out
+        if not isinstance(cursor, str) or not cursor or cursor in seen_cursors:
+            raise OpenCodeError("session.list returned an invalid or repeated cursor; discovery incomplete")
+        seen_cursors.add(cursor)
+    raise OpenCodeError("session.list exceeded the page limit; discovery incomplete")
 
 
 def state_of(session_id, active=None):
@@ -190,11 +209,11 @@ def current_session_id():
     return sid if is_session_id(sid) else None
 
 
-def deliver(session_id, text, metadata):
+def deliver(session_id, text, metadata, resume=False):
     """Queue one input for the session's next turn; the inbox item id.
 
     `delivery: queue` never steers a running turn. The service runs the turn
-    itself, so delivery does not depend on a TUI being attached.
+    itself when resume is true, even without a TUI being attached.
     """
     if len(text) > sp_constants.MAX_TEXT_CHARS or sp_runtime.utf8_len(text) > sp_constants.MAX_TEXT_CHARS:
         raise ValueError(
@@ -203,7 +222,7 @@ def deliver(session_id, text, metadata):
     body = api(
         "session.prompt",
         {"sessionID": session_id},
-        {"text": text, "delivery": "queue", "metadata": {"session_peers": metadata}},
+        {"text": text, "delivery": "queue", "resume": resume, "metadata": {"session_peers": metadata}},
     )
     item = body.get("data")
     return item.get("id") if isinstance(item, dict) else None

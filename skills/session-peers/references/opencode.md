@@ -1,7 +1,6 @@
 # OpenCode V2 sessions
 
-Verified against OpenCode 2.0.30 (2026-10-17) through the running service's
-OpenAPI (`opencode api GET /openapi.json`) and the operations below.
+Use the V2 API through the running service's authenticated CLI.
 
 ## Transport
 
@@ -39,12 +38,18 @@ OpenAPI (`opencode api GET /openapi.json`) and the operations below.
   unknown" with "route available".
 - `list` shows top-level sessions updated in the last 24 hours
   (`SESSION_PEERS_OPENCODE_RECENT_HOURS`).
+- Follow every pagination cursor; incomplete or malformed pagination refuses
+  title resolution. Address a known session by its full id instead.
 
 ## Delivery semantics
 
-- A queued input runs as the session's next turn on the service, with or
-  without a TUI, under that session's own permissions. It never steers a
-  running turn.
+- Ordinary sends set `resume: false`: they park input until the session resumes.
+  A bound OpenCode buddy or an explicit `--wake` sets `resume: true`, allowing
+  the service to run a turn without a TUI under the session's own permissions.
+  Queue delivery never steers a running turn. Use `--wake` only when the user
+  authorized waking that recipient; the flag grants no action authority.
+- Correlated requests to OpenCode require a bound buddy or `--wake`; otherwise
+  refuse before creating a mailbox, rather than parking a request that times out.
 - OpenCode has no reply socket. A message from OpenCode carries
   `[session-peers reply route: peers.py send --to oc:<ses_id> ...]`; a message
   to OpenCode carries the sender's typed address the same way. SendMessage and a

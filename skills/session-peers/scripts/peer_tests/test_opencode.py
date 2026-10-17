@@ -57,6 +57,24 @@ class OpenCodeBase(Base):
 
 
 class OpenCodeDiscoveryTests(OpenCodeBase):
+    def test_title_resolution_checks_later_pages(self):
+        self.set_oc(sessions=[oc_session(OC_A, "twin"), oc_session(OC_B, "twin")], page_size=1)
+        rc, _out, err = self.cli("send", "--to", "oc:twin", "--message", "x")
+        self.assertEqual(rc, 1)
+        self.assertIn(OC_A, err)
+        self.assertIn(OC_B, err)
+        self.assertEqual(self.oc_calls("session.prompt"), [])
+
+    def test_repeated_cursor_refuses_title_resolution(self):
+        self.set_oc(page_size=1, repeat_cursor=True)
+        rc, _out, err = self.cli("send", "--to", "oc:oc-lead", "--message", "x")
+        self.assertEqual(rc, 1)
+        self.assertIn("cursor", err)
+        self.assertEqual(self.oc_calls("session.prompt"), [])
+        rc, out, err = self.cli("list", "--json")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("cursor", json.loads(out)["opencode_error"])
+
     def test_list_shows_recent_top_level_sessions_with_running_state(self):
         self.set_oc(active=[OC_B])
         rc, out, err = self.cli("list", "--json")
@@ -122,6 +140,7 @@ class OpenCodeSendTests(OpenCodeBase):
         prompt = self.oc_calls("session.prompt")[0]
         self.assertEqual(prompt["params"], {"sessionID": OC_B})
         self.assertEqual(prompt["data"]["delivery"], "queue")
+        self.assertFalse(prompt["data"]["resume"])
         meta = prompt["data"]["metadata"]["session_peers"]
         self.assertEqual(meta["message_id"], payload["message_id"])
         self.assertEqual(meta["from"], "cc:%s" % rec["sessionId"])
@@ -144,6 +163,11 @@ class OpenCodeSendTests(OpenCodeBase):
         self.assertIn(OC_A, err)
         self.assertIn(OC_B, err)
         self.assertEqual(len(self.oc_calls("session.prompt")), 1)
+
+    def test_explicit_wake_resumes_an_opencode_recipient(self):
+        rc, _out, err = self.cli("send", "--to", "oc:%s" % OC_B, "--wake", "--message", "x")
+        self.assertEqual(rc, 0, err)
+        self.assertTrue(self.oc_calls("session.prompt")[0]["data"]["resume"])
 
     def test_send_to_an_unknown_session_fails_without_queueing(self):
         rc, _out, err = self.cli("send", "--to", "oc:ses_zzzzzzzzzzzzzzzz", "--message", "x")
@@ -279,7 +303,7 @@ class OpenCodeRequestTests(OpenCodeBase):
     def test_claude_dispatches_to_opencode_and_only_that_session_replies(self):
         _listener, rec = self.add_listener(name="cc-main", session_id=new_uuid())
         self.as_claude(rec)
-        rc, out, err = self.cli("dispatch", "--to", "oc:%s" % OC_B, "--message", "plan?", "--json")
+        rc, out, err = self.cli("dispatch", "--to", "oc:%s" % OC_B, "--wake", "--message", "plan?", "--json")
         self.assertEqual(rc, 0, err)
         payload = json.loads(out)
         request_id = payload["request_id"]
@@ -315,7 +339,7 @@ class OpenCodeRequestTests(OpenCodeBase):
         _listener, rec = self.add_listener(name="cc-main", session_id=new_uuid())
         self.as_claude(rec)
         self.set_oc(prompt_fail=True)
-        rc, out, _err = self.cli("dispatch", "--to", "oc:%s" % OC_B, "--message", "x", "--json")
+        rc, out, _err = self.cli("dispatch", "--to", "oc:%s" % OC_B, "--wake", "--message", "x", "--json")
         self.assertEqual(rc, 1)
         self.assertEqual(json.loads(out)["status"], "delivery_failed")
         self.assertEqual(list(pathlib.Path(sp_storage.request_dir()).glob("*.json")), [])
@@ -335,8 +359,26 @@ class OpenCodeRequestTests(OpenCodeBase):
                                   "--timeout", "0.1")
         self.assertEqual(rc, 124)
 
+    def test_correlated_opencode_request_needs_buddy_or_explicit_wake(self):
+        _listener, rec = self.add_listener(name="cc-main", session_id=new_uuid())
+        self.as_claude(rec)
+        rc, _out, err = self.cli("dispatch", "--to", "oc:%s" % OC_B, "--message", "plan?")
+        self.assertEqual(rc, 2)
+        self.assertIn("--wake", err)
+        self.assertEqual(self.oc_calls("session.prompt"), [])
+        self.assertEqual(list(pathlib.Path(sp_storage.request_dir()).glob("*.json")), [])
+
 
 class OpenCodeBuddyTests(OpenCodeBase):
+    def test_unknown_opencode_owner_cannot_bind_a_buddy(self):
+        self.add_listener(name="cc-main", session_id=new_uuid())
+        unknown = "ses_notaknownsession0000"
+        self.as_opencode(unknown)
+        rc, _out, err = self.cli("buddy", "set", "cc:cc-main", "--json")
+        self.assertEqual(rc, 2)
+        self.assertIn("cannot verify OpenCode session", err)
+        self.assertFalse(pathlib.Path(sp_storage.buddy_path({"kind": "oc", "uuid": unknown})).exists())
+
     def test_opencode_session_binds_a_claude_buddy_without_as(self):
         self.add_listener(name="cc-main", session_id=new_uuid())
         self.as_opencode(OC_A)
@@ -364,6 +406,7 @@ class OpenCodeBuddyTests(OpenCodeBase):
         rc, out, err = self.cli("send", "--to", "buddy", "--message", "hi", "--json")
         self.assertEqual(rc, 0, err)
         self.assertEqual(json.loads(out)["session_id"], OC_B)
+        self.assertTrue(self.oc_calls("session.prompt")[0]["data"]["resume"])
 
     def test_bare_name_shared_by_claude_and_opencode_is_ambiguous(self):
         _listener, rec = self.add_listener(name="cc-main", session_id=new_uuid())

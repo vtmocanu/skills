@@ -111,11 +111,24 @@ def _caller_view(args, oc_sender=None):
     return "unknown", None, None
 
 
+def _may_wake_opencode(args, session_id, owner=None):
+    """Only an explicit wake or this caller's bound buddy starts a headless turn."""
+    if getattr(args, "wake", False):
+        return True
+    try:
+        owner = owner or sp_identity.caller_identity(args)
+    except ValueError:
+        return False
+    binding = sp_buddy.read_buddy(owner)
+    return bool(binding and binding["buddy"]["kind"] == "oc"
+                and binding["buddy"]["uuid"] == session_id)
+
+
 def _send_opencode(target, args):
     """Queue one message as an OpenCode session's next turn.
 
-    The service runs the turn whether or not a TUI is attached; `delivery:
-    queue` never steers a running turn. OpenCode has no reply socket, so the
+    Waking requires a bound buddy or explicit opt-in; `delivery: queue`
+    never steers a running turn. OpenCode has no reply socket, so the
     body names the sender's typed address for an explicit `send` back.
     """
     try:
@@ -148,9 +161,10 @@ def _send_opencode(target, args):
         lines.append(sp_protocol.reply_route_hint(address))
     text = "\n".join(lines + [args.message])
     state = sp_opencode.state_of(session["id"])
+    resume = _may_wake_opencode(args, session["id"])
     try:
         inbox_id = sp_opencode.deliver(
-            session["id"], text, {"message_id": msg_id, "from": address}
+            session["id"], text, {"message_id": msg_id, "from": address}, resume=resume
         )
     except (sp_opencode.OpenCodeError, ValueError) as exc:
         sys.stderr.write("error: could not queue to OpenCode session %s: %s\n" % (session["id"], exc))
@@ -166,6 +180,7 @@ def _send_opencode(target, args):
             "message_id": msg_id,
             "inbox_id": inbox_id,
             "reply_capable": bool(address),
+            "resume": resume,
         },
         "queued to OpenCode session %s (%s, %s), message %s"
         % (session.get("title") or "(untitled)", session["id"], state, msg_id),
@@ -398,6 +413,9 @@ def _prepare_request(args, purpose):
             if rec["sessionId"] == exclude:
                 sys.stderr.write("error: an OpenCode session cannot ask itself\n")
                 return 2
+            if not _may_wake_opencode(args, rec["sessionId"], requester):
+                sys.stderr.write("error: an OpenCode request needs a bound buddy or --wake; no request was queued\n")
+                return 2
         else:
             rec = sp_claude._resolve_claude_record(target)
     except sp_codex.ResolveError as exc:
@@ -438,6 +456,7 @@ def _send_prepared_request(request):
         inbox_id = sp_opencode.deliver(
             request.record["sessionId"], text,
             {"request_id": request.request_id, "from": "%s:%s" % (requester["kind"], requester["uuid"])},
+            resume=True,
         )
         return inbox_id, False
     return sp_claude._deliver_claude(
