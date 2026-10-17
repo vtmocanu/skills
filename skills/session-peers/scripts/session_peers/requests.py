@@ -92,11 +92,11 @@ def _request_envelope(request_id, message, timeout):
         '<session-peers-request id="%s" timeout-seconds="%d">\n'
         "%s\n"
         "</session-peers-request>\n\n"
-        "Reply contract: return the result to the waiting Codex turn, not its "
+        "Reply contract: return the result to the waiting requester, not its "
         "ordinary queue. Write the complete reply to a private temporary file, "
         "then run:\n"
         "%s reply --request %s --message-file <absolute-reply-file>\n"
-        "Do not use SendMessage or `send --to codex:` for this request. The "
+        "Do not use SendMessage or `send` for this request. The "
         "mailbox is single-use and expires with the timeout."
         % (
             request_id,
@@ -108,21 +108,28 @@ def _request_envelope(request_id, message, timeout):
     )
 
 
-def _request_meta(request_id, requester_thread_id, rec, expires_at, reply_path):
+def _request_meta(request_id, requester, rec, expires_at, reply_path):
     """The single-use mailbox metadata shared by `ask` and `dispatch`.
 
     Keeping one builder means the two entry points cannot drift in the fields
     `reply`, `await`, and `cleanup_expired_requests` all read back.
+    ``requester`` is a typed identity; a Codex requester also keeps the
+    `requester_thread_id` field older readers check. ``rec`` names the target:
+    a Claude registry record, or `{"_runtime": "opencode", ...}` for an
+    OpenCode session.
     """
-    return {
+    meta = {
         "request_id": request_id,
-        "requester_thread_id": requester_thread_id,
+        "requester": "%s:%s" % (requester["kind"], requester["uuid"]),
+        "requester_thread_id": requester["uuid"] if requester["kind"] == "codex" else None,
+        "target_kind": "oc" if rec.get("_runtime") == "opencode" else "cc",
         "target_session_id": rec.get("sessionId"),
         "target_session_name": rec.get("name"),
         "created_at": sp_runtime.now_iso(),
         "expires_at": expires_at,
         "reply_path": reply_path,
     }
+    return meta
 
 
 def _reply_matches(response, request_id, target_session_id):

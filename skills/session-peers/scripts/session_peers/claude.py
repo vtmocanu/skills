@@ -301,7 +301,27 @@ def _resolve_claude_record(target, exclude=None):
     return rec
 
 
-def _deliver_claude(rec, message, thread_id=None, reply_route=True):
+def _deliver_claude(rec, message, thread_id=None, reply_route=True, opencode_sender=None):
+    """One user frame to a Claude session; (msg_id, reply_capable).
+
+    ``opencode_sender`` (`{"id", "title"}`, verified by the caller) names an
+    OpenCode sender, which has no socket: its body says how to answer instead.
+    """
+    if opencode_sender:
+        # A correlated request (no reply route) is answered through its
+        # mailbox, so it carries no `send` hint that would invite a stale turn.
+        lines = [sp_protocol.build_origin("opencode", opencode_sender.get("title"), opencode_sender["id"])]
+        if reply_route:
+            lines.append(sp_protocol.reply_route_hint("oc:%s" % opencode_sender["id"]))
+        body = "\n".join(lines + [message])
+        if len(body) > sp_constants.MAX_TEXT_CHARS or sp_runtime.utf8_len(body) > sp_constants.MAX_TEXT_CHARS:
+            raise ValueError(
+                "wrapped message exceeds the %d-character/UTF-8-byte peer cap"
+                % sp_constants.MAX_TEXT_CHARS
+            )
+        frame = sp_protocol.build_user_frame(body, None)
+        send_frame(rec["messagingSocketPath"], frame, auth_token=peer_token_for(rec))
+        return frame["msg_id"], False
     thread_name = None
     shim_socket = None
     if thread_id:

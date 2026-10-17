@@ -53,7 +53,7 @@ import os
 import socket
 from . import config as sp_config, constants as sp_constants, protocol as sp_protocol, runtime as sp_runtime
 from . import claude as sp_claude, codex as sp_codex, lifecycle as sp_lifecycle, process as sp_process, storage as sp_storage
-from . import hooks as sp_hooks, maintenance as sp_maintenance
+from . import hooks as sp_hooks, maintenance as sp_maintenance, opencode as sp_opencode
 
 # --------------------------------------------------------------------------
 # Commands
@@ -147,12 +147,15 @@ def cmd_list(args):
     codex_unverified = [
         codex_view(thread) for thread in threads if thread.get("live") is None
     ]
+    opencode, opencode_error = opencode_sessions()
     payload = {
         "claude": claude,
         "claude_unverified": claude_unverified,
         "codex": codex,
         "codex_unverified": codex_unverified,
         "codex_schema_recognised": schema_ok,
+        "opencode": opencode,
+        "opencode_error": opencode_error,
         "socket_dir": sp_claude.default_socket_dir(),
     }
     if args.json:
@@ -204,7 +207,41 @@ def cmd_list(args):
             )
     if not schema_ok:
         print("  (thread discovery degraded: unknown state_*.sqlite schema)")
+    if opencode or opencode_error is None:
+        print("OpenCode sessions (%d recent; attachment unknown):" % len(opencode))
+        for o in opencode:
+            print("  %-24s %s  %-7s %s" % (o["title"] or "(untitled)", o["id"], o["state"], o["directory"] or ""))
+    elif opencode_error != "opencode is not installed":
+        print("OpenCode sessions: unavailable (%s)" % opencode_error)
     return 0
+
+
+def opencode_sessions():
+    """(recent top-level OpenCode sessions, error or None).
+
+    A session is durable: it is listed while recent, with `state` running or
+    idle from `session.active`, or unknown when that read fails. Whether a
+    TUI is attached is never known.
+    """
+    try:
+        sessions = sp_opencode.recent_sessions()
+    except sp_opencode.OpenCodeError as exc:
+        return [], str(exc)
+    try:
+        active = sp_opencode.active_ids()
+    except sp_opencode.OpenCodeError:
+        active = None
+    out = []
+    for session in sessions:
+        out.append({
+            "runtime": "opencode",
+            "id": session["id"],
+            "title": session["title"],
+            "directory": session["directory"],
+            "updated_ms": session["updated_ms"],
+            "state": "unknown" if active is None else sp_opencode.state_of(session["id"], active),
+        })
+    return out, None
 
 
 def unix_socket_probe(sock_dir):

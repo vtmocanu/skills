@@ -38,6 +38,7 @@ from session_peers import buddy as sp_buddy, hooks as sp_hooks, maintenance as s
 from session_peers import shim as sp_shim, budgets as sp_budgets
 from session_peers import claude as sp_claude, codex as sp_codex, diagnostics as sp_diagnostics, lifecycle as sp_lifecycle, process as sp_process, requests as sp_requests, storage as sp_storage
 from session_peers import config as sp_config, constants as sp_constants, protocol as sp_protocol, rollout as sp_rollout, runtime as sp_runtime
+from session_peers import opencode as sp_opencode
 
 PS_LSTART = "Mon Sep  7 12:00:00 2026"
 
@@ -129,6 +130,78 @@ raise SystemExit(int(os.environ.get("FAKE_CODEX_RC", "0")))
 FAKE_CLAUDE = '''\
 import os
 print(os.environ.get("FAKE_CLAUDE_VERSION", "2.1.263 (Claude Code)"))
+'''
+
+
+FAKE_OPENCODE = '''\
+import json, os, sys
+
+args = sys.argv[1:]
+path = os.environ.get("FAKE_OPENCODE_STATE")
+state = {}
+if path and os.path.exists(path):
+    with open(path) as fh:
+        state = json.load(fh)
+log = os.environ.get("FAKE_OPENCODE_LOG")
+
+
+def record(entry):
+    if log:
+        with open(log, "a") as fh:
+            fh.write(json.dumps(entry) + "\\n")
+
+
+def fail(tag, message, status):
+    print(json.dumps({"_tag": tag, "message": message}))
+    sys.stderr.write("HTTP %s\\n" % status)
+    raise SystemExit(1)
+
+
+if args[:1] == ["--version"]:
+    print(state.get("version", "2.0.30"))
+    raise SystemExit(0)
+if args[:2] == ["service", "status"]:
+    record({"op": "service.status"})
+    print("stopped" if state.get("stopped") else "http://127.0.0.1:4096")
+    raise SystemExit(0)
+if args[:1] != ["api"]:
+    raise SystemExit(2)
+op, params, data, i = args[1], {}, None, 2
+while i < len(args):
+    if args[i] == "--param":
+        key, _, value = args[i + 1].partition("=")
+        params[key] = value
+    elif args[i] == "--data":
+        data = json.loads(args[i + 1])
+    i += 2
+record({"op": op, "params": params, "data": data})
+if state.get("stopped"):
+    # The real CLI would start the service here; tests assert it never runs.
+    fail("Started", "api ran against a stopped service", "500 Internal Server Error")
+sessions = state.get("sessions", {})
+if op == "session.get":
+    sid = params.get("sessionID")
+    if sid not in sessions:
+        fail("SessionNotFoundError", "Session not found: %s" % sid, "404 Not Found")
+    print(json.dumps({"data": sessions[sid]}))
+elif op == "session.list":
+    rows = list(sessions.values())
+    if params.get("parentID") == "null":
+        rows = [r for r in rows if not r.get("parentID")]
+    print(json.dumps({"data": rows}))
+elif op == "session.active":
+    print(json.dumps({"data": {sid: {"type": "running"} for sid in state.get("active", [])}}))
+elif op == "session.prompt":
+    if state.get("prompt_fail"):
+        fail("UnknownError", "prompt refused", "500 Internal Server Error")
+    sid = params.get("sessionID")
+    if sid not in sessions:
+        fail("SessionNotFoundError", "Session not found: %s" % sid, "404 Not Found")
+    print(json.dumps({"data": {"id": "msg_fake%d" % len(open(log).read().splitlines()) if log else "msg_fake",
+                               "sessionID": sid, "type": "user", "delivery": data.get("delivery"),
+                               "payload": {"text": data.get("text")}, "time": {"created": 0}}}))
+else:
+    fail("NotFound", "unknown operation %s" % op, "404 Not Found")
 '''
 
 
@@ -308,6 +381,11 @@ class Base(unittest.TestCase):
         os.environ.pop("CLAUDE_CODE_SESSION_ID", None)
         os.environ.pop("CODEX_THREAD_ID", None)
         os.environ.pop("CODEX_SESSION_ID", None)
+        # A suite run from an OpenCode shell must not inherit its identity.
+        os.environ.pop("OPENCODE_SESSION_ID", None)
+        os.environ.pop("OPENCODE", None)
+        os.environ.pop("SESSION_PEERS_OPENCODE_BIN", None)
+        os.environ.pop("SESSION_PEERS_OPENCODE_RECENT_HOURS", None)
         os.environ["SESSION_PEERS_SOCKET_DIR"] = str(self.socks)
         os.environ["SESSION_PEERS_POLL_INTERVAL"] = "0.05"
         os.environ["SESSION_PEERS_LIVENESS_INTERVAL"] = "0.3"

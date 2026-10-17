@@ -16,7 +16,7 @@ from . import buddy as sp_buddy, diagnostics as sp_diagnostics, hooks as sp_hook
 def build_parser():
     p = argparse.ArgumentParser(
         prog="peers.py",
-        description="Cross-session messaging between Claude Code and Codex CLI.",
+        description="Cross-session messaging between Claude Code, Codex CLI and OpenCode.",
     )
     sub = p.add_subparsers(dest="command")
 
@@ -48,7 +48,7 @@ def add_message_source(parser):
 
 
 def _register_list(sub):
-    p_list = sub.add_parser("list", help="live Claude sessions and Codex threads")
+    p_list = sub.add_parser("list", help="live Claude sessions, Codex threads and recent OpenCode sessions")
     p_list.add_argument("--json", action="store_true", help="machine-readable output")
     p_list.set_defaults(func=sp_diagnostics.cmd_list)
 
@@ -58,7 +58,7 @@ def _register_messaging(sub):
     p_send.add_argument(
         "--to",
         required=True,
-        metavar="codex:<name|uuid>|cc:<name|uuid>|buddy",
+        metavar="codex:<name|uuid>|cc:<name|uuid>|oc:<title|ses_id>|buddy",
         help="the peer",
     )
     add_message_source(p_send)
@@ -74,10 +74,10 @@ def _register_messaging(sub):
     p_send.set_defaults(func=sp_messaging.cmd_send)
 
     p_ask = sub.add_parser(
-        "ask", help="send a correlated request to Claude and wait for its reply"
+        "ask", help="send a correlated request to Claude or OpenCode and wait for its reply"
     )
     p_ask.add_argument(
-        "--to", required=True, metavar="cc:<name|uuid>|buddy", help="the Claude peer"
+        "--to", required=True, metavar="cc:<name|uuid>|oc:<title|ses_id>|buddy", help="the Claude or OpenCode peer"
     )
     add_message_source(p_ask)
     p_ask.add_argument(
@@ -103,10 +103,10 @@ def _register_messaging(sub):
 
     p_dispatch = sub.add_parser(
         "dispatch",
-        help="send a correlated request to Claude and return immediately",
+        help="send a correlated request to Claude or OpenCode and return immediately",
     )
     p_dispatch.add_argument(
-        "--to", required=True, metavar="cc:<name|uuid>|buddy", help="the Claude peer"
+        "--to", required=True, metavar="cc:<name|uuid>|oc:<title|ses_id>|buddy", help="the Claude or OpenCode peer"
     )
     add_message_source(p_dispatch)
     p_dispatch.add_argument(
@@ -142,9 +142,9 @@ def _register_messaging(sub):
     p_await.add_argument("--json", action="store_true", help="machine-readable result")
     p_await.set_defaults(func=sp_messaging.cmd_await)
 
-    p_wait = sub.add_parser("wait", help="wait for a Claude peer registry state")
+    p_wait = sub.add_parser("wait", help="wait for a Claude or OpenCode peer to be idle or busy")
     p_wait.add_argument(
-        "--for", dest="for_peer", required=True, metavar="cc:<name|uuid>|buddy"
+        "--for", dest="for_peer", required=True, metavar="cc:<name|uuid>|oc:<title|ses_id>|buddy"
     )
     p_wait.add_argument(
         "--state", choices=("idle", "busy"), default="idle", help="target state"
@@ -202,7 +202,7 @@ def _register_budget(sub):
         help="the requesting Claude session (default: the calling session)",
     )
     p_allow.add_argument(
-        "--as", dest="as_identity", metavar="cc:<uuid>|codex:<uuid>",
+        "--as", dest="as_identity", metavar="cc:<uuid>|codex:<uuid>|oc:<ses_id>",
         help="the calling session, when it cannot be detected",
     )
     p_allow.set_defaults(func=sp_buddy.cmd_budget)
@@ -212,7 +212,7 @@ def _register_budget(sub):
 def _register_buddy(sub):
     p_buddy = sub.add_parser("buddy", help="bind, show, ping or clear this session's buddy")
     p_buddy.add_argument(
-        "--as", dest="as_identity", metavar="cc:<uuid>|codex:<uuid>",
+        "--as", dest="as_identity", metavar="cc:<uuid>|codex:<uuid>|oc:<ses_id>",
         help="the calling session, when it cannot be detected",
     )
     p_buddy.add_argument("--json", action="store_true", help="machine-readable output")
@@ -223,7 +223,7 @@ def _register_buddy(sub):
         # SUPPRESS: an option given before the action must survive the subparser.
         parser.add_argument(
             "--as", dest="as_identity", default=argparse.SUPPRESS,
-            metavar="cc:<uuid>|codex:<uuid>",
+            metavar="cc:<uuid>|codex:<uuid>|oc:<ses_id>",
         )
         parser.add_argument(
             "--json", action="store_true", default=argparse.SUPPRESS,
@@ -250,7 +250,7 @@ def _register_buddy(sub):
     p_buddy_set.add_argument(
         "target",
         nargs="?",
-        metavar="[cc:|codex:|@]name|uuid",
+        metavar="[cc:|codex:|oc:|@]name|uuid",
         help="the peer to bind (default: the other peer sharing this session's name)",
     )
     p_buddy_set.add_argument(
@@ -303,7 +303,7 @@ def _register_topics(sub):
     tsource.add_argument("--json-file", metavar="PATH", help="a JSON value stored as data")
     p_tpost.add_argument("--kind", metavar="KIND", help="an opaque label for readers")
     p_tpost.add_argument(
-        "--as", dest="as_identity", metavar="cc:<uuid>|codex:<uuid>",
+        "--as", dest="as_identity", metavar="cc:<uuid>|codex:<uuid>|oc:<ses_id>",
         help="the posting session, when it cannot be detected",
     )
     p_tpost.add_argument("--json", action="store_true", help="machine-readable result")

@@ -3,7 +3,7 @@
 from __future__ import annotations
 import os
 from . import constants as sp_constants, runtime as sp_runtime
-from . import claude as sp_claude, codex as sp_codex
+from . import claude as sp_claude, codex as sp_codex, opencode as sp_opencode
 
 def _thread_from_args(args, required=False):
     explicit = getattr(args, "from_thread", None)
@@ -26,11 +26,22 @@ def _thread_from_args(args, required=False):
 # --------------------------------------------------------------------------
 
 
+def valid_ident(kind, ident) -> bool:
+    """A typed identity's id: a UUID, or a `ses_` id for an OpenCode session.
+
+    The `uuid` key of a typed identity carries the OpenCode session id as
+    issued; no UUID is derived for it.
+    """
+    if kind == "oc":
+        return sp_opencode.is_session_id(ident)
+    return kind in sp_constants.BUDDY_KINDS and sp_runtime.is_uuid(ident)
+
+
 def parse_typed(value):
-    """`cc:<uuid>` / `codex:<uuid>` into a typed identity, or ValueError."""
+    """`cc:<uuid>` / `codex:<uuid>` / `oc:<ses_id>` into a typed identity, or ValueError."""
     kind, sep, ident = str(value or "").partition(":")
-    if not sep or kind not in sp_constants.BUDDY_KINDS or not sp_runtime.is_uuid(ident):
-        raise ValueError("expected cc:<uuid> or codex:<uuid>, got %r" % value)
+    if not sep or not valid_ident(kind, ident):
+        raise ValueError("expected cc:<uuid>, codex:<uuid> or oc:<ses_id>, got %r" % value)
     return {"kind": kind, "uuid": ident}
 
 
@@ -39,6 +50,17 @@ def caller_identity(args):
     explicit = getattr(args, "as_identity", None)
     if explicit:
         return parse_typed(explicit)
+    oc_sid = sp_opencode.current_session_id()
+    if oc_sid:
+        # OpenCode exports its id into every shell command; a Claude or Codex
+        # id beside it was inherited from whichever agent launched the other,
+        # and which one runs this command cannot be told apart.
+        if sp_claude._current_claude_session_id() or _thread_from_args(args):
+            raise ValueError(
+                "this environment names OpenCode session %s and a Claude or Codex "
+                "session; pass --as" % oc_sid
+            )
+        return {"kind": "oc", "uuid": oc_sid}
     sid = sp_claude._current_claude_session_id()
     if sid:
         if not sp_runtime.is_uuid(sid):
@@ -51,6 +73,9 @@ def caller_identity(args):
 
 
 def _resolve_typed_kind(kind, target, live_only=False, exclude=None):
+    if kind == "oc":
+        session = sp_opencode.resolve_session(target, exclude=exclude)
+        return {"kind": "oc", "uuid": session["id"], "name": session.get("title")}
     if kind == "cc":
         rec = sp_claude._resolve_claude_record(target, exclude=exclude)
         sid = rec.get("sessionId")
@@ -74,7 +99,7 @@ def _resolve_typed_kind(kind, target, live_only=False, exclude=None):
 
 
 def resolve_typed(target, exclude=None):
-    """`cc:x`, `codex:x` or a bare `[@]x` into one typed identity with its name.
+    """`cc:x`, `codex:x`, `oc:x` or a bare `[@]x` into one typed identity with its name.
 
     Names are resolved here, once; a bound buddy is used by UUID afterwards.
     ``exclude`` (the caller's UUID) keeps the caller out of NAME matching, so
@@ -128,6 +153,7 @@ def resolve_typed(target, exclude=None):
         )
     if not found:
         raise sp_codex.ResolveNotFound(
-            "no Claude session or Codex thread named %r; run `peers.py list`" % target
+            "no Claude session, Codex thread or OpenCode session named %r; run "
+            "`peers.py list`" % target
         )
     return found[0]
