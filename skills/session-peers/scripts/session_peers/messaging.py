@@ -25,9 +25,6 @@ def _validate_reply_wake(args):
     if consent is not None:
         if overrides or _opencode_sender(args) is None:
             raise ValueError("--allow-reply-wake requires this verified OpenCode sender, without --from-* overrides")
-        import math
-        if not math.isfinite(consent):
-            raise ValueError("reply-wake lifetime must be finite")
         sp_requests._bounded_timeout(consent)
 
 
@@ -217,7 +214,7 @@ def _send_opencode(target, args):
         if reply_id:
             sp_reply_wake.forget(reply_id)
         if in_reply_to:
-            sys.stderr.write("error: reply-wake grant consumed; delivery failed; reissue consent or resend with --wake only if authorized.\n")
+            sys.stderr.write("error: delivery failed or unconfirmed; grant spent; check the recipient before resending. Reissue consent or use --wake only if separately authorized.\n")
         sys.stderr.write("error: could not queue to OpenCode session %s: %s\n" % (session["id"], exc))
         return 1
     _print_send_result(

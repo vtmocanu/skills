@@ -97,11 +97,34 @@ class OpenCodeReplyWakeTests(OpenCodeBase):
     def test_gc_removes_expired_grants_only_and_dry_run_preserves(self):
         mid, _peer, data = self.grant()
         future = data["expires_at"] + 1
-        self.assertIn(mid, sp_requests.cleanup_expired_requests(now=future, dry_run=True))
+        sp_requests.cleanup_expired_requests(now=future, dry_run=True)
         self.assertTrue(pathlib.Path(sp_reply_wake.path_for(mid)).exists())
-        self.assertNotIn(mid, sp_requests.cleanup_expired_requests(now=time.time()))
-        self.assertIn(mid, sp_requests.cleanup_expired_requests(now=future))
+        sp_requests.cleanup_expired_requests(now=time.time())
+        sp_requests.cleanup_expired_requests(now=future)
         self.assertFalse(pathlib.Path(sp_reply_wake.path_for(mid)).exists())
+
+    def test_gc_labels_reply_wake_grants_not_requests(self):
+        mid, _peer, data = self.grant()
+        with mock.patch.object(sp_reply_wake.time, "time", return_value=data["expires_at"] + 1):
+            rc, out, err = self.cli("gc")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("pruned expired reply-wake grant " + mid, out)
+        self.assertNotIn("pruned expired request " + mid, out)
+
+    def test_cleanup_unreadable_directory_is_nonfatal(self):
+        with mock.patch.object(sp_reply_wake.os, "listdir", side_effect=PermissionError("denied")):
+            self.assertEqual(sp_reply_wake.cleanup(time.time()), [])
+
+    def test_cli_refuses_nonfinite_request_and_reply_wake_lifetimes(self):
+        self.as_opencode()
+        for value in ("nan", "inf", "-inf", "0", "-1", "3601"):
+            for verb in ("ask", "dispatch", "send"):
+                flag = "--allow-reply-wake=" if verb == "send" else "--timeout="
+                rc, _out, err = self.cli(verb, "--to", "cc:" + new_uuid(),
+                                         "--message", "x", flag + value)
+                self.assertNotEqual(rc, 0)
+                self.assertTrue("finite" in err or "greater than 0" in err, err)
+        self.assertEqual(list(pathlib.Path(sp_storage.request_dir()).glob("*.request.json")), [])
 
     def test_revoke_only_issuer_and_idempotent(self):
         mid, _peer, _data = self.grant()
@@ -177,7 +200,7 @@ class OpenCodeReplyWakeTests(OpenCodeBase):
             rc, _out, err = self.cli("send", "--to", "oc:" + OC_A,
                                      "--message", "reply", "--in-reply-to", mid)
         self.assertNotEqual(rc, 0)
-        self.assertIn("grant consumed; delivery failed", err)
+        self.assertIn("delivery failed or unconfirmed; grant spent; check the recipient before resending", err)
         self.assertFalse(pathlib.Path(sp_reply_wake.path_for(mid)).exists())
 
     def test_codex_alias_grant_matches_codex_reply_identity(self):

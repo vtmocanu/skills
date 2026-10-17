@@ -23,8 +23,6 @@ def issue(message_id, requester, recipient, seconds):
         raise ValueError("reply-wake requester must be OpenCode")
     identity.parse_typed(recipient)
     seconds = requests._bounded_timeout(seconds)
-    if not math.isfinite(seconds):
-        raise ValueError("reply-wake lifetime must be finite")
     requests.warn_short_lifetime(seconds)
     data = {"message_id": message_id, "requester": requester, "recipient": recipient,
             "created_at": time.time(), "expires_at": time.time() + seconds}
@@ -86,7 +84,11 @@ def consume(message_id, requester, recipient):
 
 def cleanup(now, dry_run=False):
     removed = []
-    for name in os.listdir(storage.request_dir()):
+    try:
+        names = os.listdir(storage.request_dir())
+    except OSError:
+        return removed
+    for name in names:
         if not name.endswith(SUFFIX):
             continue
         mid = name[:-len(SUFFIX)]

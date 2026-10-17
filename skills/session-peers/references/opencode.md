@@ -83,9 +83,10 @@ consent: the local grant must exist and match both exact session identities.
 - Missing, used, expired, mismatched or ambiguous grants refuse the reply without
   queueing. Resend without `--in-reply-to` to queue normally, adding `--wake`
   only if separately user-authorized. Mismatched callers do not consume consent.
-- Consent is consumed before delivery. If delivery fails, it stays spent: reissue
-  consent or explicitly resend with separately authorized `--wake`; no automatic
-  retry or duplicate wake is promised.
+- Consent is consumed before delivery. A transport error may mean delivery failed
+  or was queued but unconfirmed; the grant stays spent. Check the recipient before
+  resending to avoid a duplicate. Reissue consent or resend with separately
+  authorized `--wake` only after reconciliation; no automatic retry is promised.
 - Do not combine `--in-reply-to` with `--wake`, sender overrides or
   `--allow-reply-wake`; it is only for `send` to OpenCode. It cannot create a
   recursive wake grant. `ask`/`dispatch`/`await` retain their nonqueue mailbox
