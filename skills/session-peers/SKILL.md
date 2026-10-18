@@ -104,6 +104,13 @@ an unattended loop.
 - When a review gate is established, keep it closed until the matching verdict
   arrives. Silence or an older reply never authorizes filing, pushing, opening,
   or merging. Name the owed action and its owner in the gate message.
+- If blocked, answer the correlated request with `HOLD: owner=OWNER` and the
+  condition for reconsideration; do not silently wait out its lifetime. A denied
+  reply stays blocked: report the denial, never route it through another peer.
+- A pending `dispatch` mailbox does not schedule a future turn. Before ending a
+  turn waiting on it, establish a verified completion/expiry callback or report
+  manual-only coverage. Expiry means no answer, never consent; reconcile the old
+  request before issuing another.
 - Pin each request to a commit SHA or exact draft/digest. State the SHA or draft
   actually reviewed in the verdict; it covers nothing newer. For queued reviews,
   identify the live head reviewed and which requests the verdict supersedes.
@@ -124,6 +131,11 @@ an unattended loop.
 
 Read [references/delegated-work.md](references/delegated-work.md) before having
 one buddy execute while the other steers, including check-ins and sandbox setup.
+Read [references/completion.md](references/completion.md) before leaving an
+asynchronous duty waiting on a background command or delegated observer.
+On Codex/OpenCode, reconcile `peers.py watch list --json` on resume, after long
+work and before consequential actions or reporting waiting/done. A finished observer still owes handling;
+an unknown/lost worker is not verified coverage.
 
 ## Claude Code
 

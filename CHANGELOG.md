@@ -8,6 +8,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `session-peers`: finite, owner-bound poller observations with private durable receipts/logs, optional one-shot OpenCode self-notification, truthful timeout/cleanup/delivery states and explicit continuation records. Codex stays receipt-only pending idle-wake validation; no scheduler, automatic re-arm or budget changes.
 - `session-peers`: explicit own-OpenCode inbox checks with safe human output, read-only request-state hints and expiring sender/message handled markers to avoid duplicate actions without consuming queued input or changing wake permissions.
 - `session-peers`: opt-in, expiring one-shot OpenCode reply wakes, bound to an initiated message and exact peer; generated reply routes, issuer revocation and fail-closed replay protection leave unsolicited sends and correlated mailboxes unchanged.
 - `skipper`: OpenCode V2 native session IDs as ledger owners and enrolled targets, recent API-confirmed peer discovery and explicit routing without claiming TUI attachment. Missing/cached sessions never prove stop or death; existing enrollment, handover and barrier gates remain unchanged.
@@ -21,6 +22,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- `session-peers`: require verified background-duty coverage, durable owner-bound logs, expiry-aware delegated callbacks and explicit continuation evidence; pending correlated mailboxes are not wake subscriptions, and blocked reviews return an explicit hold.
 - `skipper`: add cached roster views with age and unknown current coverage, defer transcript discovery behind fresh context exports and reuse repo lookups per refresh, atomically batch validated ledger records with compact receipts, shorten transition/FYI reports, and pause change-only user reminders during away, snooze and quiet hours while preserving patrol, incident monitoring and due missing-buddy reminders outside pauses.
 - `skipper`: accept a user-approved standard successor grant relayed first by the lead's enrolled skipper, verify transport identities via header UUIDs or resolved native senders, and count it as user-established enrollment while retaining per-lead stops and unchanged buddy bindings.
 - `skipper`: assign read-only investigation of unowned findings to an enrolled pair with capacity without asking the user; the pair may file a buddy-approved issue, while remediation, other owners' items and Hold classes stay with the user or owner.
