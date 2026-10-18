@@ -8,7 +8,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- `session-peers`: finite, owner-bound Codex/OpenCode poller observations with private durable receipts/logs, optional one-shot self-notification, truthful timeout/cleanup/delivery states and explicit continuation records, without a scheduler, automatic re-arm or budget changes.
+- `session-peers`: finite, owner-bound poller observations with private durable receipts/logs, optional one-shot OpenCode self-notification, truthful timeout/cleanup/delivery states and explicit continuation records. Codex stays receipt-only pending idle-wake validation; no scheduler, automatic re-arm or budget changes.
 - `session-peers`: explicit own-OpenCode inbox checks with safe human output, read-only request-state hints and expiring sender/message handled markers to avoid duplicate actions without consuming queued input or changing wake permissions.
 - `session-peers`: opt-in, expiring one-shot OpenCode reply wakes, bound to an initiated message and exact peer; generated reply routes, issuer revocation and fail-closed replay protection leave unsolicited sends and correlated mailboxes unchanged.
 - `skipper`: OpenCode V2 native session IDs as ledger owners and enrolled targets, recent API-confirmed peer discovery and explicit routing without claiming TUI attachment. Missing/cached sessions never prove stop or death; existing enrollment, handover and barrier gates remain unchanged.

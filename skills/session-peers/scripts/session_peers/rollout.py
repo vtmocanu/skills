@@ -190,16 +190,19 @@ class RolloutTail:
         return "\n".join(parts) if parts else None
 
 
-def last_boundary(rollout_path):
+def last_boundary(rollout_path, strict=False):
     """The last turn boundary in a rollout: 'started', 'complete', 'aborted'.
 
     Used for the interrupt check: a `turn_aborted` with no later `task_started`
     means the queue is paused until the human types something (measured).
+    Strict callers reject unreadable/malformed input instead of inferring unpaused.
     """
     result = None
     try:
         fh = open(rollout_path, "r", encoding="utf-8", errors="replace")
-    except (FileNotFoundError, OSError, TypeError):
+    except (FileNotFoundError, OSError, TypeError) as exc:
+        if strict:
+            raise ValueError('cannot read rollout boundary') from exc
         return None
     with fh:
         for line in fh:
@@ -209,6 +212,8 @@ def last_boundary(rollout_path):
             try:
                 obj = json.loads(line)
             except ValueError:
+                if strict:
+                    raise ValueError('cannot verify malformed rollout boundary')
                 continue
             if not isinstance(obj, dict) or obj.get("type") != "event_msg":
                 continue

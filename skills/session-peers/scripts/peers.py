@@ -26,7 +26,7 @@ Subcommands::
                   [--json]
     peers.py watch start --task LABEL --timeout SECONDS [--wake] -- POLLER ARGV...
     peers.py watch list [--json]
-    peers.py watch handled UUID --next ACTION_OR_BLOCKER
+    peers.py watch handled UUID --next ACTION_OR_BLOCKER [--lost]
     peers.py shim --thread <uuid>
     peers.py up [<name|uuid>]
     peers.py down [<name|uuid>]

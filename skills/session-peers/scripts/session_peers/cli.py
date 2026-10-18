@@ -88,6 +88,7 @@ def _register_watch(sub):
     ack = commands.add_parser('handled', help='record actual continuation or blocker, not transport acceptance')
     ack.add_argument('watch_id')
     ack.add_argument('--next', required=True)
+    ack.add_argument('--lost', action='store_true', help='explicitly record lost/unknown observer coverage, not task success')
     ack.set_defaults(func=sp_watches.cmd_watch)
 
 

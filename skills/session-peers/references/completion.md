@@ -7,7 +7,7 @@ watched, name the exact owner and the mechanism that will produce its next turn.
 |---|---|
 | Claude Code | Native `run_in_background` task notification. Verify the task actually started. |
 | OpenCode | Native shell `background: true` completion notification. Verify the actual start; a shell ID alone is not proof of lifetime coverage. |
-| Codex | A yielded exec session ID needs active retrieval unless a completion adapter is independently verified. Use the bounded observation below, an explicitly consenting native-capable peer observer, or report manual-only continuation. |
+| Codex | Receipt-only observation; self-wake is unverified and `--wake` is refused. A yielded exec ID alone proves no completion wake. Use a consenting native-capable peer observer or report manual-only continuation. |
 
 Native callbacks remain scoped to the host/session lifecycle. Do not promise
 survival across host death, restart, machine sleep, or permission interruption
@@ -16,7 +16,8 @@ without separate evidence. Missing callbacks are unknown, not proof the run died
 ## Bounded own-session observation
 
 For an already-authorized read-only poller, Codex/OpenCode can detach one finite
-observation from the launching turn:
+observation from the launching turn. The waking example is OpenCode-only;
+Codex must omit `--wake` and arrange a separate consented observer:
 
 ```bash
 <this skill's directory>/scripts/peers.py watch start --task "TASK exact-head-or-plan" --timeout 3600 --wake -- /absolute/path/to/poller ARG
@@ -26,6 +27,8 @@ observation from the launching turn:
 
 - Obtain task-scoped user consent before `--wake`. Omitting it creates receipts
   only. Owner identity comes from this shell, not an arbitrary target or override.
+  The native identity is inherited through environment variables; launch only in
+  the intended agent's own shell, not a descended terminal carrying stale IDs.
   Claude callers are refused with the native `run_in_background` alternative.
 - Timeout is required, finite, positive and at most 86400 seconds. Run only
   read-only pollers with their own finite bounds. This is one detached worker,
@@ -45,15 +48,24 @@ observation from the launching turn:
   output stays unknown, including on exit zero. Read actual task/head/gates before
   acting. An observer can finish while the product task remains running or failed.
 - Notifications are `queued_unacknowledged`, not read or handled. A missing,
-  stopped, unavailable or paused owner leaves a durable receipt; a paused Codex
-  owner is not queued or unpaused. Uncertain delivery is never retried/retargeted.
+  stopped or unavailable owner leaves a durable receipt. An observed paused Codex
+  owner is skipped, never unpaused. An interrupt racing queue acceptance can still
+  hold queued input until user resume; acceptance never proves a wake. Uncertain
+  delivery is never retried/retargeted.
 - `watch handled` records the real continuation or blocker, not permission to act.
   It is owner-only, requires a finished receipt and preserves the first entry.
+  For a lost or unverifiable worker, explicitly add `--lost` to record unknown
+  coverage and its next action/blocker, without rewriting the process outcome or
+  claiming the product task completed. It does not permit killing or re-arming.
   Reconcile outward effects before handling a replay. Ordinary self-`send`
   refusal, correlated request expiry and reply budgets remain unchanged.
 - Re-read after host/session interruption. A mismatched/dead/unverifiable worker
   PID/start identity means lost/unknown coverage, never a successful observation.
   No claim transfer, restart, wake retry or observer re-arm follows automatically.
+- Corrupt or unreadable receipts/handling records appear as per-duty unknown rows;
+  they do not hide other duties. A launch error, an error after the poller started,
+  and failed result publication are not interchangeable. Reconcile the retained
+  child identity and log before starting another observer.
 
 Machine sleep, service restart, owner death and TUI detachment are not continuity
 guarantees. A test of one transport/runtime cannot certify another.
