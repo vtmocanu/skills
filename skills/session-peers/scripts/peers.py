@@ -24,6 +24,9 @@ Subcommands::
                    [--json]
     peers.py wait --for cc:<name|uuid>|oc:<title|ses_id>|buddy [--state idle|busy] [--timeout <seconds>]
                   [--json]
+    peers.py watch start --task LABEL --timeout SECONDS [--wake] -- POLLER ARGV...
+    peers.py watch list [--json]
+    peers.py watch handled UUID --next ACTION_OR_BLOCKER
     peers.py shim --thread <uuid>
     peers.py up [<name|uuid>]
     peers.py down [<name|uuid>]

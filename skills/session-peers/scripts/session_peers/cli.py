@@ -6,6 +6,7 @@ import sys
 from . import constants as sp_constants
 from . import reply_wake as sp_reply_wake
 from . import inbox as sp_inbox
+from . import watches as sp_watches
 from . import diagnostics as sp_diagnostics, lifecycle as sp_lifecycle
 from . import shim as sp_shim
 from . import buddy as sp_buddy, diagnostics as sp_diagnostics, hooks as sp_hooks, maintenance as sp_maintenance, messaging as sp_messaging, topics as sp_topics
@@ -24,6 +25,7 @@ def build_parser():
 
     _register_list(sub)
     _register_inbox(sub)
+    _register_watch(sub)
 
     _register_messaging(sub)
 
@@ -69,6 +71,24 @@ def _register_inbox(sub):
         command.add_argument("message_id", help="logical peer message UUID, not native msg_ id")
         command.add_argument("--json", action="store_true")
         command.set_defaults(func=sp_inbox.cmd_inbox)
+
+
+def _register_watch(sub):
+    parser = sub.add_parser('watch', help='bounded owner-only poller receipts and optional one-shot self notification')
+    commands = parser.add_subparsers(dest='watch_cmd', required=True)
+    start = commands.add_parser('start', help='run an already-authorized read-only poller detached, once')
+    start.add_argument('--task', required=True)
+    start.add_argument('--timeout', required=True, type=float)
+    start.add_argument('--wake', action='store_true', help='consent to one own-session notification on exit/timeout')
+    start.add_argument('argv', nargs=argparse.REMAINDER)
+    start.set_defaults(func=sp_watches.cmd_watch)
+    listing = commands.add_parser('list', help='read this owner\'s durable observation receipts')
+    listing.add_argument('--json', action='store_true')
+    listing.set_defaults(func=sp_watches.cmd_watch)
+    ack = commands.add_parser('handled', help='record actual continuation or blocker, not transport acceptance')
+    ack.add_argument('watch_id')
+    ack.add_argument('--next', required=True)
+    ack.set_defaults(func=sp_watches.cmd_watch)
 
 
 def _register_messaging(sub):
