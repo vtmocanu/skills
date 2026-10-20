@@ -11,7 +11,7 @@ Report the open work in this session once. Repeat it on a timer only when the us
 
 | Invocation | Do |
 |---|---|
-| `/status-check` | Report once. Arm nothing; leave an existing timer as is |
+| `/status-check` | Report once. Arm nothing; leave an existing timer as is unless no open items remain |
 | `/status-check every [N]` | Report, then arm the timer every N minutes (default 20; N divides 60: 5, 10, 15, 20, 30, 60). Use this for any request to repeat, loop or report periodically |
 | `/status-check tick` | Report only. The timer sends this; never arm from it |
 | `/status-check stop` | Delete the timer and confirm |
