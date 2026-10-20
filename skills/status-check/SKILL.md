@@ -1,18 +1,18 @@
 ---
 name: status-check
-description: Reports what work is still open in the current session (running background jobs and subagents, items waiting on the user, on another session, on CI or a bot, held items, and what finished since the last check) as one table, then arms a session-only timer that repeats the report every 20 minutes until nothing is left. Read-only; it never merges, reruns, or edits. Use when the user runs /status-check, asks what is left, what is still open, or what you are waiting on, or wants periodic progress reports. Triggers include "/status-check", "what is left on your plate", "what's still open", "status check", "remind me what's pending".
+description: Reports what work is still open in the current session (running background jobs and subagents, items waiting on the user, on another session, on CI or a bot, held items, and what finished since the last check) as one table, once. Only on request (`/status-check every [N]`) does it arm a session-only timer that repeats the report until nothing is left. Read-only; it never merges, reruns, or edits. Use when the user runs /status-check, asks what is left, what is still open, or what you are waiting on, or wants periodic progress reports. Triggers include "/status-check", "what is left on your plate", "what's still open", "status check", "remind me what's pending".
 ---
 
 # Status check
 
-Report the open work in this session, then keep reporting on a timer. Report only: never merge, push, rerun, retry, edit, or message anyone while running this skill.
+Report the open work in this session once. Repeat it on a timer only when the user asks. Report only: never merge, push, rerun, retry, edit, or message anyone while running this skill.
 
 ## Arguments
 
 | Invocation | Do |
 |---|---|
-| `/status-check` | Report, then arm the timer (default every 20 minutes) |
-| `/status-check every N` | Report, then arm the timer every N minutes (N divides 60: 5, 10, 15, 20, 30, 60) |
+| `/status-check` | Report once. Arm nothing; leave an existing timer as is unless no open items remain |
+| `/status-check every [N]` | Report, then arm the timer every N minutes (default 20; N divides 60: 5, 10, 15, 20, 30, 60). Use this for any request to repeat, loop or report periodically |
 | `/status-check tick` | Report only. The timer sends this; never arm from it |
 | `/status-check stop` | Delete the timer and confirm |
 
@@ -38,7 +38,7 @@ On a `tick`, when nothing changed since the previous report, print exactly one l
 
 ## The timer
 
-Use the scheduled-prompt tools (`CronList`, `CronCreate`, `CronDelete` in Claude Code). Before arming:
+Arm it only from `every`. Use the scheduled-prompt tools (`CronList`, `CronCreate`, `CronDelete` in Claude Code). Before arming:
 
 1. `CronList`. If a job with prompt `/status-check tick` exists, keep it; arm nothing new. On a new interval, delete it first, then arm.
 2. Pick the cron minutes: an offset `o` from 1 to N-1 that avoids minutes 0 and 30, then `o, o+N, …` below 60. Example for 20 minutes: `7,27,47 * * * *`.
@@ -47,4 +47,4 @@ Use the scheduled-prompt tools (`CronList`, `CronCreate`, `CronDelete` in Claude
 
 **Stop on its own.** When a report finds no open items, delete the timer (or skip arming it) and say the session has nothing left to track. The timer itself never counts as open work.
 
-Without scheduled-prompt tools (Codex, other hosts), print the report once and say that this host cannot repeat it automatically.
+Without scheduled-prompt tools (Codex, other hosts), on `every` print the report once and say that this host cannot repeat it automatically.
