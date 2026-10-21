@@ -275,10 +275,53 @@ class TestCodexDiscovery(Base):
             sp_codex.thread_is_held("/no/rollout.jsonl", holder_pid=4321, lock_path=lock),
             (True, 4321),
         )
-        held, _pid = sp_codex.thread_is_held(
-            "/no/rollout.jsonl", holder_pid=9999, lock_path=lock
+        self.assertEqual(
+            sp_codex.thread_is_held("/no/rollout.jsonl", holder_pid=9999, lock_path=lock),
+            (False, None),
         )
-        self.assertFalse(held)
+
+    def _lsof_argv(self):
+        log = self.root / "lsof-argv.jsonl"
+        os.environ["FAKE_LSOF_ARGV_LOG"] = str(log)
+        self.addCleanup(os.environ.pop, "FAKE_LSOF_ARGV_LOG", None)
+        return lambda: [json.loads(l) for l in log.read_text().splitlines()] if log.exists() else []
+
+    def test_a_known_holder_is_probed_alone_not_every_process(self):
+        # A global lsof walks every process's descriptors; each shim repeats it
+        # every liveness interval, so with a holder pid the probe is scoped.
+        argv = self._lsof_argv()
+        lock = sp_codex.writer_lock_path("t")
+        self.set_holder(lock, pid=4321)
+        sp_codex.thread_is_held("/no/rollout.jsonl", holder_pid=4321, lock_path=lock)
+        sp_codex.thread_is_held("/no/rollout.jsonl", lock_path=lock)
+        scoped, unscoped = argv()
+        self.assertEqual(scoped[:3], ["-a", "-p", "4321"])
+        self.assertNotIn("-p", unscoped)
+
+    def test_a_known_holder_counts_through_either_handle(self):
+        rollout = self.make_rollout()
+        lock = sp_codex.writer_lock_path("t")
+        self.set_holder(rollout, pid=4321)
+        self.assertEqual(
+            sp_codex.thread_is_held(str(rollout), holder_pid=4321, lock_path=lock),
+            (True, 4321),
+        )
+        self.clear_holders()
+        self.set_holder(lock, pid=4321)
+        self.assertEqual(
+            sp_codex.thread_is_held(str(rollout), holder_pid=4321, lock_path=lock),
+            (True, 4321),
+        )
+
+    def test_a_blocked_scoped_probe_is_unverified_not_dead(self):
+        lock = sp_codex.writer_lock_path("t")
+        self.set_holder(lock, pid=4321)
+        os.environ["FAKE_LSOF_RC"] = "1"
+        os.environ["FAKE_LSOF_STDERR"] = "operation not permitted"
+        self.assertEqual(
+            sp_codex.thread_is_held("/no/rollout.jsonl", holder_pid=4321, lock_path=lock),
+            (None, None),
+        )
 
     def test_the_session_index_supplies_a_missing_name(self):
         rollout = self.make_rollout()
