@@ -148,28 +148,40 @@ def codex_threads(check_live=True):
                 "liveness_error": None,
             }
         )
-    if check_live and threads:
-        # The lock is rooted at CODEX_HOME, not at the state DB's home: the DB
-        # can live under a separate `sqlite_home` while the locks stay put.
-        lock_of = {t["id"]: writer_lock_path(t["id"]) for t in threads}
-        probe = [t["rollout_path"] for t in threads if t["rollout_path"]]
-        probe += list(lock_of.values())
-        holders, verified, liveness_error = sp_process.lsof_holders_checked(probe)
-        for t in threads:
-            if not verified:
-                t["live"] = None
-                t["liveness_error"] = liveness_error
-                continue
-            # Either handle a live Codex process keeps proves the thread is
-            # live; the lock covers a fresh thread whose rollout is not written
-            # yet, the rollout covers an older Codex with no writer lock.
-            found = (holders.get(sp_process.canon_path(t["rollout_path"])) or []) or (
-                holders.get(sp_process.canon_path(lock_of[t["id"]])) or []
-            )
-            if found:
-                t["live"] = True
-                t["holder_pid"] = found[0][0]
+    if check_live:
+        probe_liveness(threads)
     return threads, True
+
+
+def probe_liveness(threads):
+    """Set `live`/`holder_pid`/`liveness_error` on these thread rows in place.
+
+    One batched `lsof` over their rollouts and writer locks. A caller that only
+    needs some rows (the shim's alias refresh needs same-title contenders) passes
+    just those: the probe walks every process, so its cost is per call.
+    """
+    if not threads:
+        return
+    # The lock is rooted at CODEX_HOME, not at the state DB's home: the DB
+    # can live under a separate `sqlite_home` while the locks stay put.
+    lock_of = {t["id"]: writer_lock_path(t["id"]) for t in threads}
+    probe = [t["rollout_path"] for t in threads if t["rollout_path"]]
+    probe += list(lock_of.values())
+    holders, verified, liveness_error = sp_process.lsof_holders_checked(probe)
+    for t in threads:
+        if not verified:
+            t["live"] = None
+            t["liveness_error"] = liveness_error
+            continue
+        # Either handle a live Codex process keeps proves the thread is
+        # live; the lock covers a fresh thread whose rollout is not written
+        # yet, the rollout covers an older Codex with no writer lock.
+        found = (holders.get(sp_process.canon_path(t["rollout_path"])) or []) or (
+            holders.get(sp_process.canon_path(lock_of[t["id"]])) or []
+        )
+        if found:
+            t["live"] = True
+            t["holder_pid"] = found[0][0]
 
 
 def thread_is_held(rollout_path, holder_pid=None, lock_path=None):

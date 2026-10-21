@@ -40,9 +40,10 @@ Paths proven absent are omitted before a batched `lsof` call, so a lazy rollout
 or stale database row does not hide holders returned for other paths. Any
 failure to inspect a path still makes liveness unverified. An `lsof` exit 1
 with no diagnostic is treated as a verified partial or empty result.
-A running shim's periodic check probes only its known holder pid
-(`lsof -a -p PID`); discovery (`list`, `up`, alias refresh) still probes all
-processes.
+A running shim's liveness check and its alias refresh for a title no other
+thread carries probe only its known holder pid (`lsof -a -p PID`); a duplicate
+title's refresh probes its same-title contenders, and discovery (`list`, `up`)
+probes all processes.
 Run `list`, `doctor`, and direct `send --to cc:...` with host permission from
 the outset. If permission is unavailable, an `unverified` result is not
 evidence that no session exists. A Claude record missing `procStart` is also

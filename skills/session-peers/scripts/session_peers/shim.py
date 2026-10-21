@@ -736,21 +736,39 @@ class Shim:
 
     def _refresh_name(self):
         """Converge the advertised alias after a Codex `/rename`."""
-        threads, schema_ok = sp_codex.codex_threads()
+        threads, schema_ok = sp_codex.codex_threads(check_live=False)
         if not schema_ok:
             return
         thread = next(
             (candidate for candidate in threads if candidate["id"] == self.thread_id),
             None,
         )
-        if thread is None or thread.get("live") is None:
+        if thread is None:
             return
         title = thread.get("name")
+        # This runs every alias interval in every shim, and an unscoped lsof walks
+        # every process's descriptors whatever paths it is given. Title ownership
+        # reads only live rows carrying this title (an invalid title has no owner),
+        # so a title nobody else carries needs only self's holder pid; duplicates
+        # keep the unscoped batch over the contenders so a new holder is found.
+        if sp_protocol.valid_peer_name(title):
+            contenders = [candidate for candidate in threads if candidate.get("name") == title]
+        else:
+            contenders = [thread]
+        if contenders == [thread] and self.holder_pid is not None:
+            held, _pid = sp_codex.thread_is_held(self.rollout_path, self.holder_pid, self.lock_path)
+            thread["live"] = held
+        else:
+            sp_codex.probe_liveness(contenders)
+        # Unverified or no longer held: keep the advertised alias; the liveness
+        # check owns the exit.
+        if thread.get("live") is not True:
+            return
         try:
             desired = sp_codex.peer_name_for_thread(
                 title,
                 self.thread_id,
-                title_owner=sp_codex.codex_title_owner(title, threads),
+                title_owner=sp_codex.codex_title_owner(title, contenders),
             )
         except sp_protocol.NameError_ as exc:
             sp_runtime.log("cannot refresh the peer alias: %s" % exc)

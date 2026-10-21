@@ -957,6 +957,110 @@ class TestShimRecord(ShimBase):
         self.assertEqual(lower_shim.name, "shared")
         self.assertEqual(higher_shim.name, "codex-%s" % higher[:8])
 
+    LOWER = "11111111-1111-4111-8111-111111111111"
+    HIGHER = "22222222-2222-4222-8222-222222222222"
+    OTHER = "33333333-3333-4333-8333-333333333333"
+
+    def _shared_title_threads(self):
+        rollouts = {tid: self.make_rollout("%s.jsonl" % tid[:8]) for tid in (self.LOWER, self.HIGHER, self.OTHER)}
+        self.make_state_db(
+            [
+                {"id": self.LOWER, "name": "shared", "rollout_path": str(rollouts[self.LOWER])},
+                {"id": self.HIGHER, "name": "shared", "rollout_path": str(rollouts[self.HIGHER])},
+                {"id": self.OTHER, "name": "unrelated", "rollout_path": str(rollouts[self.OTHER])},
+            ]
+        )
+        return rollouts
+
+    def _drop_holder(self, path):
+        mapping = json.loads(self.lsof_map.read_text())
+        mapping.pop(str(path), None)
+        self.lsof_map.write_text(json.dumps(mapping))
+
+    def _lsof_calls(self, action):
+        log = self.root / "lsof-argv.jsonl"
+        log.unlink(missing_ok=True)
+        os.environ["FAKE_LSOF_ARGV_LOG"] = str(log)
+        try:
+            action()
+        finally:
+            os.environ.pop("FAKE_LSOF_ARGV_LOG", None)
+        return [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+
+    def test_a_unique_title_refresh_probes_only_its_own_holder(self):
+        # Every shim refreshes every alias interval, and an unscoped lsof walks
+        # every process whatever paths it gets: a unique title needs only self.
+        rollouts = self._shared_title_threads()
+        for path in rollouts.values():
+            self.set_holder(path)
+        shim = sp_shim.Shim(sp_codex.resolve_thread(self.OTHER))
+        calls = self._lsof_calls(shim._refresh_name)
+        self.assertTrue(calls)
+        for argv in calls:
+            self.assertEqual(argv[:3], ["-a", "-p", str(os.getpid())])
+        self.assertEqual(shim.name, "unrelated")
+
+    def test_a_duplicate_title_refresh_probes_every_contender_unscoped(self):
+        rollouts = self._shared_title_threads()
+        for path in rollouts.values():
+            self.set_holder(path)
+        shim = sp_shim.Shim(sp_codex.resolve_thread(self.HIGHER))
+        calls = self._lsof_calls(shim._refresh_name)
+        self.assertEqual(len(calls), 1)
+        self.assertNotIn("-p", calls[0])
+        self.assertIn(str(rollouts[self.LOWER]), calls[0])
+        self.assertIn(str(rollouts[self.HIGHER]), calls[0])
+        self.assertNotIn(str(rollouts[self.OTHER]), calls[0])
+
+    def test_an_unheld_unique_title_refresh_keeps_the_alias(self):
+        rollouts = self._shared_title_threads()
+        self.set_holder(rollouts[self.OTHER])
+        shim = sp_shim.Shim(sp_codex.resolve_thread(self.OTHER))
+        self.add_listener(name="unrelated", pid=os.getppid())
+        self._drop_holder(rollouts[self.OTHER])
+        shim._refresh_name()
+        self.assertEqual(shim.name, "unrelated")
+
+    def test_a_registry_collision_with_an_unchanged_title_moves_the_alias(self):
+        rollouts = self._shared_title_threads()
+        self.set_holder(rollouts[self.OTHER])
+        shim = sp_shim.Shim(sp_codex.resolve_thread(self.OTHER))
+        self.assertEqual(shim.name, "unrelated")
+        self.add_listener(name="unrelated", pid=os.getppid())
+        shim._refresh_name()
+        self.assertEqual(shim.name, "codex-%s" % self.OTHER[:8])
+
+    def test_a_lower_uuid_contender_arriving_takes_the_title_on_refresh(self):
+        rollouts = self._shared_title_threads()
+        self.set_holder(rollouts[self.HIGHER])
+        shim = sp_shim.Shim(sp_codex.resolve_thread(self.HIGHER))
+        self.assertEqual(shim.name, "shared")
+        self.set_holder(rollouts[self.LOWER])
+        shim._refresh_name()
+        self.assertEqual(shim.name, "codex-%s" % self.HIGHER[:8])
+
+    def test_the_title_is_reclaimed_on_refresh_when_its_owner_departs(self):
+        rollouts = self._shared_title_threads()
+        self.set_holder(rollouts[self.LOWER])
+        self.set_holder(rollouts[self.HIGHER])
+        shim = sp_shim.Shim(sp_codex.resolve_thread(self.HIGHER))
+        self.assertEqual(shim.name, "codex-%s" % self.HIGHER[:8])
+        self._drop_holder(rollouts[self.LOWER])
+        shim._refresh_name()
+        self.assertEqual(shim.name, "shared")
+
+    def test_an_unverified_refresh_probe_keeps_the_alias(self):
+        rollouts = self._shared_title_threads()
+        self.set_holder(rollouts[self.LOWER])
+        self.set_holder(rollouts[self.HIGHER])
+        shim = sp_shim.Shim(sp_codex.resolve_thread(self.HIGHER))
+        self._drop_holder(rollouts[self.LOWER])
+        os.environ["FAKE_LSOF_RC"] = "1"
+        os.environ["FAKE_LSOF_STDERR"] = "operation not permitted"
+        with contextlib.redirect_stderr(io.StringIO()):
+            shim._refresh_name()
+        self.assertEqual(shim.name, "codex-%s" % self.HIGHER[:8])
+
     def test_a_rename_refreshes_the_record_state_and_registration(self):
         shim, tid, _rollout = self.make_shim(name="codex-old")
         sp_storage.register_thread({"id": tid, "name": "codex-old"})
