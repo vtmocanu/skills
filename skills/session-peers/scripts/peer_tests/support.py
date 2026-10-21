@@ -66,6 +66,14 @@ forced = int(os.environ.get("FAKE_LSOF_RC", "0"))
 if forced:
     sys.stderr.write(os.environ.get("FAKE_LSOF_STDERR", "operation not permitted") + "\\n")
     raise SystemExit(forced)
+argv_log = os.environ.get("FAKE_LSOF_ARGV_LOG")
+if argv_log:
+    with open(argv_log, "a") as fh:
+        fh.write(json.dumps(args) + "\\n")
+# `-a -p PID` restricts the probe to that process, as real lsof does.
+only_pid = None
+if "-a" in args and "-p" in args:
+    only_pid = int(args[args.index("-p") + 1])
 mapping = {}
 path = os.environ.get("FAKE_LSOF_MAP")
 if path and os.path.exists(path):
@@ -92,7 +100,10 @@ for target in targets:
         unmatched = True
         continue
     pid, cmd = entry
-    out += ["p%d" % pid, "c%s" % cmd, "f7", "n%s" % real]
+    if only_pid is not None and pid != only_pid:
+        unmatched = True
+        continue
+    out +=["p%d" % pid, "c%s" % cmd, "f7", "n%s" % real]
 if out:
     sys.stdout.write("\\n".join(out) + "\\n")
 for target in missing:

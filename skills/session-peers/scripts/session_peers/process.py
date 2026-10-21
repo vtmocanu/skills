@@ -73,11 +73,15 @@ def canon_path(path):
         return path
 
 
-def lsof_holders_checked(paths):
+def lsof_holders_checked(paths, pid=None):
     """(holders, verified, error) for paths a Codex process may hold.
 
     Keyed by the canonical (realpath) form so a lookup by an unresolved probe
     path still matches a holder `lsof` reported at its symlink-resolved path.
+
+    With `pid`, only that process is inspected (`lsof -a -p PID`): a global
+    probe walks every process's descriptor table, which each shim repeats every
+    liveness interval. A dead or non-holding pid is a clean exit 1.
 
     `lsof` exits 1 both for a verified no-match and for some failures. It can
     also exit 1 with valid holder data on stdout when another requested path is
@@ -105,8 +109,9 @@ def lsof_holders_checked(paths):
     paths = existing
     if not paths:
         return out, True, None
+    scope = ["-a", "-p", str(int(pid))] if pid is not None else []
     rc, stdout, stderr = sp_runtime.run_cmd(
-        ["lsof", "-F", "pcn", "--"] + list(paths), timeout=20
+        ["lsof"] + scope + ["-F", "pcn", "--"] + list(paths), timeout=20
     )
     if rc != 0 and not (rc == 1 and not stderr.strip()):
         detail = stderr.strip() or stdout.strip() or "lsof exited %d" % rc

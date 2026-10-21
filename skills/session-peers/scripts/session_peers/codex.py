@@ -181,10 +181,11 @@ def thread_is_held(rollout_path, holder_pid=None, lock_path=None):
     (measured on codex-cli 0.153.4), so a just-created thread reads as live
     through the lock alone. With `holder_pid` given, that exact pid must still
     hold one of them (D2: a live daemon can unload one thread while staying
-    alive).
+    alive). That probe inspects only `holder_pid`, so a mismatch returns
+    (False, None): another holder's pid is not discovered.
     """
     paths = [p for p in (rollout_path, lock_path) if p]
-    holders, verified, _error = sp_process.lsof_holders_checked(paths)
+    holders, verified, _error = sp_process.lsof_holders_checked(paths, pid=holder_pid)
     if not verified:
         return None, None
     found = []
