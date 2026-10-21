@@ -17,6 +17,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Fixed
 
 - `session-peers`: a shim's periodic Codex liveness check inspects only its known holder process (`lsof -a -p PID`) instead of every process's descriptors, about 20x less kernel time per probe on a busy host. Liveness decisions are unchanged; a non-holder now reports no other holder pid.
+- `session-peers`: a shim's 30 s alias refresh no longer probes every Codex thread with an unscoped `lsof`: a title no other thread carries uses the shim's holder pid, and a duplicate title probes only its same-title contenders. Measured on a 1290-thread state DB: 2.2-2.75 s wall / 1.6-1.9 s CPU per refresh down to 0.09 s / 0.08 s. Ownership, registry-collision checks and the refresh interval are unchanged; an unverified or no-longer-held self keeps its alias.
 - `session-peers`: reject non-finite correlated-request timeouts rather than admitting an unusable `nan` lifetime.
 - `session-peers`: avoid reporting a delivered correlated reply as failed when its consumer removes the mailbox before the writer returns.
 - `token-audit`: count repeated assistant usage rows once per message ID while preserving log order, sidechain accounting and separate responses without IDs.
