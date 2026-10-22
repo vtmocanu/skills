@@ -53,6 +53,8 @@ Bind only when the user's own message names a buddy or says to ask one:
 <this skill's directory>/scripts/peers.py buddy clear
 ```
 
+- Claude session with a Claude Code buddy: talk natively (`SendMessage`), never
+  through `peers.py`. Still `buddy set` it so other skills see the binding.
 - Strip a leading `@`. Bare `buddy set` binds the other peer sharing this
   session's own name and excludes this session. If none exists, ask the user.
 - Names resolve once to UUIDs. An ambiguous name fails with retry commands;

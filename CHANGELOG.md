@@ -24,6 +24,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- `session-peers`: a Claude session talks to a Claude Code buddy natively (`SendMessage`), never through `peers.py`; the buddy is still bound so other skills see it.
 - `status-check`: a bare `/status-check` reports once and arms no timer; the repeating report is opt-in via `/status-check every [N]` (default 20 minutes). `tick` and `stop` are unchanged.
 - `session-peers`: require verified background-duty coverage, durable owner-bound logs, expiry-aware delegated callbacks and explicit continuation evidence; pending correlated mailboxes are not wake subscriptions, and blocked reviews return an explicit hold.
 - `skipper`: add cached roster views with age and unknown current coverage, defer transcript discovery behind fresh context exports and reuse repo lookups per refresh, atomically batch validated ledger records with compact receipts, shorten transition/FYI reports, and pause change-only user reminders during away, snooze and quiet hours while preserving patrol, incident monitoring and due missing-buddy reminders outside pauses.
