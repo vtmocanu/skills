@@ -232,7 +232,45 @@ class TestSendToCodex(Base):
         self.assertIn("codex:", err)
 
 
+class TestAnonymousClaudeOrigin(Base):
+    def test_send_ask_and_dispatch_refuse_anonymous_origins_without_delivery(self):
+        listener, rec = self.add_listener(name="cc-main", session_id=str(uuidlib.uuid4()))
+        for claude_session in (None, str(uuidlib.uuid4())):
+            for command in ("send", "ask", "dispatch"):
+                with self.subTest(command=command, claude_session=claude_session):
+                    if claude_session:
+                        os.environ["CLAUDE_CODE_SESSION_ID"] = claude_session
+                    else:
+                        os.environ.pop("CLAUDE_CODE_SESSION_ID", None)
+                    flags = [] if command == "send" else ["--timeout", "1"]
+                    rc, _out, err = self.cli(
+                        command, "--to", "cc:" + rec["sessionId"],
+                        "--message", "must not arrive", *flags,
+                    )
+                    self.assertEqual(rc, 2, err)
+                    self.assertIn("origin", err)
+                    if claude_session:
+                        self.assertIn("Claude Code session", err)
+                        self.assertIn("SendMessage", err)
+                    self.assertEqual(listener.of_type("user"), [])
+                    self.assertEqual(list(pathlib.Path(sp_storage.request_dir()).glob("*.json")), [])
+
+    def test_invalid_thread_identity_refuses_send_before_delivery(self):
+        listener, _rec = self.add_listener(name="cc-main")
+        os.environ["CODEX_THREAD_ID"] = "not-a-uuid"
+        rc, _out, err = self.cli(
+            "send", "--to", "cc:cc-main", "--message", "must not arrive",
+        )
+        self.assertEqual(rc, 2, err)
+        self.assertIn("UUID", err)
+        self.assertEqual(listener.of_type("user"), [])
+
+
 class TestSendToClaude(Base):
+    def setUp(self):
+        super().setUp()
+        os.environ["CODEX_THREAD_ID"] = str(uuidlib.uuid4())
+
     def test_send_reaches_a_named_session_in_the_bare_form(self):
         listener, _rec = self.add_listener(name="cc-main")
         rc, out, _err = self.cli("send", "--to", "cc:cc-main", "--message", "hello")

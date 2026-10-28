@@ -88,6 +88,27 @@ class TestTag(Base):
         self.assertEqual(len(tag["mid"]), sp_constants.MAX_TAG_FIELD_CHARS)
 
 
+class TestOriginIdentity(Base):
+    def test_known_runtimes_require_an_identity_after_sanitization(self):
+        for runtime in ("claude", "codex", "opencode"):
+            for ident in (None, "", " \n\t", "\x00\x1b"):
+                with self.subTest(runtime=runtime, ident=ident):
+                    with self.assertRaisesRegex(ValueError, "sender identity"):
+                        sp_protocol.build_origin(runtime, "named-peer", ident)
+
+    def test_unknown_runtime_remains_explicitly_unverified(self):
+        self.assertEqual(
+            sp_protocol.build_origin("unknown", None, None),
+            "[session-peers from peer of unverified runtime]",
+        )
+
+    def test_codex_body_requires_identity_with_and_without_a_route(self):
+        for route in (None, "/tmp/cc-socks/1.sock"):
+            with self.subTest(route=route):
+                with self.assertRaisesRegex(ValueError, "sender identity"):
+                    sp_protocol.build_cc_body("hello", None, "named-peer", route)
+
+
 class TestFrames(Base):
     def test_wrapper_never_claims_a_permission_mode(self):
         w = sp_protocol.build_wrapper("body", "/tmp/cc-socks/1.sock", "sess", "codex-uzi")

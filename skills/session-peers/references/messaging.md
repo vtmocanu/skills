@@ -58,8 +58,9 @@ Without a shim the reply is visible only in the Codex TUI. `--from-socket <path>
 routes the reply to the Claude session listening on that socket:
 `send` resolves its live registry record to fill the name and session id and
 refuses when nothing listens there. A tag without a session id is never
-auto-delivered. `send --to cc:<name|uuid>` posts a wrapped message directly
-into a Claude session from a host shell; UUID is stable across renames.
+auto-delivered. `send --to cc:<name|uuid>` requires a Codex thread origin
+(`CODEX_THREAD_ID` or `--from-thread`) or a verified OpenCode sender; UUID is
+stable across renames. From Claude Code, use `SendMessage` for a Claude peer.
 
 `list --json` reports Codex threads under `.codex[]` (proven live) and
 `.codex_unverified[]` (liveness unproven), and each entry carries an explicit
@@ -72,7 +73,7 @@ message, and reports it in `--json` output. When `send --to codex:...` runs from
 a Claude Code Bash tool, it automatically uses
 `CLAUDE_CODE_MESSAGING_SOCKET` to resolve the sender's current name, UUID,
 and reply route. Do not hand-build `--from-name`, `--from-sid`, or
-`--from-socket` there. Outside Claude Code, an identity-free send is still
+`--from-socket` there. An identity-free send to a Codex target is still
 allowed but prints a warning and cannot route an automatic reply.
 `status: queued` means `codex queue` accepted the message, not that the thread
 has read it. A unique live `codex-<UUID prefix>` or raw UUID prefix of at least

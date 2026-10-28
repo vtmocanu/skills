@@ -580,7 +580,8 @@ class OpenCodeRequestTests(OpenCodeBase):
         self.as_claude(rec)
         rc, _out, err = self.cli("ask", "--to", "cc:cc-main", "--message", "x", "--timeout", "1")
         self.assertEqual(rc, 2)
-        self.assertIn("--from-thread or CODEX_THREAD_ID", err)
+        self.assertIn("Claude Code session", err)
+        self.assertIn("SendMessage", err)
 
     def test_dispatch_to_opencode_delivery_failure_leaves_no_mailbox(self):
         _listener, rec = self.add_listener(name="cc-main", session_id=new_uuid())

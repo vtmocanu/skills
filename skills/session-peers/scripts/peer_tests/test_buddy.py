@@ -287,12 +287,12 @@ class TestBuddyRouting(BuddyBase):
         sid = new_uuid()
         bound, _rec = self.add_listener(name="cc-other", session_id=sid)
         self.make_state_db([])
-        owner_sid = new_uuid()
-        self.assertEqual(self.buddy("cc:%s" % owner_sid, "set", "cc-other")[0], 0)
+        owner_tid = new_uuid()
+        self.assertEqual(self.buddy("codex:%s" % owner_tid, "set", "cc-other")[0], 0)
         # The buddy renames itself; a newcomer takes the old name.
         self.write_record(os.getpid(), "renamed", sid, bound.path)
         newcomer, _rec = self.add_listener(name="cc-other", session_id=new_uuid(), pid=1)
-        os.environ["CLAUDE_CODE_SESSION_ID"] = owner_sid
+        os.environ["CODEX_THREAD_ID"] = owner_tid
         rc, _out, err = self.cli("send", "--to", "buddy", "--message", "hello")
         self.assertEqual(rc, 0, err)
         self.assertTrue(wait_for(lambda: bound.of_type("user")))

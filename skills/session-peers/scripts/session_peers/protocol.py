@@ -53,6 +53,7 @@ def build_origin(runtime, name, ident):
     ``runtime`` is "claude", "codex", "opencode" or "unknown" (sender not
     verified). The
     line sits after the tag (Codex side) or first in the body (Claude side).
+    Known runtimes require a nonempty identity after sanitization.
     Fields are sanitised so a name cannot end the line or forge a second one.
     """
     label = {
@@ -67,6 +68,8 @@ def build_origin(runtime, name, ident):
         return value.replace("[", "(").replace("]", ")").strip()[:sp_constants.MAX_TAG_FIELD_CHARS]
 
     name, ident = clean(name), clean(ident)
+    if runtime != "unknown" and not ident:
+        raise ValueError("a known runtime requires a sender identity")
     who = " ".join(x for x in (name, "(%s)" % ident if ident else "") if x)
     return "[session-peers from %s%s]" % (label, " " + who if who else "")
 

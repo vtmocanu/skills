@@ -373,7 +373,11 @@ def _send_claude(target, args, oc_sender=None):
         if oc_sender and getattr(args, "allow_reply_wake", None) is not None:
             reply_id = _issue_reply_wake(args, oc_sender, "cc:" + rec["sessionId"], str(uuidlib.uuid4()))
             oc_sender = dict(oc_sender, reply_wake_id=reply_id)
-        thread_id = None if oc_sender else sp_identity._thread_from_args(args)
+        try:
+            thread_id = None if oc_sender else sp_identity._thread_from_args(args, required=True)
+        except ValueError as exc:
+            sys.stderr.write("error: %s\n" % exc)
+            return 2
         msg_id, reply_capable = sp_claude._deliver_claude(
             rec, args.message, thread_id, opencode_sender=oc_sender
         )
