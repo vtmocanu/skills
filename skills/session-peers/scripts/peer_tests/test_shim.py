@@ -43,6 +43,18 @@ from .support import (
 
 
 class TestShimInbound(ShimBase):
+    def test_an_idless_verified_record_queues_as_unverified_runtime(self):
+        shim, _tid, _rollout = self.make_shim()
+        listener, _rec = self.add_listener(name="cc-main", session_id=None)
+        frame = self.inbound_frame("hello", listener.path, from_session=None)
+        shim._handle_line(json.dumps(frame))
+        calls = self.queue_calls()
+        self.assertEqual(len(calls), 1)
+        _tag, body = sp_protocol.parse_tag(calls[0][4])
+        self.assertEqual(
+            body, "[session-peers from peer of unverified runtime cc-main]\nhello",
+        )
+
     def test_a_user_frame_is_queued_with_the_senders_tag(self):
         shim, tid, _rollout = self.make_shim()
         listener, rec = self.add_listener(name="cc-main", session_id="s1")

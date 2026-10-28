@@ -89,12 +89,14 @@ class TestTag(Base):
 
 
 class TestOriginIdentity(Base):
-    def test_known_runtimes_require_an_identity_after_sanitization(self):
+    def test_known_runtimes_without_a_sanitized_identity_become_unverified(self):
         for runtime in ("claude", "codex", "opencode"):
             for ident in (None, "", " \n\t", "\x00\x1b"):
                 with self.subTest(runtime=runtime, ident=ident):
-                    with self.assertRaisesRegex(ValueError, "sender identity"):
-                        sp_protocol.build_origin(runtime, "named-peer", ident)
+                    self.assertEqual(
+                        sp_protocol.build_origin(runtime, "named-peer", ident),
+                        "[session-peers from peer of unverified runtime named-peer]",
+                    )
 
     def test_unknown_runtime_remains_explicitly_unverified(self):
         self.assertEqual(
@@ -102,11 +104,14 @@ class TestOriginIdentity(Base):
             "[session-peers from peer of unverified runtime]",
         )
 
-    def test_codex_body_requires_identity_with_and_without_a_route(self):
+    def test_codex_body_without_identity_is_unverified_with_and_without_a_route(self):
         for route in (None, "/tmp/cc-socks/1.sock"):
             with self.subTest(route=route):
-                with self.assertRaisesRegex(ValueError, "sender identity"):
-                    sp_protocol.build_cc_body("hello", None, "named-peer", route)
+                text = sp_protocol.build_cc_body("hello", None, "named-peer", route)
+                body, _attrs = sp_protocol.unwrap_message(text)
+                self.assertEqual(
+                    body, "[session-peers from peer of unverified runtime named-peer]\nhello",
+                )
 
 
 class TestFrames(Base):

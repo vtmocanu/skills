@@ -143,6 +143,8 @@ an unknown/lost worker is not verified coverage.
 ## Claude Code
 
 - Two Claude Code sessions talk via `SendMessage`, never `peers.py`.
+  If deferred, load it with ToolSearch (`select:SendMessage`); never fall back
+  to `peers.py` for a Claude peer.
 - Follow the harness, not the model: Claude Code driving a non-Anthropic model
   (claudish or opencodex) follows the Claude Code rules.
 - Open the first message to a new peer with your replyable session name, e.g.
@@ -159,7 +161,9 @@ ambiguous alias or an explicit CLI result, use:
 The Bash tool's identity and reply route are resolved automatically for a
 Codex target (`codex:<uuid>`, a shim's `cc:codex-<prefix>` alias, or a buddy);
 do not hand-build `--from-name`, `--from-sid`, or `--from-socket`.
-Without the target thread's shim, queued replies appear only in Codex's TUI. If `SendMessage` cannot reach the
+Without the target thread's shim, queued replies appear only in Codex's TUI.
+A plain-shell send to Claude may report `"target": "claude"` and
+`"reply_capable": false`; that unverified sender has no automatic reply route. If `SendMessage` cannot reach the
 peer, run `list`; a live thread with no `shim <pid>` needs `peers.py up <uuid>`
 before sending by its bare name. Completion and idle notices do not prove reply
 delivery.

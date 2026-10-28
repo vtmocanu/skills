@@ -144,6 +144,8 @@ class TestSendToCodex(Base):
         )
         self.assertEqual(rc, 0)
         self.assertIn("sender identity absent", err)
+        _tag, body = sp_protocol.parse_tag(self.queue_calls()[0][4])
+        self.assertEqual(body, "[session-peers from peer of unverified runtime]\nhello")
 
     def test_send_resolves_a_name_to_its_uuid(self):
         tid, _r = self.one_thread(name="codex-uzi")
@@ -233,30 +235,55 @@ class TestSendToCodex(Base):
 
 
 class TestAnonymousClaudeOrigin(Base):
-    def test_send_ask_and_dispatch_refuse_anonymous_origins_without_delivery(self):
+    def test_claude_send_ask_and_dispatch_without_a_thread_refuse_before_delivery(self):
         listener, rec = self.add_listener(name="cc-main", session_id=str(uuidlib.uuid4()))
-        for claude_session in (None, str(uuidlib.uuid4())):
-            for command in ("send", "ask", "dispatch"):
-                with self.subTest(command=command, claude_session=claude_session):
-                    if claude_session:
-                        os.environ["CLAUDE_CODE_SESSION_ID"] = claude_session
-                    else:
-                        os.environ.pop("CLAUDE_CODE_SESSION_ID", None)
-                    flags = [] if command == "send" else ["--timeout", "1"]
+        os.environ["CLAUDE_CODE_SESSION_ID"] = str(uuidlib.uuid4())
+        for command in ("send", "ask", "dispatch"):
+            with self.subTest(command=command):
+                flags = [] if command == "send" else ["--timeout", "1"]
+                with mock.patch.object(sp_claude, "send_frame") as send_frame:
                     rc, _out, err = self.cli(
                         command, "--to", "cc:" + rec["sessionId"],
                         "--message", "must not arrive", *flags,
                     )
-                    self.assertEqual(rc, 2, err)
-                    self.assertIn("origin", err)
-                    if claude_session:
-                        self.assertIn("Claude Code session", err)
-                        self.assertIn("SendMessage", err)
-                    self.assertEqual(listener.of_type("user"), [])
-                    self.assertEqual(list(pathlib.Path(sp_storage.request_dir()).glob("*.json")), [])
+                self.assertEqual(rc, 2, err)
+                self.assertIn("Claude Code session", err)
+                self.assertIn("SendMessage", err)
+                send_frame.assert_not_called()
+                self.assertEqual(listener.of_type("user"), [])
+                self.assertEqual(list(pathlib.Path(sp_storage.request_dir()).glob("*.json")), [])
 
-    def test_invalid_thread_identity_refuses_send_before_delivery(self):
+    def test_plain_shell_send_delivers_with_unverified_runtime(self):
+        listener, rec = self.add_listener(name="cc-main", session_id=str(uuidlib.uuid4()))
+        for key in ("CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_MESSAGING_SOCKET",
+                    "CODEX_THREAD_ID", "CODEX_SESSION_ID"):
+            os.environ.pop(key, None)
+        rc, out, err = self.cli(
+            "send", "--to", "cc:" + rec["sessionId"], "--message", "hello", "--json",
+        )
+        self.assertEqual(rc, 0, err)
+        self.assertFalse(json.loads(out)["reply_capable"])
+        frame = wait_for(lambda: listener.of_type("user"))[0]
+        self.assertEqual(
+            frame["message"]["content"],
+            "[session-peers from peer of unverified runtime]\nhello",
+        )
+        self.assertNotIn("from", frame)
+
+    def test_threadless_plain_shell_requests_still_require_an_origin(self):
         listener, _rec = self.add_listener(name="cc-main")
+        for command in ("ask", "dispatch"):
+            with self.subTest(command=command):
+                rc, _out, err = self.cli(
+                    command, "--to", "cc:cc-main", "--message", "hello", "--timeout", "1",
+                )
+                self.assertEqual(rc, 2, err)
+                self.assertIn("origin is explicit", err)
+                self.assertEqual(listener.of_type("user"), [])
+
+    def test_invalid_claude_thread_identity_refuses_send_before_delivery(self):
+        listener, _rec = self.add_listener(name="cc-main")
+        os.environ["CLAUDE_CODE_SESSION_ID"] = str(uuidlib.uuid4())
         os.environ["CODEX_THREAD_ID"] = "not-a-uuid"
         rc, _out, err = self.cli(
             "send", "--to", "cc:cc-main", "--message", "must not arrive",

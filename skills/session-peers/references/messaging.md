@@ -3,8 +3,10 @@
 ### Messaging a Codex thread
 
 Use `SendMessage` (or `@<name>` in the prompt) exactly as for another Claude
-session. The shim tags the message with your name and reply address, adds a
-`[session-peers from Claude Code session NAME (SID)]` line, and queues it; Codex runs it as its next user turn under the thread's own approval mode.
+session. The shim tags the message with the available name and reply address,
+adds the verified runtime and identity (or `peer of unverified runtime` when
+identity is unavailable), and queues it. Codex runs it as its next user turn
+under the thread's own approval mode.
 
 For a request whose reply gates an action, use `peers.py list` to identify the
 live thread and its busy/idle state, then match the reply's message-id header
@@ -58,9 +60,10 @@ Without a shim the reply is visible only in the Codex TUI. `--from-socket <path>
 routes the reply to the Claude session listening on that socket:
 `send` resolves its live registry record to fill the name and session id and
 refuses when nothing listens there. A tag without a session id is never
-auto-delivered. `send --to cc:<name|uuid>` requires a Codex thread origin
-(`CODEX_THREAD_ID` or `--from-thread`) or a verified OpenCode sender; UUID is
-stable across renames. From Claude Code, use `SendMessage` for a Claude peer.
+auto-delivered. `send --to cc:<name|uuid>` also permits plain-shell sends,
+labelled `peer of unverified runtime` when no thread identity is available;
+UUID is stable across renames. Claude Code sessions must use `SendMessage`
+for a Claude peer instead.
 
 `list --json` reports Codex threads under `.codex[]` (proven live) and
 `.codex_unverified[]` (liveness unproven), and each entry carries an explicit
