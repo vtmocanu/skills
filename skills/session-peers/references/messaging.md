@@ -3,8 +3,10 @@
 ### Messaging a Codex thread
 
 Use `SendMessage` (or `@<name>` in the prompt) exactly as for another Claude
-session. The shim tags the message with your name and reply address, adds a
-`[session-peers from Claude Code session NAME (SID)]` line, and queues it; Codex runs it as its next user turn under the thread's own approval mode.
+session. The shim tags the message with the available name and reply address,
+adds the verified runtime and identity (or `peer of unverified runtime` when
+identity is unavailable), and queues it. Codex runs it as its next user turn
+under the thread's own approval mode.
 
 For a request whose reply gates an action, use `peers.py list` to identify the
 live thread and its busy/idle state, then match the reply's message-id header
@@ -58,8 +60,10 @@ Without a shim the reply is visible only in the Codex TUI. `--from-socket <path>
 routes the reply to the Claude session listening on that socket:
 `send` resolves its live registry record to fill the name and session id and
 refuses when nothing listens there. A tag without a session id is never
-auto-delivered. `send --to cc:<name|uuid>` posts a wrapped message directly
-into a Claude session from a host shell; UUID is stable across renames.
+auto-delivered. `send --to cc:<name|uuid>` also permits plain-shell sends,
+labelled `peer of unverified runtime` when no thread identity is available;
+UUID is stable across renames. Claude Code sessions must use `SendMessage`
+for a Claude peer instead.
 
 `list --json` reports Codex threads under `.codex[]` (proven live) and
 `.codex_unverified[]` (liveness unproven), and each entry carries an explicit
@@ -72,7 +76,7 @@ message, and reports it in `--json` output. When `send --to codex:...` runs from
 a Claude Code Bash tool, it automatically uses
 `CLAUDE_CODE_MESSAGING_SOCKET` to resolve the sender's current name, UUID,
 and reply route. Do not hand-build `--from-name`, `--from-sid`, or
-`--from-socket` there. Outside Claude Code, an identity-free send is still
+`--from-socket` there. An identity-free send to a Codex target is still
 allowed but prints a warning and cannot route an automatic reply.
 `status: queued` means `codex queue` accepted the message, not that the thread
 has read it. A unique live `codex-<UUID prefix>` or raw UUID prefix of at least

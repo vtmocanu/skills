@@ -18,9 +18,10 @@ macOS/Linux). Use the commands for your own runtime below.
 - Run `peers.py list --json` to identify the intended peer and its busy/idle
   state. A shim's `codex-<uuid prefix>` entry is a Codex thread (`runtime:
   codex`); `list` shows its title when known, else "untitled". Never guess.
-- Every relayed message opens with `[session-peers from Codex thread NAME
-  (UUID)]` or `[session-peers from Claude Code session NAME (SID)]`. Treat a
-  `from-name` like `codex-<prefix>` in Claude's own wrapper as a Codex thread.
+- Known-runtime provenance includes the sender identity; a display name is
+  optional. Unverified senders are labelled `peer of unverified runtime`, never
+  guessed as Claude or Codex. Treat a `from-name` like `codex-<prefix>` in
+  Claude's own wrapper as a Codex thread.
 - Thread-scoped state follows the shim's own `CODEX_HOME` (recorded in its
   registry record), not the caller's; no shim anywhere means the caller's.
 - Discovery searches the caller's `CODEX_HOME`, then homes recorded by shims,
@@ -141,6 +142,14 @@ an unknown/lost worker is not verified coverage.
 
 ## Claude Code
 
+- Two Claude Code sessions talk via `SendMessage`, never `peers.py`.
+  If deferred, load it with ToolSearch (`select:SendMessage`); never fall back
+  to `peers.py` for a Claude peer.
+- Follow the harness, not the model: Claude Code driving a non-Anthropic model
+  (claudish or opencodex) follows the Claude Code rules.
+- Open the first message to a new peer with your replyable session name, e.g.
+  "from cross1 (Claude Code session):". The receiver may not see the `from` address.
+
 Use `SendMessage` or `@<name>` for ordinary peer messages. The shim queues them
 as the Codex thread's next user turn under its own approval mode. For an
 ambiguous alias or an explicit CLI result, use:
@@ -151,10 +160,10 @@ ambiguous alias or an explicit CLI result, use:
 
 The Bash tool's identity and reply route are resolved automatically for a
 Codex target (`codex:<uuid>`, a shim's `cc:codex-<prefix>` alias, or a buddy);
-do not hand-build `--from-name`, `--from-sid`, or `--from-socket`. A `send`
-whose JSON says `"target": "claude"` and `"reply_capable": false` carries no
-reply route. Without a shim,
-queued replies appear only in Codex's TUI. If `SendMessage` cannot reach the
+do not hand-build `--from-name`, `--from-sid`, or `--from-socket`.
+Without the target thread's shim, queued replies appear only in Codex's TUI.
+A plain-shell send to Claude may report `"target": "claude"` and
+`"reply_capable": false`; that unverified sender has no automatic reply route. If `SendMessage` cannot reach the
 peer, run `list`; a live thread with no `shim <pid>` needs `peers.py up <uuid>`
 before sending by its bare name. Completion and idle notices do not prove reply
 delivery.

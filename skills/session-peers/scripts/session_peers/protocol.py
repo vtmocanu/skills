@@ -53,20 +53,22 @@ def build_origin(runtime, name, ident):
     ``runtime`` is "claude", "codex", "opencode" or "unknown" (sender not
     verified). The
     line sits after the tag (Codex side) or first in the body (Claude side).
+    A missing identity after sanitization makes the runtime unverified.
     Fields are sanitised so a name cannot end the line or forge a second one.
     """
+    def clean(value):
+        value = sp_constants.ORIGIN_BREAK_RE.sub(" ", str(value or ""))
+        return value.replace("[", "(").replace("]", ")").strip()[:sp_constants.MAX_TAG_FIELD_CHARS]
+
+    name, ident = clean(name), clean(ident)
+    if not ident:
+        runtime = "unknown"
     label = {
         "claude": "Claude Code session",
         "codex": "Codex thread",
         "opencode": "OpenCode session",
         "unknown": "peer of unverified runtime",
     }[runtime]
-
-    def clean(value):
-        value = sp_constants.ORIGIN_BREAK_RE.sub(" ", str(value or ""))
-        return value.replace("[", "(").replace("]", ")").strip()[:sp_constants.MAX_TAG_FIELD_CHARS]
-
-    name, ident = clean(name), clean(ident)
     who = " ".join(x for x in (name, "(%s)" % ident if ident else "") if x)
     return "[session-peers from %s%s]" % (label, " " + who if who else "")
 
@@ -232,9 +234,9 @@ def reply_text(text, msg_id, held_reply=False):
 def build_cc_body(text, thread_id, thread_name, shim_socket):
     """Wrapped when the thread has a shim socket to reply to, bare otherwise.
 
-    Both forms start the body with a provenance line naming the sender as a
-    Codex thread: the wrapper's from-name alone reads as a Claude session. The
-    bare form also renders like a typed prompt with no peer name (measured).
+    Both forms start with Codex provenance when a thread identity is present,
+    or explicitly unverified provenance without one. The wrapper's from-name
+    alone reads as a Claude session; a bare body reads like a typed prompt.
     """
     if shim_socket:
         return build_wrapper(

@@ -15,8 +15,13 @@ def _thread_from_args(args, required=False):
             raise ValueError("--from-thread/CODEX_THREAD_ID must be a UUID")
         return None
     if required and not value:
+        if os.environ.get("CLAUDE_CODE_SESSION_ID"):
+            raise ValueError(
+                "this is a Claude Code session; use SendMessage for a Claude "
+                "peer instead of a Codex origin"
+            )
         raise ValueError(
-            "a request needs --from-thread or CODEX_THREAD_ID so its origin is explicit"
+            "a Codex sender needs --from-thread or CODEX_THREAD_ID so its origin is explicit"
         )
     return value
 
