@@ -134,7 +134,7 @@ an unattended loop.
   message becomes a later turn and reply. If the reviewer edits the artifact,
   the author's approval of the edited text is the final sign-off.
 - Hand back one message containing current work, reviewed SHAs, outstanding
-  gates and their owners, the next owner, and the buddy's full UUID for the
+  gates and their owners, the next owner, and the buddy's full typed identity for the
   successor to bind. Transfer no reply allowance or approval authority. If you
   stay open afterwards, run `buddy clear` so the successor's bind gets a total.
 - When the user asks whether this session can close, also ask the buddy about
