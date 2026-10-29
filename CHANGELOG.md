@@ -8,7 +8,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- `session-peers`, `skipper`: a successor binds the buddy a verified handover names without waiting for the user, and a handover names the buddy's full UUID. It still transfers no reply allowance or approvals; an unverified sender or an ambiguous or dead buddy still goes to the user.
+- `session-peers`, `skipper`, `away-mode`: a successor binds the buddy a verified handover names without waiting for the user, and a handover names the buddy's full UUID. It still transfers no reply allowance or approvals; an unverified sender or an ambiguous or dead buddy still goes to the user.
 - `session-peers`: finite, owner-bound poller observations with private durable receipts/logs, optional one-shot OpenCode self-notification, truthful timeout/cleanup/delivery states and explicit continuation records. Codex stays receipt-only pending idle-wake validation; no scheduler, automatic re-arm or budget changes.
 - `session-peers`: explicit own-OpenCode inbox checks with safe human output, read-only request-state hints and expiring sender/message handled markers to avoid duplicate actions without consuming queued input or changing wake permissions.
 - `session-peers`: opt-in, expiring one-shot OpenCode reply wakes, bound to an initiated message and exact peer; generated reply routes, issuer revocation and fail-closed replay protection leave unsolicited sends and correlated mailboxes unchanged.

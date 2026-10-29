@@ -83,7 +83,7 @@ Autonomy changes who decides, not the rules. Project instructions, permission se
 
 ## Buddy
 
-A buddy is a peer session the user bound to co-decide (for example with the `session-peers` skill: its `scripts/peers.py buddy` prints the binding, liveness, and replies left). No binding means no buddy. Never bind one or grant it replies yourself; only the user does.
+A buddy is a peer session the user bound to co-decide (for example with the `session-peers` skill: its `scripts/peers.py buddy` prints the binding, liveness, and replies left). No binding means no buddy. Bind one yourself only under `session-peers`' verified-handover rule, and never grant it replies yourself. Such a binding adds no co-decision authority beyond the user's away grant.
 
 With a buddy:
 
