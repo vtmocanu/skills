@@ -7,6 +7,11 @@
 - If a Claudish receiver misses a busy-turn reply, distinguish queued host input
   from input the model actually received. A persisted peer `queued_command`
   attachment alone proves neither model receipt nor a specific translation defect.
+- When sending a verdict to a Claudish-hosted peer, subscribe with
+  `notify_when_idle: true`. Treat the verdict as unacknowledged until the receiver
+  acknowledges its message ID or first line and reviewed SHA. If the idle notice
+  arrives without that acknowledgment, resend once at idle, labelled with the
+  original message ID and reviewed SHA. The notice itself is not an acknowledgment.
 - Batch independent work, then end the turn when waiting for the peer. If the
   verdict is still missing, request one native resend of that exact request and
   reviewed SHA after the receiver is idle. Confirm the received verdict; idle
