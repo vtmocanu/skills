@@ -149,6 +149,10 @@ an unknown/lost worker is not verified coverage.
   (claudish or opencodex) follows the Claude Code rules.
 - Open the first message to a new peer with your replyable session name, e.g.
   "from cross1 (Claude Code session):". The receiver may not see the `from` address.
+- A missing reply on a Claudish-hosted receiver may be a mid-turn receive problem,
+  not a silent peer. Keep native `SendMessage`; follow the
+  [native receive checks](references/diagnostics.md#native-claude-code-receivers)
+  before resending or reporting a review pending.
 
 Use `SendMessage` or `@<name>` for ordinary peer messages. The shim queues them
 as the Codex thread's next user turn under its own approval mode. For an

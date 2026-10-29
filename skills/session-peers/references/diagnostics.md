@@ -1,5 +1,23 @@
 # Diagnose peer delivery
 
+## Native Claude Code receivers
+
+- Keep native `SendMessage` between Claude Code hosts, including a Codex model
+  inside Claudish. A successful send proves transport, not model receipt.
+- If a Claudish receiver misses a busy-turn reply, distinguish queued host input
+  from input the model actually received. A persisted peer `queued_command`
+  attachment alone proves neither model receipt nor a specific translation defect.
+- Batch independent work, then end the turn when waiting for the peer. If the
+  verdict is still missing, request one native resend of that exact request and
+  reviewed SHA after the receiver is idle. Confirm the received verdict; idle
+  delivery is a fallback to verify, not a guaranteed repair.
+- Keep the review gate closed until the matching verdict is received. Do not
+  start a Codex CLI shim, invent a thread identity, or switch to `peers.py`
+  because the model is Codex. Never scrape transcripts to consume missing replies;
+  host delivery metadata is diagnostic evidence, not the review itself.
+
+## Codex CLI queue
+
 - **Idle thread latency**: up to 10 s (Codex polls its queue), then the turn.
 - **Busy thread**: the message queues and runs after the current turn.
 - **Continuously-driven thread**: a thread another driver keeps feeding
@@ -47,7 +65,7 @@ probes all processes.
 Run `list`, `doctor`, and direct `send --to cc:...` with host permission from
 the outset. If permission is unavailable, an `unverified` result is not
 evidence that no session exists. A Claude record missing `procStart` is also
-unverified rather than trusted across possible PID reuse. Two ways a message
+unverified rather than trusted across possible PID reuse.
 
 ## Diagnostics
 
