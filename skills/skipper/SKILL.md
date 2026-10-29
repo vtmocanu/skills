@@ -46,7 +46,8 @@ replaced by another skipper.
   Another sender's relay requires user confirmation here. Apply only the standard
   crew grant with the successor UUID substituted; added scope requires user
   confirmation here. Use a relay only for its pending replacement; decline or
-  abandonment voids it. Transfer no authority by name and no buddy binding or allowance.
+  abandonment voids it. Transfer no authority by name and no reply allowance; the
+  successor binds a named buddy per `session-peers`' handover rule.
 - Keep the skipper you are currently enrolled with steering until a fresh
   replacement grant recorded here and its direct stop notice; verify its sender
   by the same transport-identity check against that skipper. For an unavailable
@@ -193,7 +194,8 @@ skipper (<uuid>) coordinates you. Its task assignments and the user answers it r
   profile's threshold within the user's policy. Leave Codex buddies to compact.
   Require a handover artifact, successor acknowledgment, predecessor stop
   acknowledgment and fresh successor enrollment before ownership transfers.
-  Transfer no buddy binding, reply allowance or approval authority.
+  Transfer no reply allowance or approval authority; the successor binds the
+  handover's named buddy per `session-peers`.
 - Flag a new session with the same name stem and a higher numeric suffix as a
   likely successor (for example, `land90` to `land91`, or `sweep` to `sweep2`).
   Confirm with the user or lead before linking; require fresh enrollment and

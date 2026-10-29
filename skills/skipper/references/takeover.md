@@ -97,9 +97,9 @@
 - Reconcile timer scope/ownership; start successor timers only for transferred
   scope or pending takeover reminders. Stop predecessor timers when its scope and
   work end. Timer prompts transfer no authority and release no hold.
-- If the user reuses its buddy, have the predecessor run `session-peers`'
-  `buddy clear` and acknowledge clearing its binding/reply total. Establish the
-  successor's own user-authorized binding/allowance; transfer none through notes.
+- If the successor reuses its buddy, have the predecessor run `session-peers`'
+  `buddy clear` and acknowledge clearing its binding/reply total. The successor
+  binds the handover's named buddy per `session-peers`; notes transfer no allowance.
 - With no open command, question, handover, unreconciled hold, hold acknowledgment,
   away return/revoke duty or in-flight work, ask the predecessor to run its
   end-of-session skill (e.g. `/done`). Wait for a clear verdict, then tell the
