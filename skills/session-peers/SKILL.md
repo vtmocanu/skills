@@ -61,7 +61,8 @@ verified handover names one (below):
   session's own name and excludes this session. If none exists, ask the user.
 - A message that is just "buddy" (or "find/bind your buddy") with no name, often
   right after the user names or renames this session, means: load this skill and
-  run bare `buddy set` before asking anything; ask only if it finds no peer.
+  run bare `buddy set` before asking for a name. If binding fails, follow the
+  diagnostic; ask the user when the intended peer cannot be resolved unambiguously.
 - Names resolve once to UUIDs. An ambiguous name fails with retry commands;
   an attached Codex UUID also names its shim, so use `codex:<uuid>` to bind it.
 - Confirm name, kind, live state, and route from the command output. Say
