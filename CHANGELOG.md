@@ -8,6 +8,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `session-peers`: a bare "buddy" message (or "find/bind your buddy"), typically right after the user names or renames the session, now triggers the skill and runs bare `buddy set`, which binds the peer sharing this session's name, before asking for a name; a failed or ambiguous bind still goes to the user.
 - `session-peers`, `skipper`, `away-mode`: a successor binds the buddy a verified handover names without waiting for the user, and a handover names the buddy's full typed identity. It still transfers no reply allowance or approvals; an unverified sender or an ambiguous or dead buddy still goes to the user.
 - `session-peers`: finite, owner-bound poller observations with private durable receipts/logs, optional one-shot OpenCode self-notification, truthful timeout/cleanup/delivery states and explicit continuation records. Codex stays receipt-only pending idle-wake validation; no scheduler, automatic re-arm or budget changes.
 - `session-peers`: explicit own-OpenCode inbox checks with safe human output, read-only request-state hints and expiring sender/message handled markers to avoid duplicate actions without consuming queued input or changing wake permissions.

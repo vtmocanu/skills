@@ -1,6 +1,6 @@
 ---
 name: session-peers
-description: 'Messages between Claude Code sessions, Codex CLI threads and OpenCode V2 sessions on one machine, including correlated request/reply without stale queued turns, blocking (ask) or nonblocking (dispatch then await). Registers Codex as a Claude peer, delivers asynchronous messages through codex queue, and provides ask/dispatch/await/reply/wait commands for supervised multi-round work. Binds a named buddy peer for review and brainstorming. Use when sending cross-session messages or handoffs, requesting peer review, dispatching correlated work without blocking, waiting on a peer, listing live sessions, or diagnosing a stuck, paused, or dead peer. Triggers include "message codex", "message opencode", "ask claude", "dispatch to claude", "reply to the session", "@codex", "session peers", "peer review", "buddy: @name", "your buddy is", "ask your buddy".'
+description: 'Messages between Claude Code sessions, Codex CLI threads and OpenCode V2 sessions on one machine, including correlated request/reply without stale queued turns, blocking (ask) or nonblocking (dispatch then await). Registers Codex as a Claude peer, delivers asynchronous messages through codex queue, and provides ask/dispatch/await/reply/wait commands for supervised multi-round work. Binds a named buddy peer for review and brainstorming. Use when sending cross-session messages or handoffs, requesting peer review, dispatching correlated work without blocking, waiting on a peer, listing live sessions, or diagnosing a stuck, paused, or dead peer. Triggers include "message codex", "message opencode", "ask claude", "dispatch to claude", "reply to the session", "@codex", "session peers", "peer review", "buddy: @name", "your buddy is", "ask your buddy", a bare "buddy", "find your buddy", "bind your buddy".'
 ---
 
 # session-peers
@@ -59,6 +59,10 @@ verified handover names one (below):
   through `peers.py`. Still `buddy set` it so other skills see the binding.
 - Strip a leading `@`. Bare `buddy set` binds the other peer sharing this
   session's own name and excludes this session. If none exists, ask the user.
+- A message that is just "buddy" (or "find/bind your buddy") with no name, often
+  right after the user names or renames this session, means: load this skill and
+  run bare `buddy set` before asking for a name. If binding fails, follow the
+  diagnostic; ask the user when the intended peer cannot be resolved unambiguously.
 - Names resolve once to UUIDs. An ambiguous name fails with retry commands;
   an attached Codex UUID also names its shim, so use `codex:<uuid>` to bind it.
 - Confirm name, kind, live state, and route from the command output. Say
