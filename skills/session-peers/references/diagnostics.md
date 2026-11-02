@@ -16,6 +16,15 @@
   verdict is still missing, request one native resend of that exact request and
   reviewed SHA after the receiver is idle. Confirm the received verdict; idle
   delivery is a fallback to verify, not a guaranteed repair.
+- After one idle resend still yields no verdict, stop repeated requests. Ask the
+  verified peer for a private verdict artifact and have them send its path natively.
+  The peer writes the final verdict, reviewed SHA/digest, scope and owed action
+  before announcing the path; a newer review replaces the old verdict explicitly.
+- Read only that explicitly shared artifact, where the filesystem and permissions
+  allow it. Match its verdict and scope to the current request and artifact digest,
+  then acknowledge the exact verdict and digest. A path, file timestamp, idle summary
+  or stale verdict alone is not approval. If the artifact is unavailable or ambiguous,
+  keep the gate closed and report the missing evidence; do not invent another route.
 - Keep the review gate closed until the matching verdict is received. Do not
   start a Codex CLI shim, invent a thread identity, or switch to `peers.py`
   because the model is Codex. Never scrape transcripts to consume missing replies;
