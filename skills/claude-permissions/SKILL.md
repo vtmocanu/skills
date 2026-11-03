@@ -239,7 +239,7 @@ Permissions live in `permissions.allow` (array of strings):
 {
   "permissions": {
     "allow": [
-      "Read(*)",                       // allow reading any file
+      "Read",                          // allow reading any file (not "Read(*)": it adds nothing and triggers a warning)
       "Read(~/**)",      // path-specific
       "WebSearch",                     // no pattern needed
       "WebFetch",
