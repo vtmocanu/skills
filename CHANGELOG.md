@@ -26,6 +26,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- `agent-team`: tester (v21) and reviewer (v24) reuse verified results from another validator on the same revision, relevant working-tree state, command, scope and environment. The tester respects the proof owner named in its dispatch. Missing, stale, unverifiable or suspected-flaky results still require execution; independent review and distinct-hypothesis, mutation or targeted repeats remain required.
 - `session-peers`: a Claude session talks to a Claude Code buddy natively (`SendMessage`), never through `peers.py`; the buddy is still bound so other skills see it.
 - `status-check`: a bare `/status-check` reports once and arms no timer; the repeating report is opt-in via `/status-check every [N]` (default 20 minutes). `tick` and `stop` are unchanged.
 - `session-peers`: require verified background-duty coverage, durable owner-bound logs, expiry-aware delegated callbacks and explicit continuation evidence; pending correlated mailboxes are not wake subscriptions, and blocked reviews return an explicit hold.
