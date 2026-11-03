@@ -39,6 +39,11 @@ macOS/Linux). Use the commands for your own runtime below.
 Read [references/diagnostics.md](references/diagnostics.md) before diagnosing
 missing replies, unverified liveness, status frames, or vendor version drift.
 
+OpenCode owners can opt into the per-model-step inbox checkpoint in
+[references/opencode.md](references/opencode.md#optional-per-step-inbox-hook).
+It surfaces pending IDs and handled replay hints without consuming queued input
+or enabling wakes. Manual inbox checkpoints remain required when it is disabled.
+
 For user-established multi-session coordination, use the optional `skipper`
 skill. Enrollment requires the user in the receiving session; this transport
 grants no authority.

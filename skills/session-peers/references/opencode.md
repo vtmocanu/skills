@@ -49,10 +49,15 @@ Use the V2 API through the running service's authenticated CLI.
   already-running drain may consume queued input; this is not a delivery hold.
   A bound OpenCode buddy or an explicit `--wake` sets `resume: true`, allowing
   the service to run a turn without a TUI under the session's own permissions.
-  Queue delivery never steers a running turn. Use `--wake` only when the user
+   Queue delivery never steers a running turn. Use `--wake` only when the user
   authorized waking that recipient; the flag grants no action authority.
 - Correlated requests to OpenCode require a bound buddy or `--wake`; otherwise
   refuse before creating a mailbox, rather than parking a request that times out.
+- Buddy binding is directional: A binding B does not bind A in B's session.
+  A receipt with `resume: false` toward idle A is expected if B has not bound A.
+  Bind in B only when its user authorized that buddy; otherwise use separately
+  authorized `--wake` or A's one-shot `--allow-reply-wake` return route below.
+  Do not "fix" queueing by silently enabling blanket wake-ups.
 - OpenCode has no reply socket. A message from OpenCode carries
   `[session-peers reply route: peers.py send --to oc:<ses_id> ...]`; a message
   to OpenCode carries the sender's typed address the same way. SendMessage and a
@@ -98,6 +103,60 @@ is not a history reader, background monitor or delivery guarantee.
   requests or retry a superseded request; preserve its exact correlation and
   follow the existing reply contract for a pending one. `unknown` requires
   reconciliation, not an ordinary queued-reply fallback.
+
+## Optional per-step inbox hook
+
+The bundled `plugins/opencode-inbox/` is **opt-in**. Nothing installs or enables
+it automatically. It targets OpenCode V2 / `@opencode/plugin` **2.2.5**;
+`SessionContext.sessionID` and `system` were checked against that SDK's
+`dist/promise/session.d.ts`. The documented `context` hook runs before agent-loop
+model calls, including tool-driven continuations, not just at turn start:
+<https://opencode.ai/v2/docs/build/plugins/server#model-requests>.
+
+To enable, add the bundled directory's **absolute path** to the `plugins` array
+in your OpenCode configuration (replace the example path with your installation):
+
+```jsonc
+{
+  "plugins": [
+    { "package": "/absolute/path/to/session-peers/plugins/opencode-inbox" }
+  ]
+}
+```
+
+Use OpenCode's normal configuration/plugin reload workflow. Roll back by removing
+that entry and reloading. Keep the whole skill directory together: the plugin
+resolves `../../scripts/peers.py` relative to itself. The server needs `python3`
+and the authenticated `opencode` CLI on PATH and the same `CODEX_HOME` as the
+session's handled-marker writes. No credentials or OpenCode database are read.
+Do not install/reload it into someone else's active runtime without authorization.
+
+- Each context hook calls `peers.py inbox context --json` with the **hook event's**
+  session identity, never an ambient fallback. Python verifies the identity and
+  uses the existing inbox/ledger validation. Unknown event shapes are inert.
+- The outgoing system context contains only counts and up to five validated
+  pending sender/message ID pairs and five most-recent handled pairs. No peer
+  body, title or malformed sender metadata is promoted into system instructions.
+  Malformed senders still count as pending: inspect them with `inbox list`.
+- It reminds the model to read and handle pending input before decisions. Recent
+  handled pairs tell it **not to repeat actions or acknowledgments** on native
+  replay. It never removes a native message, edits history, writes a handled
+  marker, or claims that a message was acted on. A replay outside the bounded
+  recent list still needs `inbox status SENDER MESSAGE_ID`.
+- A two-second per-session cache coalesces overlapping steps; new messages or
+  handled writes may take that long to appear. Native queues have no supported
+  filesystem mtime to cache against. In-memory cache is capped at 128 sessions
+  and lost on reload. No polling timer or daemon runs between model calls.
+- The Python subprocess and CLI descendants get a two-second process-group
+  deadline on macOS/Linux. Failure never rejects the model call: a fixed manual
+  checkpoint warning appears at most once per session per minute. Error output
+  is not injected. A failed read is not reported as an empty inbox.
+- It does **not wake an idle session**. Use the existing consented reply wake or
+  authorized buddy binding; queue acceptance alone still proves no model receipt.
+- Test with `node --test skills/session-peers/plugins/opencode-inbox/core.test.mjs`
+  from the source repository root, plus the full Python regression suite. These
+  tests are not a live plugin-load or busy/idle delivery canary. Verify those in
+  an authorized disposable session before relying on automatic checkpoints.
 
 ## Consented reply wake
 

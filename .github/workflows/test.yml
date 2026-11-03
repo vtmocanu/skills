@@ -46,6 +46,9 @@ jobs:
       - name: Test skills/skill-maker/scripts/refresh_skills.py
         run: python3 skills/skill-maker/scripts/test_refresh_skills.py
 
+      - name: Test optional OpenCode inbox hook
+        run: node --test skills/session-peers/plugins/opencode-inbox/core.test.mjs
+
   peers-tests:
     # setup-python publishes no 3.9 build for ubuntu-latest (26.04); 24.04 still has it.
     runs-on: ${{ matrix.python-version == '3.9' && 'ubuntu-24.04' || 'ubuntu-latest' }}
