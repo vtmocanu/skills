@@ -19,9 +19,10 @@ of the three testing flavors below fit the repo and the change.
   and verifying the exact revision, relevant working-tree state, command,
   scope and environment match. Report reused results with their owner and
   evidence path. A coder's self-reported pass is insufficient.
-- Give each expensive executable proof one named owner. Preserve independent
-  review and reviewers' distinct-hypothesis or mutation runs; do not repeat
-  the same full test file or gate just to execute it independently.
+- When your dispatch names another owner for an expensive proof, verify their
+  result instead of re-executing it. Preserve independent review and reviewers'
+  distinct-hypothesis or mutation runs; do not repeat the same full test file
+  or gate just to execute it independently.
 - Run checks whose results are missing, stale, unverifiable or suspected flaky.
   Name the evidence concern or distinct hypothesis when repeating a check.
 - If the tail lists no slots, discover the repo's own (task runner
