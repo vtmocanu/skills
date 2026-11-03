@@ -65,6 +65,9 @@ def _register_inbox(sub):
     listing.add_argument("--all", action="store_true", help="include locally handled messages")
     listing.add_argument("--json", action="store_true")
     listing.set_defaults(func=sp_inbox.cmd_inbox)
+    context = commands.add_parser("context", help="bounded read-only summary for the optional OpenCode hook")
+    context.add_argument("--json", action="store_true")
+    context.set_defaults(func=sp_inbox.cmd_inbox)
     for name in ("handled", "status"):
         command = commands.add_parser(name, help="mark or check a local handled sender/message pair")
         command.add_argument("sender", help="typed sender address from the message metadata")

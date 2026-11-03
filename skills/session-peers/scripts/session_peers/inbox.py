@@ -156,10 +156,29 @@ def human_text(text):
     return text[:HUMAN_TEXT_LIMIT] + ("\n[truncated; use --json]" if len(text) > HUMAN_TEXT_LIMIT else "")
 
 
+def context_summary(sid):
+    """IDs only: never promote peer bodies or malformed metadata into instructions.
+
+    Include recent ledger pairs even after native delivery removes the queued item.
+    This is an action-deduplication hint, not queue consumption or acknowledgment.
+    """
+    items = list_items(sid)
+    pending = [{"from": row["from"], "message_id": row["message_id"]}
+               for row in items if row["sender_well_formed"]][:5]
+    rows = sorted((row for row in _ledger(sid)
+                   if row["handled_at"] > time.time() - HANDLED_TTL),
+                  key=lambda row: row["handled_at"], reverse=True)[:5]
+    return {"pending_count": len(items), "pending": pending,
+            "recently_handled": [{"from": row["from"], "message_id": row["message_id"]}
+                                 for row in rows]}
+
+
 def cmd_inbox(args):
     try:
         sid = own_session(args)
-        if args.inbox_cmd == "handled":
+        if args.inbox_cmd == "context":
+            result = context_summary(sid)
+        elif args.inbox_cmd == "handled":
             mark_handled(sid, args.sender, args.message_id)
             result = {"from": args.sender, "message_id": args.message_id, "handled": True}
         elif args.inbox_cmd == "status":
