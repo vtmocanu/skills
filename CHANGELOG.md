@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.49.0] - 2026-11-03
+
 ### Added
 
 - `session-peers`: a bare "buddy" message (or "find/bind your buddy"), typically right after the user names or renames the session, now triggers the skill and runs bare `buddy set`, which binds the peer sharing this session's name, before asking for a name; a failed or ambiguous bind still goes to the user.
