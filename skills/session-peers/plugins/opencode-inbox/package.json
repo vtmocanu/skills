@@ -3,8 +3,5 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "exports": "./index.mjs",
-  "peerDependencies": {
-    "@opencode/plugin": "2.2.5"
-  }
+  "exports": "./index.mjs"
 }

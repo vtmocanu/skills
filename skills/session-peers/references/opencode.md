@@ -112,6 +112,8 @@ it automatically. It targets OpenCode V2 / `@opencode/plugin` **2.2.5**;
 `dist/promise/session.d.ts`. The documented `context` hook runs before agent-loop
 model calls, including tool-driven continuations, not just at turn start:
 <https://opencode.ai/v2/docs/build/plugins/server#model-requests>.
+The entry exports the plain plugin definition: SDK 2.2.5's `Plugin.define` is an
+identity helper, so no bare SDK import or npm dependency installation is needed.
 
 To enable, add the bundled directory's **absolute path** to the `plugins` array
 in your OpenCode configuration (replace the example path with your installation):
