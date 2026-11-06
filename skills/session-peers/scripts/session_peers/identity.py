@@ -207,7 +207,8 @@ def _thread_liveness(thread):
 def describe_candidates(name, kinds=None, exclude=None):
     """One line per session ``name`` could mean: typed ID, kind, liveness.
 
-    Live first, then unverified, then dead, newest first inside each group.
+    Live first, then recent OpenCode sessions, then unverified, then dead,
+    newest first inside each group.
     Nothing is capped: the caller needs every typed ID to pick one. A Codex
     shim's registry record is the same peer as its thread and merges into the
     `codex:<uuid>` line.

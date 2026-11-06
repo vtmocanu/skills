@@ -192,9 +192,9 @@ still resolves as before.
 | Claude session | `send`/`ask`/`dispatch` to a Claude session (`wait` is allowed) | Refused: use native `SendMessage`. The name is advised only when verified unique (complete registry read, no live or unverified namesake); otherwise the advice says to `/rename` or pick it in `ListAgents`. The typed ID is shown for disambiguation only; never pass it to `SendMessage`. |
 
 The sender counts as a Claude session when `CLAUDE_CODE_SESSION_ID` or
-`CLAUDE_CODE_MESSAGING_SOCKET` names one and no valid Codex id
-(`--from-thread`, `CODEX_THREAD_ID`, `CODEX_SESSION_ID`) or OpenCode id is
-present; a valid Codex id makes it a Codex sender. Beside a Claude session, an
+`CLAUDE_CODE_MESSAGING_SOCKET` is set and there is no valid Codex id
+(`--from-thread`, `CODEX_THREAD_ID`, `CODEX_SESSION_ID`) and no OpenCode id
+without explicit `--from-*` flags; a valid Codex id makes it a Codex sender. Beside a Claude session, an
 invalid Codex id is refused (rc 2): the sender cannot be attributed, nothing is
 sent. An OpenCode id beside a Claude or Codex one keeps the existing refusal to
 pass explicit `--from-*` flags. `ask`, `dispatch` and `wait` validate
@@ -203,7 +203,7 @@ pass explicit `--from-*` flags. `ask`, `dispatch` and `wait` validate
 Not covered: a native `SendMessage` aimed at a Codex shim never passes through
 `peers.py`, so it cannot be intercepted. It is asynchronous and uncorrelated,
 and there is no correlated equivalent until #88. The CLI tests prove which
-advice is emitted, not that native `SendMessage` accepts the advised name. The
-only measurement, in [spike-checklist.md](spike-checklist.md), is a by-name
-`SendMessage` to a Codex shim's registry record; by-name delivery to a Claude
-session relies on the same registry and is not separately measured.
+advice is emitted, not that native `SendMessage` accepts the advised name.
+[spike-checklist.md](spike-checklist.md) measures a by-name `SendMessage` to a
+Codex shim's registry record only; by-name delivery to a Claude session is not
+separately measured.
