@@ -58,6 +58,11 @@ def _typed(runtime, ident):
     return "%s:%s" % (_RUNTIME_KIND[runtime], ident)
 
 
+def _shown(runtime, ident):
+    """`_typed` with the id escaped by `display_id` (it may come from a hostile record)."""
+    return _typed(runtime, sp_identity.display_id(_RUNTIME_KIND[runtime], ident))
+
+
 def _claude_indicator():
     return bool(os.environ.get("CLAUDE_CODE_SESSION_ID") or os.environ.get("CLAUDE_CODE_MESSAGING_SOCKET"))
 
@@ -161,6 +166,11 @@ def _wait_for_codex(args, ident):
     return head + "is not live, so no status can be published; there is no equivalent."
 
 
+def _plain_name(name):
+    """True for a peer name with no newline (the shared regex lets a trailing one through)."""
+    return sp_protocol.valid_peer_name(name) and "\n" not in str(name)
+
+
 def _verified_name(rec):
     """(name or None, reason): a SendMessage name proven unique, else why not.
 
@@ -168,7 +178,7 @@ def _verified_name(rec):
     unverifiable-contender detail.
     """
     name = rec.get("name")
-    if not sp_protocol.valid_peer_name(name):
+    if not _plain_name(name):
         return None, "absent"
     records, error = sp_claude.read_claude_records_checked()
     if error is not None:
@@ -193,7 +203,7 @@ def _claude_to_claude(verb, rec):
     sid = rec.get("sessionId")
     name, reason = _verified_name(rec)
     shown = sp_identity.display_id("cc", sid)
-    label = rec.get("name") if sp_protocol.valid_peer_name(rec.get("name")) else "cc:%s" % shown
+    label = rec.get("name") if _plain_name(rec.get("name")) else "cc:%s" % shown
     if name:
         how = 'Use SendMessage with to: "%s".' % name
     elif reason in ("absent", "duplicate"):
@@ -370,7 +380,7 @@ def verify(args, runtime, ident):
         return None
     sys.stderr.write(
         "error: %s changed between the route check and delivery (checked %s, now %s); nothing was sent\n"
-        % (checked["target"], _typed(checked["runtime"], checked["id"]), _typed(runtime, ident))
+        % (checked["target"], _shown(checked["runtime"], checked["id"]), _shown(runtime, ident))
     )
     return 1
 

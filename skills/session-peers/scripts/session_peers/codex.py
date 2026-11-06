@@ -14,6 +14,20 @@ from . import claude as sp_claude, process as sp_process, storage as sp_storage
 # --------------------------------------------------------------------------
 
 
+def _plain_id(ident):
+    """``ident`` for an error message: raw when a clean UUID, else repr-quoted."""
+    ok = sp_runtime.is_uuid(ident) and "\n" not in str(ident)
+    return str(ident) if ok else repr(ident)
+
+
+def _plain_name(name):
+    """A thread name for an error message: raw only when it is a plain peer name."""
+    if not name:
+        return "unnamed"
+    ok = sp_protocol.valid_peer_name(name) and "\n" not in str(name)
+    return str(name) if ok else repr(name)
+
+
 def find_state_db(sqlite_home=None):
     """The state_*.sqlite whose `threads` schema we recognise, or None.
 
@@ -436,7 +450,7 @@ def resolve_thread(target, require_live=True, exclude=None):
         matches = live
     if len(matches) > 1:
         candidates = ", ".join(
-            "%s (%s)" % (t["id"], t.get("name") or "unnamed")
+            "%s (%s)" % (_plain_id(t["id"]), _plain_name(t.get("name")))
             for t in matches
         )
         raise ResolveAmbiguous(

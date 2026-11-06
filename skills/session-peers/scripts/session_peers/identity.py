@@ -184,7 +184,7 @@ _LABELS = {"cc": "Claude session", "codex": "Codex thread", "oc": "OpenCode sess
 def display_id(kind, ident):
     """``ident`` as printed in advice: raw for a well-formed id, else ``%r``-quoted."""
     ok = sp_opencode.is_session_id(ident) if kind == "oc" else sp_runtime.is_uuid(ident)
-    return str(ident) if ok else repr(ident)
+    return str(ident) if ok and "\n" not in str(ident) else repr(ident)
 
 
 def dead_only_duplicates(name, exclude=None):

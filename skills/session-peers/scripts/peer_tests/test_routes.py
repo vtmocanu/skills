@@ -694,6 +694,7 @@ class TestRoutesConsistency(RoutesBase):
             ("wait", "--for", "oc:oc-lead", "--timeout", "1"),
         ):
             with self.subTest(verb=argv[0]):
+                self.oc_log.unlink(missing_ok=True)
                 with self.swapped(sp_opencode, "resolve_session", "oc-lead", "oc-buddy"):
                     self.refused(expected, *argv, code=1)
 
@@ -776,3 +777,159 @@ class TestRoutesStillDeliver(RoutesBase):
         rc, out, err = self.cli("wait", "--for", "cc:%s" % tid, "--timeout", "2")
         self.assertEqual(rc, 0, err)
         self.assertIn("codex-uzi is idle", out)
+
+
+class TestRoutesHostileText(RoutesBase):
+    """Ids, names and paths read from state files never reach advice unescaped."""
+
+    NEWLINE_ID = "dead\nbeef; touch /tmp/pwned"
+    NEWLINE_REPR = r"'dead\nbeef; touch /tmp/pwned'"
+    QUOTABLE_ID = "deadbeef; touch /tmp/pwned #"
+
+    def hostile_threads(self, specs):
+        """specs: (id, name, updated_at); live threads whose rollout files get safe names."""
+        rows = []
+        for i, (tid, name, updated) in enumerate(specs):
+            rollout = self.make_rollout("hostile-%d.jsonl" % i)
+            self.set_holder(rollout)
+            rows.append({"id": tid, "name": name, "rollout_path": str(rollout), "updated_at": updated})
+        self.make_state_db(rows)
+
+    # describe_candidates
+
+    def test_a_codex_candidate_with_a_hostile_id_is_listed_escaped(self):
+        good = new_uuid()
+        self.hostile_threads([(self.NEWLINE_ID, "dup", "2026-09-08T12:00:00Z"), (good, "dup", "2026-09-07T12:00:00Z")])
+        self.refused(
+            'error: "dup" is ambiguous; pick one typed ID:\n'
+            "  codex:%s  Codex thread  live\n"
+            "  codex:%s  Codex thread  live" % (self.NEWLINE_REPR, good),
+            "send", "--to", "dup", "--message", "hi",
+        )
+
+    def test_a_uuid_with_a_trailing_newline_is_listed_escaped(self):
+        good, odd = new_uuid(), new_uuid()
+        self.hostile_threads([(odd + "\n", "dup", "2026-09-08T12:00:00Z"), (good, "dup", "2026-09-07T12:00:00Z")])
+        self.refused(
+            'error: "dup" is ambiguous; pick one typed ID:\n'
+            "  codex:'%s\\n'  Codex thread  live\n"
+            "  codex:%s  Codex thread  live" % (odd, good),
+            "send", "--to", "dup", "--message", "hi",
+        )
+
+    def test_a_claude_candidate_with_a_hostile_id_is_listed_escaped(self):
+        good = new_uuid()
+        listener, _rec = self.add_listener(name="dup", session_id=self.NEWLINE_ID)
+        self.hostile_threads([(good, "dup", "2026-09-08T12:00:00Z")])
+        self.refused(
+            "error: Claude session 'dup' has no UUID session id; pick the kind\n"
+            "Candidates:\n"
+            "  codex:%s  Codex thread  live\n"
+            "  cc:%s  Claude session  live" % (good, self.NEWLINE_REPR),
+            "send", "--to", "dup", "--message", "hi", listeners=[listener],
+        )
+
+    # No OpenCode case: sp_opencode.recent_sessions rejects a record whose id fails
+    # is_session_id ("session.list returned an invalid session record"), so a hostile
+    # OpenCode id never reaches describe_candidates.
+
+    # wrong-verb advice
+
+    def test_ask_to_a_thread_with_a_hostile_id_prints_it_escaped(self):
+        self.hostile_threads([(self.NEWLINE_ID, "cx", "2026-09-08T12:00:00Z")])
+        self.as_codex()
+        for target in ("cx", "codex:cx"):
+            with self.subTest(target=target):
+                self.refused(
+                    request_refusal("ask", self.NEWLINE_REPR) + NOT_EQUIVALENT,
+                    "ask", "--to", target, "--message", "q",
+                )
+
+    def test_wait_for_a_live_thread_without_a_shim_escapes_the_id_and_quotes_the_commands(self):
+        # sp_codex.resolve_thread(ident) only finds a thread by name or UUID prefix, so a real
+        # non-UUID id never survives to the restart line. The patched resolver stands in for a
+        # resolver that accepts the id the route check already resolved; shlex.quote is the
+        # only thing that stops this id from running a second command.
+        self.hostile_threads([(self.QUOTABLE_ID, "cx", "2026-09-08T12:00:00Z")])
+        real = sp_codex.resolve_thread
+
+        def resolve(target, *args, **kwargs):
+            if target == self.QUOTABLE_ID:
+                return {"id": target, "live": True}
+            return real(target, *args, **kwargs)
+
+        for target in ("cx", "codex:cx"):
+            with self.subTest(target=target), mock.patch.object(sp_codex, "resolve_thread", side_effect=resolve):
+                self.refused(
+                    "error: wait reads a Claude-registry status; Codex thread codex:'%s' has no "
+                    "running shim, so no status is published. Run:\n"
+                    "  peers.py restart '%s'\n"
+                    "  peers.py wait --for 'cc:%s' --timeout 1 --state idle"
+                    % (self.QUOTABLE_ID, self.QUOTABLE_ID, self.QUOTABLE_ID),
+                    "wait", "--for", target, "--timeout", "1",
+                )
+
+    # codex multi-match message
+
+    def test_a_multi_match_message_escapes_thread_names_and_ids(self):
+        a, b = "deadbeef-0000-4000-8000-000000000001", "deadbeef\nforged line"
+        bad = "x\x1b[2K\rerror: forged"
+        self.hostile_threads([(a, bad, "2026-09-08T12:00:00Z"), (b, "ok-name", "2026-09-07T12:00:00Z")])
+        rc, out, err = self.cli("send", "--to", "codex:deadbeef", "--message", "q")
+        self.assertEqual(rc, 1, err)
+        self.assertEqual(out, "")
+        self.assertEqual(
+            err,
+            "error: 'deadbeef' matches 2 live threads (%s ('x\\x1b[2K\\rerror: forged'), 'deadbeef\\nforged line' (ok-name)); "
+            "register by UUID instead\n"
+            "pick one typed ID:\n"
+            "  codex:%s  Codex thread  live\n"
+            "  codex:'deadbeef\\nforged line'  Codex thread  live\n" % (a, a),
+        )
+        self.assertNotIn("\x1b", err)
+        self.assertNotIn("\r", err)
+
+    # trailing newline
+
+    def test_a_session_name_with_a_trailing_newline_is_not_a_sendmessage_address(self):
+        sid = new_uuid()
+        listener, _rec = self.add_listener(name="cc-main\n", session_id=sid)
+        self.as_claude_session()
+        how = (
+            "It has no unique verified session name, so SendMessage cannot be addressed "
+            "safely: have it /rename to a unique name, or pick it in ListAgents."
+        )
+        self.refused(
+            claude_refusal("cc:%s" % sid, how, sid),
+            "send", "--to", "cc:%s" % sid, "--message", "q", listeners=[listener],
+        )
+
+    # registry path
+
+    def test_an_indeterminate_registry_record_path_is_escaped(self):
+        sid = new_uuid()
+        listener, _rec = self.add_listener(name="cc-main", session_id=sid)
+        (self.sessions / "bad\x1b[2K\rname.json").write_text("{}")
+        self.as_claude_session()
+        rc, out, err = self.cli("send", "--to", "cc:%s" % sid, "--message", "q")
+        self.assertEqual(rc, 2, err)
+        self.assertEqual(out, "")
+        self.assertIn("(indeterminate registry record: '", err)
+        self.assertIn("bad\\x1b[2K\\rname.json')", err)
+        self.assertNotIn("\x1b", err)
+        self.assertNotIn("\r", err)
+        self.assertEqual(err.count("\n"), 1)
+        self.nothing_sent(listener)
+
+    # delivery mismatch
+
+    def test_a_delivery_mismatch_prints_a_hostile_resolved_id_escaped(self):
+        t1 = new_uuid()
+        self.hostile_threads([(t1, "cx-a", "2026-09-07T12:00:00Z"), (self.NEWLINE_ID, "cx-b", "2026-09-07T12:00:00Z")])
+        self.as_codex()
+        with TestRoutesConsistency.swapped(self, sp_codex, "resolve_thread", "cx-a", "cx-b"):
+            self.refused(
+                "error: codex:cx-a changed between the route check and delivery "
+                "(checked codex:%s, now codex:%s); nothing was sent" % (t1, self.NEWLINE_REPR),
+                "send", "--to", "codex:cx-a", "--message", "q", code=1,
+            )
