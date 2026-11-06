@@ -131,7 +131,7 @@ class TestRoutesBareNames(RoutesBase):
             "send", "--to", "codex-uzi", "--message", "hi",
         )
 
-    def test_a_thread_id_that_is_not_a_uuid_is_quoted_in_the_command(self):
+    def test_a_thread_id_that_is_not_a_uuid_gets_no_command(self):
         rollout = self.make_rollout("odd.jsonl")
         self.set_holder(rollout)
         odd = "deadbeef; touch /tmp/pwned #"
@@ -139,8 +139,7 @@ class TestRoutesBareNames(RoutesBase):
         self.as_codex()
         self.refused(
             'error: --to needs a typed target; "cx" is Codex thread codex:%r (unverified). Run:\n'
-            "  peers.py send --to 'codex:%s' --message-file <PATH>\n"
-            "  (write the message to PATH)" % (odd, odd),
+            "  (no command is printed: the target's ID is not a well-formed typed ID)" % (odd,),
             "send", "--to", "cx", "--message", "hi",
         )
 
@@ -829,9 +828,20 @@ class TestRoutesHostileText(RoutesBase):
             "send", "--to", "dup", "--message", "hi", listeners=[listener],
         )
 
-    # No OpenCode case: sp_opencode.recent_sessions rejects a record whose id fails
-    # is_session_id ("session.list returned an invalid session record"), so a hostile
-    # OpenCode id never reaches describe_candidates.
+    def test_an_opencode_id_with_a_trailing_newline_is_listed_escaped(self):
+        # is_session_id accepts "ses_abcdefgh12\n" (the shared regex's $ matches before a final
+        # newline), so this id reaches the oc row of describe_candidates.
+        odd, now = "ses_abcdefgh12\n", time.time() * 1000
+        self.set_oc(sessions=[
+            oc_session(odd, "dup", updated_ms=now),
+            oc_session(OC_B, "dup", updated_ms=now - 5000),
+        ])
+        self.refused(
+            'error: "dup" is ambiguous; pick one typed ID:\n'
+            "  oc:%r  OpenCode session  recent (idle)\n"
+            "  oc:%s  OpenCode session  recent (idle)" % (odd, OC_B),
+            "send", "--to", "dup", "--message", "hi",
+        )
 
     # wrong-verb advice
 
@@ -845,11 +855,28 @@ class TestRoutesHostileText(RoutesBase):
                     "ask", "--to", target, "--message", "q",
                 )
 
-    def test_wait_for_a_live_thread_without_a_shim_escapes_the_id_and_quotes_the_commands(self):
+    def test_a_bare_name_with_a_control_character_id_gets_no_command_and_no_raw_bytes(self):
+        hostile = "dead\nbeef\x1b[2K\rforged"
+        self.hostile_threads([(hostile, "cx", "2026-09-08T12:00:00Z")])
+        self.as_codex()
+        rc, out, err = self.cli("send", "--to", "cx", "--message", "hi")
+        self.assertEqual(rc, 2, err)
+        self.assertEqual(out, "")
+        self.assertEqual(
+            err,
+            'error: --to needs a typed target; "cx" is Codex thread codex:%r (unverified). Run:\n'
+            "  (no command is printed: the target's ID is not a well-formed typed ID)\n" % (hostile,),
+        )
+        self.assertNotIn("\x1b", err)
+        self.assertNotIn("\r", err)
+        self.assertEqual(err.count("\n"), 2)
+        self.nothing_sent()
+
+    def test_wait_for_a_live_thread_without_a_shim_escapes_the_id_and_prints_no_command(self):
         # sp_codex.resolve_thread(ident) only finds a thread by name or UUID prefix, so a real
         # non-UUID id never survives to the restart line. The patched resolver stands in for a
-        # resolver that accepts the id the route check already resolved; shlex.quote is the
-        # only thing that stops this id from running a second command.
+        # resolver that accepts the id the route check already resolved; the id is not a
+        # well-formed typed ID, so neither the restart nor the wait command is printed.
         self.hostile_threads([(self.QUOTABLE_ID, "cx", "2026-09-08T12:00:00Z")])
         real = sp_codex.resolve_thread
 
@@ -863,9 +890,8 @@ class TestRoutesHostileText(RoutesBase):
                 self.refused(
                     "error: wait reads a Claude-registry status; Codex thread codex:'%s' has no "
                     "running shim, so no status is published. Run:\n"
-                    "  peers.py restart '%s'\n"
-                    "  peers.py wait --for 'cc:%s' --timeout 1 --state idle"
-                    % (self.QUOTABLE_ID, self.QUOTABLE_ID, self.QUOTABLE_ID),
+                    "  (no command is printed: the target's ID is not a well-formed typed ID)"
+                    % (self.QUOTABLE_ID,),
                     "wait", "--for", target, "--timeout", "1",
                 )
 

@@ -119,10 +119,22 @@ def _wait_flag(verb):
     return "--for" if verb == "wait" else "--to"
 
 
-def _run_lines(args, verb, typed, extra=()):
-    """The indented commands to run: ``extra`` first, then the verb with the other options kept."""
+NO_COMMAND = "  (no command is printed: the target's ID is not a well-formed typed ID)"
+
+
+def _run_lines(args, verb, kind, ident, restart=False):
+    """The indented commands to run, with the other options kept.
+
+    shlex.quote does not escape control characters, so a command is built only
+    when ``ident`` is one `identity.display_id` would print raw; otherwise the
+    one-line NO_COMMAND notice stands in. ``restart`` adds the restart line first.
+    """
+    if not (isinstance(ident, str) and sp_identity.display_id(kind, ident) == ident):
+        return NO_COMMAND
     options, note = _options(args, verb)
-    lines = list(extra) + [" ".join(["peers.py", verb, _wait_flag(verb), shlex.quote(typed)] + options)]
+    typed = "%s:%s" % (kind, ident)
+    extra = ["peers.py restart %s" % shlex.quote(ident)] if restart else []
+    lines = extra + [" ".join(["peers.py", verb, _wait_flag(verb), shlex.quote(typed)] + options)]
     if note:
         lines.append("(write the message to PATH)")
     return "\n".join("  " + line for line in lines)
@@ -154,15 +166,13 @@ def _shim_running(ident):
 def _wait_for_codex(args, ident):
     head = "error: wait reads a Claude-registry status; Codex thread codex:%s " % sp_identity.display_id("codex", ident)
     if _shim_running(ident):
-        return head + "publishes it through its shim. Run:\n" + _run_lines(args, "wait", "cc:" + ident)
+        return head + "publishes it through its shim. Run:\n" + _run_lines(args, "wait", "cc", ident)
     try:
         thread = sp_codex.resolve_thread(ident, require_live=False)
     except sp_codex.ResolveError as exc:
         raise _Refusal(1, "error: %s" % exc)
     if thread.get("live") is True:
-        return head + "has no running shim, so no status is published. Run:\n" + _run_lines(
-            args, "wait", "cc:" + ident, extra=("peers.py restart %s" % shlex.quote(ident),)
-        )
+        return head + "has no running shim, so no status is published. Run:\n" + _run_lines(args, "wait", "cc", ident, restart=True)
     return head + "is not live, so no status can be published; there is no equivalent."
 
 
@@ -336,14 +346,13 @@ def _route(args, verb, value):
     refusal = _verdict(args, verb, sender, tgt)
     if refusal:
         raise _Refusal(2, refusal)
-    typed = _typed(tgt.runtime, tgt.ident)
     kind = {"claude": "cc", "codex": "codex", "opencode": "oc"}[tgt.runtime]
     raise _Refusal(
         2,
         'error: %s needs a typed target; "%s" is %s %s (%s). Run:\n%s'
         % (
             _wait_flag(verb), value, LABELS[kind], _typed(tgt.runtime, sp_identity.display_id(kind, tgt.ident)),
-            _liveness(tgt), _run_lines(args, verb, typed),
+            _liveness(tgt), _run_lines(args, verb, kind, tgt.ident),
         ),
     )
 
