@@ -318,7 +318,7 @@ class ChannelHistoryTests(ChannelBase):
         sp_topics.topic_post(topic, {}, text="one")
         log, _meta, _lock = sp_topics._topic_paths(topic)
         with open(log, "ab") as fh:
-            fh.write(json.dumps({"seq": 2, "ts": "2026-01-01T00:00:00.000Z", "text": "torn"}).encode())
+            fh.write(json.dumps({"seq": 2, "ts": sp_topics.sp_runtime.now_iso(), "text": "torn"}).encode())
         seen = sp_topics.topic_tail(topic, since=1)
         self.assertEqual((seen["entries"], seen["next"]), ([], 1))
         entry = sp_topics.topic_post(topic, {}, text="two")
