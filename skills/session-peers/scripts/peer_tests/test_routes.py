@@ -627,6 +627,42 @@ class TestRoutesClaudeToClaude(RoutesBase):
                     verb, "--to", "cc:%s" % sid, "--message", "q", *timeout(verb), listeners=[listener],
                 )
 
+    def test_a_target_restarted_under_another_pid_between_the_reads_gets_the_unverifiable_advice(self):
+        sid = new_uuid()
+        listener, rec = self.add_listener(name="cc-main", session_id=sid)
+        self.as_claude_session()
+        how = (
+            "Its session name cannot be verified as unique (its registry record changed while "
+            "it was checked), so SendMessage cannot be addressed safely: pick it in ListAgents "
+            "or have it /rename to a unique name."
+        )
+        real = sp_claude.read_claude_records_checked
+        restarted_pid = os.getppid()
+        self.assertNotEqual(restarted_pid, rec["pid"])
+
+        def snapshot():
+            records, error = real()
+            # Same sessionId and name, a different live pid: a restarted session.
+            out = [dict(r, pid=restarted_pid) if r.get("sessionId") == sid else r for r in records]
+            return out, error
+        sp_claude.read_claude_records_checked = snapshot
+        self.addCleanup(setattr, sp_claude, "read_claude_records_checked", real)
+        for verb in ("send", "ask", "dispatch"):
+            with self.subTest(verb=verb):
+                self.refused(
+                    claude_refusal("cc-main", how, sid, verb),
+                    verb, "--to", "cc:%s" % sid, "--message", "q", *timeout(verb), listeners=[listener],
+                )
+
+    def test_ask_to_a_codex_thread_from_a_mixed_opencode_and_claude_sender_cites_the_missing_request(self):
+        tid, _rollout = self.one_thread(name="codex-uzi")
+        self.as_opencode(OC_A)
+        self.as_claude_session()
+        self.refused(
+            request_refusal("ask", tid) + NO_CORRELATED_CODEX + NOT_EQUIVALENT,
+            "ask", "--to", "codex:%s" % tid, "--message", "q", "--timeout", "1",
+        )
+
     def test_a_mixed_opencode_and_claude_sender_is_sent_to_sendmessage_for_a_claude_target(self):
         listener, rec = self.add_listener(name="cc-main", session_id=new_uuid())
         self.as_opencode(OC_A)

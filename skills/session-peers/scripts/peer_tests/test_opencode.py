@@ -475,6 +475,14 @@ class OpenCodeSendTests(OpenCodeBase):
         time.sleep(0.2)
         self.assertEqual(listener.of_type("user"), [])
 
+    def test_opencode_sender_beside_a_claude_identity_sending_to_opencode_is_refused(self):
+        self.as_opencode(OC_A)
+        os.environ["CLAUDE_CODE_SESSION_ID"] = new_uuid()
+        rc, _out, err = self.cli("send", "--to", "oc:" + OC_B, "--message", "x")
+        self.assertEqual(rc, 2, err)
+        self.assertIn("pass explicit --from-* flags", err)
+        self.assertEqual(self.oc_calls("session.prompt"), [])
+
     def test_opencode_sender_the_service_cannot_confirm_is_refused(self):
         listener, _rec = self.add_listener(name="cc-main", session_id="s1")
         self.as_opencode("ses_notaknownsession0000")

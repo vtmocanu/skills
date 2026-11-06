@@ -189,7 +189,7 @@ still resolves as before.
 | --- | --- | --- |
 | any | `ask`/`dispatch` to a Codex thread (`codex:`, a `cc:` shim, or a Codex buddy) | Refused. `send` is asynchronous (no request id, single-use reply or await) and is not an equivalent. For a Claude sender it also cites #88: no correlated Claude-to-Codex request exists yet. |
 | any | `wait` on a Codex thread | With a running shim, run `wait --for cc:<uuid>`. Live thread without a shim: `peers.py restart <uuid>` first (it keeps the reply budget, unlike `up`), then that `wait`. Dead thread: no equivalent. |
-| Claude session | `send`/`ask`/`dispatch` to a Claude session (`wait` is allowed) | Refused: use native `SendMessage`. The name is advised only when verified unique (complete registry read, no live or unverified namesake); otherwise the advice says to `/rename` or pick it in `ListAgents`. The typed ID is shown for disambiguation only; never pass it to `SendMessage`. |
+| Claude session | `send`/`ask`/`dispatch` to a Claude session (`wait` is allowed) | Refused: use native `SendMessage`. The name is advised only when verified unique (complete registry read, no live or unverified namesake, and the target still holds that name); otherwise the advice says to `/rename` or pick it in `ListAgents`. The typed ID is shown for disambiguation only; never pass it to `SendMessage`. |
 
 The sender counts as a Claude session when `CLAUDE_CODE_SESSION_ID` or
 `CLAUDE_CODE_MESSAGING_SOCKET` is set and there is no valid Codex id
@@ -198,7 +198,7 @@ makes it a Codex sender. Beside a Claude session, an invalid Codex id is
 refused (rc 2): the sender cannot be attributed, nothing is sent. An OpenCode id
 beside a Claude or Codex one, without explicit `--from-*` flags, cannot be
 attributed: with a Claude variable set it is treated as a Claude session for
-the table above, otherwise it keeps the existing refusal to pass explicit
+the table above; any other route keeps the existing refusal to pass explicit
 `--from-*` flags. `ask`, `dispatch` and `wait` validate `--timeout` before the
 route check.
 

@@ -184,8 +184,10 @@ def _plain_name(name):
 def _verified_name(rec):
     """(name or None, reason): a SendMessage name proven unique, else why not.
 
-    reason is "absent" (no usable name), "duplicate", or an incomplete-read /
-    unverifiable-contender detail.
+    reason is "absent" (no usable name), "duplicate", "its registry record
+    changed while it was checked" (no live record still holds the target's
+    sessionId, pid and name), or an incomplete-read / unverifiable-contender
+    detail.
     """
     name = rec.get("name")
     if not _plain_name(name):
