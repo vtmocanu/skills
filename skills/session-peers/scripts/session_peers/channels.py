@@ -1100,6 +1100,92 @@ def _handover_mutator(me, target, label):
     return mutate
 
 
+def buddy_channel_key(owner):
+    """The channel key a lead's own buddy channel gets: ``buddy-`` and 12 hex of sha256 of its typed id."""
+    digest = hashlib.sha256(sp_journal._norm(owner).encode("utf-8")).hexdigest()[:12]
+    return sp_constants.CHANNEL_BUDDY_PREFIX + digest
+
+
+def _latest_handover_to(key, owner):
+    """The ``ts`` of the newest ``channel.handover`` in ``key`` that moved it to ``owner``, else ''."""
+    entries = read_history(key, limit=sp_constants.TOPIC_TAIL_MAX)["entries"]
+    stamps = [
+        str(e.get("ts", "")) for e in entries
+        if e.get("kind") == EVENT_HANDOVER and (e.get("data") or {}).get("to") == owner
+    ]
+    return max(stamps) if stamps else ""
+
+
+def find_buddy_channel(owner):
+    """The key of the buddy channel ``owner`` (a typed id) manages, or None.
+
+    Rule: (1) the channel at ``buddy_channel_key(owner)`` when ``owner`` owns it;
+    else (2) among ``kind == "buddy"`` channels ``owner`` owns, the one whose latest
+    ``channel.handover`` to ``owner`` is newest, ties and channels never handed
+    over ordered by ``created_at`` and then key.
+    """
+    own = read_channel(buddy_channel_key(owner))
+    if own is not None and own["owner"] == owner and own["kind"] == "buddy":
+        return own["key"]
+    best, best_rank = None, None
+    for rec in list_channels():
+        if rec["kind"] != "buddy" or rec["owner"] != owner:
+            continue
+        rank = (_latest_handover_to(rec["key"], owner), str(rec.get("created_at", "")), rec["key"])
+        if best_rank is None or rank > best_rank:
+            best, best_rank = rec["key"], rank
+    return best
+
+
+def buddy_channel_add(owner, buddy):
+    """Add ``buddy`` to ``owner``'s buddy channel, creating it on first use; returns its key.
+
+    Takes only channel locks, so call it with no buddy lock held.
+    """
+    key = find_buddy_channel(owner)
+    if key is None:
+        try:
+            create_channel(
+                buddy_channel_key(owner), owner, [], kind="buddy",
+                display="buddy · %s" % _successor_label(owner), reserved_ok=True)
+        except ChannelError:
+            if find_buddy_channel(owner) is None:  # a concurrent creator is fine
+                raise
+        key = find_buddy_channel(owner)
+        if key is None:
+            raise ChannelError("the buddy channel of %s could not be created" % owner)
+
+    def mutate(rec):
+        if rec["owner"] != owner:
+            raise ChannelError("#%s is no longer owned by this session" % rec["key"])
+        if buddy in rec["members"]:
+            return None
+        _check_member_cap(len(rec["members"]) + 1)
+        rec["members"].append(buddy)
+        return EVENT_JOINED, {"member": buddy}
+
+    change_membership(key, mutate, owner)
+    return key
+
+
+def buddy_channel_remove(owner, buddy):
+    """Remove ``buddy`` from ``owner``'s buddy channel; returns its key, or None when there is none."""
+    key = find_buddy_channel(owner)
+    if key is None:
+        return None
+
+    def mutate(rec):
+        if rec["owner"] != owner:
+            raise ChannelError("#%s is no longer owned by this session" % rec["key"])
+        if buddy not in rec["members"]:
+            return None
+        rec["members"].remove(buddy)
+        return EVENT_REMOVED, {"member": buddy}
+
+    change_membership(key, mutate, owner)
+    return key
+
+
 def cmd_handover(args):
     """`peers.py handover --to TYPED`: move the caller's channels to a successor.
 
