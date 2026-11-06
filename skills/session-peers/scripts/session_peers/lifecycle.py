@@ -10,6 +10,7 @@ import sys
 import time
 from . import protocol as sp_protocol, runtime as sp_runtime
 from . import codex as sp_codex, diagnostics as sp_diagnostics, process as sp_process, storage as sp_storage
+from . import identity as sp_identity
 
 def shim_code_status(thread_id, pid, installed_digest):
     """Unknown old/unreadable state is not evidence of stale running code."""
@@ -212,7 +213,7 @@ def cmd_up(args):
         try:
             thread = sp_codex.resolve_thread(args.target)
         except sp_codex.ResolveError as exc:
-            sys.stderr.write("error: %s\n" % exc)
+            sys.stderr.write("error: %s\n" % "\n".join([str(exc)] + sp_identity.ambiguity_report(exc, args.target)))
             return 1
         # A thread found under another CODEX_HOME is registered, budget-reset
         # and reconciled there, so its shim starts in the thread's own home.
@@ -245,7 +246,7 @@ def cmd_restart(args):
     try:
         thread = sp_codex.resolve_thread_prefer_live(args.target)
     except sp_codex.ResolveError as exc:
-        sys.stderr.write("error: %s\n" % exc)
+        sys.stderr.write("error: %s\n" % "\n".join([str(exc)] + sp_identity.ambiguity_report(exc, args.target)))
         return 1
     tid = thread["id"]
     with sp_storage.reconcile_lock():
@@ -273,7 +274,7 @@ def cmd_down(args):
             thread = {}
             tid = args.target if sp_runtime.is_uuid(args.target) else None
             if tid is None:
-                sys.stderr.write("error: %s\n" % exc)
+                sys.stderr.write("error: %s\n" % "\n".join([str(exc)] + sp_identity.ambiguity_report(exc, args.target)))
                 return 1
         # R2: stop and unregister under ONE hold of the reconcile lock. A bare
         # `up` landing between them would restart the still-registered thread,

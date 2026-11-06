@@ -329,20 +329,29 @@ class TestBuddyRouting(BuddyBase):
         self.assertTrue(wait_for(lambda: len(listener.of_type("user")) == 2))
 
     def test_ask_dispatch_and_wait_refuse_a_codex_buddy_and_send_nothing(self):
-        self.one_thread(name="fail-codex")
+        tid, _rollout = self.one_thread(name="fail-codex")
         owner_sid = new_uuid()
         self.assertEqual(self.buddy("cc:%s" % owner_sid, "set", "fail-codex")[0], 0)
         os.environ["CLAUDE_CODE_SESSION_ID"] = owner_sid
-        for argv in (
-            ("ask", "--to", "buddy", "--message", "q", "--from-thread", new_uuid()),
-            ("dispatch", "--to", "buddy", "--message", "q", "--from-thread", new_uuid()),
-            ("wait", "--for", "buddy", "--timeout", "1"),
+        request_advice = (
+            "error: %s cannot reach Codex thread codex:" + tid + ": correlated requests "
+            "reach only Claude Code and OpenCode peers. send is asynchronous and is not "
+            "an equivalent: it has no request id, single-use reply or await.\n"
+        )
+        wait_advice = (
+            "error: wait reads a Claude-registry status; Codex thread codex:" + tid
+            + " has no running shim, so no status is published. Run:\n"
+            "  peers.py restart " + tid + "\n"
+            "  peers.py wait --for cc:" + tid + " --timeout 1 --state idle\n"
+        )
+        for argv, advice in (
+            (("ask", "--to", "buddy", "--message", "q", "--from-thread", new_uuid()), request_advice % "ask"),
+            (("dispatch", "--to", "buddy", "--message", "q", "--from-thread", new_uuid()), request_advice % "dispatch"),
+            (("wait", "--for", "buddy", "--timeout", "1"), wait_advice),
         ):
             rc, _out, err = self.cli(*argv)
             self.assertEqual(rc, 2, argv)
-            self.assertIn(
-                "ask/dispatch/wait need a Claude or OpenCode buddy; use send (asynchronous)", err
-            )
+            self.assertEqual(err, advice)
         self.assertEqual(self.queue_calls(), [])
         self.assertEqual(os.listdir(sp_storage.request_dir()), [])
 

@@ -205,6 +205,8 @@ class OpenCodeReplyWakeTests(OpenCodeBase):
 
     def test_codex_alias_grant_matches_codex_reply_identity(self):
         tid, _rollout = self.one_thread()
+        # The route check resolves cc:<uuid> itself, so the shim's record must exist.
+        self.write_record(os.getpid(), "codex-uzi", tid, str(self.socks / "shim.sock"), entrypoint="codex")
         self.as_opencode()
         with mock.patch.object(sp_messaging, "_codex_shim_thread", return_value=tid):
             rc, out, err = self.cli("send", "--to", "cc:" + tid, "--message", "review",
