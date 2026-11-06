@@ -407,6 +407,7 @@ class BuddyChannelIdentityTests(BuddyChannelBase):
         self.assertEqual(rc, 0, err)
         self.assertNotIn("warning: buddy channel", err)
         rec = sp_channels.read_channel(key)
+        self.assertIsNotNone(rec)
         self.assertEqual(rec["owner"], lead)
         self.assertEqual(rec["members"], [lead, self.lead])
 
