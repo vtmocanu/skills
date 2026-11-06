@@ -21,5 +21,6 @@ Are we done here? Can we close this session? Decide and tell me, after checking:
 
   Never force a removal past git's own safety checks, except deleting a branch whose work the preservation test above has proven. Never touch the `main` worktree, stashes, remote branches, or anything another session or the user created. List what you removed.
 - **Outstanding work**: review this session for anything unfinished: partial edits, failed or skipped steps, open TODOs, loose ends.
+- **Channels**: only when your verdict is that the session can close, run `~/.agents/skills/session-peers/scripts/peers.py leave` to leave every session-peers channel and `#general`, and report its result. Skip it when anything is left to do, when the session stays open, or when session-peers is not installed.
 
-Then give me a plain verdict: can we close the session, or is there something left to do? Apart from that cleanup, do not commit, push, or change anything; report only.
+Then give me a plain verdict: can we close the session, or is there something left to do? Apart from that cleanup and the channel leave, do not commit, push, or change anything; report only.
