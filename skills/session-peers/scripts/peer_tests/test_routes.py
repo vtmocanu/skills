@@ -855,7 +855,7 @@ class TestRoutesConsistency(RoutesBase):
 class TestRoutesStillDeliver(RoutesBase):
     def setUp(self):
         super().setUp()
-        self.listener, self.rec = self.add_listener(name="cc-main", session_id="s1")
+        self.listener, self.rec = self.add_listener(name="cc-main", session_id=new_uuid())
 
     def test_send_ask_and_dispatch_from_a_codex_thread_still_reach_a_named_session(self):
         self.as_codex()

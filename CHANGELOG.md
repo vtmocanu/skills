@@ -6,8 +6,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `session-peers`: a private critical-message journal and explicit ACKs. `send --record` and `record --to` store a body under `~/.codex/session-peers/journal/` (0700/0600), every correlated `ask`/`dispatch` request and `reply` is journaled, and recipients fetch it with `inbox get`, list pending ones with `inbox journal`, and ACK with `ack`; `inbox acks` shows ACK and `replied`/`consumed` settlement state and `inbox handover` lets a successor given by full typed id read and ACK. Retention is a fixed 14-day age cap (nothing is kept longer) with a 16 MiB size cap (lowerable via `SESSION_PEERS_JOURNAL_MAX_BYTES`) that prunes only finished entries. Exit 75 (journal full) and exit 1 (refused or unavailable) before sending mean nothing was sent, while exit 1 after a reported transport failure leaves delivery unconfirmed; exit 76 means a journal update after a transport attempt failed, so read the printed transport result: on success the message went out or the reply was taken (do not resend), on a delivery failure delivery is unconfirmed (check the recipient before resending). The journal is not a record of all traffic, the recipient check is not confidentiality against the same OS user, and it covers process crashes only, not power loss.
+
 ### Changed
 
+- `session-peers`: `ask`, `dispatch` and `await` refuse (exit 2) an explicit `--from-thread` that differs from the environment's Codex thread when both are UUIDs; `send --from-thread` is unchanged.
 - `session-peers`: `send`, `ask`, `dispatch` and `wait` check the route first; prefix targets with `cc:`, `codex:` or `oc:`. `ask`/`dispatch` to a Codex thread, including a `cc:` shim, are refused (`send` is asynchronous and not an equivalent; #88 tracks a correlated Claude-to-Codex request); `wait` on a Codex thread points to `wait --for cc:<uuid>`, `peers.py restart <uuid>`, or says there is no equivalent. A bare session name is refused with the exact typed command (the `buddy` alias still works; a target with control characters prints escaped; no command for a dead Codex thread or an option holding a control character), a sender whose OpenCode and Claude or Codex identities are mixed cannot address a Claude session, and a Claude session's `send`/`ask`/`dispatch` to a Claude session gets native `SendMessage` advice that names the target only when verified unique. An invalid `CODEX_THREAD_ID` or `--from-thread` beside a Claude session is refused instead of misattributing the sender, and delivery refuses a target that changed after the check.
 
 ### Fixed

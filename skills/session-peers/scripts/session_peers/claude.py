@@ -302,11 +302,21 @@ def _resolve_claude_record(target, exclude=None):
     return rec
 
 
-def _deliver_claude(rec, message, thread_id=None, reply_route=True, opencode_sender=None):
-    """One user frame to a Claude session; (msg_id, reply_capable).
+def check_wrapped_size(body):
+    """Raise ValueError when a wrapped body is over the peer cap."""
+    if len(body) > sp_constants.MAX_TEXT_CHARS or sp_runtime.utf8_len(body) > sp_constants.MAX_TEXT_CHARS:
+        raise ValueError(
+            "wrapped message exceeds the %d-character/UTF-8-byte peer cap"
+            % sp_constants.MAX_TEXT_CHARS
+        )
 
-    ``opencode_sender`` (`{"id", "title"}`, verified by the caller) names an
-    OpenCode sender, which has no socket: its body says how to answer instead.
+
+def claude_body(message, thread_id=None, reply_route=True, opencode_sender=None):
+    """(wrapped body, reply socket route) of one user frame, size-checked.
+
+    Raises ValueError over the peer cap, before anything is sent. ``send
+    --record`` calls it ahead of recording so a near-cap message is refused
+    before it is recorded.
     """
     if opencode_sender:
         # A correlated request (no reply route) is answered through its
@@ -315,16 +325,8 @@ def _deliver_claude(rec, message, thread_id=None, reply_route=True, opencode_sen
         if reply_route:
             lines.append(sp_protocol.reply_route_hint("oc:%s" % opencode_sender["id"], opencode_sender.get("reply_wake_id")))
         body = "\n".join(lines + [message])
-        if len(body) > sp_constants.MAX_TEXT_CHARS or sp_runtime.utf8_len(body) > sp_constants.MAX_TEXT_CHARS:
-            raise ValueError(
-                "wrapped message exceeds the %d-character/UTF-8-byte peer cap"
-                % sp_constants.MAX_TEXT_CHARS
-            )
-        frame = sp_protocol.build_user_frame(body, None)
-        if opencode_sender.get("reply_wake_id"):
-            frame["msg_id"] = opencode_sender["reply_wake_id"]
-        send_frame(rec["messagingSocketPath"], frame, auth_token=peer_token_for(rec))
-        return frame["msg_id"], False
+        check_wrapped_size(body)
+        return body, None
     thread_name = None
     shim_socket = None
     if thread_id:
@@ -337,12 +339,25 @@ def _deliver_claude(rec, message, thread_id=None, reply_route=True, opencode_sen
             shim_socket = shim_rec.get("messagingSocketPath")
     route = shim_socket if reply_route else None
     body = sp_protocol.build_cc_body(message, thread_id or "", thread_name, route)
-    if len(body) > sp_constants.MAX_TEXT_CHARS or sp_runtime.utf8_len(body) > sp_constants.MAX_TEXT_CHARS:
-        raise ValueError(
-            "wrapped message exceeds the %d-character/UTF-8-byte peer cap"
-            % sp_constants.MAX_TEXT_CHARS
-        )
-    frame = sp_protocol.build_user_frame(body, route)
+    check_wrapped_size(body)
+    return body, route
+
+
+def _deliver_claude(rec, message, thread_id=None, reply_route=True, opencode_sender=None, msg_id=None):
+    """One user frame to a Claude session; (msg_id, reply_capable).
+
+    ``opencode_sender`` (`{"id", "title"}`, verified by the caller) names an
+    OpenCode sender, which has no socket: its body says how to answer instead.
+    ``msg_id`` puts a caller-chosen id on the frame; a reply-wake id wins.
+    """
+    body, route = claude_body(message, thread_id, reply_route, opencode_sender)
+    if opencode_sender:
+        frame = sp_protocol.build_user_frame(body, None, msg_id)
+        if opencode_sender.get("reply_wake_id"):
+            frame["msg_id"] = opencode_sender["reply_wake_id"]
+        send_frame(rec["messagingSocketPath"], frame, auth_token=peer_token_for(rec))
+        return frame["msg_id"], False
+    frame = sp_protocol.build_user_frame(body, route, msg_id)
     send_frame(rec["messagingSocketPath"], frame, auth_token=peer_token_for(rec))
     return frame["msg_id"], bool(route)
 

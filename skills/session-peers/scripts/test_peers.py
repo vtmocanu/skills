@@ -34,6 +34,8 @@ MODULES = (
     "peer_tests.test_opencode",
     "peer_tests.test_inbox",
     "peer_tests.test_watches",
+    "peer_tests.test_journal",
+    "peer_tests.test_journal_cli",
     "peer_tests.test_routes",
 )
 

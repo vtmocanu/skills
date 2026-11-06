@@ -30,6 +30,30 @@
   because the model is Codex. Never scrape transcripts to consume missing replies;
   host delivery metadata is diagnostic evidence, not the review itself.
 
+## Missed critical messages
+
+See [the journal](journal.md) for the full contract.
+
+- Fetch a missed consequential message by id: `peers.py inbox get <id>` (the id
+  is in the pointer or the sender's `--json` result). `peers.py inbox journal`
+  lists what is pending for you; `--all` adds ACKed messages.
+- An idle notice is not the message it announces, and never an ACK or verdict.
+  Run `inbox acks <id>` to see who ACKed or settled it.
+- Exit 76 means a journal update after a transport attempt failed (stderr:
+  `journal update failed: ...`). Read the transport result the command printed.
+  If it reports success (sent, queued, replied, or the consumed reply body was
+  printed), the message went out or the reply was taken: do not resend. If it
+  reports a delivery failure (`delivery_failed` or a "could not send/queue"
+  error), delivery is unconfirmed: check the recipient before resending. Never
+  resend blindly on 76.
+- A journal failure before sending (75 full, 1 refused or unavailable) sent
+  nothing; exit 1 after a reported transport failure leaves delivery
+  unconfirmed. Exit 1 also covers read refusals (not a recipient, unknown id). `ack` and
+  `inbox handover` can return 75 when even the event reserve is exhausted. For
+  75 only, recipients `ack` older messages, or wait for expiry.
+- The journal covers only recorded messages. A casual or native message that was
+  never recorded cannot be fetched from it.
+
 ## Codex CLI queue
 
 - **Idle thread latency**: up to 10 s (Codex polls its queue), then the turn.

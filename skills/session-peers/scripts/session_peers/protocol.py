@@ -204,11 +204,15 @@ def unwrap_message(content):
     return m.group("body"), attrs
 
 
-def build_user_frame(body, from_socket=None):
-    """The exact frame Claude itself sends between sessions."""
+def build_user_frame(body, from_socket=None, msg_id=None):
+    """The exact frame Claude itself sends between sessions.
+
+    ``msg_id`` lets a caller that already recorded the message (the journal
+    keys an entry by it) put that same id on the wire.
+    """
     frame = {
         "msgV": 1,
-        "msg_id": str(uuidlib.uuid4()),
+        "msg_id": msg_id or str(uuidlib.uuid4()),
         "type": "user",
         "message": {"role": "user", "content": body},
         "priority": "next",

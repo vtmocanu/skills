@@ -531,12 +531,11 @@ class QueueError(Exception):
     pass
 
 
-def codex_queue(thread_id, text, cwd=None, home=None):
-    """`codex queue --thread <uuid> --message <text>`, run in `stable_dir(cwd)`.
+def check_queue_text(text):
+    """Raise QueueError when ``text`` cannot be passed to `codex queue`.
 
-    rc != 0, or "No active session" on stderr, means the thread is not live.
-    Pass the thread's own cwd; a deleted one falls back to `$HOME`. ``home``
-    is the thread's CODEX_HOME when it differs from the caller's.
+    ``codex_queue`` runs it, and a sender calls it ahead of recording so a
+    local size refusal leaves no journal entry.
     """
     budget = sp_runtime.argv_text_budget()
     size = sp_runtime.utf8_len(text)
@@ -551,6 +550,16 @@ def codex_queue(thread_id, text, cwd=None, home=None):
             "message is %d characters, over Codex's %d cap"
             % (len(text), sp_constants.MAX_TEXT_CHARS)
         )
+
+
+def codex_queue(thread_id, text, cwd=None, home=None):
+    """`codex queue --thread <uuid> --message <text>`, run in `stable_dir(cwd)`.
+
+    rc != 0, or "No active session" on stderr, means the thread is not live.
+    Pass the thread's own cwd; a deleted one falls back to `$HOME`. ``home``
+    is the thread's CODEX_HOME when it differs from the caller's.
+    """
+    check_queue_text(text)
     rc, out, err = sp_runtime.run_cmd(
         ["codex", "queue", "--thread", str(thread_id), "--message", text],
         timeout=60,

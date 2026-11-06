@@ -27,6 +27,8 @@ python3 -m unittest peer_tests.test_messaging
 | test_routes | Typed route check: bare-name advice, ambiguity candidates, Codex request/wait refusals, Claude-to-Claude advice, and delivery re-verification |
 | test_commands | Version pins, doctor, hooks, config readers, and CLI surface |
 | test_topics | Shared topic logs and cursors |
+| test_journal | Session-peers journal: retrieval identity, handovers, ACKs, retention, crash recovery, integrity, and the read-only view |
+| test_journal_cli | Journal command line: `send --record`, recorded requests and replies, exit codes 75 and 76, `record`, `inbox` journal commands and `ack` |
 | test_upgrade | Source digests and replacing an installed copy under a running shim |
 | test_inbox | Own-session queued peer reads, handled sender/message pairs, safe display and read-only request states |
 

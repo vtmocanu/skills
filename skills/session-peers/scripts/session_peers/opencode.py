@@ -211,16 +211,21 @@ def current_session_id():
     return sid if is_session_id(sid) else None
 
 
+def check_text_size(text):
+    """Raise ValueError over the peer cap; ``deliver`` runs it before any API call."""
+    if len(text) > sp_constants.MAX_TEXT_CHARS or sp_runtime.utf8_len(text) > sp_constants.MAX_TEXT_CHARS:
+        raise ValueError(
+            "message exceeds the %d-character/UTF-8-byte peer cap" % sp_constants.MAX_TEXT_CHARS
+        )
+
+
 def deliver(session_id, text, metadata, resume=False):
     """Queue one input for the session's next turn; the inbox item id.
 
     `delivery: queue` never steers a running turn. The service runs the turn
     itself when resume is true, even without a TUI being attached.
     """
-    if len(text) > sp_constants.MAX_TEXT_CHARS or sp_runtime.utf8_len(text) > sp_constants.MAX_TEXT_CHARS:
-        raise ValueError(
-            "message exceeds the %d-character/UTF-8-byte peer cap" % sp_constants.MAX_TEXT_CHARS
-        )
+    check_text_size(text)
     body = api(
         "session.prompt",
         {"sessionID": session_id},
