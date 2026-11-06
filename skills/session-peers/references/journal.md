@@ -173,7 +173,8 @@ the journal, and report the failure. The command never resends or retries.
     restarts at 1.
   - Meta is lost, invalid, or its write fails after a rewrite dropped the
     highest-seq record (for example an event whose pruning rewrite removed its
-    own entry): the next seq falls back to the last retained seq + 1. The reused
+    own entry): the next seq falls back to the last retained seq + 1 (or, after
+    a failed write, to the surviving older meta's next seq). The reused
     seq is still above every retained record, so handover coverage is
     unaffected: no retained grant's `through_seq` reaches it. Low likelihood:
     meta is replaced atomically.
@@ -183,8 +184,10 @@ the journal, and report the failure. The command never resends or retries.
   For the first two cases the reused seq is harmless (above every retained
   line). In the stale-meta case the fast append path (every ask/dispatch request
   and any record without a supplied id) can assign a seq at or below a retained
-  line's; the reader counts that new line as malformed and skips it, and the next
-  rewrite drops it, so that one record is lost.
+  line's. Each later fast append keeps that meta trusted, so every fast-path
+  record appended before the seq passes the highest retained seq (or a parsing
+  write runs) is counted malformed, skipped by the reader and dropped by the
+  next rewrite: one or more records are lost.
 - **Temp-file recovery:** an interrupted rewrite leaves the old journal intact.
   The next locked write removes stale `journal.*.tmp.*` files, and a torn final
   line is truncated before the next append.
