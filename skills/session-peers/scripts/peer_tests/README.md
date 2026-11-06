@@ -26,6 +26,7 @@ python3 -m unittest peer_tests.test_messaging
 | test_cross_home | Shim state and thread discovery under another CODEX_HOME, request mailboxes, hook failure log, shim-name buddies, sender provenance, list titles |
 | test_commands | Version pins, doctor, hooks, config readers, and CLI surface |
 | test_topics | Shared topic logs and cursors |
+| test_journal | Session-peers journal: retrieval identity, handovers, ACKs, retention, crash recovery, integrity, and the read-only view |
 | test_upgrade | Source digests and replacing an installed copy under a running shim |
 | test_inbox | Own-session queued peer reads, handled sender/message pairs, safe display and read-only request states |
 

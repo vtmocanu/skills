@@ -148,3 +148,30 @@ HOOK_ATTACH_WAIT = 60.0
 HOOK_ATTACH_FAST_WINDOW = 10.0
 HOOK_ATTACH_FAST_STEP = 0.25
 HOOK_ATTACH_SLOW_STEP = 1.0
+
+
+# --------------------------------------------------------------------------
+# Journal: one durable, user-wide record of recorded peer messages
+# --------------------------------------------------------------------------
+
+JOURNAL_AGE_DAYS = 14
+# Encoded UTF-8 line bytes. SESSION_PEERS_JOURNAL_MAX_BYTES may only lower it.
+# A 32 MiB journal took 1.24 s to parse and rewrite; 16 MiB keeps a rewrite near 0.6 s.
+JOURNAL_MAX_BYTES_DEFAULT = 16 * 1024 * 1024
+# Above the cap, only event records (ACK, settlement, transport error, handover) fit.
+JOURNAL_EVENT_RESERVE = 1024 * 1024
+JOURNAL_READ_CEILING = 256 * 1024 * 1024
+JOURNAL_LOCK_TIMEOUT = 10.0
+# Plain messages (kind "message") may hold half the cap; one sender a quarter.
+JOURNAL_MESSAGE_QUOTA_DIVISOR = 2
+JOURNAL_SENDER_QUOTA_DIVISOR = 4
+JOURNAL_MAX_RECIPIENTS = 64
+JOURNAL_MAX_GRANTS = 8
+JOURNAL_MAX_LINKS = 8
+JOURNAL_MAX_EDGES = 64
+JOURNAL_FUTURE_SKEW = 300.0
+JOURNAL_DETAIL_CHARS = 512
+JOURNAL_META_CEILING = 4 * 1024 * 1024
+# Namespace of the deterministic reply message id (uuid5 of "reply:<request id>").
+JOURNAL_REPLY_NAMESPACE = "5a0b6f64-8f0e-4c63-9b0d-2f6c7e9a1d35"
+JOURNAL_TMP_RE = re.compile(r"^journal\.(jsonl|meta\.json)\.tmp\.\d+\.[0-9a-f]{32}$")

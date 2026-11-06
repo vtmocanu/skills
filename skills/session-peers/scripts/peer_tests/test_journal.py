@@ -1,0 +1,896 @@
+"""Session-peers journal: identity, handovers, ACKs, retention, crashes, integrity, reader."""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import shutil
+import stat
+import subprocess
+import sys
+import tempfile
+import unittest
+import uuid
+from unittest import mock
+
+HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if HERE not in sys.path:
+    sys.path.insert(0, HERE)
+
+import time  # noqa: E402
+from session_peers import constants as sp_constants, codex as sp_codex, identity as sp_identity  # noqa: E402
+from session_peers import journal, opencode as sp_opencode  # noqa: E402
+
+CAP_ENV = "SESSION_PEERS_JOURNAL_MAX_BYTES"
+OC_ID = "ses_aaaaaaaaaaaaAAAAAAAAAAAAAA"
+IDENTITY_ENV = (
+    "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_MESSAGING_SOCKET", "CODEX_THREAD_ID",
+    "CODEX_SESSION_ID", "OPENCODE_SESSION_ID", "OPENCODE", CAP_ENV,
+)
+
+
+def cc():
+    return "cc:" + str(uuid.uuid4())
+
+
+class JournalBase(unittest.TestCase):
+    def setUp(self):
+        self.root = tempfile.mkdtemp(prefix="spj")
+        patcher = mock.patch.dict(os.environ)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.addCleanup(shutil.rmtree, self.root, True)
+        for name in IDENTITY_ENV:
+            os.environ.pop(name, None)
+        os.environ["HOME"] = self.root
+        os.environ["CODEX_HOME"] = os.path.join(self.root, "codex-a")
+        self.now = time.time()
+        self.missing = set()
+        for patch in (
+            mock.patch.object(journal, "_now", lambda: self.now),
+            mock.patch.object(sp_identity, "resolve_typed", self._resolve),
+        ):
+            patch.start()
+            self.addCleanup(patch.stop)
+        self.A, self.B, self.C = cc(), cc(), cc()
+        self.X = "codex:" + str(uuid.uuid4())
+        self.dir = journal.journal_dir()
+        self.jpath = os.path.join(self.dir, "journal.jsonl")
+        self.mpath = os.path.join(self.dir, "journal.meta.json")
+
+    def _resolve(self, target, exclude=None):
+        if target in self.missing:
+            raise sp_codex.ResolveNotFound("no such session %s" % target)
+        kind, _sep, ident = target.partition(":")
+        return {"kind": kind, "uuid": ident, "name": None}
+
+    # -- helpers ------------------------------------------------------------
+
+    def msg(self, to=None, sender=None, body="hello"):
+        return journal.record_message(sender or cc(), to or [self.A], body)
+
+    def req(self, to=None, sender=None, body="ask", mailbox=None, expires=None):
+        rid = str(uuid.uuid4())
+        mailbox = mailbox or "/nonexistent/spj/%s.json" % rid
+        journal.record_request(rid, sender or cc(), to or [self.A], body,
+                               self.now + 600 if expires is None else expires, mailbox)
+        return rid
+
+    def read(self, path=None):
+        with open(path or self.jpath, "rb") as fh:
+            return fh.read()
+
+    def records(self):
+        return [json.loads(line) for line in self.read().splitlines() if line.strip()]
+
+    def size(self):
+        return os.path.getsize(self.jpath)
+
+    def entry(self, mid):
+        for item in journal.read_only_view()["entries"]:
+            if item["message_id"] == mid:
+                return item
+        return None
+
+    def ids(self):
+        return [item["message_id"] for item in journal.read_only_view()["entries"]]
+
+    def set_cap(self, value):
+        os.environ[CAP_ENV] = str(value)
+
+    def snapshot(self):
+        out = {}
+        for name in sorted(os.listdir(self.dir)):
+            path = os.path.join(self.dir, name)
+            st = os.stat(path)
+            out[name] = (st.st_ino, st.st_size, self.read(path) if name != "journal.lock" else b"")
+        return out
+
+    def fill(self, ack_first):
+        """A journal whose size equals its cap, holding one entry that a write can prune."""
+        self.set_cap(60000)
+        body = "b" * 2000
+        first = journal.record_message(cc(), [self.A], body)
+        if ack_first:
+            journal.ack(first, self.A)
+        while self.size() < 20000:
+            self.req(body=body)
+        self.set_cap(self.size())
+        return first, body
+
+    def child(self, failpoint, code):
+        script = (
+            "import os, sys\nsys.path.insert(0, %r)\n"
+            "from session_peers import journal as j, identity as i\n"
+            "i.resolve_typed = lambda *a, **k: {}\n"
+            "def fp(name):\n    if name == %r:\n        os._exit(9)\n"
+            "j._failpoint = fp\n%s\n" % (HERE, failpoint, code)
+        )
+        proc = subprocess.run([sys.executable, "-c", script], env=dict(os.environ),
+                              capture_output=True, text=True, timeout=60)
+        self.assertEqual(proc.returncode, 9, proc.stderr)
+
+    def meta(self):
+        with open(self.mpath) as fh:
+            return json.load(fh)
+
+    def leftovers(self):
+        return [n for n in os.listdir(self.dir) if sp_constants.JOURNAL_TMP_RE.match(n)]
+
+
+class JournalRetrievalTests(JournalBase):
+    def test_each_runtime_reads_its_slot(self):
+        mid = self.msg(to=[self.A, self.X, "oc:" + OC_ID], body="to all")
+        cases = [
+            ({"CLAUDE_CODE_SESSION_ID": self.A[3:]}, self.A),
+            ({"CODEX_THREAD_ID": self.X[6:]}, self.X),
+            ({"CODEX_SESSION_ID": self.X[6:]}, self.X),
+            ({"OPENCODE_SESSION_ID": OC_ID}, "oc:" + OC_ID),
+        ]
+        for env, typed in cases:
+            with self.subTest(typed=typed), mock.patch.dict(os.environ, env), \
+                    mock.patch.object(sp_opencode, "get_session", return_value={}):
+                who = journal.caller()
+                self.assertEqual(who, typed)
+                self.assertEqual(journal.get(mid, who)["body"], "to all")
+
+    def test_sender_and_other_sessions_are_refused(self):
+        sender = cc()
+        mid = self.msg(sender=sender)
+        for who in (sender, self.B):
+            with self.subTest(who=who):
+                with self.assertRaises(journal.JournalRefused):
+                    journal.get(mid, who)
+
+    def test_mixed_and_missing_runtime_env_refused(self):
+        with self.assertRaises(journal.JournalRefused) as ctx:
+            journal.caller()
+        self.assertIn("OPENCODE_SESSION_ID", str(ctx.exception))
+        env = {"CLAUDE_CODE_SESSION_ID": self.A[3:], "CODEX_THREAD_ID": self.X[6:]}
+        with mock.patch.dict(os.environ, env):
+            with self.assertRaises(journal.JournalRefused) as ctx:
+                journal.caller()
+        self.assertIn("CODEX_THREAD_ID", str(ctx.exception))
+        self.assertIn("env -u", str(ctx.exception))
+
+    def test_unverifiable_opencode_session_refused_and_nothing_written(self):
+        err = sp_opencode.OpenCodeError("service down", unavailable=True)
+        with mock.patch.dict(os.environ, {"OPENCODE_SESSION_ID": OC_ID}), \
+                mock.patch.object(sp_opencode, "get_session", side_effect=err):
+            with self.assertRaises(journal.JournalRefused) as ctx:
+                journal.caller()
+        self.assertIn("cannot verify OpenCode session " + OC_ID, str(ctx.exception))
+        self.assertFalse(os.path.exists(self.dir))
+
+    def test_non_uuid_claude_id_refused(self):
+        with mock.patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ID": "not-a-uuid"}):
+            with self.assertRaises(journal.JournalRefused):
+                journal.caller()
+
+    def test_two_codex_homes_share_one_journal(self):
+        mid = self.msg()
+        os.environ["CODEX_HOME"] = os.path.join(self.root, "codex-b")
+        self.assertEqual(journal.get(mid, self.A)["body"], "hello")
+        self.assertEqual(journal.journal_dir(), self.dir)
+        self.assertFalse(os.path.exists(os.path.join(self.root, "codex-b", "session-peers")))
+
+    def test_recipient_must_exist_and_be_typed(self):
+        self.missing.add(self.B)
+        with self.assertRaises(journal.JournalRefused):
+            journal.record_message(cc(), [self.B], "x")
+        with self.assertRaises(journal.JournalRefused):
+            journal.record_message(cc(), ["buddy"], "x")
+        self.assertFalse(os.path.exists(self.jpath))
+
+    def test_list_for_hides_acked_and_carries_no_body(self):
+        first, second = self.msg(body="one"), self.msg(body="two")
+        self.msg(to=[self.B])
+        journal.ack(first, self.A)
+        shown = journal.list_for(self.A)
+        self.assertEqual([e["message_id"] for e in shown], [second])
+        self.assertNotIn("body", shown[0])
+        every = journal.list_for(self.A, include_acked=True)
+        self.assertEqual([e["message_id"] for e in every], [first, second])
+
+    def test_reads_never_prune_and_flag_expired(self):
+        mid = self.msg()
+        self.now += 15 * 86400
+        self.assertTrue(journal.get(mid, self.A)["expired"])
+        self.assertEqual(len(self.records()), 1)
+
+    def test_reply_is_idempotent_and_single(self):
+        rid = self.req(to=[self.B], sender=self.A)
+        reply_id = journal.reply_message_id(rid)
+        self.assertEqual(reply_id, journal.reply_message_id(rid))
+        args = (rid, self.B, [self.A], "answer", self.now + 600, "/nonexistent/spj/%s.json" % rid)
+        self.assertEqual(journal.record_reply(*args), "recorded")
+        self.assertEqual(journal.record_reply(*args), "same")
+        with self.assertRaises(journal.JournalRefused) as ctx:
+            journal.record_reply(rid, self.B, [self.A], "other", self.now + 600, args[5])
+        self.assertIn("already has a recorded reply", str(ctx.exception))
+        self.assertEqual(sum(1 for r in self.records() if r.get("kind") == "reply"), 1)
+        self.assertEqual(journal.get(reply_id, self.A)["body"], "answer")
+
+    def test_reply_revalidate_failure_writes_nothing(self):
+        rid = self.req(to=[self.B], sender=self.A)
+        before = self.read()
+
+        def refuse():
+            raise journal.JournalRefused("request meta changed")
+
+        with self.assertRaises(journal.JournalRefused):
+            journal.record_reply(rid, self.B, [self.A], "a", self.now + 600, "/nonexistent/x", refuse)
+        self.assertEqual(self.read(), before)
+
+
+class JournalSuccessorTests(JournalBase):
+    def test_name_handover_refused(self):
+        for target in ("buddy", "@buddy", "namesake"):
+            with self.subTest(target=target):
+                with self.assertRaises(journal.JournalRefused) as ctx:
+                    journal.handover(self.A, target)
+                self.assertIn("a handover names a full typed identity, not a name", str(ctx.exception))
+        with self.assertRaises(journal.JournalRefused):
+            journal.handover(self.A, self.A)
+
+    def test_missing_successor_refused(self):
+        self.missing.add(self.B)
+        with self.assertRaises(journal.JournalRefused):
+            journal.handover(self.A, self.B)
+
+    def test_handover_allows_read_and_ack_with_for_and_by(self):
+        mid = self.msg(body="inherited")
+        with self.assertRaises(journal.JournalRefused):
+            journal.get(mid, self.B)
+        journal.handover(self.A, self.B)
+        self.assertEqual(journal.get(mid, self.B)["body"], "inherited")
+        record = journal.ack(mid, self.B)
+        self.assertEqual((record["for"], record["by"]), (self.A, self.B))
+        view = journal.acks_view(mid, self.B)
+        self.assertEqual(view["recipients"][0]["by"], self.B)
+
+    def test_non_recipient_handover_grants_nothing(self):
+        mid = self.msg()
+        journal.handover(self.X, self.B)
+        with self.assertRaises(journal.JournalRefused):
+            journal.get(mid, self.B)
+        with self.assertRaises(journal.JournalRefused):
+            journal.ack(mid, self.B)
+
+    def test_message_after_grant_is_not_covered(self):
+        old = self.msg(body="old")
+        journal.handover(self.A, self.B)
+        new = self.msg(body="new")
+        self.assertEqual(journal.get(old, self.B)["body"], "old")
+        with self.assertRaises(journal.JournalRefused):
+            journal.get(new, self.B)
+
+    def test_chain_works_and_respects_the_minimum_coverage(self):
+        first = self.msg(body="first")
+        journal.handover(self.A, self.B)
+        second = self.msg(body="second")
+        journal.handover(self.B, self.C)
+        self.assertEqual(journal.get(first, self.C)["body"], "first")
+        with self.assertRaises(journal.JournalRefused):
+            journal.get(second, self.C)
+
+    def test_cycle_terminates(self):
+        mid = self.msg()
+        journal.handover(self.A, self.B)
+        journal.handover(self.B, self.A)
+        self.assertEqual(journal.get(mid, self.B)["body"], "hello")
+        with self.assertRaises(journal.JournalRefused):
+            journal.get(mid, self.C)
+
+    def test_chain_longer_than_eight_links_is_cut(self):
+        mid = self.msg()
+        chain = [self.A] + [cc() for _ in range(9)]
+        for left, right in zip(chain, chain[1:]):
+            journal.handover(left, right)
+        self.assertEqual(journal.get(mid, chain[8])["body"], "hello")
+        with self.assertRaises(journal.JournalRefused):
+            journal.get(mid, chain[9])
+
+    def test_ninth_grant_refused_and_regrant_replaces(self):
+        self.msg()
+        targets = [cc() for _ in range(8)]
+        for target in targets:
+            journal.handover(self.A, target)
+        with self.assertRaises(journal.JournalRefused):
+            journal.handover(self.A, cc())
+        journal.handover(self.A, targets[0])
+        grants = [g for g in journal.read_only_view()["handovers"] if g["from"] == self.A]
+        self.assertEqual(len(grants), 8)
+
+    def test_grant_is_retained_while_covering_then_pruned(self):
+        self.set_cap(6000)
+        first = self.msg(body="x" * 500)
+        journal.ack(first, self.A)
+        journal.handover(self.A, self.B)
+        self.assertEqual(len(journal.read_only_view()["handovers"]), 1)
+        self.msg(body="y" * 500, to=[self.C])
+        self.assertEqual(len(journal.read_only_view()["handovers"]), 1)
+        for _ in range(3):
+            self.msg(body="z" * 500, to=[self.C])
+        view = journal.read_only_view()
+        self.assertNotIn(first, [e["message_id"] for e in view["entries"]])
+        self.assertEqual(view["handovers"], [])
+
+
+class JournalAckTests(JournalBase):
+    def test_ack_records_for_and_by_and_is_idempotent(self):
+        mid = self.msg()
+        first = journal.ack(mid, self.A)
+        self.assertEqual((first["for"], first["by"], first["message_id"]), (self.A, self.A, mid))
+        before = self.read()
+        again = journal.ack(mid, self.A)
+        self.assertEqual(again["seq"], first["seq"])
+        self.assertEqual(self.read(), before)
+
+    def test_non_recipient_cannot_ack(self):
+        mid = self.msg()
+        with self.assertRaises(journal.JournalRefused):
+            journal.ack(mid, self.B)
+        with self.assertRaises(journal.JournalRefused):
+            journal.ack(mid, self.A, for_slot=self.B)
+        self.assertEqual(len(self.records()), 1)
+
+    def test_two_recipients_one_acked_one_pending(self):
+        mid = self.msg(to=[self.A, self.B])
+        journal.ack(mid, self.B)
+        view = journal.acks_view(mid, self.A)
+        states = {r["slot"]: r["state"] for r in view["recipients"]}
+        self.assertEqual(states, {self.A: "pending", self.B: "acked"})
+        self.assertNotIn("body", view)
+
+    def test_sender_sees_acks_but_strangers_do_not(self):
+        sender = cc()
+        mid = self.msg(sender=sender)
+        self.assertEqual(journal.acks_view(mid, sender)["recipients"][0]["state"], "pending")
+        with self.assertRaises(journal.JournalRefused):
+            journal.acks_view(mid, self.B)
+
+    def test_covering_several_slots_needs_for(self):
+        mid = self.msg(to=[self.A, self.B])
+        journal.handover(self.A, self.C)
+        journal.handover(self.B, self.C)
+        with self.assertRaises(journal.JournalRefused):
+            journal.ack(mid, self.C)
+        self.assertEqual(journal.ack(mid, self.C, for_slot=self.B)["for"], self.B)
+
+    def test_settlement_is_not_an_ack(self):
+        rid = self.req(to=[self.A])
+        journal.settle(rid, "replied", self.A)
+        view = journal.acks_view(rid, self.A)
+        self.assertEqual(view["recipients"][0]["state"], "pending")
+        self.assertEqual(view["settlement"]["state"], "replied")
+        journal.settle(rid, "replied", self.A)
+        self.assertEqual(sum(1 for r in self.records() if r["type"] == "settled"), 1)
+
+    def test_transport_error_is_separate_and_truncated(self):
+        mid = self.msg()
+        journal.transport_error(mid, self.A, "e" * 2000)
+        entry = journal.get(mid, self.A)
+        self.assertEqual(len(entry["transport_error"]["detail"]), 512)
+        self.assertEqual(entry["acks"], [])
+        self.assertIsNone(entry["settlement"])
+
+    def test_post_send_updates_raise_update_failed(self):
+        rid = self.req()
+        mid = self.msg()
+        with mock.patch.object(os, "fsync", side_effect=OSError("disk gone")):
+            with self.assertRaises(journal.JournalUpdateFailed):
+                journal.settle(rid, "replied", self.A)
+            with self.assertRaises(journal.JournalUpdateFailed):
+                journal.transport_error(mid, self.A, "boom")
+        with self.assertRaises(journal.JournalUpdateFailed):
+            journal.settle(str(uuid.uuid4()), "replied", self.A)
+        with self.assertRaises(journal.JournalUpdateFailed):
+            journal.settle(mid, "consumed", self.A)
+        self.assertFalse(any(r["type"] in ("settled", "transport_error") for r in self.records()))
+
+
+class JournalRetentionTests(JournalBase):
+    def test_age_cap_prunes_unacked_and_entries_with_a_live_mailbox(self):
+        mailbox = os.path.join(self.root, "request.json")
+        open(mailbox, "w").close()
+        old_plain = self.msg()
+        old_req = self.req(mailbox=mailbox)
+        self.now += 14 * 86400 + 60
+        fresh = self.msg(body="fresh")
+        self.assertEqual(self.ids(), [fresh])
+        self.assertNotIn(old_plain, self.ids())
+        self.assertNotIn(old_req, self.ids())
+
+    def test_oldest_eligible_entry_goes_first(self):
+        ids = []
+        for _ in range(6):
+            rid = self.req(body="r" * 400)
+            journal.ack(rid, self.A)
+            ids.append(rid)
+        self.set_cap(self.size())
+        newest = self.req(body="r" * 400)
+        self.assertEqual(self.ids(), ids[1:] + [newest])
+
+    def test_young_unacked_entries_survive_a_full_journal(self):
+        expired = self.req(body="q" * 400, expires=self.now - 5)
+        failed = self.msg(body="m" * 400)
+        journal.transport_error(failed, self.A, "no route")
+        plain = self.msg(body="p" * 400)
+        self.set_cap(self.size())
+        before = self.snapshot()
+        with self.assertRaises(journal.JournalFull):
+            self.msg(body="n" * 400)
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(self.ids(), [expired, failed, plain])
+
+    def test_live_mailbox_protects_acked_and_settled_entries(self):
+        mailbox = os.path.join(self.root, "mailbox.json")
+        open(mailbox, "w").close()
+        for _ in range(3):
+            self.req(body="f" * 400)
+        acked = self.req(body="a" * 400, mailbox=mailbox)
+        journal.ack(acked, self.A)
+        settled = self.req(body="s" * 400, mailbox=mailbox)
+        journal.settle(settled, "replied", self.A)
+        self.set_cap(self.size())
+        before = self.snapshot()
+        with self.assertRaises(journal.JournalFull):
+            self.req(body="n" * 400)
+        self.assertEqual(self.snapshot(), before)
+        os.unlink(mailbox)
+        newest = self.req(body="n" * 400)
+        self.assertNotIn(acked, self.ids())
+        self.assertIn(newest, self.ids())
+
+    def test_settled_entry_is_eligible_once_mailbox_is_gone(self):
+        for _ in range(4):
+            self.req(body="f" * 400)
+        settled = self.req(body="s" * 400)
+        journal.settle(settled, "replied", self.A)
+        self.set_cap(self.size())
+        newest = self.req(body="n" * 400)
+        self.assertNotIn(settled, self.ids())
+        self.assertIn(newest, self.ids())
+
+    def test_message_quota_is_half_the_cap_for_plain_messages(self):
+        self.set_cap(10000)
+        body = "q" * 1100
+        for _ in range(3):
+            self.msg(body=body)
+        calls = []
+        real = journal._Writer.load
+
+        def spy(writer, now):
+            calls.append(1)
+            return real(writer, now)
+
+        with mock.patch.object(journal._Writer, "load", spy):
+            with self.assertRaises(journal.JournalFull):
+                self.msg(body=body)
+        self.assertTrue(calls)
+        self.assertLess(self.size() + 1400, 10000)
+        self.req(body=body)
+
+    def test_sender_quota_is_a_quarter_of_the_cap_on_fast_and_stale_meta(self):
+        for stale in (False, True):
+            with self.subTest(stale=stale):
+                shutil.rmtree(self.dir, ignore_errors=True)
+                self.set_cap(10000)
+                sender = cc()
+                journal.record_message(sender, [self.A], "q" * 1100)
+                if stale:
+                    os.unlink(self.mpath)
+                before = self.snapshot()
+                with self.assertRaises(journal.JournalFull):
+                    journal.record_message(sender, [self.A], "q" * 1100)
+                self.assertEqual(self.snapshot(), before)
+                with self.assertRaises(journal.JournalFull):
+                    journal.record_request(str(uuid.uuid4()), sender, [self.A], "q" * 1100,
+                                           self.now + 60, "/nonexistent/x")
+                self.msg(body="q" * 1100)
+
+    def test_fast_path_appends_without_parsing(self):
+        self.msg()
+        calls = []
+        real = journal._Writer.load
+        with mock.patch.object(journal._Writer, "load", lambda w, n: calls.append(1) or real(w, n)):
+            self.msg(body="again")
+        self.assertEqual(calls, [])
+        self.assertEqual(len(self.records()), 2)
+
+    def test_null_sender_is_one_bucket(self):
+        self.set_cap(10000)
+        journal.record_message(None, [self.A], "q" * 1100)
+        with self.assertRaises(journal.JournalFull):
+            journal.record_message(None, [self.A], "q" * 1100)
+
+    def test_lowered_cap_with_only_protected_entries_refuses_new_messages(self):
+        for _ in range(3):
+            self.msg(body="p" * 500)
+        self.set_cap(1000)
+        before = self.snapshot()
+        with self.assertRaises(journal.JournalFull):
+            self.msg()
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(len(self.ids()), 3)
+
+    def test_higher_or_invalid_cap_env_is_ignored(self):
+        big = "x" * (9 * 1024 * 1024)
+        for value in (str(10 ** 12), "garbage", "-5", "0"):
+            with self.subTest(value=value):
+                shutil.rmtree(self.dir, ignore_errors=True)
+                self.set_cap(value)
+                with self.assertRaises(journal.JournalFull):
+                    self.msg(body=big)
+
+    def test_event_reserve_admits_an_ack_above_the_cap(self):
+        mids = [self.msg(body="p" * 500) for _ in range(3)]
+        self.set_cap(1000)
+        record = journal.ack(mids[0], self.A)
+        self.assertEqual(record["type"], "ack")
+        self.assertNotIn(mids[0], self.ids())
+        self.assertEqual(self.ids(), mids[1:])
+
+    def test_event_beyond_the_reserve_is_refused_untouched(self):
+        mids = [self.msg(body="p" * 500) for _ in range(3)]
+        self.set_cap(1000)
+        before = self.snapshot()
+        with mock.patch.object(sp_constants, "JOURNAL_EVENT_RESERVE", 1):
+            with self.assertRaises(journal.JournalFull):
+                journal.ack(mids[0], self.A)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_meta_matches_the_file(self):
+        self.msg()
+        self.req()
+        meta = self.meta()
+        st = os.stat(self.jpath)
+        self.assertEqual((meta["file_ino"], meta["file_size"]), (st.st_ino, st.st_size))
+        self.assertEqual(meta["total_bytes"], st.st_size)
+        self.assertEqual(meta["next_seq"], 3)
+        self.assertEqual(sum(meta["bytes_by_sender"].values()), st.st_size)
+        self.assertLess(meta["message_bytes"], st.st_size)
+
+
+class JournalCrashTests(JournalBase):
+    def test_crash_after_append_before_meta(self):
+        self.msg()
+        self.child("after_append_before_meta",
+                   "j.record_request(%r, %r, [%r], 'child', 1e12, '/nonexistent/c')" % (
+                       str(uuid.uuid4()), self.B, self.A))
+        mid = self.msg(body="after")
+        records = [r for r in self.records() if r["type"] == "message"]
+        self.assertEqual(len(records), 3)
+        self.assertEqual([r["seq"] for r in records], [1, 2, 3])
+        self.assertEqual(journal.read_only_view()["malformed_lines"], 0)
+        self.assertIn(mid, self.ids())
+
+    def test_crash_mid_line_leaves_a_torn_tail_that_is_removed(self):
+        self.msg()
+        self.child("mid_line", "j.record_message(%r, [%r], %r)" % (self.B, self.A, "t" * 200))
+        self.assertFalse(self.read().endswith(b"\n"))
+        self.assertEqual(journal.read_only_view()["malformed_lines"], 0)
+        mid = self.msg(body="next")
+        self.assertTrue(self.read().endswith(b"\n"))
+        view = journal.read_only_view()
+        self.assertEqual(view["malformed_lines"], 0)
+        self.assertEqual([e["body"] for e in view["entries"]], ["hello", "next"])
+        self.assertEqual(self.entry(mid)["seq"], 2)
+
+    def test_crash_before_prune_rename_changes_nothing(self):
+        self.fill(ack_first=True)
+        before = self.read()
+        self.child("before_prune_rename", "j.record_message(%r, [%r], %r)" % (cc(), self.A, "b" * 2000))
+        self.assertEqual(self.read(), before)
+        self.assertEqual(len(self.leftovers()), 1)
+        mid = self.msg(body="b" * 2000)
+        self.assertEqual(self.leftovers(), [])
+        self.assertIn(mid, self.ids())
+
+    def test_crash_after_prune_rename_keeps_the_prune_and_seq(self):
+        first, _body = self.fill(ack_first=True)
+        last_seq = journal.read_only_view()["last_seq"]
+        self.child("after_prune_rename", "j.record_message(%r, [%r], %r)" % (cc(), self.A, "b" * 2000))
+        self.assertNotIn(first, self.ids())
+        view = journal.read_only_view()
+        self.assertGreater(view["last_seq"], last_seq)
+        record = journal.ack(view["entries"][-1]["message_id"], self.A)
+        self.assertEqual(record["seq"], view["last_seq"] + 1)
+        self.assertEqual(journal.read_only_view()["malformed_lines"], 0)
+
+    def test_crash_with_meta_tmp_written(self):
+        self.msg()
+        self.child("meta_tmp_written", "j.record_message(%r, [%r], 'child')" % (self.B, self.A))
+        self.assertEqual(len(self.leftovers()), 1)
+        mid = self.msg(body="after")
+        self.assertEqual(self.leftovers(), [])
+        self.assertEqual(self.entry(mid)["seq"], 3)
+
+    def test_deleted_meta_recovers_the_sequence(self):
+        self.msg()
+        self.msg()
+        os.unlink(self.mpath)
+        mid = self.msg()
+        self.assertEqual(self.entry(mid)["seq"], 3)
+        self.assertEqual(self.meta()["next_seq"], 4)
+
+    def test_meta_never_lowers_the_sequence_after_everything_is_pruned(self):
+        self.set_cap(5000)
+        first = self.msg(body="x" * 500)
+        journal.ack(first, self.A)
+        self.now += 15 * 86400
+        mid = self.msg()
+        self.assertGreater(self.entry(mid)["seq"], 2)
+
+    def test_interrupted_rewrites_leave_leftovers_a_fresh_writer_removes(self):
+        self.fill(ack_first=True)
+        before = self.read()
+        stash = []
+        for point in ("before_prune_rename", "before_prune_rename", "before_prune_rename"):
+            self.child(point, "j.record_message(%r, [%r], %r)" % (cc(), self.A, "b" * 2000))
+            # Each later writer would clean the previous leftover, so park it.
+            (name,) = self.leftovers()
+            parked = os.path.join(self.root, "parked-%d" % len(stash))
+            os.rename(os.path.join(self.dir, name), parked)
+            stash.append(parked)
+        meta_tmp = os.path.join(self.dir, "journal.meta.json.tmp.%d.%s" % (os.getpid(), "c" * 32))
+        stash.append(meta_tmp)
+        open(meta_tmp, "w").close()
+        for i, parked in enumerate(stash[:3]):
+            os.rename(parked, os.path.join(self.dir, "journal.jsonl.tmp.%d.%s" % (i + 1, str(i) * 32)))
+        self.assertEqual(len(self.leftovers()), 4)
+        keep = os.path.join(self.dir, "journal.jsonl.tmp.notes")
+        open(keep, "w").close()
+        self.assertEqual(self.read(), before)
+        self.msg(body="b" * 2000)
+        self.assertEqual(self.leftovers(), [])
+        self.assertTrue(os.path.exists(keep))
+
+    def test_leftover_symlink_is_not_followed_or_deleted(self):
+        self.msg()
+        victim = os.path.join(self.root, "victim")
+        open(victim, "w").close()
+        link = os.path.join(self.dir, "journal.jsonl.tmp.1." + "a" * 32)
+        os.symlink(victim, link)
+        self.msg()
+        self.assertTrue(os.path.exists(victim))
+
+    def test_event_is_atomic_with_the_prune_it_enables(self):
+        for point in ("before_prune_rename", "after_prune_rename"):
+            with self.subTest(point=point):
+                shutil.rmtree(self.dir, ignore_errors=True)
+                first, _body = self.fill(ack_first=False)
+                before = self.read()
+                self.child(point, "j.ack(%r, %r)" % (first, self.A))
+                after = self.read()
+                if point == "before_prune_rename":
+                    self.assertEqual(after, before)
+                    self.assertIn(first, self.ids())
+                else:
+                    self.assertNotIn(first, self.ids())
+                    self.assertFalse(any(r["type"] == "ack" and r["message_id"] == first
+                                         for r in self.records()))
+                self.assertEqual(journal.read_only_view()["malformed_lines"], 0)
+
+
+class JournalIntegrityTests(JournalBase):
+    def test_modes_are_private_and_repaired(self):
+        self.msg()
+        for path, mode in ((self.dir, 0o700), (self.jpath, 0o600), (self.mpath, 0o600),
+                           (os.path.join(self.dir, "journal.lock"), 0o600)):
+            self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), mode, path)
+        os.chmod(self.dir, 0o755)
+        os.chmod(self.jpath, 0o666)
+        os.chmod(self.mpath, 0o644)
+        self.msg()
+        for path, mode in ((self.dir, 0o700), (self.jpath, 0o600), (self.mpath, 0o600)):
+            self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), mode, path)
+
+    def test_symlinked_journal_refused(self):
+        os.makedirs(self.dir, mode=0o700)
+        target = os.path.join(self.root, "elsewhere")
+        open(target, "w").close()
+        os.symlink(target, self.jpath)
+        with self.assertRaises(journal.JournalUnavailable):
+            self.msg()
+        with self.assertRaises(journal.JournalUnavailable):
+            journal.read_only_view()
+        self.assertEqual(os.path.getsize(target), 0)
+
+    def test_symlinked_directory_refused(self):
+        real = os.path.join(self.root, "real")
+        os.makedirs(real, mode=0o700)
+        os.makedirs(os.path.dirname(self.dir))
+        os.symlink(real, self.dir)
+        with self.assertRaises(journal.JournalUnavailable):
+            self.msg()
+        self.assertEqual(os.listdir(real), [])
+
+    def test_fifo_journal_refused(self):
+        os.makedirs(self.dir, mode=0o700)
+        os.mkfifo(self.jpath, 0o600)
+        with self.assertRaises(journal.JournalUnavailable):
+            self.msg()
+        with self.assertRaises(journal.JournalUnavailable):
+            journal.read_only_view()
+
+    def test_foreign_owned_journal_refused(self):
+        self.msg()
+        with mock.patch.object(os, "geteuid", return_value=os.geteuid() + 1):
+            with self.assertRaises(journal.JournalUnavailable):
+                self.msg()
+            with self.assertRaises(journal.JournalUnavailable):
+                journal.read_only_view()
+
+    def test_file_above_the_read_ceiling_refused(self):
+        self.msg()
+        with mock.patch.object(sp_constants, "JOURNAL_READ_CEILING", 10):
+            with self.assertRaises(journal.JournalUnavailable):
+                journal.read_only_view()
+            with self.assertRaises(journal.JournalUnavailable):
+                self.msg()
+
+    def test_unusable_location_is_unavailable(self):
+        blocker = os.path.join(self.root, "afile")
+        open(blocker, "w").close()
+        os.environ["HOME"] = blocker
+        with self.assertRaises(journal.JournalUnavailable) as ctx:
+            self.msg()
+        self.assertTrue(str(ctx.exception).startswith("session-peers journal unavailable: "))
+
+    def test_held_lock_times_out_with_a_clear_message(self):
+        self.msg()
+        import fcntl
+        fd = os.open(os.path.join(self.dir, "journal.lock"), os.O_RDWR)
+        self.addCleanup(os.close, fd)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        with mock.patch.object(sp_constants, "JOURNAL_LOCK_TIMEOUT", 0.2):
+            with self.assertRaises(journal.JournalUnavailable) as ctx:
+                self.msg()
+        self.assertIn("another peers.py command holds the session-peers journal lock", str(ctx.exception))
+
+    def test_hostile_lines_are_counted_and_never_trusted(self):
+        mid = self.msg()
+        good = json.dumps({"schema": 1, "seq": 2, "type": "ack", "at": self.now, "message_id": mid,
+                           "for": self.A, "by": self.A}, sort_keys=True)
+        nan = good.replace('"seq": 2', '"seq": 3').replace('"at": %r' % self.now, '"at": NaN')
+        future = good.replace('"seq": 2', '"seq": 4').replace('"at": %r' % self.now, '"at": %r' % (self.now + 1000))
+        deep = "[" * 200000 + "]" * 200000
+        huge = '{"schema":1,"seq":5,"type":"ack","at":1e999,"message_id":"%s","for":"%s","by":"%s"}' % (
+            mid, self.A, self.A)
+        self.assertIn("NaN", nan)
+        with open(self.jpath, "ab") as fh:
+            for line in (nan, future, deep, huge, "not json", "\xff"):
+                fh.write(line.encode("latin-1") + b"\n")
+            fh.write(good.encode() + b"\n")
+        view = journal.read_only_view()
+        self.assertEqual(view["malformed_lines"], 6)
+        self.assertEqual(view["last_seq"], 2)
+        self.assertEqual(view["entries"][0]["recipients"][0]["state"], "acked")
+
+    def test_forged_ack_for_a_non_recipient_is_ignored(self):
+        mid = self.msg()
+        forged = {"schema": 1, "seq": 2, "type": "ack", "at": self.now, "message_id": mid,
+                  "for": self.B, "by": self.B}
+        with open(self.jpath, "ab") as fh:
+            fh.write(json.dumps(forged).encode() + b"\n")
+        self.assertEqual(journal.read_only_view()["entries"][0]["recipients"][0]["state"], "pending")
+
+    def test_malformed_lines_are_dropped_by_the_next_rewrite(self):
+        self.set_cap(5000)
+        mid = self.msg(body="x" * 400)
+        journal.ack(mid, self.A)
+        with open(self.jpath, "ab") as fh:
+            fh.write(b"garbage\n")
+        self.assertEqual(journal.read_only_view()["malformed_lines"], 1)
+        self.now += 15 * 86400
+        self.msg()
+        self.assertEqual(journal.read_only_view()["malformed_lines"], 0)
+
+
+class JournalReaderTests(JournalBase):
+    def test_missing_journal_is_an_empty_view_and_creates_nothing(self):
+        view = journal.read_only_view()
+        self.assertEqual(view, {"entries": [], "handovers": [], "malformed_lines": 0, "last_seq": 0})
+        self.assertFalse(os.path.exists(os.path.join(self.root, ".codex")))
+        self.assertEqual(journal.list_for(self.A), [])
+
+    def test_view_needs_no_write_capability_and_changes_no_times(self):
+        mid = self.msg(to=[self.A, self.B])
+        journal.ack(mid, self.A)
+        journal.settle(self.req(), "replied", self.A)
+        paths = [self.dir] + [os.path.join(self.dir, n) for n in os.listdir(self.dir)]
+        stamp = lambda: [(os.stat(p).st_ctime_ns, os.stat(p).st_mtime_ns) for p in paths]  # noqa: E731
+        before = stamp()
+        raw = self.snapshot()
+        real_open = os.open
+
+        def guarded_open(path, flags, *args, **kwargs):
+            if flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC):
+                raise AssertionError("reader opened for writing: %r" % (path,))
+            return real_open(path, flags, *args, **kwargs)
+
+        def boom(*_a, **_k):
+            raise AssertionError("reader mutated the filesystem")
+
+        with mock.patch.object(os, "chmod", boom), mock.patch.object(os, "fchmod", boom), \
+                mock.patch.object(os, "replace", boom), mock.patch.object(os, "rename", boom), \
+                mock.patch.object(os, "truncate", boom), mock.patch.object(os, "ftruncate", boom), \
+                mock.patch.object(os, "unlink", boom), mock.patch.object(os, "open", guarded_open):
+            view = journal.read_only_view()
+            journal.get(mid, self.A)
+            journal.list_for(self.A)
+            journal.acks_view(mid, self.B)
+        self.assertEqual(len(view["entries"]), 2)
+        self.assertEqual(stamp(), before)
+        self.assertEqual(self.snapshot(), raw)
+
+    def test_wider_mode_is_refused_not_repaired(self):
+        self.msg()
+        os.chmod(self.jpath, 0o644)
+        with self.assertRaises(journal.JournalUnavailable):
+            journal.read_only_view()
+        with self.assertRaises(journal.JournalUnavailable):
+            journal.get(str(uuid.uuid4()), self.A)
+        self.assertEqual(stat.S_IMODE(os.stat(self.jpath).st_mode), 0o644)
+
+    def test_wider_directory_mode_is_refused_not_repaired(self):
+        self.msg()
+        os.chmod(self.dir, 0o755)
+        with self.assertRaises(journal.JournalUnavailable):
+            journal.read_only_view()
+        self.assertEqual(stat.S_IMODE(os.stat(self.dir).st_mode), 0o755)
+
+    def test_reader_does_not_prune_or_repair_a_torn_tail(self):
+        self.msg()
+        self.now += 15 * 86400
+        with open(self.jpath, "ab") as fh:
+            fh.write(b'{"torn":')
+        before = self.read()
+        view = journal.read_only_view()
+        self.assertTrue(view["entries"][0]["expired"])
+        self.assertEqual(view["malformed_lines"], 0)
+        self.assertEqual(self.read(), before)
+
+    def test_view_carries_body_acks_settlement_transport_and_grants(self):
+        rid = self.req(to=[self.A, self.B], body="full body")
+        journal.ack(rid, self.A)
+        journal.settle(rid, "replied", self.A)
+        journal.transport_error(rid, self.B, "refused")
+        journal.handover(self.A, self.C)
+        view = journal.read_only_view()
+        item = view["entries"][0]
+        self.assertEqual(item["body"], "full body")
+        self.assertEqual({r["slot"]: r["state"] for r in item["recipients"]},
+                         {self.A: "acked", self.B: "pending"})
+        self.assertEqual(item["settlement"]["state"], "replied")
+        self.assertEqual(item["transport_error"]["detail"], "refused")
+        self.assertFalse(item["expired"])
+        self.assertEqual([(g["from"], g["to"]) for g in view["handovers"]], [(self.A, self.C)])
+        self.assertEqual(view["last_seq"], max(r["seq"] for r in self.records()))
+
+
+if __name__ == "__main__":
+    unittest.main()
