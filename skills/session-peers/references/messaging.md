@@ -18,7 +18,8 @@ it does not bypass the busy thread's queue.
 - **Peer unreachable**: when `SendMessage` reports no reachable agent by that
   name, or `ListAgents` omits a Codex thread you expect, run `peers.py list`. A
   live thread shown `not registered` with no `shim <pid>` has no active shim: run
-  `peers.py up <uuid>`, then send by the bare name.
+  `peers.py up <uuid>`, then `SendMessage` it by name (`peers.py send` needs a
+  typed target, see [Route check](#route-check)).
 - **Replies normally come back on their own**: when that turn completes, the
   shim posts Codex's final message into this session as `Message from @<name>`,
   subject to live-session verification and [reply budgets](budgets.md). If it is missing,
@@ -159,3 +160,44 @@ context, and leaves the queued reply to arrive stale later.
 If normal automatic forwarding failed and asynchronous sending is authorized,
 use `send` with host permission. Otherwise ask the user to run it from a host
 shell. Confirm the successful result and message id before reporting delivery.
+
+### Route check
+
+`send`, `ask`, `dispatch` and `wait` check the route before delivering. The
+target must be typed (`cc:`, `codex:` or `oc:`); a typed name or UUID prefix
+still resolves as before.
+
+- **Bare name**: refused (rc 2) with the typed command to run, other options
+  kept. A `--message` becomes `--message-file <PATH>` followed by
+  `(write the message to PATH)`. If the target's ID is not a well-formed UUID or
+  `ses_` ID, no command is printed. Names and IDs that are not plain are
+  printed quoted (`repr`).
+- **Ambiguous name**: the error lists every candidate with kind, liveness and
+  typed ID (live first, then unverified, then dead; nothing is capped),
+  including dead or stale ones and Codex threads that are all dead. A shim's
+  registry record merges into its `codex:<uuid>` line. A bare-name ambiguity is
+  rc 2; an ambiguous typed name keeps the resolver message and rc 1, with the
+  candidates after `pick one typed ID:`. `buddy set`, `up`, `restart`, `down`
+  and `budget` print the same candidate lines.
+- **Check and delivery agree**: delivery re-verifies the checked identity and
+  refuses, sending nothing, with `<target> changed between the route check and
+  delivery` (rc 1).
+
+| Sender | Verb and target | Result |
+| --- | --- | --- |
+| any | `ask`/`dispatch` to a Codex thread (`codex:`, a `cc:` shim, or a Codex buddy) | Refused. `send` is asynchronous (no request id, single-use reply or await) and is not an equivalent. For a Claude sender it also cites #88: no correlated Claude-to-Codex request exists yet. |
+| any | `wait` on a Codex thread | With a running shim, run `wait --for cc:<uuid>`. Live thread without a shim: `peers.py restart <uuid>` first (it keeps the reply budget, unlike `up`), then that `wait`. Dead thread: no equivalent. |
+| Claude session | any verb except `wait` to a Claude session | Refused: use native `SendMessage`. The name is advised only when verified unique (complete registry read, no live or unverified namesake); otherwise the advice says to `/rename` or pick it in `ListAgents`. The typed ID is shown for disambiguation only; never pass it to `SendMessage`. |
+
+A Claude session is detected by `CLAUDE_CODE_SESSION_ID` or
+`CLAUDE_CODE_MESSAGING_SOCKET`. Beside one, an invalid `CODEX_THREAD_ID` or
+`--from-thread` is refused (rc 2): the sender cannot be attributed, nothing is
+sent. An OpenCode id beside a Claude or Codex one keeps the existing refusal to
+pass explicit `--from-*` flags. `ask` and `dispatch` validate `--timeout`
+before the route check.
+
+Not covered: a native `SendMessage` aimed at a Codex shim never passes through
+`peers.py`, so it cannot be intercepted. It is asynchronous and uncorrelated,
+and there is no correlated equivalent until #88. The CLI tests prove which
+advice is emitted, not that native `SendMessage` accepts the advised name; that
+rests on the measurement in [spike-checklist.md](spike-checklist.md).
