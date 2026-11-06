@@ -6,9 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- `session-peers`: `send`, `ask`, `dispatch` and `wait` check the route first; prefix targets with `cc:`, `codex:` or `oc:`. `ask`/`dispatch` to a Codex thread, including a `cc:` shim, are refused (`send` is asynchronous and not an equivalent; #88 tracks a correlated Claude-to-Codex request); `wait` on a Codex thread points to `wait --for cc:<uuid>`, `peers.py restart <uuid>`, or says there is no equivalent. A bare name is refused with the exact typed command, and a Claude session reaching a Claude session gets native `SendMessage` advice that names the target only when verified unique. An invalid `CODEX_THREAD_ID` or `--from-thread` beside a Claude session is refused instead of misattributing the sender, and delivery refuses a target that changed after the check.
+
 ### Fixed
 
-- `session-peers`: `send`, `ask`, `dispatch` and `wait` check the route first. `ask`/`dispatch` to a Codex thread, including a `cc:` shim, are refused (`send` is asynchronous and not an equivalent; #88 tracks a correlated Claude-to-Codex request); `wait` on a Codex thread points to `wait --for cc:<uuid>`, `peers.py restart <uuid>`, or says there is no equivalent. A bare name is refused with the exact typed command, and a Claude session reaching a Claude session gets native `SendMessage` advice that names the target only when verified unique. An invalid `CODEX_THREAD_ID` or `--from-thread` beside a Claude session is refused instead of misattributing the sender, and delivery refuses a target that changed after the check.
 - `session-peers`: an ambiguous name lists every candidate with kind, liveness and typed ID, including dead sessions and Codex threads that are all dead. `buddy set`, `up`, `restart`, `down` and `budget` print the same candidate lines. Codex thread titles that are not plain peer names now print quoted in the multi-match error.
 
 ## [0.49.0] - 2026-11-03

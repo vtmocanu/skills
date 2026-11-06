@@ -206,8 +206,8 @@ Read [references/attach-and-lifecycle.md](references/attach-and-lifecycle.md)
 before installing hooks, attaching persistently, restarting/stopping shims, or GC.
 Read [references/messaging.md](references/messaging.md) before shell-only sends
 or relying on advanced addressing and mailbox details.
-`peers.py` refuses a bare name and Claude-to-Claude routes with the working
-command or native `SendMessage` advice; see its "Route check" section.
+`peers.py` refuses bare names, `ask`/`dispatch`/`wait` to a Codex thread and
+Claude-to-Claude routes; see [Route check](references/messaging.md#route-check).
 
 ## Codex
 
