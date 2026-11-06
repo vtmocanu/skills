@@ -108,11 +108,16 @@ def _topic_limits():
 
 
 def _read_topic_lines(log_path):
-    """Parsed entries in file order; a torn or foreign line is skipped."""
+    """Parsed entries in file order; a torn or foreign line is skipped.
+
+    A final line without its newline is torn even when it parses: the next
+    post cuts it and reuses its seq, so a reader must never have seen it."""
     out = []
     try:
         with open(log_path, "r", encoding="utf-8", errors="replace") as fh:
             for line in fh:
+                if not line.endswith("\n"):
+                    continue
                 try:
                     entry = json.loads(line)
                 except ValueError:

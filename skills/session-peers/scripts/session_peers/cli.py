@@ -11,7 +11,7 @@ from . import watches as sp_watches
 from . import diagnostics as sp_diagnostics, lifecycle as sp_lifecycle
 from . import shim as sp_shim
 from . import channels as sp_channels
-from . import buddy as sp_buddy,diagnostics as sp_diagnostics, hooks as sp_hooks, maintenance as sp_maintenance, messaging as sp_messaging, topics as sp_topics
+from . import buddy as sp_buddy, hooks as sp_hooks, maintenance as sp_maintenance, messaging as sp_messaging, topics as sp_topics
 
 # --------------------------------------------------------------------------
 # CLI

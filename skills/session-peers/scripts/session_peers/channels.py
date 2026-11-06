@@ -6,7 +6,7 @@ channels:
 
     <root>/<key>.json     membership record, written with an atomic replace
     <root>/<key>.lock     per-channel flock
-    <root>/channels.lock  store lock, taken by create
+    <root>/.channels.lock store lock, taken by create
     <root>/history/       topic ``channel:<key>`` (see topics, ``base=``)
 
 Every membership change writes the record first and appends history second,
@@ -30,7 +30,9 @@ EVENT_JOINED = "channel.joined"
 EVENT_LEFT = "channel.left"
 EVENT_REMOVED = "channel.removed"
 
-STORE_LOCK = "channels.lock"
+# A leading dot keeps the store lock out of the key namespace: no channel
+# name can produce it, so ``<key>.lock`` never aliases it.
+STORE_LOCK = ".channels.lock"
 
 
 class ChannelError(Exception):
@@ -448,17 +450,23 @@ def _cmd_leave(args, me):
 def _cmd_remove(args, me):
     key = stored_key(args.name)
     target = _canon_member(args.member, exclude=me.partition(":")[2], typed_first=True)
+    removed = []
 
     def mutate(rec):
         if rec["owner"] != me:
             raise ChannelError("only the owner of #%s can remove members" % key)
-        if target not in rec["members"]:
+        found = target
+        if found not in rec["members"] and found.startswith("cc:"):
+            # A Codex shim is stored as codex:<id>; accept its cc: spelling.
+            found = "codex:" + found[3:]
+        if found not in rec["members"]:
             raise ChannelError("%s is not a member of #%s" % (target, key))
-        rec["members"].remove(target)
-        return EVENT_REMOVED, {"member": target}
+        rec["members"].remove(found)
+        removed.append(found)
+        return EVENT_REMOVED, {"member": found}
 
     change_membership(key, mutate, me)
-    print("removed %s from #%s" % (sp_journal._human(target), key))
+    print("removed %s from #%s" % (sp_journal._human(removed[0] if removed else target), key))
     return 0
 
 

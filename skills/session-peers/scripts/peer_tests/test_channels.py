@@ -141,6 +141,35 @@ class ChannelCommandTests(ChannelBase):
             self.assertIn("at most 2 channels", err)
             self.assertIsNone(sp_channels.read_channel("three"))
 
+    def test_spec_limits(self):
+        self.assertEqual(
+            (sp_constants.CHANNEL_MAX_MEMBERS, sp_constants.CHANNEL_MAX_CHANNELS,
+             sp_constants.CHANNEL_TMP_MAX_AGE),
+            (64, 256, 3600.0),
+        )
+
+    def test_a_channel_named_channels_does_not_alias_the_store_lock(self):
+        done = []
+
+        def create():
+            sp_channels.create_channel("channels", self.me)
+            done.append(True)
+
+        worker = threading.Thread(target=create, daemon=True)
+        worker.start()
+        worker.join(10)
+        self.assertEqual(done, [True], "create_channel('channels') blocked on its own lock")
+        self.assertEqual(sp_channels.read_channel("channels")["owner"], self.me)
+        self.ok("create", "after")
+
+    def test_shim_member_is_stored_as_codex_and_removable_by_its_cc_spelling(self):
+        tid = new_uuid()
+        self.write_record(os.getppid(), "shimmy", tid, str(self.socks / "shim.sock"), entrypoint="codex")
+        self.ok("create", "mix", "--member", "cc:" + tid)
+        self.assertEqual(sp_channels.read_channel("mix")["members"], [self.me, "codex:" + tid])
+        self.assertIn("removed codex:" + tid, self.ok("remove", "mix", "cc:" + tid))
+        self.assertEqual(sp_channels.read_channel("mix")["members"], [self.me])
+
     def test_ambiguous_member_is_refused_with_candidate_lines(self):
         a, b = new_uuid(), new_uuid()
         # Two live Codex threads with one title make the name ambiguous.
@@ -179,7 +208,7 @@ class ChannelCommandTests(ChannelBase):
         root = pathlib.Path(sp_channels.channels_root())
         self.assertEqual(stat.S_IMODE(root.stat().st_mode), 0o700)
         self.assertEqual(stat.S_IMODE((root / "history").stat().st_mode), 0o700)
-        for name in ("ops.json", "ops.lock", "channels.lock"):
+        for name in ("ops.json", "ops.lock", ".channels.lock"):
             self.assertEqual(stat.S_IMODE((root / name).stat().st_mode), 0o600, name)
 
     def test_human_output_escapes_peer_controlled_text(self):
@@ -281,6 +310,21 @@ class ChannelHistoryTests(ChannelBase):
             result = sp_topics.topic_tail(topic, base=base)
             self.assertEqual([(e["seq"], e["text"]) for e in result["entries"]], [(1, "one"), (2, "two")])
             self.assertTrue(pathlib.Path(log).read_bytes().endswith(b"\n"))
+
+    def test_complete_but_unterminated_last_line_is_never_read(self):
+        """A crash that lands the JSON but not the newline: the next post cuts
+        that line and reuses its seq, so no reader may have seen it."""
+        topic = "unterminated"
+        sp_topics.topic_post(topic, {}, text="one")
+        log, _meta, _lock = sp_topics._topic_paths(topic)
+        with open(log, "ab") as fh:
+            fh.write(json.dumps({"seq": 2, "ts": "2026-01-01T00:00:00.000Z", "text": "torn"}).encode())
+        seen = sp_topics.topic_tail(topic, since=1)
+        self.assertEqual((seen["entries"], seen["next"]), ([], 1))
+        entry = sp_topics.topic_post(topic, {}, text="two")
+        self.assertEqual(entry["seq"], 2)
+        after = sp_topics.topic_tail(topic, since=seen["next"])
+        self.assertEqual([(e["seq"], e["text"]) for e in after["entries"]], [(2, "two")])
 
     def test_torn_first_line_is_dropped_entirely(self):
         log, _meta, _lock = sp_topics._topic_paths("solo")
