@@ -173,8 +173,9 @@ resolves as before.
   `(write the message to PATH)`. If the target's ID is not a well-formed UUID or
   `ses_` ID, no command is printed. Resolved IDs that are not well-formed print
   quoted (`repr`); a session name that is not a plain peer name is replaced by
-  its typed ID. A target or option holding a control character prints quoted,
-  and no command is printed. A name that resolves only to a dead Codex thread
+  its typed ID. A target with control characters is printed escaped. An option
+  with control characters suppresses command advice. A name that resolves only
+  to a dead Codex thread
   gets no command: nothing can deliver to it.
 - **Ambiguous name**: the error lists every candidate with kind, liveness and
   typed ID (live first, then recent OpenCode sessions, then unverified, then
