@@ -46,10 +46,13 @@ def _record_before_send(args, message_id, recipient):
     """
     if not getattr(args, "record", False):
         return None
+    sender = sp_journal.sender_or_none()
     try:
-        sp_journal.record_message(sp_journal.sender_or_none(), [recipient], args.message, message_id=message_id)
+        sp_journal.record_message(sender, [recipient], args.message, message_id=message_id)
     except sp_journal.JournalError as exc:
         return sp_journal.presend_failed(exc, getattr(args, "json", False))
+    if sender is None:
+        sys.stderr.write("note: sender identity not detected; recorded with no sender\n")
     args.journal_slot = recipient
     args.journal_result = {"message_id": message_id, "recorded": True}
     return None
@@ -182,6 +185,11 @@ def _may_wake_opencode(args, session_id, owner=None):
                 and binding["buddy"]["uuid"] == session_id)
 
 
+_REPLY_WAKE_REFUSED = (
+    "error: %s; nothing queued. Resend without --in-reply-to, and use --wake only if authorized.\n"
+)
+
+
 def _send_opencode(target, args):
     """Queue one message as an OpenCode session's next turn.
 
@@ -226,15 +234,18 @@ def _send_opencode(target, args):
     state = sp_opencode.state_of(session["id"])
     resume = _may_wake_opencode(args, session["id"])
     in_reply_to = getattr(args, "in_reply_to", None)
+    grant_requester = "oc:" + session["id"]
     if in_reply_to:
+        # Read-only check now; the grant is spent only after the journal accepted the entry.
         try:
             caller = sp_identity.caller_identity(args)
             caller_address = "%s:%s" % (caller["kind"], caller["uuid"])
             if caller_address != address:
                 raise ValueError("reply sender identity is absent or ambiguous")
-            sp_reply_wake.consume(in_reply_to, "oc:" + session["id"], caller_address)
+            grant_path = sp_reply_wake.find(in_reply_to)
+            sp_reply_wake._check(sp_runtime.read_json(grant_path), in_reply_to, grant_requester, caller_address)
         except (ValueError, OSError) as exc:
-            sys.stderr.write("error: %s; nothing queued. Resend without --in-reply-to, and use --wake only if authorized.\n" % exc)
+            sys.stderr.write(_REPLY_WAKE_REFUSED % exc)
             return 1
         resume = True
     failed = _record_before_send(args, msg_id, "oc:" + session["id"])
@@ -242,6 +253,12 @@ def _send_opencode(target, args):
         if reply_id:
             sp_reply_wake.forget(reply_id)
         return failed
+    if in_reply_to:
+        try:
+            sp_reply_wake.consume(in_reply_to, grant_requester, caller_address)
+        except (ValueError, OSError) as exc:
+            sys.stderr.write(_REPLY_WAKE_REFUSED % exc)
+            return _transport_failed(args, msg_id, "reply-wake grant refused")
     try:
         inbox_id = sp_opencode.deliver(
             session["id"], text, {"message_id": msg_id, "from": address}, resume=resume
@@ -424,7 +441,9 @@ def _send_claude(target, args, oc_sender=None):
         if getattr(args, "record", False):
             # A near-cap message is refused before it is recorded.
             sp_claude.claude_body(args.message, thread_id, opencode_sender=oc_sender)
-            failed = _record_before_send(args, msg_id, "cc:" + str(rec.get("sessionId")))
+            # A Codex shim's record is a `codex:` slot, the kind its owner reads as.
+            kind = "codex" if rec.get("entrypoint") == "codex" else "cc"
+            failed = _record_before_send(args, msg_id, "%s:%s" % (kind, rec.get("sessionId")))
             if failed is not None:
                 if reply_id:
                     sp_reply_wake.forget(reply_id)
@@ -478,6 +497,13 @@ def _requester(args, target_kind):
     Raises ValueError with the reason.
     """
     explicit = getattr(args, "from_thread", None)
+    env_thread = os.environ.get("CODEX_THREAD_ID") or os.environ.get("CODEX_SESSION_ID")
+    if (explicit and sp_runtime.is_uuid(explicit) and sp_runtime.is_uuid(env_thread)
+            and explicit.lower() != env_thread.lower()):
+        # The journal's `from` is this identity: a flag must not speak for another thread.
+        raise ValueError(
+            "--from-thread names thread %s but this environment is Codex thread %s" % (explicit, env_thread)
+        )
     if explicit or target_kind == "cc" and not sp_opencode.current_session_id():
         tid = sp_identity._thread_from_args(args, required=True)
         return {"kind": "codex", "uuid": tid}, None
@@ -728,6 +754,11 @@ def cmd_reply(args):
             raise sp_journal.JournalRefused("request %s is expired" % args.request)
         if current.get("target_session_id") != sid:
             raise sp_journal.JournalRefused("request %s no longer belongs to %s" % (args.request, sid))
+        if os.path.exists(reply_path):
+            # A different reply already won the file: record nothing for this one.
+            existing = sp_requests._read_completed_reply(reply_path)
+            if existing.get("session_id") != sid or existing.get("message") != message:
+                raise sp_journal.JournalRefused("request %s already has a different reply" % args.request)
 
     _after_reply_validation()
     try:
@@ -782,20 +813,17 @@ def cmd_dispatch(args):
         # mailbox that a later `await` would poll until it expired.
         sp_requests._unlink_quiet(request.meta_path)
         sp_requests._unlink_quiet(request.reply_path)
-        if args.json:
-            print(
-                json.dumps(
-                    {
-                        "status": "delivery_failed",
-                        "request_id": request.request_id,
-                        "target_session_id": request.record.get("sessionId"),
-                        "detail": str(exc),
-                    },
-                    sort_keys=True,
-                )
-            )
+        failure = {
+            "status": "delivery_failed",
+            "request_id": request.request_id,
+            "target_session_id": request.record.get("sessionId"),
+            "detail": str(exc),
+        }
         sys.stderr.write("error: could not send request to %s: %s\n" % (args.to, exc))
-        return sp_journal.transport_failed(request.request_id, request.target_typed, exc)
+        rc = sp_journal.transport_failed(request.request_id, request.target_typed, exc, payload=failure)
+        if args.json:
+            print(json.dumps(failure, sort_keys=True))
+        return rc
     sp_runtime.log(
         "dispatched request %s to %s; expires in %.0fs"
         % (request.request_id, request.record.get("name") or request.record.get("sessionId"), request.timeout)

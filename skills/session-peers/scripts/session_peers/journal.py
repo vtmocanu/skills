@@ -1073,9 +1073,16 @@ def _resolve_recipients(to):
         if slot not in seen:
             seen.append(slot)
             try:
-                sp_identity.resolve_typed(slot)
+                resolved = sp_identity.resolve_typed(slot)
             except sp_codex.ResolveError as exc:
                 raise JournalRefused("recipient %s is not an existing session: %s" % (slot, exc))
+            # A Codex shim's Claude-facing record resolves as `codex:`; a slot
+            # of the other kind would name a session that cannot read it.
+            if resolved["kind"] != slot.partition(":")[0]:
+                raise JournalRefused(
+                    "recipient %s is a %s session: use %s:%s"
+                    % (slot, resolved["kind"], resolved["kind"], slot.partition(":")[2])
+                )
     return seen
 
 
@@ -1507,15 +1514,18 @@ def update_failed(exc):
     return EXIT_UPDATE_FAILED
 
 
-def transport_failed(message_id, slot, exc, rc=1):
+def transport_failed(message_id, slot, exc, rc=1, payload=None):
     """Append a transport_error after a failed transport call.
 
     Returns ``rc`` (the caller's exit code for the transport failure) when the
-    append works, else 76 after reporting it. Never resends or retries.
+    append works, else 76 after reporting it, adding ``journal_error`` to
+    ``payload`` when given. Never resends or retries.
     """
     try:
         transport_error(message_id, slot, exc)
-    except JournalUpdateFailed as failure:
+    except Exception as failure:  # post-transport: any failure is reported, never raised
+        if payload is not None:
+            payload["journal_error"] = str(failure)
         return update_failed(failure)
     return rc
 
@@ -1528,7 +1538,7 @@ def settle_or_report(message_id, state, by, payload=None):
     """
     try:
         settle(message_id, state, by)
-    except JournalUpdateFailed as failure:
+    except Exception as failure:  # post-transport: any failure is reported, never raised
         if payload is not None:
             payload["journal_error"] = str(failure)
         return update_failed(failure)

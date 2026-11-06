@@ -123,7 +123,7 @@ class JournalBase(unittest.TestCase):
         script = (
             "import os, sys\nsys.path.insert(0, %r)\n"
             "from session_peers import journal as j, identity as i\n"
-            "i.resolve_typed = lambda *a, **k: {}\n"
+            "i.resolve_typed = lambda t, *a, **k: {\"kind\": t.partition(\":\")[0]}\n"
             "def fp(name):\n    if name == %r:\n        os._exit(9)\n"
             "j._failpoint = fp\n%s\n" % (HERE, failpoint, code)
         )
