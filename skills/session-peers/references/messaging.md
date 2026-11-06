@@ -164,15 +164,18 @@ shell. Confirm the successful result and message id before reporting delivery.
 ### Route check
 
 `send`, `ask`, `dispatch` and `wait` check the route before delivering. The
-target must be typed (`cc:`, `codex:` or `oc:`); a typed name or UUID prefix
-still resolves as before.
+target must be typed (`cc:`, `codex:` or `oc:`) or the `buddy` alias, which
+expands to the bound buddy's typed ID first; a typed name or UUID prefix still
+resolves as before.
 
-- **Bare name**: refused (rc 2) with the typed command to run, other options
+- **Bare session name**: refused (rc 2) with the typed command to run, other options
   kept. A `--message` becomes `--message-file <PATH>` followed by
   `(write the message to PATH)`. If the target's ID is not a well-formed UUID or
   `ses_` ID, no command is printed. Resolved IDs that are not well-formed print
   quoted (`repr`); a session name that is not a plain peer name is replaced by
-  its typed ID.
+  its typed ID. A target or option holding a control character prints quoted,
+  and no command is printed. A name that resolves only to a dead Codex thread
+  gets no command: nothing can deliver to it.
 - **Ambiguous name**: the error lists every candidate with kind, liveness and
   typed ID (live first, then recent OpenCode sessions, then unverified, then
   dead; nothing is capped),
@@ -197,8 +200,9 @@ The sender counts as a Claude session when `CLAUDE_CODE_SESSION_ID` or
 makes it a Codex sender. Beside a Claude session, an invalid Codex id is
 refused (rc 2): the sender cannot be attributed, nothing is sent. An OpenCode id
 beside a Claude or valid Codex one, without explicit `--from-*` flags, cannot be
-attributed: with a Claude variable set it is treated as a Claude session for
-the table above. Once the target resolves, its other routes are left to each
+attributed: `send`/`ask`/`dispatch` to a Claude session are refused (rc 2) with
+"pass explicit --from-* flags", and the Claude-only #88 note is omitted. Once
+the target resolves, its other routes are left to each
 command's existing identity checks, unchanged (for example, `send` refuses it with "pass explicit
 `--from-*` flags"). `ask`, `dispatch` and `wait` validate `--timeout` before the
 route check.

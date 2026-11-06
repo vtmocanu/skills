@@ -160,6 +160,16 @@ class TestRoutesBareNames(RoutesBase):
             "wait", "--for", "cc-main", "--timeout", "5", "--state", "busy", "--json",
         )
 
+    def test_a_bare_name_of_a_single_dead_codex_thread_gets_no_command(self):
+        tid = new_uuid()
+        self.threads([(tid, "gone", False, "2026-09-08T12:00:00Z")])
+        self.as_codex()
+        self.refused(
+            'error: --to needs a typed target; "gone" is Codex thread codex:%s (dead). '
+            "It is not live, so no command can deliver to it; there is no equivalent." % tid,
+            "send", "--to", "gone", "--message", "hi",
+        )
+
     def test_an_unknown_bare_name_is_not_found(self):
         self.refused(
             "error: no Claude session, Codex thread or OpenCode session named 'nobody'; "
@@ -654,23 +664,25 @@ class TestRoutesClaudeToClaude(RoutesBase):
                     verb, "--to", "cc:%s" % sid, "--message", "q", *timeout(verb), listeners=[listener],
                 )
 
-    def test_ask_to_a_codex_thread_from_a_mixed_opencode_and_claude_sender_cites_the_missing_request(self):
+    def test_ask_to_a_codex_thread_from_a_mixed_opencode_and_claude_sender_omits_the_claude_note(self):
         tid, _rollout = self.one_thread(name="codex-uzi")
         self.as_opencode(OC_A)
         self.as_claude_session()
         self.refused(
-            request_refusal("ask", tid) + NO_CORRELATED_CODEX + NOT_EQUIVALENT,
+            request_refusal("ask", tid) + NOT_EQUIVALENT,
             "ask", "--to", "codex:%s" % tid, "--message", "q", "--timeout", "1",
         )
 
-    def test_a_mixed_opencode_and_claude_sender_is_sent_to_sendmessage_for_a_claude_target(self):
+    def test_a_mixed_opencode_and_claude_sender_cannot_be_attributed_for_a_claude_target(self):
         listener, rec = self.add_listener(name="cc-main", session_id=new_uuid())
         self.as_opencode(OC_A)
         self.as_claude_session()
         for verb in ("send", "ask", "dispatch"):
             with self.subTest(verb=verb):
                 self.refused(
-                    claude_refusal("cc-main", 'Use SendMessage with to: "cc-main".', rec["sessionId"], verb),
+                    "error: this environment names an OpenCode session and a Claude Code or Codex "
+                    "session, so the sender cannot be attributed; pass explicit --from-* flags. "
+                    "Nothing was sent.",
                     verb, "--to", "cc:%s" % rec["sessionId"], "--message", "q", *timeout(verb), listeners=[listener],
                 )
 
@@ -1057,3 +1069,24 @@ class TestRoutesHostileText(RoutesBase):
                 "(checked codex:%s, now codex:%s); nothing was sent" % (t1, self.NEWLINE_REPR),
                 "send", "--to", "codex:cx-a", "--message", "q", code=1,
             )
+
+    def test_an_option_with_a_newline_gets_no_command(self):
+        listener, rec = self.add_listener(name="cc-main", session_id=new_uuid())
+        self.as_codex()
+        self.refused(
+            'error: --to needs a typed target; "cc-main" is Claude Code session cc:%s (live). Run:\n'
+            "  (no command is printed: an option holds a control character)" % rec["sessionId"],
+            "send", "--to", "cc-main", "--message", "hi", "--from-name", "n1\nerror: forged",
+            listeners=[listener],
+        )
+
+    def test_a_bare_name_with_a_newline_is_printed_escaped(self):
+        tid = new_uuid()
+        name = "x\nforged line"
+        self.threads([(tid, name, True, "2026-09-08T12:00:00Z")])
+        self.as_codex()
+        rc, out, err = self.cli("send", "--to", name, "--message", "hi")
+        self.assertEqual(rc, 2, err)
+        self.assertEqual(out, "")
+        self.assertNotIn("\nforged line", err)
+        self.assertIn(repr(name), err)

@@ -93,7 +93,23 @@ def sender_kind(args):
 
 
 def _claudeish(sender):
-    return sender.kind == "cc" or (sender.kind == "unknown" and _claude_indicator())
+    return sender.kind == "cc"
+
+
+_UNATTRIBUTED = (
+    "error: this environment names an OpenCode session and a Claude Code or Codex "
+    "session, so the sender cannot be attributed; pass explicit --from-* flags. "
+    "Nothing was sent."
+)
+
+
+def _printable(text):
+    return str(text).isprintable()
+
+
+def _quoted(text):
+    """``text`` in double quotes, or ``repr``-quoted when it holds a control character."""
+    return '"%s"' % text if _printable(text) else repr(str(text))
 
 
 def _options(args, verb):
@@ -106,6 +122,9 @@ def _options(args, verb):
         value = getattr(args, attr, None)
         if value is None or value is False:
             continue
+        if not _printable(value):
+            # shlex.quote keeps control characters: such a command would forge lines.
+            return None, False
         if boolean:
             out.append(flag)
         elif isinstance(value, float):
@@ -120,6 +139,7 @@ def _wait_flag(verb):
 
 
 NO_COMMAND = "  (no command is printed: the target's ID is not a well-formed typed ID)"
+UNSAFE_OPTION = "  (no command is printed: an option holds a control character)"
 
 
 def _run_lines(args, verb, kind, ident, restart=False):
@@ -132,6 +152,8 @@ def _run_lines(args, verb, kind, ident, restart=False):
     if not (isinstance(ident, str) and sp_identity.display_id(kind, ident) == ident):
         return NO_COMMAND
     options, note = _options(args, verb)
+    if options is None:
+        return UNSAFE_OPTION
     typed = "%s:%s" % (kind, ident)
     extra = ["peers.py restart %s" % shlex.quote(ident)] if restart else []
     lines = extra + [" ".join(["peers.py", verb, _wait_flag(verb), shlex.quote(typed)] + options)]
@@ -252,8 +274,11 @@ def _verdict(args, verb, sender, tgt):
             return _request_to_codex(verb, sender, tgt.ident)
         if verb == "wait" and tgt.via != "cc":
             return _wait_for_codex(args, tgt.ident)
-    elif tgt.runtime == "claude" and verb != "wait" and _claudeish(sender):
-        return _claude_to_claude(verb, tgt.rec)
+    elif tgt.runtime == "claude" and verb != "wait":
+        if sender.kind == "unknown":
+            return _UNATTRIBUTED
+        if _claudeish(sender):
+            return _claude_to_claude(verb, tgt.rec)
     return None
 
 
@@ -289,13 +314,13 @@ def _resolve_bare(args, verb, value, sender):
     except sp_codex.ResolveAmbiguousKind as exc:
         if exc.ambiguous:
             lines = sp_identity.describe_candidates(name, exclude=exclude)
-            raise _Refusal(2, "\n".join(['error: "%s" is ambiguous; pick one typed ID:' % value] + lines))
+            raise _Refusal(2, "\n".join(["error: %s is ambiguous; pick one typed ID:" % _quoted(value)] + lines))
         lines = sp_identity.describe_candidates(name, exclude=exclude)
         raise _Refusal(2, "\n".join(["error: %s" % exc] + (["Candidates:"] + lines if lines else [])))
     except sp_codex.ResolveNoLive as exc:
         lines = sp_identity.ambiguity_lines(exc, name, exclude)
         if lines:
-            raise _Refusal(2, "\n".join(['error: "%s" is ambiguous; pick one typed ID:' % value] + lines))
+            raise _Refusal(2, "\n".join(["error: %s is ambiguous; pick one typed ID:" % _quoted(value)] + lines))
         raise _Refusal(2, "error: %s" % exc)
     except sp_codex.ResolveError as exc:
         raise _Refusal(2, "error: %s" % exc)
@@ -355,14 +380,15 @@ def _route(args, verb, value):
     if refusal:
         raise _Refusal(2, refusal)
     kind = {"claude": "cc", "codex": "codex", "opencode": "oc"}[tgt.runtime]
-    raise _Refusal(
-        2,
-        'error: %s needs a typed target; "%s" is %s %s (%s). Run:\n%s'
-        % (
-            _wait_flag(verb), value, LABELS[kind], _typed(tgt.runtime, sp_identity.display_id(kind, tgt.ident)),
-            _liveness(tgt), _run_lines(args, verb, kind, tgt.ident),
-        ),
+    liveness = _liveness(tgt)
+    head = "error: %s needs a typed target; %s is %s %s (%s)." % (
+        _wait_flag(verb), _quoted(value), LABELS[kind], _typed(tgt.runtime, sp_identity.display_id(kind, tgt.ident)),
+        liveness,
     )
+    if tgt.runtime == "codex" and liveness == "dead":
+        # resolve_typed falls back to a single dead thread; no send can deliver to it.
+        raise _Refusal(2, head + " It is not live, so no command can deliver to it; there is no equivalent.")
+    raise _Refusal(2, "%s Run:\n%s" % (head, _run_lines(args, verb, kind, tgt.ident)))
 
 
 def check(args, verb, attr):
