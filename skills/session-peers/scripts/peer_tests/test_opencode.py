@@ -205,6 +205,8 @@ class OpenCodeReplyWakeTests(OpenCodeBase):
 
     def test_codex_alias_grant_matches_codex_reply_identity(self):
         tid, _rollout = self.one_thread()
+        # The route check resolves cc:<uuid> itself, so the shim's record must exist.
+        self.write_record(os.getpid(), "codex-uzi", tid, str(self.socks / "shim.sock"), entrypoint="codex")
         self.as_opencode()
         with mock.patch.object(sp_messaging, "_codex_shim_thread", return_value=tid):
             rc, out, err = self.cli("send", "--to", "cc:" + tid, "--message", "review",
@@ -459,12 +461,27 @@ class OpenCodeSendTests(OpenCodeBase):
         self.assertIn("--to oc:%s" % OC_A, body)
 
     def test_opencode_sender_beside_a_claude_identity_is_refused(self):
-        self.add_listener(name="cc-main", session_id="s1")
+        listener, _rec = self.add_listener(name="cc-main", session_id="s1")
         self.as_opencode(OC_A)
         os.environ["CLAUDE_CODE_SESSION_ID"] = new_uuid()
         rc, _out, err = self.cli("send", "--to", "cc:cc-main", "--message", "x")
         self.assertEqual(rc, 2)
+        self.assertEqual(
+            err,
+            "error: this environment names an OpenCode session and a Claude Code or Codex "
+            "session, so the sender cannot be attributed; pass explicit --from-* flags. "
+            "Nothing was sent.\n",
+        )
+        time.sleep(0.2)
+        self.assertEqual(listener.of_type("user"), [])
+
+    def test_opencode_sender_beside_a_claude_identity_sending_to_opencode_is_refused(self):
+        self.as_opencode(OC_A)
+        os.environ["CLAUDE_CODE_SESSION_ID"] = new_uuid()
+        rc, _out, err = self.cli("send", "--to", "oc:" + OC_B, "--message", "x")
+        self.assertEqual(rc, 2, err)
         self.assertIn("pass explicit --from-* flags", err)
+        self.assertEqual(self.oc_calls("session.prompt"), [])
 
     def test_opencode_sender_the_service_cannot_confirm_is_refused(self):
         listener, _rec = self.add_listener(name="cc-main", session_id="s1")

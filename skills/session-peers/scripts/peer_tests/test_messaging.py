@@ -249,6 +249,13 @@ class TestAnonymousClaudeOrigin(Base):
                 self.assertEqual(rc, 2, err)
                 self.assertIn("Claude Code session", err)
                 self.assertIn("SendMessage", err)
+                self.assertEqual(err, (
+                    "error: this Claude Code session must reach Claude Code session cc-main "
+                    "with native SendMessage, not peers.py. Use SendMessage with to: "
+                    '"cc-main". Typed ID cc:%s is for disambiguation only; do not pass it '
+                    "to SendMessage.%s\n" % (rec["sessionId"], "" if command == "send" else (
+                        " A correlated ask has no Claude-to-Claude equivalent; "
+                        "SendMessage is asynchronous."))))
                 send_frame.assert_not_called()
                 self.assertEqual(listener.of_type("user"), [])
                 self.assertEqual(list(pathlib.Path(sp_storage.request_dir()).glob("*.json")), [])

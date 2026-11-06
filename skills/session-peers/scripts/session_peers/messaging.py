@@ -11,6 +11,7 @@ from . import constants as sp_constants, protocol as sp_protocol, rollout as sp_
 from . import claude as sp_claude, codex as sp_codex, diagnostics as sp_diagnostics, requests as sp_requests, storage as sp_storage
 from . import buddy as sp_buddy, identity as sp_identity, opencode as sp_opencode
 from . import reply_wake as sp_reply_wake
+from . import routes as sp_routes
 
 
 def _validate_reply_wake(args):
@@ -65,6 +66,8 @@ def cmd_send(args):
     except ValueError as exc:
         sys.stderr.write("error: %s\n" % exc)
         return 1
+    if (refused := sp_routes.check(args, "send", "to")) is not None:
+        return refused
     target = args.to
     if target.startswith("oc:"):
         return _send_opencode(target[len("oc:") :], args)
@@ -170,6 +173,8 @@ def _send_opencode(target, args):
     except sp_codex.ResolveError as exc:
         sys.stderr.write("error: %s\n" % exc)
         return 1
+    if (refused := sp_routes.verify(args, "opencode", session["id"])) is not None:
+        return refused
     if exclude and session["id"] == exclude:
         sys.stderr.write("error: an OpenCode session cannot message itself\n")
         return 2
@@ -263,6 +268,8 @@ def _send_codex(target, args, oc_sender=None):
     except sp_codex.ResolveError as exc:
         sys.stderr.write("error: %s\n" % exc)
         return 1
+    if (refused := sp_routes.verify(args, "codex", thread["id"])) is not None:
+        return refused
     degraded = thread.get("degraded")
     if degraded:
         sp_runtime.log("liveness unverified: the Codex state schema is unknown")
@@ -370,6 +377,8 @@ def _send_claude(target, args, oc_sender=None):
     reply_id = None
     try:
         rec = sp_claude._resolve_claude_record(target)
+        if (refused := sp_routes.verify_record(args, rec)) is not None:
+            return refused
         if oc_sender and getattr(args, "allow_reply_wake", None) is not None:
             reply_id = _issue_reply_wake(args, oc_sender, "cc:" + rec["sessionId"], str(uuidlib.uuid4()))
             oc_sender = dict(oc_sender, reply_wake_id=reply_id)
@@ -467,6 +476,8 @@ def _prepare_request(args, purpose):
     failed = _expand_buddy_arg(args, "to", purpose)
     if failed is not None:
         return failed
+    if (refused := sp_routes.check(args, purpose, "to")) is not None:
+        return refused
     kind, _sep, target = args.to.partition(":")
     if kind not in ("cc", "oc") or not _sep:
         sys.stderr.write("error: %s --to must start with cc: or oc:\n" % purpose)
@@ -500,6 +511,8 @@ def _prepare_request(args, purpose):
             % (rec.get("name") or args.to)
         )
         return 1
+    if (refused := sp_routes.verify_record(args, rec)) is not None:
+        return refused
 
     sp_requests.cleanup_expired_requests()
     request_id = str(uuidlib.uuid4())
@@ -832,6 +845,8 @@ def cmd_wait_peer(args):
     failed = _expand_buddy_arg(args, "for_peer", "wait")
     if failed is not None:
         return failed
+    if (refused := sp_routes.check(args, "wait", "for_peer")) is not None:
+        return refused
     if args.for_peer.startswith("oc:"):
         return _wait_opencode(args)
     if not args.for_peer.startswith("cc:"):
@@ -848,6 +863,8 @@ def cmd_wait_peer(args):
     except sp_codex.ResolveError as exc:
         sys.stderr.write("error: %s\n" % exc)
         return 1
+    if (refused := sp_routes.verify_record(args, rec)) is not None:
+        return refused
     sid = rec.get("sessionId")
     deadline = time.monotonic() + timeout
     interval = sp_runtime._float_env(
@@ -894,6 +911,8 @@ def _wait_opencode(args):
     except sp_codex.ResolveError as exc:
         sys.stderr.write("error: %s\n" % exc)
         return 1
+    if (refused := sp_routes.verify(args, "opencode", session["id"])) is not None:
+        return refused
     want = {"idle": "idle", "busy": "running"}[args.state]
     deadline = time.monotonic() + timeout
     interval = sp_runtime._float_env(

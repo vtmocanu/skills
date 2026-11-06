@@ -193,9 +193,10 @@ def resolve_session(target, exclude=None):
             "no recent OpenCode session titled %r; address it as oc:<ses_id>" % target
         )
     if len(matches) > 1:
-        raise sp_codex.ResolveError(
+        raise sp_codex.ResolveAmbiguous(
             "%r titles %d OpenCode sessions (%s); address one as oc:<ses_id>"
-            % (target, len(matches), ", ".join(m["id"] for m in matches))
+            % (target, len(matches), ", ".join(m["id"] for m in matches)),
+            name=target, kind="oc",
         )
     return matches[0]
 
