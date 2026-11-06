@@ -193,12 +193,14 @@ still resolves as before.
 
 The sender counts as a Claude session when `CLAUDE_CODE_SESSION_ID` or
 `CLAUDE_CODE_MESSAGING_SOCKET` is set and there is no valid Codex id
-(`--from-thread`, `CODEX_THREAD_ID`, `CODEX_SESSION_ID`) and no OpenCode id
-without explicit `--from-*` flags; a valid Codex id makes it a Codex sender. Beside a Claude session, an
-invalid Codex id is refused (rc 2): the sender cannot be attributed, nothing is
-sent. An OpenCode id beside a Claude or Codex one keeps the existing refusal to
-pass explicit `--from-*` flags. `ask`, `dispatch` and `wait` validate
-`--timeout` before the route check.
+(`--from-thread`, `CODEX_THREAD_ID`, `CODEX_SESSION_ID`); a valid Codex id
+makes it a Codex sender. Beside a Claude session, an invalid Codex id is
+refused (rc 2): the sender cannot be attributed, nothing is sent. An OpenCode id
+beside a Claude or Codex one, without explicit `--from-*` flags, cannot be
+attributed: with a Claude variable set it is treated as a Claude session for
+the table above, otherwise it keeps the existing refusal to pass explicit
+`--from-*` flags. `ask`, `dispatch` and `wait` validate `--timeout` before the
+route check.
 
 Not covered: a native `SendMessage` aimed at a Codex shim never passes through
 `peers.py`, so it cannot be intercepted. It is asynchronous and uncorrelated,

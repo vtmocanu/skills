@@ -93,7 +93,7 @@ def sender_kind(args):
 
 
 def _claudeish(sender):
-    return sender.kind == "cc"
+    return sender.kind == "cc" or (sender.kind == "unknown" and _claude_indicator())
 
 
 def _options(args, verb):
@@ -195,6 +195,12 @@ def _verified_name(rec):
         return None, error
     if sp_claude.record_liveness(rec) != "live":
         return None, "absent"
+    if not any(
+        other.get("sessionId") == rec.get("sessionId") and other.get("pid") == rec.get("pid")
+        and other.get("name") == name and sp_claude.record_liveness(other) == "live"
+        for other in records
+    ):
+        return None, "its registry record changed while it was checked"
     unverified = False
     for other in records:
         if other.get("name") != name or (other.get("pid") == rec.get("pid") and other.get("sessionId") == rec.get("sessionId")):

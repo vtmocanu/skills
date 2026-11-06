@@ -461,12 +461,19 @@ class OpenCodeSendTests(OpenCodeBase):
         self.assertIn("--to oc:%s" % OC_A, body)
 
     def test_opencode_sender_beside_a_claude_identity_is_refused(self):
-        self.add_listener(name="cc-main", session_id="s1")
+        listener, _rec = self.add_listener(name="cc-main", session_id="s1")
         self.as_opencode(OC_A)
         os.environ["CLAUDE_CODE_SESSION_ID"] = new_uuid()
         rc, _out, err = self.cli("send", "--to", "cc:cc-main", "--message", "x")
         self.assertEqual(rc, 2)
-        self.assertIn("pass explicit --from-* flags", err)
+        self.assertEqual(
+            err,
+            "error: this Claude Code session must reach Claude Code session cc-main with "
+            "native SendMessage, not peers.py. Use SendMessage with to: \"cc-main\". Typed ID "
+            "cc:'s1' is for disambiguation only; do not pass it to SendMessage.\n",
+        )
+        time.sleep(0.2)
+        self.assertEqual(listener.of_type("user"), [])
 
     def test_opencode_sender_the_service_cannot_confirm_is_refused(self):
         listener, _rec = self.add_listener(name="cc-main", session_id="s1")
