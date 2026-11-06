@@ -27,7 +27,10 @@ Records (``schema`` 1, ``seq``, ``type``, ``at``):
 A handover covers every message with ``seq <= through_seq``. A session may read
 or ACK a slot when it is that slot or reaches it through covering handovers.
 Malformed lines are counted and never trusted. A rewrite (pruning, or an event
-that enables pruning) drops them.
+that enables pruning) drops them. A line that is a JSON object with an integer
+``seq`` and a finite ``at`` but an unknown ``schema`` or ``type`` is a later
+version's record: it is not interpreted or counted as malformed, a rewrite keeps
+it verbatim, it counts toward the size, and only the age cap drops it.
 """
 
 from __future__ import annotations
@@ -52,6 +55,7 @@ _NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _NONBLOCK = getattr(os, "O_NONBLOCK", 0)
 _DIRECTORY = getattr(os, "O_DIRECTORY", 0)
 _KINDS = ("message", "request", "reply")
+_TYPES = ("message", "ack", "settled", "transport_error", "handover")
 _STATES = ("replied", "consumed")
 _STATE_FOR_KIND = {"request": "replied", "reply": "consumed"}
 _SLOT_ENV = ("CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_MESSAGING_SOCKET")
@@ -66,7 +70,10 @@ class JournalError(Exception):
 
 
 class JournalFull(JournalError):
-    """Nothing eligible can be pruned to fit the record; nothing was written (CLI exit 75)."""
+    """Nothing eligible can be pruned to fit the record (CLI exit 75).
+
+    The journal file is left byte-identical, except for the repair of a torn tail.
+    """
 
 
 class JournalUnavailable(JournalError):
@@ -122,11 +129,26 @@ def _age_cutoff(now):
 # --------------------------------------------------------------------------
 
 
+# Full-match patterns: the shared ones end in ``$``, which also accepts a trailing newline.
+_UUID_FULL = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+_OC_FULL = re.compile(r"ses_[A-Za-z0-9]{8,64}")
+
+
+def _full_uuid(value):
+    return isinstance(value, str) and _UUID_FULL.fullmatch(value) is not None
+
+
+def _full_oc(value):
+    return isinstance(value, str) and _OC_FULL.fullmatch(value) is not None
+
+
 def _norm(value):
     """A typed id in canonical form (lowercase UUID), or ValueError."""
     typed = sp_identity.parse_typed(value)
-    ident = typed["uuid"] if typed["kind"] == "oc" else typed["uuid"].lower()
-    return "%s:%s" % (typed["kind"], ident)
+    kind, ident = typed["kind"], typed["uuid"]
+    if not (_full_oc(ident) if kind == "oc" else _full_uuid(ident)):
+        raise ValueError("expected cc:<uuid>, codex:<uuid> or oc:<ses_id>, got %r" % (value,))
+    return "%s:%s" % (kind, ident if kind == "oc" else ident.lower())
 
 
 def _norm_caller(value):
@@ -167,15 +189,17 @@ def caller():
         )
     label = groups[0][0]
     if label == "Claude":
-        if not sp_runtime.is_uuid(claude_sid):
+        if not _full_uuid(claude_sid):
             raise JournalRefused("this Claude session's id %r is not a UUID" % claude_sid)
         return "cc:" + claude_sid.lower()
     if label == "Codex":
         if len(set(codex_vals)) > 1:
             raise JournalRefused("CODEX_THREAD_ID and CODEX_SESSION_ID name different threads")
-        if not sp_runtime.is_uuid(codex_vals[0]):
+        if not _full_uuid(codex_vals[0]):
             raise JournalRefused("this Codex thread's id %r is not a UUID" % codex_vals[0])
         return "codex:" + codex_vals[0].lower()
+    if not _full_oc(oc_sid):
+        raise JournalRefused("this OpenCode session's id %r is not a session id" % oc_sid)
     try:
         sp_opencode.get_session(oc_sid)
     except sp_opencode.OpenCodeError as exc:
@@ -205,7 +229,7 @@ def _typed_ok(value):
 
 
 def _uuid_ok(value):
-    return isinstance(value, str) and sp_runtime.is_uuid(value) and value == value.lower()
+    return _full_uuid(value) and value == value.lower()
 
 
 def _check(cond, what):
@@ -213,14 +237,19 @@ def _check(cond, what):
         raise ValueError(what)
 
 
+class _Foreign(ValueError):
+    """A record with a valid ``seq`` and ``at`` but an unknown schema or type."""
+
+
 def _validate(d, now):
-    """Raise ValueError unless ``d`` is one well-formed record."""
+    """Raise ValueError unless ``d`` is one well-formed record (_Foreign if only unknown)."""
     _check(isinstance(d, dict), "record is not an object")
-    _check(_is_int(d.get("schema")) and d["schema"] == 1, "schema")
     _check(_is_int(d.get("seq")) and d["seq"] >= 1, "seq")
     _check(_is_num(d.get("at")) and math.isfinite(d["at"]), "at")
     _check(d["at"] <= now + sp_constants.JOURNAL_FUTURE_SKEW, "at is in the future")
     kind = d.get("type")
+    if not (_is_int(d.get("schema")) and d["schema"] == 1 and kind in _TYPES):
+        raise _Foreign("unknown schema or type")
     if kind == "message":
         _check(_uuid_ok(d.get("message_id")), "message_id")
         _check(d.get("kind") in _KINDS, "kind")
@@ -255,28 +284,36 @@ def _validate(d, now):
 
 
 def _parse_line(raw, now):
+    """``(record, foreign)`` for a usable line, or None for a malformed one."""
     try:
         text = raw.decode("utf-8")
         d = json.loads(text, parse_constant=_reject_constant)
-        return _validate(d, now)
+        try:
+            return _validate(d, now), False
+        except _Foreign:
+            return d, True
     except (ValueError, RecursionError, TypeError, OverflowError, UnicodeError):
         return None
 
 
 class _Rec:
-    """One validated line. ``dead`` marks a record the next rewrite drops."""
+    """One usable line. ``dead`` marks a record the next rewrite drops.
 
-    __slots__ = ("d", "size", "line", "dead")
+    ``foreign`` marks an unknown-schema or unknown-type record kept verbatim.
+    """
 
-    def __init__(self, d, line):
+    __slots__ = ("d", "size", "line", "dead", "foreign")
+
+    def __init__(self, d, line, foreign=False):
         self.d = d
         self.line = line
         self.size = len(line) + 1
         self.dead = False
+        self.foreign = foreign
 
 
 def _parse(data, now):
-    """Valid records in file order, the malformed-line count and the last seq.
+    """Usable records in file order, the malformed-line count and the last seq.
 
     A final line without its newline is a torn or in-flight write: ignored.
     """
@@ -287,12 +324,12 @@ def _parse(data, now):
             break
         raw = data[pos:nl]
         pos = nl + 1
-        d = _parse_line(raw, now)
-        if d is None or d["seq"] <= last_seq:
+        parsed = _parse_line(raw, now)
+        if parsed is None or parsed[0]["seq"] <= last_seq:
             malformed += 1
             continue
-        last_seq = d["seq"]
-        recs.append(_Rec(d, raw))
+        last_seq = parsed[0]["seq"]
+        recs.append(_Rec(parsed[0], raw, parsed[1]))
     return recs, malformed, last_seq
 
 
@@ -328,7 +365,9 @@ class _Model:
     def __init__(self, recs):
         self.recs = []
         self.entries = {}
-        self.grants = []
+        self.grants = {}  # (from, to) -> record, oldest first
+        self.foreign = []
+        self._index = None
         self.total = 0
         self.msg_bytes = 0
         self.by_sender = {}
@@ -338,7 +377,7 @@ class _Model:
     def _count(self, rec, sign):
         self.total += sign * rec.size
         d = rec.d
-        if d["type"] == "message":
+        if not rec.foreign and d["type"] == "message":
             key = _bucket(d)
             self.by_sender[key] = self.by_sender.get(key, 0) + sign * rec.size
             if d["kind"] == "message":
@@ -352,14 +391,21 @@ class _Model:
     def add(self, rec):
         """Append ``rec``; a duplicate or dangling one is marked dead, not kept."""
         self.recs.append(rec)
+        if rec.foreign:
+            self.foreign.append(rec)
+            self._count(rec, 1)
+            return
         d = rec.d
         kind = d["type"]
         if kind == "handover":
-            for old in [g for g in self.grants if g.d["from"] == d["from"] and g.d["to"] == d["to"]]:
+            old = self.grants.pop((d["from"], d["to"]), None)
+            if old is not None:
                 self._kill(old)
-                self.grants.remove(old)
-            self.grants.append(rec)
+            self.grants[(d["from"], d["to"])] = rec
+            self._index = None
             self._count(rec, 1)
+            if len(self.grants) > sp_constants.JOURNAL_MAX_GRANTS_TOTAL:
+                self._drop_grant(next(iter(self.grants)))
             return
         if kind == "message":
             if d["message_id"] in self.entries:
@@ -395,25 +441,30 @@ class _Model:
         for rec in entry.events:
             self._kill(rec)
 
+    def _drop_grant(self, key):
+        self._kill(self.grants.pop(key))
+        self._index = None
+
     def age_prune(self, now):
         cutoff = _age_cutoff(now)
         for entry in list(self.entries.values()):
             if entry.d["at"] < cutoff:
                 self.drop_entry(entry)
-        for grant in list(self.grants):
+        for key, grant in list(self.grants.items()):
             if grant.d["at"] < cutoff:
-                self._kill(grant)
-                self.grants.remove(grant)
+                self._drop_grant(key)
+        for rec in self.foreign:
+            if rec.d["at"] < cutoff:
+                self._kill(rec)
 
     def prune_grants(self, keep=None):
         """Drop grants that cover no retained message."""
         lowest = next(iter(self.entries.values())).d["seq"] if self.entries else None
-        for grant in list(self.grants):
+        for key, grant in list(self.grants.items()):
             if grant is keep:
                 continue
             if lowest is None or lowest > grant.d["through_seq"]:
-                self._kill(grant)
-                self.grants.remove(grant)
+                self._drop_grant(key)
 
     def has_dead(self):
         return any(rec.dead for rec in self.recs)
@@ -452,15 +503,24 @@ class _Model:
 
     def reach(self, slot, seq):
         """Sessions that may act for ``slot`` on a message with ``seq``."""
-        edges = [g.d for g in self.grants[-sp_constants.JOURNAL_MAX_EDGES:] if g.d["through_seq"] >= seq]
-        seen, frontier = {slot}, [slot]
+        if self._index is None:
+            index = {}
+            for g in self.grants.values():
+                index.setdefault(g.d["from"], []).append((g.d["to"], g.d["through_seq"]))
+            self._index = index
+        seen, frontier, examined = {slot}, [slot], 0
         for _ in range(sp_constants.JOURNAL_MAX_LINKS):
             nxt = []
             for cur in frontier:
-                for edge in edges:
-                    if edge["from"] == cur and edge["to"] not in seen:
-                        seen.add(edge["to"])
-                        nxt.append(edge["to"])
+                for target, through in self._index.get(cur, ()):
+                    if through < seq:
+                        continue
+                    examined += 1
+                    if examined > sp_constants.JOURNAL_MAX_EDGES:
+                        return seen
+                    if target not in seen:
+                        seen.add(target)
+                        nxt.append(target)
             if not nxt:
                 break
             frontier = nxt
@@ -510,6 +570,8 @@ def _check_stat(st, name):
         raise _unavailable("%s is not a regular file" % name)
     if st.st_uid != os.geteuid():
         raise _unavailable("%s is not owned by this user" % name)
+    if st.st_nlink != 1:
+        raise _unavailable("%s has %d hard links; it must have exactly one" % (name, st.st_nlink))
     return st
 
 
@@ -677,7 +739,11 @@ class _Writer:
             return None, False
         finally:
             os.close(fd)
-        if not self._meta_valid(meta):
+        try:
+            valid = self._meta_valid(meta)
+        except (OverflowError, TypeError, ValueError):
+            valid = False
+        if not valid:
             return None, False
         jst = os.fstat(self.jfd)
         return meta, meta["file_ino"] == jst.st_ino and meta["file_size"] == jst.st_size
@@ -842,15 +908,36 @@ def _fast_fits(meta, rec, size, cap, now):
     return oldest is None or oldest >= _age_cutoff(now)
 
 
-def _add_message(rec, revalidate=None, dedupe=False):
-    """Record ``rec`` (seq assigned here). "recorded", or "same" for an equal replay."""
+def _refuse_taken_id(m, message_id):
+    """Refuse an id of a retained entry, or the reply id of a retained request."""
+    if message_id in m.entries:
+        raise JournalRefused("message id %s is already recorded" % message_id)
+    if uuid.UUID(message_id).version == 5:
+        for entry in m.entries.values():
+            if entry.d["kind"] == "request" and reply_message_id(entry.d["request_id"]) == message_id:
+                raise JournalRefused("message id %s is reserved for the reply to request %s"
+                                     % (message_id, entry.d["request_id"]))
+
+
+def _same_reply(old, rec):
+    keys = ("kind", "request_id", "from", "to", "body")
+    return all(old.d.get(k) == rec[k] for k in keys)
+
+
+def _add_message(rec, revalidate=None, dedupe=False, check_id=True):
+    """Record ``rec`` (seq assigned here). "recorded", or "same" for an equal replay.
+
+    The fast path cannot see ids, so ``check_id`` (a caller-supplied id) takes the
+    parsing path and refuses an id that is already taken. Only a generated
+    uuid4 id may skip it.
+    """
     with _Writer() as w:
         if revalidate is not None:
             revalidate()
         now = _now()
         cap = _cap()
         rec["at"] = now
-        meta = None if dedupe else w.trusted_meta()
+        meta = None if dedupe or check_id else w.trusted_meta()
         if meta is not None:
             rec["seq"] = meta["next_seq"]
             size = len(_encode(rec)) + 1
@@ -871,10 +958,12 @@ def _add_message(rec, revalidate=None, dedupe=False):
         if dedupe:
             old = m.entries.get(rec["message_id"])
             if old is not None:
-                if old.d["body"] != rec["body"]:
+                if not _same_reply(old, rec):
                     raise JournalRefused("request already has a recorded reply")
                 return "same"
         m.age_prune(now)
+        if check_id and not dedupe:
+            _refuse_taken_id(m, rec["message_id"])
         line = _encode(rec)
         size = len(line) + 1
         bucket = _bucket(rec)
@@ -930,13 +1019,16 @@ def record_message(sender, to, body, message_id=None):
     """Record a plain message; return its message id.
 
     ``sender`` is a typed id or None. Every recipient must be an existing
-    session (resolved here, before the journal lock is taken). Raises
-    JournalRefused, JournalFull or JournalUnavailable.
+    session (resolved here, before the journal lock is taken). A caller-supplied
+    ``message_id`` that is already recorded, or is the reply id of a retained
+    request, raises JournalRefused. Raises JournalRefused, JournalFull or
+    JournalUnavailable.
     """
     to = _resolve_recipients(to)
+    supplied = bool(message_id)
     message_id = message_id or str(uuid.uuid4())
     rec = _message_record(sender, to, body, "message", message_id, {}, _now())
-    _add_message(rec)
+    _add_message(rec, check_id=supplied)
     return message_id
 
 
@@ -946,6 +1038,7 @@ def record_request(request_id, sender, to, body, expires_at, mailbox):
 
     The recipients come from the request's mailbox metadata, so they are not
     resolved again. ``mailbox`` is the absolute path of the request meta file.
+    A ``request_id`` that is already recorded raises JournalRefused.
     """
     extra = {"request_id": request_id, "expires_at": expires_at, "mailbox": mailbox}
     rec = _message_record(sender, to, body, "request", request_id, extra, _now())
@@ -958,7 +1051,9 @@ def record_reply(request_id, sender, to, body, expires_at, mailbox, revalidate=N
 
     Under the journal lock, ``revalidate()`` runs first (the caller passes a
     function that re-reads the request meta and raises to refuse). A different
-    body already recorded raises JournalRefused; the same body is idempotent.
+    reply (or another record under the reply id) already recorded raises
+    JournalRefused; an identical one (kind, request, sender, recipients and
+    body) is idempotent.
     Every failure here happens before the reply is sent.
     """
     extra = {"request_id": request_id, "in_reply_to": request_id,
@@ -1010,17 +1105,24 @@ def _write_event(make):
 def settle(message_id, state, by):
     """Record that a correlated entry finished: a request "replied" or a reply "consumed".
 
-    Raises JournalUpdateFailed on any failure, including an unknown entry; the
-    caller must surface it. Idempotent.
+    ``by`` must be one of the entry's recipient slots (the replier of a request,
+    the requester of a reply) or a session covering one through handovers.
+    Returns None, writing nothing, when ``message_id`` is not in the journal
+    (pruned, or a legacy mailbox that never had an entry). Raises
+    JournalUpdateFailed on any other failure, including an unauthorized ``by``;
+    the caller must surface it. Idempotent.
     """
     by = _norm(by)
 
     def make(m, now, seq):
         entry = m.entries.get(message_id)
         if entry is None:
-            raise JournalRefused("message %s is not in the journal" % message_id)
+            return None, None
         if _STATE_FOR_KIND.get(entry.d["kind"]) != state:
             raise JournalRefused("a %s entry cannot be settled as %r" % (entry.d["kind"], state))
+        if not m.authorized(by, entry):
+            raise JournalRefused("%s may not settle %s: not a recipient of this %s"
+                                 % (by, message_id, entry.d["kind"]))
         if entry.settled is not None:
             return None, entry.settled.d
         return {"type": "settled", "message_id": message_id, "state": state, "by": by}, None
@@ -1111,10 +1213,13 @@ def handover(caller, target_typed):
     def make(m, now, seq):
         m.age_prune(now)
         m.prune_grants()
-        mine = [g for g in m.grants if g.d["from"] == who and g.d["to"] != target]
+        mine = [g for g in m.grants.values() if g.d["from"] == who and g.d["to"] != target]
         if len(mine) >= sp_constants.JOURNAL_MAX_GRANTS:
             raise JournalRefused("%s already has %d handovers; the journal keeps at most %d per session"
                                  % (who, len(mine), sp_constants.JOURNAL_MAX_GRANTS))
+        if (who, target) not in m.grants and len(m.grants) >= sp_constants.JOURNAL_MAX_GRANTS_TOTAL:
+            raise JournalRefused("the journal already keeps %d handovers, its limit; retry after older "
+                                 "messages are acknowledged or expire" % len(m.grants))
         return {"type": "handover", "from": who, "to": target, "through_seq": seq - 1}, None
 
     return _write_event(make)
@@ -1198,7 +1303,7 @@ def read_only_view():
         item["settlement"] = _settlement(entry)
         item["transport_error"] = _transport(entry)
         entries.append(item)
-    grants = [dict(g.d) for g in m.grants]
+    grants = [dict(g.d) for g in m.grants.values()]
     return {"entries": entries, "handovers": grants, "malformed_lines": malformed, "last_seq": last_seq}
 
 

@@ -405,8 +405,6 @@ class JournalAckTests(JournalBase):
             with self.assertRaises(journal.JournalUpdateFailed):
                 journal.transport_error(mid, self.A, "boom")
         with self.assertRaises(journal.JournalUpdateFailed):
-            journal.settle(str(uuid.uuid4()), "replied", self.A)
-        with self.assertRaises(journal.JournalUpdateFailed):
             journal.settle(mid, "consumed", self.A)
         self.assertFalse(any(r["type"] in ("settled", "transport_error") for r in self.records()))
 
@@ -776,7 +774,7 @@ class JournalIntegrityTests(JournalBase):
         good = json.dumps({"schema": 1, "seq": 2, "type": "ack", "at": self.now, "message_id": mid,
                            "for": self.A, "by": self.A}, sort_keys=True)
         nan = good.replace('"seq": 2', '"seq": 3').replace('"at": %r' % self.now, '"at": NaN')
-        future = good.replace('"seq": 2', '"seq": 4').replace('"at": %r' % self.now, '"at": %r' % (self.now + 1000))
+        future = good.replace('"seq": 2', '"seq": 4').replace('"at": %r' % self.now, '"at": %r' % (self.now + 2 * 86400))
         deep = "[" * 200000 + "]" * 200000
         huge = '{"schema":1,"seq":5,"type":"ack","at":1e999,"message_id":"%s","for":"%s","by":"%s"}' % (
             mid, self.A, self.A)
@@ -890,6 +888,207 @@ class JournalReaderTests(JournalBase):
         self.assertFalse(item["expired"])
         self.assertEqual([(g["from"], g["to"]) for g in view["handovers"]], [(self.A, self.C)])
         self.assertEqual(view["last_seq"], max(r["seq"] for r in self.records()))
+
+
+class JournalReworkTests(JournalBase):
+    def append_lines(self, *records):
+        with open(self.jpath, "ab") as fh:
+            for item in records:
+                fh.write((item if isinstance(item, str) else json.dumps(item)).encode() + b"\n")
+
+    def last_seq(self):
+        return journal.read_only_view()["last_seq"]
+
+    def grant_line(self, seq, source=None, target=None, through=1):
+        return {"schema": 1, "seq": seq, "type": "handover", "at": self.now,
+                "from": source or cc(), "to": target or cc(), "through_seq": through}
+
+    # -- clock step-back ----------------------------------------------------
+
+    def test_clock_step_back_keeps_records_through_a_rewrite(self):
+        mid = self.msg(body="kept")
+        journal.handover(self.A, self.B)
+        real = self.now
+        self.now = real - 600
+        journal.handover(self.A, self.B)  # a re-grant rewrites the journal
+        self.assertIn(mid, self.ids())
+        self.assertEqual(journal.get(mid, self.A)["body"], "kept")
+        self.assertEqual(journal.ack(mid, self.A)["by"], self.A)
+        self.now = real
+        self.assertEqual(journal.get(mid, self.A)["acks"][0]["by"], self.A)
+        self.assertEqual(journal.read_only_view()["malformed_lines"], 0)
+
+    # -- forward compatibility ---------------------------------------------
+
+    def test_unknown_records_survive_a_rewrite_and_age_out_by_at(self):
+        first, _body = self.fill(ack_first=True)
+        seq = self.last_seq()
+        later = {"schema": 2, "seq": seq + 1, "type": "message", "at": self.now, "x": [1, 2]}
+        odd = '{"schema": 1, "seq": %d, "type": "poll", "at": %r, "n": {"a": 1}}' % (seq + 2, self.now)
+        no_seq = '{"schema": 3, "type": "poll", "at": %r}' % self.now
+        self.append_lines(json.dumps(later), odd, no_seq)
+        self.set_cap(self.size())
+        self.msg(body="b" * 2000)
+        self.assertNotIn(first, self.ids())
+        data = self.read()
+        self.assertIn(json.dumps(later).encode() + b"\n", data)
+        self.assertIn(odd.encode() + b"\n", data)
+        self.assertNotIn(no_seq.encode(), data)
+        self.assertEqual(journal.read_only_view()["malformed_lines"], 0)
+        self.assertEqual(self.meta()["total_bytes"], len(data))
+        self.now += 15 * 86400
+        self.msg()
+        self.assertNotIn(odd.encode(), self.read())
+        self.assertNotIn(json.dumps(later).encode(), self.read())
+
+    def test_unknown_record_is_not_counted_as_malformed(self):
+        self.msg()
+        self.append_lines({"schema": 9, "seq": 2, "type": "future", "at": self.now})
+        view = journal.read_only_view()
+        self.assertEqual((view["malformed_lines"], view["last_seq"]), (0, 2))
+
+    # -- message ids --------------------------------------------------------
+
+    def test_duplicate_request_and_message_ids_are_refused(self):
+        rid = self.req()
+        mid = journal.record_message(cc(), [self.A], "x", message_id=str(uuid.uuid4()))
+        before = self.read()
+        with self.assertRaises(journal.JournalRefused):
+            journal.record_request(rid, cc(), [self.A], "again", self.now + 60, "/nonexistent/x")
+        with self.assertRaises(journal.JournalRefused):
+            journal.record_message(cc(), [self.A], "again", message_id=mid)
+        with self.assertRaises(journal.JournalRefused):
+            journal.record_message(cc(), [self.A], "again", message_id=rid)
+        os.unlink(self.mpath)  # the slow path refuses too
+        with self.assertRaises(journal.JournalRefused):
+            journal.record_message(cc(), [self.A], "again", message_id=mid)
+        self.assertEqual(self.read(), before)
+
+    def test_reply_id_cannot_be_squatted(self):
+        rid = self.req(to=[self.B], sender=self.A)
+        before = self.read()
+        with self.assertRaises(journal.JournalRefused):
+            journal.record_message(cc(), [self.A], "x", message_id=journal.reply_message_id(rid))
+        self.assertEqual(self.read(), before)
+        args = (rid, self.B, [self.A], "answer", self.now + 600, "/nonexistent/x")
+        self.assertEqual(journal.record_reply(*args), "recorded")
+
+    def test_reply_dedupe_compares_every_field(self):
+        rid = self.req(to=[self.B], sender=self.A)
+        mailbox = "/nonexistent/x"
+        self.assertEqual(journal.record_reply(rid, self.B, [self.A], "answer", self.now + 600, mailbox),
+                         "recorded")
+        for sender, to in ((self.C, [self.A]), (self.B, [self.X])):
+            with self.subTest(sender=sender, to=to):
+                with self.assertRaises(journal.JournalRefused) as ctx:
+                    journal.record_reply(rid, sender, to, "answer", self.now + 600, mailbox)
+                self.assertIn("already has a recorded reply", str(ctx.exception))
+        self.assertEqual(journal.record_reply(rid, self.B, [self.A], "answer", self.now + 600, mailbox),
+                         "same")
+
+    def test_reply_dedupe_refuses_a_non_reply_under_the_reply_id(self):
+        rid = str(uuid.uuid4())
+        self.msg()
+        self.append_lines({"schema": 1, "seq": 2, "type": "message", "at": self.now,
+                           "message_id": journal.reply_message_id(rid), "kind": "message",
+                           "from": self.B, "to": [self.A], "body": "answer"})
+        with self.assertRaises(journal.JournalRefused):
+            journal.record_reply(rid, self.B, [self.A], "answer", self.now + 600, "/nonexistent/x")
+
+    # -- settle -------------------------------------------------------------
+
+    def test_settle_needs_a_recipient_or_a_covering_session(self):
+        rid = self.req(to=[self.A])
+        before = self.read()
+        with self.assertRaises(journal.JournalUpdateFailed) as ctx:
+            journal.settle(rid, "replied", self.B)
+        self.assertIn("may not settle", str(ctx.exception))
+        self.assertEqual(self.read(), before)
+        self.assertIsNone(self.entry(rid)["settlement"])
+        journal.handover(self.A, self.C)
+        self.assertEqual(journal.settle(rid, "replied", self.C)["by"], self.C)
+
+    def test_consumed_is_settled_only_by_the_requester(self):
+        rid = self.req(to=[self.B], sender=self.A)
+        journal.record_reply(rid, self.B, [self.A], "answer", self.now + 600, "/nonexistent/x")
+        reply_id = journal.reply_message_id(rid)
+        for who in (self.B, self.C):
+            with self.subTest(who=who):
+                with self.assertRaises(journal.JournalUpdateFailed):
+                    journal.settle(reply_id, "consumed", who)
+        self.assertIsNone(self.entry(reply_id)["settlement"])
+        self.assertEqual(journal.settle(reply_id, "consumed", self.A)["by"], self.A)
+
+    def test_settle_on_an_absent_entry_is_a_no_op(self):
+        self.msg()
+        before = self.snapshot()
+        self.assertIsNone(journal.settle(str(uuid.uuid4()), "replied", self.A))
+        self.assertEqual(self.snapshot(), before)
+
+    # -- handovers ----------------------------------------------------------
+
+    def test_unrelated_grants_do_not_revoke_a_legitimate_one(self):
+        mid = self.msg()
+        journal.handover(self.A, self.B)
+        for _ in range(72):
+            journal.handover(cc(), cc())
+        self.assertEqual(journal.get(mid, self.B)["body"], "hello")
+
+    def test_grant_beyond_the_global_cap_is_refused(self):
+        self.msg()
+        first = self.grant_line(2)
+        self.append_lines(first, *[self.grant_line(3 + i) for i in range(511)])
+        self.assertEqual(len(journal.read_only_view()["handovers"]), 512)
+        before = self.read()
+        with self.assertRaises(journal.JournalRefused):
+            journal.handover(self.A, self.B)
+        self.assertEqual(self.read(), before)
+        journal.handover(first["from"], first["to"])  # replacing a pair stays within the cap
+        self.assertEqual(len(journal.read_only_view()["handovers"]), 512)
+
+    def test_crafted_flood_loads_fast_and_keeps_the_newest_grants(self):
+        self.msg()
+        lines = [self.grant_line(2 + i) for i in range(2000)]
+        self.append_lines(*lines)
+        started = time.monotonic()
+        view = journal.read_only_view()
+        self.assertLess(time.monotonic() - started, 2.0)
+        self.assertEqual([(g["from"], g["to"]) for g in view["handovers"]],
+                         [(g["from"], g["to"]) for g in lines[-512:]])
+
+    # -- meta, links, identities --------------------------------------------
+
+    def test_corrupt_meta_is_treated_as_absent(self):
+        mid = self.msg()
+        for step in ("message", "ack"):
+            meta = self.meta()
+            meta["oldest_at"] = 10 ** 400
+            with open(self.mpath, "w") as fh:
+                json.dump(meta, fh)
+            if step == "message":
+                self.msg(body="after")
+            else:
+                self.assertEqual(journal.ack(mid, self.A)["by"], self.A)
+        self.assertEqual(len(self.ids()), 2)
+
+    def test_hard_linked_journal_refused(self):
+        self.msg()
+        os.link(self.jpath, os.path.join(self.root, "alias"))
+        with self.assertRaises(journal.JournalUnavailable):
+            self.msg()
+        with self.assertRaises(journal.JournalUnavailable):
+            journal.read_only_view()
+
+    def test_trailing_newline_is_no_identity(self):
+        with mock.patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ID": self.A[3:] + "\n"}):
+            with self.assertRaises(journal.JournalRefused):
+                journal.caller()
+        with self.assertRaises(journal.JournalRefused):
+            journal.record_message(cc(), [self.A + "\n"], "x")
+        mid = self.msg()
+        self.append_lines({"schema": 1, "seq": 2, "type": "ack", "at": self.now,
+                           "message_id": mid + "\n", "for": self.A, "by": self.A})
+        self.assertEqual(journal.read_only_view()["malformed_lines"], 1)
 
 
 if __name__ == "__main__":

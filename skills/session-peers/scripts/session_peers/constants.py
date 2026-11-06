@@ -169,7 +169,10 @@ JOURNAL_MAX_RECIPIENTS = 64
 JOURNAL_MAX_GRANTS = 8
 JOURNAL_MAX_LINKS = 8
 JOURNAL_MAX_EDGES = 64
-JOURNAL_FUTURE_SKEW = 300.0
+# Retained handovers across all grantors; a new one beyond it is refused.
+JOURNAL_MAX_GRANTS_TOTAL = 512
+# A record may be dated up to a day ahead (a clock stepped back); it ages normally later.
+JOURNAL_FUTURE_SKEW = 86400.0
 JOURNAL_DETAIL_CHARS = 512
 JOURNAL_META_CEILING = 4 * 1024 * 1024
 # Namespace of the deterministic reply message id (uuid5 of "reply:<request id>").
