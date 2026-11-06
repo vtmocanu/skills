@@ -774,18 +774,18 @@ class JournalIntegrityTests(JournalBase):
         good = json.dumps({"schema": 1, "seq": 2, "type": "ack", "at": self.now, "message_id": mid,
                            "for": self.A, "by": self.A}, sort_keys=True)
         nan = good.replace('"seq": 2', '"seq": 3').replace('"at": %r' % self.now, '"at": NaN')
-        future = good.replace('"seq": 2', '"seq": 4').replace('"at": %r' % self.now, '"at": %r' % (self.now + 2 * 86400))
+        future = good.replace('"seq": 2', '"seq": 4').replace('"at": %r' % self.now, '"at": %r' % (self.now + 20 * 86400))
         deep = "[" * 200000 + "]" * 200000
         huge = '{"schema":1,"seq":5,"type":"ack","at":1e999,"message_id":"%s","for":"%s","by":"%s"}' % (
             mid, self.A, self.A)
         self.assertIn("NaN", nan)
         with open(self.jpath, "ab") as fh:
+            fh.write(good.encode() + b"\n")
             for line in (nan, future, deep, huge, "not json", "\xff"):
                 fh.write(line.encode("latin-1") + b"\n")
-            fh.write(good.encode() + b"\n")
         view = journal.read_only_view()
         self.assertEqual(view["malformed_lines"], 6)
-        self.assertEqual(view["last_seq"], 2)
+        self.assertEqual(view["last_seq"], 5)
         self.assertEqual(view["entries"][0]["recipients"][0]["state"], "acked")
 
     def test_forged_ack_for_a_non_recipient_is_ignored(self):
@@ -1104,15 +1104,14 @@ class JournalReworkTests(JournalBase):
         return {"schema": 1, "seq": self.last_seq() + 1, "type": "ack", "at": self.now,
                 "message_id": str(uuid.uuid4()), "for": self.A, "by": self.A}
 
-    def test_clock_step_back_beyond_a_day_never_drops_records(self):
+    def test_clock_step_back_of_two_days_keeps_records_through_a_rewrite(self):
         real = self.now
         kept = self.msg(body="kept")
         self.now = real - 2 * 86400  # kept is now dated two days ahead
-        other = self.msg(body="other")  # the fast-path append may proceed
+        other = self.msg(body="other")
         self.append_lines(self.dangling_ack())  # makes every commit a rewrite
-        self.assertEqual(journal.read_only_view()["malformed_lines"], 1)
-        self.assertEqual(self.ids(), [other])
-        before = self.read()
+        self.assertEqual(journal.read_only_view()["malformed_lines"], 0)
+        self.assertEqual(sorted(self.ids()), sorted([kept, other]))
         ops = (
             ("slow-path message", lambda: self.msg()),
             ("event rewrite", lambda: journal.ack(other, self.A)),
@@ -1120,35 +1119,67 @@ class JournalReworkTests(JournalBase):
         )
         for name, op in ops:
             with self.subTest(op=name):
-                with self.assertRaises(journal.JournalUnavailable) as ctx:
-                    op()
-                self.assertIn("journal has records dated more than a day ahead; check the system clock",
-                              str(ctx.exception))
-                self.assertEqual(self.read(), before)
+                self.append_lines(self.dangling_ack())
+                op()
+                self.assertIn(kept, self.ids())
+                self.assertEqual(journal.get(kept, self.A)["body"], "kept")
         self.now = real
-        self.assertIn(kept, self.ids())
         self.assertEqual(journal.get(kept, self.A)["body"], "kept")
         self.assertEqual(journal.read_only_view()["malformed_lines"], 0)
 
-    def test_far_future_line_with_an_unknown_schema_is_not_dropped_either(self):
+    def test_record_more_than_the_age_cap_ahead_is_malformed_and_dropped_on_rewrite(self):
         real = self.now
-        self.msg()
-        self.append_lines({"schema": 2, "seq": 2, "type": "message", "at": real, "x": 1})
-        self.now = real - 2 * 86400
-        self.append_lines(self.dangling_ack())
-        before = self.read()
-        with self.assertRaises(journal.JournalUnavailable):
-            self.msg()
-        self.assertEqual(self.read(), before)
-
-    def test_fast_append_proceeds_while_a_far_future_record_is_held(self):
-        real = self.now
-        self.msg()
-        self.now = real - 2 * 86400
-        self.msg(body="again")
-        self.assertEqual(len(self.records()), 2)
+        kept = self.msg(body="kept")
+        self.now = real - 20 * 86400  # kept is now dated 20 days ahead
+        self.assertEqual(journal.read_only_view()["malformed_lines"], 1)
+        self.assertEqual(self.ids(), [])
+        self.append_lines(self.dangling_ack())  # makes the next commit a rewrite
+        self.msg(body="new")
+        self.assertEqual(journal.read_only_view()["malformed_lines"], 0)
         self.now = real
-        self.assertEqual(len(self.ids()), 2)
+        self.assertNotIn(kept, self.ids())
+        self.assertNotIn(b"kept", self.read())
+
+    def test_no_rewrite_is_refused_because_of_a_future_dated_record(self):
+        real = self.now
+        self.msg(body="kept")
+        for back in (2 * 86400, 13 * 86400, 30 * 86400):
+            with self.subTest(back_days=back // 86400):
+                self.now = real - back
+                self.append_lines(self.dangling_ack())
+                other = self.msg()
+                self.append_lines(self.dangling_ack())
+                journal.ack(other, self.A)
+                self.append_lines(self.dangling_ack())
+                journal.handover(self.A, self.B)
+
+    def test_far_future_line_with_an_unknown_schema_is_dropped_but_a_near_one_kept(self):
+        real = self.now
+        self.msg()
+        near = {"schema": 2, "seq": 2, "type": "message", "at": real + 5 * 86400, "x": 1}
+        far = {"schema": 2, "seq": 3, "type": "message", "at": real + 20 * 86400, "x": 2}
+        self.append_lines(near, far)
+        self.assertEqual(journal.read_only_view()["malformed_lines"], 1)
+        self.append_lines(self.dangling_ack())
+        self.msg()
+        data = self.read()
+        self.assertIn(json.dumps(near).encode(), data)
+        self.assertNotIn(json.dumps(far).encode(), data)
+
+    def test_malformed_line_with_a_seq_advances_seq_when_meta_is_lost(self):
+        self.msg()
+        self.append_lines({"schema": 1, "seq": 7, "type": "bogus-shape", "at": "not a number"})
+        os.unlink(self.mpath)
+        self.msg(body="next")
+        self.assertEqual([r["seq"] for r in self.records()][-1], 8)
+
+    def test_fresh_id_with_a_non_v4_request_id_is_refused(self):
+        rid = journal.reply_message_id(str(uuid.uuid4()))  # a uuid5
+        before = self.read() if os.path.exists(self.jpath) else None
+        with self.assertRaises(journal.JournalRefused):
+            journal.record_request(rid, cc(), [self.A], "ask", self.now + 60, "/nonexistent/x",
+                                   fresh_id=True)
+        self.assertEqual(self.read() if os.path.exists(self.jpath) else None, before)
 
     def test_forged_grantors_cannot_fill_the_grant_cap(self):
         mid = self.msg()
@@ -1251,7 +1282,7 @@ class JournalReworkTests(JournalBase):
                {"schema": 2.0, "seq": 5, "type": "poll", "at": self.now}]
         self.append_lines(*bad)
         view = journal.read_only_view()
-        self.assertEqual((view["malformed_lines"], view["last_seq"]), (len(bad), 4))
+        self.assertEqual((view["malformed_lines"], view["last_seq"]), (len(bad), 5))
 
     def test_reply_id_held_by_a_non_reply_has_its_own_message(self):
         rid = str(uuid.uuid4())

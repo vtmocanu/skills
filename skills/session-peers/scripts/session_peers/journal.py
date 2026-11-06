@@ -27,9 +27,14 @@ Records (``schema`` 1, ``seq``, ``type``, ``at``):
 A handover covers every message with ``seq <= through_seq``. A session may read
 or ACK a slot when it is that slot or reaches it through covering handovers.
 Malformed lines are counted and never trusted. A rewrite (pruning, or an event
-that enables pruning) drops them, except a line whose only problem is an ``at``
-more than a day ahead: such a line may come from a clock that stepped back, so
-any rewrite refuses (JournalUnavailable) while one is present. A line that is a
+that enables pruning) drops them. A record dated ahead of the clock by at most
+the age cap (JOURNAL_FUTURE_SKEW, 14 days) is valid, so a clock that stepped
+back keeps its records through rewrites and they age out once real time passes
+their ``at``. A record dated further ahead is malformed and a rewrite drops it:
+the residual is that a clock step-back of more than 14 days can lose records at
+the next rewrite. Every line with an integer ``seq`` advances the last seen seq
+even when it is otherwise malformed, so a lost meta file cannot make a seq be
+reused. A line that is a
 JSON object with an integer ``seq`` and a finite ``at`` and either an integer
 ``schema`` above 1, or schema 1 with an unknown string ``type``, is a later
 version's record: it is not interpreted or counted as malformed, a rewrite keeps
@@ -240,27 +245,17 @@ class _Foreign(ValueError):
     schema 1 with a string type this version does not know."""
 
 
-class _Future(ValueError):
-    """A line whose only problem is an ``at`` beyond the clock-skew allowance.
-
-    It is untrusted and counted as malformed, but a rewrite must never drop it:
-    the clock may simply have stepped back.
-    """
-
-
 def _validate(d, now):
     """Raise ValueError unless ``d`` is one well-formed record.
 
-    _Foreign if only unknown, _Future if only dated beyond the skew allowance.
+    _Foreign if only unknown. A record dated more than JOURNAL_FUTURE_SKEW ahead is malformed.
     """
     try:
         _validate_fields(d)
     except _Foreign:
-        if d["at"] > now + sp_constants.JOURNAL_FUTURE_SKEW:
-            raise _Future("at is in the future")
+        _check(d["at"] <= now + sp_constants.JOURNAL_FUTURE_SKEW, "at is in the future")
         raise
-    if d["at"] > now + sp_constants.JOURNAL_FUTURE_SKEW:
-        raise _Future("at is in the future")
+    _check(d["at"] <= now + sp_constants.JOURNAL_FUTURE_SKEW, "at is in the future")
     return d
 
 
@@ -305,12 +300,8 @@ def _validate_fields(d):
         raise ValueError("type")
 
 
-# Marks a line that is malformed only for its far-future ``at``.
-_FUTURE = object()
-
-
 def _parse_line(raw, now):
-    """``(record, foreign)`` for a usable line, None for a malformed one, _FUTURE for a far-future one."""
+    """``(record, foreign)`` for a usable line, None for a malformed one."""
     try:
         text = raw.decode("utf-8")
         d = json.loads(text, parse_constant=_reject_constant)
@@ -318,8 +309,6 @@ def _parse_line(raw, now):
             return _validate(d, now), False
         except _Foreign:
             return d, True
-        except _Future:
-            return _FUTURE
     except (ValueError, RecursionError, TypeError, OverflowError, UnicodeError):
         return None
 
@@ -340,13 +329,25 @@ class _Rec:
         self.foreign = foreign
 
 
-def _parse(data, now):
-    """Usable records in file order, the malformed-line count, the last seq and
-    the number of far-future lines (also counted as malformed).
+def _loose_seq(raw):
+    """The integer ``seq`` of a line that is otherwise unusable, or 0."""
+    try:
+        d = json.loads(raw.decode("utf-8"), parse_constant=_reject_constant)
+    except (ValueError, RecursionError, TypeError, OverflowError, UnicodeError):
+        return 0
+    if isinstance(d, dict) and _is_int(d.get("seq")) and d["seq"] >= 1:
+        return d["seq"]
+    return 0
 
-    A final line without its newline is a torn or in-flight write: ignored.
+
+def _parse(data, now):
+    """Usable records in file order, the malformed-line count and the last seq.
+
+    Any line with an integer ``seq`` advances the last seq, even a malformed or
+    skipped one, so a seq is never reused. A final line without its newline is a
+    torn or in-flight write: ignored.
     """
-    recs, malformed, last_seq, pos, future = [], 0, 0, 0, 0
+    recs, malformed, last_seq, pos = [], 0, 0, 0
     while True:
         nl = data.find(b"\n", pos)
         if nl < 0:
@@ -354,14 +355,16 @@ def _parse(data, now):
         raw = data[pos:nl]
         pos = nl + 1
         parsed = _parse_line(raw, now)
-        if parsed is _FUTURE:
-            future += 1
-        if parsed is None or parsed is _FUTURE or parsed[0]["seq"] <= last_seq:
+        if parsed is None:
+            malformed += 1
+            last_seq = max(last_seq, _loose_seq(raw))
+            continue
+        if parsed[0]["seq"] <= last_seq:
             malformed += 1
             continue
         last_seq = parsed[0]["seq"]
         recs.append(_Rec(parsed[0], raw, parsed[1]))
-    return recs, malformed, last_seq, future
+    return recs, malformed, last_seq
 
 
 def _encode(d):
@@ -393,8 +396,7 @@ class _Entry:
 
 
 class _Model:
-    def __init__(self, recs, future=0):
-        self.future = future  # lines dated beyond the skew allowance: never dropped by a rewrite
+    def __init__(self, recs):
         self.recs = []
         self.entries = {}
         self.grants = {}  # (from, to) -> record, oldest first
@@ -494,7 +496,9 @@ class _Model:
 
         A grant is reachable when its ``from`` is a ``to`` slot of a retained entry
         with ``seq <= through_seq``, or the ``to`` of another kept grant (fixpoint).
-        Grants from forged grantors therefore cannot fill the global cap.
+        A grant is therefore kept only while its grantor is a retained recipient slot,
+        or a successor chained from one. Sessions that are recipients of retained
+        messages can still use up the global cap.
         """
         first = {}
         for entry in self.entries.values():
@@ -823,9 +827,9 @@ class _Writer:
         """Repair the tail, parse the journal, and return (model, next_seq, malformed)."""
         self.repair_tail()
         meta, _trusted = self.read_meta()
-        recs, malformed, last_seq, future = _parse(_read_fd(self.jfd, self.size()), now)
+        recs, malformed, last_seq = _parse(_read_fd(self.jfd, self.size()), now)
         next_seq = max(meta["next_seq"] if meta else 1, last_seq + 1)
-        return _Model(recs, future), next_seq, malformed
+        return _Model(recs), next_seq, malformed
 
     def trusted_meta(self):
         self.repair_tail()
@@ -898,8 +902,6 @@ class _Writer:
 def _commit(w, m, new, next_seq, malformed):
     """Persist ``m`` whose last record is ``new``: an append, or one atomic rewrite."""
     if m.has_dead():
-        if m.future:
-            raise _unavailable("journal has records dated more than a day ahead; check the system clock")
         w.rewrite([rec.line for rec in m.live()], m.meta(next_seq + 1, 0))
     else:
         w.append(new.line, m.meta(next_seq + 1, malformed))
@@ -1103,8 +1105,18 @@ def record_request(request_id, sender, to, body, expires_at, mailbox, fresh_id=F
     recorded (a pre-squatted reply), raises JournalRefused. That check parses the
     journal. ``fresh_id=True`` is the caller's guarantee that ``request_id`` is a
     freshly generated uuid4 never exposed to anyone: the check is skipped and the
-    fast append path may be used.
+    fast append path may be used. The opt-out is enforced only in that
+    ``request_id`` must be a version-4 uuid, else JournalRefused; a duplicate
+    uuid4 on the fast path is not detected (the collision chance is negligible),
+    so the caller must pass a freshly generated uuid4.
     """
+    if fresh_id:
+        try:
+            fresh = uuid.UUID(str(request_id)).version == 4
+        except ValueError:
+            fresh = False
+        if not fresh:
+            raise JournalRefused("fresh_id requires a freshly generated uuid4 request id")
     extra = {"request_id": request_id, "expires_at": expires_at, "mailbox": mailbox}
     rec = _message_record(sender, to, body, "request", request_id, extra, _now())
     _add_message(rec, check_id=not fresh_id)
@@ -1324,8 +1336,8 @@ def _reader_model(now):
             os.close(fd)
     finally:
         os.close(dfd)
-    recs, malformed, last_seq, future = _parse(data, now)
-    return _Model(recs, future), malformed, last_seq
+    recs, malformed, last_seq = _parse(data, now)
+    return _Model(recs), malformed, last_seq
 
 
 def _base_view(entry, now):
