@@ -196,9 +196,10 @@ sender.
   live; derived `#general` omits it). Ownership is kept. A failure on one
   channel is reported, the rest still run, and the exit is 1. A session that
   already left everywhere exits 0. This includes the lead's own buddy channel:
-  `buddy set` only adds the buddy and never re-adds a lead that left, so the
-  lead is back in it only if the channel is created anew; `channel join` is
-  refused for a buddy channel.
+  `buddy set` only adds the buddy and never re-adds a lead that left, and
+  `channel join` is refused for a buddy channel, so there is no command to
+  rejoin: a lead that left stays out (it still owns the channel, but cannot
+  post to it).
 - `handover` is two commands in order: `peers.py inbox handover --to TYPED`,
   then `peers.py handover --to TYPED`. The second needs that grant recorded and
   never creates one: otherwise it exits 2 and prints the `inbox handover`
