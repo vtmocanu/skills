@@ -661,7 +661,10 @@ class TestRestartAndBuddyReplies(BuddyBase):
     def test_binding_without_replies_grants_the_default_total(self):
         rc, out, err = self.bind()
         self.assertEqual(rc, 0, err)
-        self.assertEqual(err, "")
+        # The buddy channel upkeep may warn when the caller is not identifiable.
+        rest = [l for l in err.splitlines()
+                if not l.startswith("warning: buddy channel not updated")]
+        self.assertEqual(rest, [])
         default = sp_constants.BUDDY_REPLIES_DEFAULT
         self.assertIn("replies left: %d of %d" % (default, default), out)
         self.assertEqual(

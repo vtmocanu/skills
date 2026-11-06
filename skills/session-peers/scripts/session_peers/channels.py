@@ -1144,6 +1144,11 @@ def buddy_channel_add(owner, buddy):
     """
     key = find_buddy_channel(owner)
     if key is None:
+        taken = read_channel(buddy_channel_key(owner))
+        if taken is not None and taken["owner"] != owner:
+            raise ChannelError(
+                "#%s was handed over to %s, so this session has no buddy channel of its own"
+                % (taken["key"], taken["owner"]))
         try:
             create_channel(
                 buddy_channel_key(owner), owner, [], kind="buddy",

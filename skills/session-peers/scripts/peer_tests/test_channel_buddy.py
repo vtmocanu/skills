@@ -5,6 +5,7 @@ import hashlib
 
 from peer_tests.support import *  # noqa: F401,F403
 from peer_tests.test_channel_send import ChannelSendBase
+from peer_tests.test_opencode import OC_A, OC_B
 from session_peers import channels as sp_channels, journal as sp_journal
 from session_peers import lifecycle as sp_lifecycle, storage as sp_storage
 
@@ -146,8 +147,87 @@ class BuddyChannelGuardTests(BuddyChannelBase):
         kind, _sep, ident = owner.partition(":")
         return pathlib.Path(sp_storage.buddies_dir()) / ("%s-%s.json" % (kind, ident))
 
+    def test_the_lead_binding_with_its_own_id_in_uppercase_still_gets_the_channel(self):
+        sid = self.lead.partition(":")[2].upper()
+        rc, _out, err = self.bset(self.x, "--as", "cc:" + sid)
+        self.assertEqual(rc, 0, err)
+        self.assertNotIn("warning: buddy channel", err)
+        self.assertEqual(self.members(), [self.lead, self.x])
+
+    def test_the_lead_whose_session_id_is_exported_in_uppercase_still_gets_the_channel(self):
+        os.environ["CLAUDE_CODE_SESSION_ID"] = self.lead.partition(":")[2].upper()
+        rc, _out, err = self.bset(self.x)
+        self.assertEqual(rc, 0, err)
+        self.assertNotIn("warning: buddy channel", err)
+        self.assertEqual(self.members(), [self.lead, self.x])
+
 
 class BuddyChannelFailureTests(BuddyChannelBase):
+    def hand_the_channel_over(self):
+        new_owner = "cc:" + new_uuid()
+
+        def mutate(rec):
+            rec["owner"] = new_owner
+            return "channel.handover", {"member": self.lead, "to": new_owner}
+
+        sp_channels.change_membership(self.key, mutate, self.lead)
+
+    def handed_over_between_find_and_mutation(self):
+        """find_buddy_channel answers the key, then the channel changes hands before the write."""
+        real = sp_channels.find_buddy_channel
+        calls = []
+
+        def find(owner):
+            key = real(owner)
+            if not calls:
+                calls.append(owner)
+                self.hand_the_channel_over()
+            return key
+
+        return mock.patch.object(sp_channels, "find_buddy_channel", find)
+
+    def test_an_owner_change_between_lookup_and_add_warns_and_adds_nobody(self):
+        self.assertEqual(self.bset(self.x)[0], 0)
+        with self.handed_over_between_find_and_mutation():
+            rc, _out, err = self.bset(self.y)
+        self.assertEqual(rc, 0, err)
+        self.assertIn("warning: buddy channel not updated: #%s is no longer owned" % self.key, err)
+        self.assertEqual(self.members(), [self.lead, self.x])
+
+    def test_an_owner_change_between_lookup_and_remove_warns_and_removes_nobody(self):
+        self.assertEqual(self.bset(self.x)[0], 0)
+        with self.handed_over_between_find_and_mutation():
+            rc, out, err = self.cli("buddy", "clear")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("buddy cleared", out)
+        self.assertIn("warning: buddy channel not updated: #%s is no longer owned" % self.key, err)
+        self.assertEqual(self.members(), [self.lead, self.x])
+
+    def test_a_failed_revoke_on_clear_leaves_the_binding_and_the_channel_alone(self):
+        self.assertEqual(self.bset(self.x)[0], 0)
+        before = self.store()
+        with mock.patch.object(sp_buddy, "_revoke_binding", side_effect=OSError("read-only")):
+            rc, _out, err = self.cli("buddy", "clear")
+        self.assertEqual(rc, 1)
+        self.assertIn("retry `buddy clear`", err)
+        self.assertNotIn("warning: buddy channel", err)
+        self.assertEqual(self.store(), before)
+        self.assertEqual(self.members(), [self.lead, self.x])
+        kind, _sep, ident = self.lead.partition(":")
+        self.assertTrue((pathlib.Path(sp_storage.buddies_dir()) / ("%s-%s.json" % (kind, ident))).exists())
+
+    def test_a_binding_lock_timeout_on_clear_leaves_the_channel_alone(self):
+        self.assertEqual(self.bset(self.x)[0], 0)
+        before = self.store()
+        with mock.patch.object(sp_storage, "_binding_locks",
+                               side_effect=sp_storage.BindingLockTimeout("busy")):
+            rc, _out, err = self.cli("buddy", "clear")
+        self.assertEqual(rc, 1)
+        self.assertIn("still bound", err)
+        self.assertNotIn("warning: buddy channel", err)
+        self.assertEqual(self.store(), before)
+        self.assertEqual(self.members(), [self.lead, self.x])
+
     def test_a_create_failure_warns_and_the_binding_is_written(self):
         with mock.patch.object(sp_channels, "create_channel", side_effect=RuntimeError("disk full")):
             rc, out, err = self.bset(self.x)
@@ -272,6 +352,16 @@ class BuddyChannelHandoverTests(BuddyChannelBase):
         self.assertEqual(keys, [self.key])
         self.assertEqual(self.members(), [self.x, self.successor, self.y])
 
+    def test_a_lead_that_handed_its_channel_over_is_told_why_it_gets_no_new_one(self):
+        self.assertEqual(self.bset(self.x)[0], 0)
+        self.hand_over()
+        before = self.store()
+        rc, _out, err = self.bset(self.y)
+        self.assertEqual(rc, 0, err)
+        self.assertIn("warning: buddy channel not updated: #%s was handed over to %s" % (self.key, self.successor), err)
+        self.assertNotIn("already exists", err)
+        self.assertEqual(self.store(), before)
+
     def test_the_most_recent_handover_wins_among_several_handed_over_channels(self):
         older = "buddy-" + "aaaaaaaaaaaa"
         newer = "buddy-" + "bbbbbbbbbbbb"
@@ -302,3 +392,38 @@ class BuddyChannelHandoverTests(BuddyChannelBase):
         self.assertEqual(self.bset(self.x)[0], 0)
         self.assertEqual(sorted(r["name"] for r in json.loads(self.ok("list", "--json"))),
                          sorted([self.key, "buddy-cccccccccccc"]))
+
+
+class BuddyChannelIdentityTests(BuddyChannelBase):
+    def as_opencode_lead(self, sid=OC_A):
+        os.environ.pop("CLAUDE_CODE_SESSION_ID", None)
+        self.as_opencode(sid)
+        return "oc:" + sid
+
+    def test_an_opencode_lead_keeps_the_case_of_its_id_in_the_channel_key(self):
+        lead = self.as_opencode_lead(OC_A)
+        key = "buddy-" + hashlib.sha256(lead.encode()).hexdigest()[:12]
+        rc, _out, err = self.bset("cc:" + self.lead.partition(":")[2], "--as", lead)
+        self.assertEqual(rc, 0, err)
+        self.assertNotIn("warning: buddy channel", err)
+        rec = sp_channels.read_channel(key)
+        self.assertEqual(rec["owner"], lead)
+        self.assertEqual(rec["members"], [lead, self.lead])
+
+    def test_an_opencode_buddy_joins_as_oc_with_its_case_preserved(self):
+        rc, _out, err = self.bset("oc:oc-buddy")
+        self.assertEqual(rc, 0, err)
+        self.assertNotIn("warning: buddy channel", err)
+        self.assertEqual(self.members(), [self.lead, "oc:" + OC_B])
+        self.assertEqual(self.cli("buddy", "clear")[0], 0)
+        self.assertEqual(self.members(), [self.lead])
+
+    def test_a_codex_shim_registered_as_a_claude_peer_joins_as_codex(self):
+        sid = new_uuid()
+        sock = str(self.socks / "shim.sock")
+        self._listeners.append(Listener(sock))
+        self.write_record(os.getppid(), "shimmy", sid, sock, entrypoint="codex")
+        rc, _out, err = self.bset("cc:shimmy")
+        self.assertEqual(rc, 0, err)
+        self.assertNotIn("warning: buddy channel", err)
+        self.assertEqual(self.members(), [self.lead, "codex:" + sid])
