@@ -94,8 +94,12 @@ UUIDs and titles. Use the full UUID for consequential requests.
   failure, delivery is unconfirmed, so check the recipient before resending. See
   [the journal](journal.md#exit-codes).
 - Every correlated `ask`/`dispatch` request and its `reply` is journaled, with no
-  flag. The request is recorded before its mailbox is written or anything is
-  sent, so a journal-full refusal (exit 75) leaves no mailbox.
+  flag. The request mailbox is written first, then the request is journaled,
+  then it is sent. If the mailbox write fails, the command exits 1 with nothing
+  journaled or sent. If journaling fails, the mailbox is removed and the command
+  exits 75 (full) or 1. A crash between the two leaves only an unjournaled
+  mailbox until it expires; the normal expiry cleanup reclaims it and it holds no
+  journal capacity.
 - `ask`, `dispatch` and `await` refuse (exit 2) a `--from-thread` that differs
   from the Codex thread the environment names (`CODEX_THREAD_ID`/
   `CODEX_SESSION_ID`), because the journal's `from` is that identity. The check

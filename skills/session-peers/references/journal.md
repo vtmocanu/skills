@@ -26,9 +26,9 @@ Run each as `<this skill's directory>/scripts/peers.py ...`. All take `--json`.
 | --- | --- |
 | `send --to PEER ... --record` | Journals the body, then sends. The journal id equals the transport message id; `--json` adds `"journal": {"message_id": ..., "recorded": true}`. |
 | `record --to PEER [--to PEER ...]` (`--message` or `--message-file`) | Record-only; nothing is sent. At most 64 recipients, each an existing session. |
-| `inbox get MSG_ID` | Prints the body, your slots, ACKs, settlement and any transport error. Recipients (and covered successors) only. |
+| `inbox get MSG_ID` | Prints the body, your slots, ACKs, settlement and any transport errors (one line per recipient slot with an error). Recipients (and covered successors) only. |
 | `inbox journal [--all]` | Lists metadata, no bodies, of messages you may read and have not ACKed; `--all` includes ACKed ones. |
-| `inbox acks MSG_ID` | Per-recipient ACK state, settlement and transport error, no body. The sender, any recipient and covered successors may run it. |
+| `inbox acks MSG_ID` | Per-recipient ACK state, settlement and transport error (each recipient's own), no body. The sender, any recipient and covered successors may run it. |
 | `inbox handover --to TYPED` | Lets a successor act for you (see Handover). |
 | `ack MSG_ID [--for TYPED]` | Records your ACK. `--for` names the recipient slot when you cover several by handover. Idempotent. |
 
@@ -136,8 +136,9 @@ An entry past the age cap is shown `[expired]` until a write prunes it.
 | Code | When | Meaning |
 | --- | --- | --- |
 | 75 | Before sending | Journal full. On a sending command nothing was sent. `--json` prints `{"status":"journal_full","detail":...}`. Recipients `ack`, or wait for expiry, then retry. `ack` and `inbox handover` can also return 75 when even the event reserve is exhausted. |
-| 1 | Before sending, or after a reported transport failure | Journal unavailable or refused (bad mode, lock held, not a recipient, unknown id): on a sending command nothing was sent. A transport failure whose `transport_error` was recorded also exits 1; delivery is then unconfirmed, as below. |
-| 76 | After transport | A journal update after a transport attempt failed (the command prints `journal update failed: ...` on stderr). The transport itself may have succeeded or failed. |
+| 1 | Before any transport call | Journal unavailable or refused (bad mode, lock held, not a recipient, unknown id), or the request mailbox write failed: on a sending command nothing was sent. |
+| 1 | After a failed transport call | The transport reported failure and its `transport_error` journal update succeeded. It may still have delivered (for example a timed-out queue or API call); the command never resends. Check the recipient before resending. |
+| 76 | After transport | A journal update after a transport attempt failed (the command prints `journal update failed: ...` on stderr). The transport itself may have succeeded or failed. A failed `journal.meta.json` write after a durable record or event is not an update failure. |
 
 On 76 read the transport result the command printed:
 
@@ -162,6 +163,24 @@ the journal, and report the failure. The command never resends or retries.
 
 - **Durability:** survives a crash of any `peers.py` process (fsynced appends,
   atomic rewrites). No claim is made about storage loss or power loss.
+- **Commit point:** a record or event is committed once its line is fsynced
+  (append) or its rewrite is renamed. A later failure writing
+  `journal.meta.json` is ignored. Meta is a validated cache, trusted only when
+  its recorded inode and size match the journal; otherwise the journal is parsed
+  and the next seq is max(meta `next_seq`, last seq + 1).
+- **Seq reuse (residual):** the seq can be reused in these cases:
+  - Meta is lost or invalid while the journal is empty (everything pruned): seq
+    restarts at 1.
+  - Meta is lost, invalid, or its write fails after a rewrite dropped the
+    highest-seq record (for example an event whose pruning rewrite removed its
+    own entry): the next seq falls back to the last retained seq + 1. An older
+    handover's `through_seq` could then cover a reused seq. Low likelihood: meta
+    is replaced atomically.
+  - Rarely (two consecutive meta write failures on rewrites, plus an inode reuse
+    and an exact size match) a stale meta could be trusted.
+
+  This affects handover coverage (`through_seq`); elsewhere seq only orders
+  listings.
 - **Temp-file recovery:** an interrupted rewrite leaves the old journal intact.
   The next locked write removes stale `journal.*.tmp.*` files, and a torn final
   line is truncated before the next append.

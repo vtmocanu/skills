@@ -155,7 +155,9 @@ HOOK_ATTACH_SLOW_STEP = 1.0
 # --------------------------------------------------------------------------
 
 JOURNAL_AGE_DAYS = 14
-# Encoded UTF-8 line bytes. SESSION_PEERS_JOURNAL_MAX_BYTES may only lower it.
+# Bytes of encoded lines. SESSION_PEERS_JOURNAL_MAX_BYTES may only lower it.
+# `_encode` uses ensure_ascii=True, so each non-ASCII character is escaped as \uXXXX
+# (a surrogate pair for astral ones): a non-ASCII body takes about 2-3x its UTF-8 size.
 # A 32 MiB journal took 1.24 s to parse and rewrite; 16 MiB keeps a rewrite near 0.6 s.
 JOURNAL_MAX_BYTES_DEFAULT = 16 * 1024 * 1024
 # Above the cap, only event records (ACK, settlement, transport error, handover) fit.
