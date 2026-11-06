@@ -49,7 +49,7 @@ def read_claude_records_checked():
                 rec = json.load(fh)
             if (not isinstance(rec, dict) or not isinstance(rec.get("sessionId"), str)
                     or not rec["sessionId"] or type(rec.get("pid")) is not int or rec["pid"] <= 0):
-                return [], "indeterminate registry record: %s" % path
+                return [], "indeterminate registry record: %r" % path
             records.append({**rec, "_path": path})
     except (OSError, ValueError, UnicodeError) as exc:
         return [], "registry read incomplete: %s" % exc
@@ -288,9 +288,10 @@ def _resolve_claude_record(target, exclude=None):
         noun = "id" if sp_runtime.is_uuid(target) else "name"
         raise sp_codex.ResolveNotFound("no live Claude session with %s %r" % (noun, target))
     if len(matches) > 1:
-        raise sp_codex.ResolveError(
+        raise sp_codex.ResolveAmbiguous(
             "%r names %d live sessions (%s); rename one"
-            % (target, len(matches), ", ".join(str(m.get("pid")) for m in matches))
+            % (target, len(matches), ", ".join(str(m.get("pid")) for m in matches)),
+            name=target, kind="cc",
         )
     rec = matches[0]
     if not socket_path_ok(rec.get("messagingSocketPath")):

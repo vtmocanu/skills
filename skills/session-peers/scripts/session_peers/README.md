@@ -23,6 +23,7 @@ the reply command included in a request envelope.
 | budgets | Sequence/binding accounting, allowance markers, and held-reply policy |
 | identity | Typed peer resolution and caller attribution |
 | journal | Critical-message journal: records, ACKs, settlements, handovers, retention, and its `record`, `ack` and `inbox` commands |
+| routes | Typed route check before send/ask/dispatch/wait, refusal advice, and delivery re-verification |
 | messaging | Send, correlated requests/replies, await, and wait commands |
 | buddy | Buddy records, binding transactions, and budget commands |
 | hooks | Hook installation, trust metadata, and startup reconciliation |

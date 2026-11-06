@@ -35,7 +35,7 @@ def _budget_target(value, args):
         return sp_codex.resolve_thread_prefer_live(value)["id"], None
     except sp_codex.ResolveError as exc:
         if not sp_runtime.is_uuid(value):
-            return None, (1, str(exc))
+            return None, (1, "\n".join([str(exc)] + sp_identity.ambiguity_report(exc, value)))
         return value, None
 
 
@@ -179,10 +179,6 @@ def expand_buddy(value, args, purpose):
             % (owner["kind"], owner["uuid"])
         )
     buddy = rec["buddy"]
-    if purpose in ("ask", "dispatch", "wait") and buddy["kind"] == "codex":
-        raise BuddyError(
-            "ask/dispatch/wait need a Claude or OpenCode buddy; use send (asynchronous)", 2
-        )
     if purpose == "budget" and buddy["kind"] != "codex":
         raise BuddyError(
             "the reply budget belongs to a Codex thread's shim; this buddy is a "
@@ -446,9 +442,14 @@ def _set_buddy(args, owner, path):
         sys.stderr.write("error: %s. Retry with one of:\n" % exc)
         for choice in exc.choices:
             sys.stderr.write("  %s\n" % _buddy_set_command(choice, args))
+        lines = sp_identity.describe_candidates(target, exclude=owner["uuid"])
+        if lines:
+            header = "pick one typed ID:" if exc.ambiguous else "Candidates:"
+            sys.stderr.write("%s\n" % "\n".join([header] + lines))
         return 1
     except sp_codex.ResolveError as exc:
-        sys.stderr.write("error: %s\n" % exc)
+        sys.stderr.write("error: %s\n" % "\n".join(
+            [str(exc)] + sp_identity.ambiguity_report(exc, target, owner["uuid"])))
         return 1
     if buddy["kind"] == owner["kind"] and buddy["uuid"] == owner["uuid"]:
         sys.stderr.write("error: a session cannot be its own buddy\n")

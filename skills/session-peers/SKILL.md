@@ -225,7 +225,7 @@ Without the target thread's shim, queued replies appear only in Codex's TUI.
 A plain-shell send to Claude may report `"target": "claude"` and
 `"reply_capable": false`; that unverified sender has no automatic reply route. If `SendMessage` cannot reach the
 peer, run `list`; a live thread with no `shim <pid>` needs `peers.py up <uuid>`
-before sending by its bare name. Completion and idle notices do not prove reply
+before `SendMessage`-ing it by name. Completion and idle notices do not prove reply
 delivery.
 
 A `<session-peers-request ...>` message comes from `ask` or `dispatch`. Write
@@ -244,6 +244,8 @@ Read [references/attach-and-lifecycle.md](references/attach-and-lifecycle.md)
 before installing hooks, attaching persistently, restarting/stopping shims, or GC.
 Read [references/messaging.md](references/messaging.md) before shell-only sends
 or relying on advanced addressing and mailbox details.
+`peers.py` refuses bare session names (the `buddy` alias stays valid), `ask`/`dispatch` to a Codex thread and Claude-to-Claude
+`send`/`ask`/`dispatch` with exact advice; see [Route check](references/messaging.md#route-check).
 
 ## Codex
 

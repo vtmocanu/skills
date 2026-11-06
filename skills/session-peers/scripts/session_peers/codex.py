@@ -14,6 +14,20 @@ from . import claude as sp_claude, process as sp_process, storage as sp_storage
 # --------------------------------------------------------------------------
 
 
+def _plain_id(ident):
+    """``ident`` for an error message: raw when a clean UUID, else repr-quoted."""
+    ok = sp_runtime.is_uuid(ident) and "\n" not in str(ident)
+    return str(ident) if ok else repr(ident)
+
+
+def _plain_name(name):
+    """A thread name for an error message: raw only when it is a plain peer name."""
+    if not name:
+        return "unnamed"
+    ok = sp_protocol.valid_peer_name(name) and "\n" not in str(name)
+    return str(name) if ok else repr(name)
+
+
 def find_state_db(sqlite_home=None):
     """The state_*.sqlite whose `threads` schema we recognise, or None.
 
@@ -223,13 +237,28 @@ class ResolveNoLive(ResolveError):
     """Only threads whose process is verified gone carry that name."""
 
 
+class ResolveAmbiguous(ResolveError):
+    """Several sessions of ONE kind carry the name; ``name`` and ``kind``
+    (``cc``, ``codex`` or ``oc``) let a caller list the candidates."""
+
+    def __init__(self, message, name=None, kind=None):
+        super().__init__(message)
+        self.name = name
+        self.kind = kind
+
+
 class ResolveAmbiguousKind(ResolveError):
     """A bare target that could be either kind; ``choices`` are the typed
-    targets (``cc:x``, ``codex:x``) that would each resolve it."""
+    targets (``cc:x``, ``codex:x``) that would each resolve it.
 
-    def __init__(self, message, choices):
+    ``ambiguous`` is True when several peers really carry the name, False when
+    one kind merely could not be verified.
+    """
+
+    def __init__(self, message, choices, ambiguous=False):
         super().__init__(message)
         self.choices = choices
+        self.ambiguous = ambiguous
 
 
 def missing_thread_message(thread_id):
@@ -307,6 +336,53 @@ def threads_in_other_homes(known_ids=()):
     return found
 
 
+def matching_threads(target, exclude=None, threads=None):
+    """Every thread a name, alias or ID prefix addresses, live or not.
+
+    The one match set `resolve_thread` and candidate listings share. ``threads``
+    (already loaded, other homes included) saves a second `lsof` probe.
+    """
+    if threads is None:
+        threads, _schema_ok = codex_threads()
+        threads = threads + threads_in_other_homes(t["id"] for t in threads)
+    if exclude:
+        threads = [t for t in threads if t["id"] != exclude]
+    # Match the name from the state DB / session index, OR from our own
+    # registration: `up <uuid>` records name->uuid, and a later `/rename` may
+    # not have propagated to the DB's `name` column yet (measured on
+    # codex-cli 0.153.4), so a thread we already registered under this name
+    # must still resolve. Union by id, so a thread matched both ways counts once.
+    reg = sp_storage.read_registered()
+    reg_ids = {
+        tid
+        for tid, meta in reg.items()
+        if isinstance(meta, dict) and meta.get("name") == target
+    }
+    matches = [
+        t for t in threads
+        if t.get("name") == target
+        or t["id"] in reg_ids
+        or t.get("registered_name") == target
+    ]
+    # The peer list advertises UUID-derived aliases for unsafe or absent titles.
+    # Check aliases alongside exact names: if they identify different threads,
+    # refuse the collision instead of silently sending to either one.
+    prefix_target = target[6:] if target.startswith("codex-") else target
+    prefix = None
+    if sp_runtime.is_uuid(prefix_target):
+        prefix = prefix_target.replace("-", "").lower()
+    elif re.fullmatch(r"[0-9a-fA-F]{8,32}", prefix_target):
+        prefix = prefix_target.lower()
+    if prefix:
+        prefix_matches = [
+            t for t in threads
+            if t["id"].replace("-", "").lower().startswith(prefix)
+        ]
+        matched_ids = {t["id"] for t in matches}
+        matches.extend(t for t in prefix_matches if t["id"] not in matched_ids)
+    return matches
+
+
 def resolve_thread(target, require_live=True, exclude=None):
     """Turn `<name|uuid>` into one thread dict, or raise ResolveError.
 
@@ -346,41 +422,7 @@ def resolve_thread(target, require_live=True, exclude=None):
             "Codex thread discovery is unavailable (unknown state_*.sqlite "
             "schema); pass the thread UUID instead of a name"
         )
-    if exclude:
-        threads = [t for t in threads if t["id"] != exclude]
-    # Match the name from the state DB / session index, OR from our own
-    # registration: `up <uuid>` records name->uuid, and a later `/rename` may
-    # not have propagated to the DB's `name` column yet (measured on
-    # codex-cli 0.153.4), so a thread we already registered under this name
-    # must still resolve. Union by id, so a thread matched both ways counts once.
-    reg = sp_storage.read_registered()
-    reg_ids = {
-        tid
-        for tid, meta in reg.items()
-        if isinstance(meta, dict) and meta.get("name") == target
-    }
-    matches = [
-        t for t in threads
-        if t.get("name") == target
-        or t["id"] in reg_ids
-        or t.get("registered_name") == target
-    ]
-    # The peer list advertises UUID-derived aliases for unsafe or absent titles.
-    # Check aliases alongside exact names: if they identify different threads,
-    # refuse the collision instead of silently sending to either one.
-    prefix_target = target[6:] if target.startswith("codex-") else target
-    prefix = None
-    if sp_runtime.is_uuid(prefix_target):
-        prefix = prefix_target.replace("-", "").lower()
-    elif re.fullmatch(r"[0-9a-fA-F]{8,32}", prefix_target):
-        prefix = prefix_target.lower()
-    if prefix:
-        prefix_matches = [
-            t for t in threads
-            if t["id"].replace("-", "").lower().startswith(prefix)
-        ]
-        matched_ids = {t["id"] for t in matches}
-        matches.extend(t for t in prefix_matches if t["id"] not in matched_ids)
+    matches = matching_threads(target, exclude, threads)
     if not matches:
         searched = sp_storage.other_homes()
         raise ResolveNotFound(
@@ -408,12 +450,13 @@ def resolve_thread(target, require_live=True, exclude=None):
         matches = live
     if len(matches) > 1:
         candidates = ", ".join(
-            "%s (%s)" % (t["id"], t.get("name") or "unnamed")
+            "%s (%s)" % (_plain_id(t["id"]), _plain_name(t.get("name")))
             for t in matches
         )
-        raise ResolveError(
+        raise ResolveAmbiguous(
             "%r matches %d %sthreads (%s); register by UUID instead"
-            % (target, len(matches), "live " if require_live else "", candidates)
+            % (target, len(matches), "live " if require_live else "", candidates),
+            name=target, kind="codex",
         )
     return matches[0]
 

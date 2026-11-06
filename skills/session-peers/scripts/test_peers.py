@@ -36,6 +36,7 @@ MODULES = (
     "peer_tests.test_watches",
     "peer_tests.test_journal",
     "peer_tests.test_journal_cli",
+    "peer_tests.test_routes",
 )
 
 # Expose test classes so unittest's existing TestClass[.test_method] selectors
