@@ -622,15 +622,31 @@ def _prepare_request(args, purpose):
     else:
         target_typed = "cc:%s" % rec["sessionId"]
     meta["target_typed"] = target_typed
-    # Journal first: a refusal here leaves no mailbox and nothing sent.
+    # Order: mailbox, then journal, then send. A journal refusal removes the mailbox again. The
+    # uuid4 request id is not exposed to anyone until the send, so no reply or await can address
+    # a mailbox that is not yet journaled. A crash between the mailbox write and the journal
+    # record leaves only an unjournaled mailbox, which cleanup_expired_requests reclaims at expiry.
+    try:
+        sp_runtime.write_json_atomic(meta_path, meta)
+    except OSError as exc:
+        # write_json_atomic does not clean its temp file on failure, and the expiry sweep skips it.
+        sp_requests._unlink_quiet(meta_path)
+        sp_requests._unlink_quiet("%s.tmp.%d" % (meta_path, os.getpid()))
+        sys.stderr.write("error: could not write request mailbox: %s\n" % exc)
+        return 1
     try:
         sp_journal.record_request(
             request_id, "%s:%s" % (requester["kind"], requester["uuid"]), [target_typed],
             message, expires_at, meta_path, fresh_id=True,
         )
     except sp_journal.JournalError as exc:
+        sp_requests._unlink_quiet(meta_path)
+        sp_requests._unlink_quiet(reply_path)
         return sp_journal.presend_failed(exc, getattr(args, "json", False))
-    sp_runtime.write_json_atomic(meta_path, meta)
+    except BaseException:
+        sp_requests._unlink_quiet(meta_path)
+        sp_requests._unlink_quiet(reply_path)
+        raise
     return _RequestSetup(
         message, timeout, requester, oc_sender, rec, request_id, meta_path, reply_path, expires_at, meta,
         target_typed,

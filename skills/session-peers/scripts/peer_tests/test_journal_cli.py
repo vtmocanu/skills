@@ -23,6 +23,7 @@ from peer_tests.support import (
 )
 from peer_tests.test_opencode import OC_A, OC_B, OpenCodeBase
 from session_peers import identity as sp_identity, journal
+from session_peers import runtime as sp_runtime
 from session_peers import reply_wake as sp_reply_wake
 
 CAP_ENV = "SESSION_PEERS_JOURNAL_MAX_BYTES"
@@ -475,6 +476,61 @@ class JournalPreSendFailureTests(JournalCliBase):
         self.assertEqual(listener.of_type("user"), [])
         self.assertEqual(self.queue_calls(), [])
         self.assertEqual(list(pathlib.Path(sp_storage.request_dir()).glob("*.json")), [])
+
+    def request_argv(self, verb, tid):
+        argv = [verb, "--to", "cc:cc-target", "--from-thread", tid, "--message", "m"]
+        return argv + (["--timeout", "5"] if verb == "ask" else [])
+
+    def assert_nothing_left_or_sent(self, listener):
+        time.sleep(0.2)
+        self.assertEqual(listener.of_type("user"), [])
+        self.assertEqual(self.queue_calls(), [])
+        self.assertEqual(self.records(), [])
+        left = sorted(p.name for p in pathlib.Path(sp_storage.request_dir()).glob("*"))
+        self.assertEqual(left, [])
+
+    def test_a_mailbox_write_failure_refuses_with_1_and_leaves_nothing(self):
+        listener, _rec = self.peer("cc-target", pid=os.getppid())
+        tid, _rollout = self.one_thread()
+        self.as_codex(tid)
+        real = sp_runtime.write_json_atomic
+
+        def failing(path, data, *a, **kw):
+            if str(path).endswith(".request.json"):
+                # A failure after the temp file exists, as a full disk would produce.
+                pathlib.Path("%s.tmp.%d" % (path, os.getpid())).write_text("partial")
+                raise OSError(errno.ENOSPC, "No space left on device")
+            return real(path, data, *a, **kw)
+
+        for verb in ("dispatch", "ask"):
+            with mock.patch.object(sp_runtime, "write_json_atomic", failing):
+                rc, _out, err = self.cli(*self.request_argv(verb, tid))
+            self.assertEqual(rc, 1, (verb, err))
+            self.assertIn("could not write request mailbox", err)
+            self.assert_nothing_left_or_sent(listener)
+
+    def test_a_journal_refusal_removes_the_mailbox_it_was_recorded_after(self):
+        listener, _rec = self.peer("cc-target", pid=os.getppid())
+        tid, _rollout = self.one_thread()
+        self.as_codex(tid)
+        real = journal.record_request
+        for verb, exc_type, want in (
+            ("dispatch", journal.JournalUnavailable, 1),
+            ("dispatch", journal.JournalFull, 75),
+            ("ask", journal.JournalFull, 75),
+        ):
+            seen = []
+
+            def refusing(request_id, requester, to, message, expires_at, mailbox, **kw):
+                seen.append(os.path.exists(mailbox))
+                raise exc_type("x")
+
+            with mock.patch.object(journal, "record_request", refusing):
+                rc, _out, err = self.cli(*self.request_argv(verb, tid))
+            self.assertEqual(rc, want, (verb, exc_type, err))
+            self.assertEqual(seen, [True], (verb, exc_type))
+            self.assert_nothing_left_or_sent(listener)
+        self.assertIs(journal.record_request, real)
 
     def test_a_near_cap_claude_message_is_refused_before_it_is_recorded(self):
         listener, _rec = self.peer("cc-target", pid=os.getppid())
