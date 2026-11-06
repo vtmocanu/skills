@@ -33,8 +33,11 @@ back keeps its records through rewrites and they age out once real time passes
 their ``at``. A record dated further ahead is malformed and a rewrite drops it:
 the residual is that a clock step-back of more than 14 days can lose records at
 the next rewrite. Every line with an integer ``seq`` advances the last seen seq
-even when it is otherwise malformed, so a lost meta file cannot make a seq be
-reused. A line that is a
+even when it is otherwise malformed, so a lost meta file does not normally make
+a seq be reused. Not absolute: with lost, invalid or unwritable meta and an empty
+journal the seq restarts at 1, and after a rewrite dropped the highest-seq record
+the next seq falls back to the last retained seq + 1 (see references/journal.md,
+"Durability" residuals). A line that is a
 JSON object with an integer ``seq`` and a finite ``at`` and either an integer
 ``schema`` above 1, or schema 1 with an unknown string ``type``, is a later
 version's record: it is not interpreted or counted as malformed, a rewrite keeps
@@ -346,7 +349,9 @@ def _parse(data, now):
     """Usable records in file order, the malformed-line count and the last seq.
 
     Any line with an integer ``seq`` advances the last seq, even a malformed or
-    skipped one, so a seq is never reused. A final line without its newline is a
+    skipped one, so a seq is not reused while that line survives (a rewrite that
+    drops the highest-seq record, or an empty journal with no meta, can reuse
+    it). A final line without its newline is a
     torn or in-flight write: ignored.
     """
     recs, malformed, last_seq, pos = [], 0, 0, 0
@@ -383,13 +388,13 @@ def _bucket(d):
 
 
 class _Entry:
-    __slots__ = ("msg", "acks", "settled", "transport", "events")
+    __slots__ = ("msg", "acks", "settled", "transports", "events")
 
     def __init__(self, rec):
         self.msg = rec
         self.acks = {}
         self.settled = None
-        self.transport = None
+        self.transports = {}
         self.events = []
 
     @property
@@ -464,7 +469,7 @@ class _Model:
             else:
                 keep = d["for"] in entry.d["to"]
                 if keep:
-                    entry.transport = rec
+                    entry.transports[d["for"]] = rec
         if not keep:
             rec.dead = True
             return
@@ -853,7 +858,7 @@ class _Writer:
                 pass
             raise
         _failpoint("after_append_before_meta")
-        self.write_meta(meta)
+        self._meta_after_commit(meta)
 
     def rewrite(self, lines, meta):
         """Atomically replace the journal with ``lines``, then rewrite the meta."""
@@ -876,7 +881,20 @@ class _Writer:
             raise
         _failpoint("after_prune_rename")
         _fsync_dir(self.dfd)
-        self.write_meta(meta)
+        self._meta_after_commit(meta)
+
+    def _meta_after_commit(self, meta):
+        """Write the meta once the record is committed; a failure is ignored.
+
+        The meta is a validated cache: ``read_meta`` trusts it only when its
+        file_ino/file_size match the journal, and ``load`` takes
+        ``max(meta next_seq, last_seq + 1)``, so a stale or missing one is
+        rebuilt by parsing.
+        """
+        try:
+            self.write_meta(meta)
+        except OSError:
+            pass
 
     def write_meta(self, meta):
         st = os.stat(JOURNAL_NAME, dir_fd=self.dfd, follow_symlinks=False)
@@ -1375,6 +1393,9 @@ def _recipients(entry, slots=None):
         item = {"slot": slot, "state": "acked" if rec else "pending"}
         if rec:
             item["by"], item["at"] = rec.d["by"], rec.d["at"]
+        failure = entry.transports.get(slot)
+        if failure:
+            item["transport_error"] = {"detail": failure.d["detail"], "at": failure.d["at"]}
         out.append(item)
     return out
 
@@ -1384,14 +1405,11 @@ def _settlement(entry):
     return {"state": s.d["state"], "by": s.d["by"], "at": s.d["at"]} if s else None
 
 
-def _transport(entry):
-    t = entry.transport
-    return {"for": t.d["for"], "detail": t.d["detail"], "at": t.d["at"]} if t else None
-
-
 @_api
 def read_only_view():
-    """Every retained entry in seq order, with body, ACKs, settlement, transport and expiry.
+    """Every retained entry in seq order, with body, ACKs, settlement and expiry.
+
+    Each recipient carries its own ``transport_error`` (latest per slot) when it has one.
 
     Same-OS-user trust exception, not a session: no identity is checked and the
     recipient list is an addressing rule, not confidentiality. Never repairs,
@@ -1406,7 +1424,6 @@ def read_only_view():
         item["body"] = entry.d["body"]
         item["recipients"] = _recipients(entry)
         item["settlement"] = _settlement(entry)
-        item["transport_error"] = _transport(entry)
         entries.append(item)
     grants = [dict(g.d) for g in m.grants.values()]
     return {"entries": entries, "handovers": grants, "malformed_lines": malformed, "last_seq": last_seq}
@@ -1417,7 +1434,7 @@ def get(message_id, caller):
     """One entry with its body for a recipient (or covered successor) of it.
 
     Returns the metadata plus ``body`` and separate ``acks``, ``settlement``,
-    ``transport_error`` and ``expired``. The sender and other sessions are refused.
+    ``transport_errors`` (one per recipient slot that has one) and ``expired``. The sender and other sessions are refused.
     """
     who = _norm_caller(caller)
     now = _now()
@@ -1431,7 +1448,9 @@ def get(message_id, caller):
     out["slots"] = slots
     out["acks"] = [{"for": s, "by": r.d["by"], "at": r.d["at"]} for s, r in entry.acks.items()]
     out["settlement"] = _settlement(entry)
-    out["transport_error"] = _transport(entry)
+    out["transport_errors"] = [
+        {"for": slot, "detail": entry.transports[slot].d["detail"], "at": entry.transports[slot].d["at"]}
+        for slot in entry.d["to"] if slot in entry.transports]
     return out
 
 
@@ -1461,7 +1480,7 @@ def list_for(caller, include_acked=False):
 
 @_api
 def acks_view(message_id, caller):
-    """Per-recipient ACK state, settlement and transport error, without the body.
+    """Per-recipient ACK state and transport error, and settlement, without the body.
 
     Allowed for the sender, any recipient and covered successors.
     """
@@ -1474,7 +1493,6 @@ def acks_view(message_id, caller):
     out = _base_view(entry, now)
     out["recipients"] = _recipients(entry)
     out["settlement"] = _settlement(entry)
-    out["transport_error"] = _transport(entry)
     return out
 
 
@@ -1614,14 +1632,13 @@ def _print_entry_header(view):
 def _print_state(view):
     for item in view.get("recipients") or []:
         extra = " by %s at %s" % (_human(item["by"]), _iso(item["at"])) if item["state"] == "acked" else ""
+        failure = item.get("transport_error")
+        if failure:
+            extra += "; transport error at %s: %s" % (_iso(failure["at"]), _human(failure["detail"]))
         print("  %s: %s%s" % (_human(item["slot"]), item["state"], extra))
     settlement = view.get("settlement")
     if settlement:
         print("settled: %s by %s at %s" % (settlement["state"], _human(settlement["by"]), _iso(settlement["at"])))
-    failure = view.get("transport_error")
-    if failure:
-        print("transport error for %s at %s: %s" % (
-            _human(failure["for"]), _iso(failure["at"]), _human(failure["detail"])))
 
 
 def _show_get(view):
@@ -1633,8 +1650,7 @@ def _show_get(view):
     settlement = view.get("settlement")
     if settlement:
         print("settled: %s by %s at %s" % (settlement["state"], _human(settlement["by"]), _iso(settlement["at"])))
-    failure = view.get("transport_error")
-    if failure:
+    for failure in view.get("transport_errors") or []:
         print("transport error for %s at %s: %s" % (
             _human(failure["for"]), _iso(failure["at"]), _human(failure["detail"])))
     print("---")
@@ -1645,7 +1661,12 @@ def _show_list(views):
     if not views:
         print("No critical messages.")
     for view in views:
-        slots = ", ".join("%s=%s" % (_human(s["slot"]), s["state"]) for s in view["slots"])
+        slots = ", ".join(
+            "%s=%s%s" % (_human(s["slot"]), s["state"],
+                         " (transport error at %s: %s)" % (_iso(s["transport_error"]["at"]),
+                                                          _human(s["transport_error"]["detail"]))
+                         if s.get("transport_error") else "")
+            for s in view["slots"])
         print("%s %s from %s at %s%s; %s" % (
             view["message_id"], view["kind"], _human(view["from"] or "unknown"), _iso(view["at"]),
             " [expired]" if view.get("expired") else "", slots))

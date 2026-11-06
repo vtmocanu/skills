@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import re
@@ -392,7 +393,8 @@ class JournalAckTests(JournalBase):
         mid = self.msg()
         journal.transport_error(mid, self.A, "e" * 2000)
         entry = journal.get(mid, self.A)
-        self.assertEqual(len(entry["transport_error"]["detail"]), 512)
+        self.assertEqual(len(entry["transport_errors"][0]["detail"]), 512)
+        self.assertEqual(entry["transport_errors"][0]["for"], self.A)
         self.assertEqual(entry["acks"], [])
         self.assertIsNone(entry["settlement"])
 
@@ -897,10 +899,135 @@ class JournalReaderTests(JournalBase):
         self.assertEqual({r["slot"]: r["state"] for r in item["recipients"]},
                          {self.A: "acked", self.B: "pending"})
         self.assertEqual(item["settlement"]["state"], "replied")
-        self.assertEqual(item["transport_error"]["detail"], "refused")
+        by_slot = {r["slot"]: r for r in item["recipients"]}
+        self.assertEqual(by_slot[self.B]["transport_error"]["detail"], "refused")
+        self.assertNotIn("transport_error", by_slot[self.A])
+        self.assertNotIn("transport_error", item)
         self.assertFalse(item["expired"])
         self.assertEqual([(g["from"], g["to"]) for g in view["handovers"]], [(self.A, self.C)])
         self.assertEqual(view["last_seq"], max(r["seq"] for r in self.records()))
+
+
+class JournalMetaFailureTests(JournalBase):
+    """A committed record or event survives a failing meta write."""
+
+    def fail_meta(self):
+        return mock.patch.object(journal._Writer, "write_meta",
+                                 side_effect=OSError(errno.ENOSPC, "No space left on device"))
+
+    def meta_matches_file(self):
+        try:
+            meta = self.meta()
+        except (OSError, ValueError):
+            return False
+        st = os.stat(self.jpath)
+        return meta.get("file_ino") == st.st_ino and meta.get("file_size") == st.st_size
+
+    def last_seq(self):
+        return journal.read_only_view()["last_seq"]
+
+    def assert_committed_with_stale_meta(self, mid, last_before):
+        self.assertIsNotNone(self.entry(mid))
+        self.assertEqual(self.last_seq(), last_before + 1)
+        self.assertFalse(self.meta_matches_file())
+        self.assertEqual(self.leftovers(), [])
+
+    def assert_next_write_recovers(self, last_before):
+        self.set_cap(60000)
+        journal.record_message(cc(), [self.A], "next")
+        self.assertEqual(self.records()[-1]["seq"], last_before + 2)
+        self.assertTrue(self.meta_matches_file())
+        self.assertEqual(self.meta()["next_seq"], last_before + 3)
+        self.assertEqual(self.leftovers(), [])
+
+    def test_fast_path_append_succeeds_when_the_meta_write_fails(self):
+        self.msg()
+        last = self.last_seq()
+        rid = str(uuid.uuid4())
+        calls = []
+        real = journal._Writer.load
+        with mock.patch.object(journal._Writer, "load", lambda w, n: calls.append(1) or real(w, n)):
+            with self.fail_meta():
+                journal.record_request(rid, cc(), [self.A], "ask", self.now + 600, "/nonexistent/x",
+                                       fresh_id=True)
+        self.assertEqual(calls, [])
+        self.assert_committed_with_stale_meta(rid, last)
+        self.assert_next_write_recovers(last)
+
+    def test_parse_path_append_succeeds_when_the_meta_write_fails(self):
+        self.msg()
+        last = self.last_seq()
+        mid = str(uuid.uuid4())
+        with self.fail_meta():
+            self.assertEqual(journal.record_message(cc(), [self.A], "hi", message_id=mid), mid)
+        self.assert_committed_with_stale_meta(mid, last)
+        self.assert_next_write_recovers(last)
+
+    def test_rewrite_succeeds_when_the_meta_write_fails(self):
+        first, body = self.fill(ack_first=True)
+        last = self.last_seq()
+        ino = os.stat(self.jpath).st_ino
+        with self.fail_meta():
+            mid = journal.record_message(cc(), [self.A], "b" * 2000)
+        self.assertNotEqual(os.stat(self.jpath).st_ino, ino)
+        self.assertIsNone(self.entry(first))
+        self.assert_committed_with_stale_meta(mid, last)
+        self.assert_next_write_recovers(last)
+
+    def test_an_ack_event_succeeds_when_the_meta_write_fails(self):
+        mid = self.msg()
+        last = self.last_seq()
+        with self.fail_meta():
+            journal.ack(mid, self.A)
+        self.assertEqual(self.entry(mid)["recipients"][0]["state"], "acked")
+        self.assertEqual(self.last_seq(), last + 1)
+        self.assertFalse(self.meta_matches_file())
+        self.assertEqual(self.leftovers(), [])
+        self.assert_next_write_recovers(last)
+
+
+class JournalTransportPerSlotTests(JournalBase):
+    def two(self):
+        mid = self.req(to=[self.A, self.B])
+        journal.transport_error(mid, self.A, "err-a")
+        journal.transport_error(mid, self.B, "err-b")
+        return mid
+
+    def test_each_view_shows_the_transport_error_of_each_recipient(self):
+        mid = self.two()
+        details = lambda rs: {r["slot"]: r["transport_error"]["detail"] for r in rs}
+        want = {self.A: "err-a", self.B: "err-b"}
+        item = self.entry(mid)
+        self.assertEqual(details(item["recipients"]), want)
+        self.assertNotIn("transport_error", item)
+        acks = journal.acks_view(mid, self.A)
+        self.assertEqual(details(acks["recipients"]), want)
+        self.assertNotIn("transport_error", acks)
+        got = journal.get(mid, self.A)
+        self.assertEqual([(e["for"], e["detail"]) for e in got["transport_errors"]],
+                         [(self.A, "err-a"), (self.B, "err-b")])
+        self.assertIsInstance(got["transport_errors"][0]["at"], float)
+        self.assertNotIn("transport_error", got)
+        [listed] = journal.list_for(self.A)
+        self.assertEqual(details(listed["slots"]), {self.A: "err-a"})
+        [listed] = journal.list_for(self.B)
+        self.assertEqual(details(listed["slots"]), {self.B: "err-b"})
+
+    def test_a_later_error_replaces_only_its_own_slot(self):
+        mid = self.two()
+        journal.transport_error(mid, self.A, "err-a2")
+        item = self.entry(mid)
+        self.assertEqual({r["slot"]: r["transport_error"]["detail"] for r in item["recipients"]},
+                         {self.A: "err-a2", self.B: "err-b"})
+        self.assertEqual([e["detail"] for e in journal.get(mid, self.A)["transport_errors"]],
+                         ["err-a2", "err-b"])
+
+    def test_a_slot_without_an_error_has_no_transport_error_key(self):
+        mid = self.req(to=[self.A, self.B])
+        journal.transport_error(mid, self.B, "only-b")
+        item = self.entry(mid)
+        self.assertNotIn("transport_error", item["recipients"][0])
+        self.assertEqual([e["for"] for e in journal.get(mid, self.A)["transport_errors"]], [self.B])
 
 
 class JournalReworkTests(JournalBase):

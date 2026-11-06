@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import pathlib
@@ -373,8 +374,9 @@ class JournalOpenCodeSendTests(JournalOpenCodeBase):
         self.assertIn("raced away; nothing queued", err)
         self.assertEqual(self.oc_calls("session.prompt"), [])
         [entry] = self.entries()
-        self.assertEqual(entry["transport_error"]["for"], "oc:" + OC_B)
-        self.assertEqual(entry["transport_error"]["detail"], "reply-wake grant refused")
+        [recipient] = entry["recipients"]
+        self.assertEqual(recipient["slot"], "oc:" + OC_B)
+        self.assertEqual(recipient["transport_error"]["detail"], "reply-wake grant refused")
 
     def test_an_opencode_transport_failure_appends_a_per_slot_transport_error(self):
         _listener, rec = self.peer("cc-sender", pid=os.getpid())
@@ -384,7 +386,8 @@ class JournalOpenCodeSendTests(JournalOpenCodeBase):
         self.assertEqual(rc, 1)
         self.assertIn("could not queue to OpenCode session", err)
         [entry] = self.entries()
-        self.assertEqual(entry["transport_error"]["for"], "oc:" + OC_B)
+        self.assertIn("transport_error", entry["recipients"][0])
+        self.assertEqual(entry["recipients"][0]["slot"], "oc:" + OC_B)
 
     def test_a_journal_refusal_on_the_claude_path_forgets_the_issued_reply_wake_grant(self):
         self.peer("cc-target", pid=os.getppid())
@@ -567,7 +570,8 @@ class JournalPostTransportTests(JournalCliBase):
         self.assertEqual(rc, 1)
         self.assertEqual(request["status"], "delivery_failed")
         entry = self.entry(request["request_id"])
-        self.assertEqual(entry["transport_error"]["for"], "cc:" + rec["sessionId"])
+        self.assertEqual(entry["recipients"][0]["slot"], "cc:" + rec["sessionId"])
+        self.assertIn("transport_error", entry["recipients"][0])
         self.assertIn("could not send request", err)
 
     def test_a_claude_path_transport_failure_with_record_appends_a_per_slot_transport_error(self):
@@ -579,7 +583,8 @@ class JournalPostTransportTests(JournalCliBase):
         rc, _out, err = self.cli("send", "--to", "cc:cc-target", "--message", "lost", "--record")
         self.assertEqual(rc, 1, err)
         [entry] = self.entries()
-        self.assertEqual(entry["transport_error"]["for"], "cc:" + rec["sessionId"])
+        self.assertEqual(entry["recipients"][0]["slot"], "cc:" + rec["sessionId"])
+        self.assertIn("transport_error", entry["recipients"][0])
         self.assertEqual(entry["body"], "lost")
 
     def test_an_ask_transport_failure_appends_a_per_slot_transport_error(self):
@@ -592,7 +597,8 @@ class JournalPostTransportTests(JournalCliBase):
         self.assertEqual(rc, 1, err)
         [entry] = self.entries()
         self.assertEqual(entry["kind"], "request")
-        self.assertEqual(entry["transport_error"]["for"], "cc:" + rec["sessionId"])
+        self.assertEqual(entry["recipients"][0]["slot"], "cc:" + rec["sessionId"])
+        self.assertIn("transport_error", entry["recipients"][0])
 
     def test_a_dispatch_json_carries_journal_error_when_the_transport_error_cannot_be_appended(self):
         listener, _rec = self.peer("cc-target", pid=os.getppid())
@@ -1168,6 +1174,26 @@ class JournalNoImplicitAckTests(JournalCliBase):
         self.assertEqual(self.entry(journal.reply_message_id(rid))["settlement"]["state"], "consumed")
 
 
+    def test_a_failed_meta_write_after_the_reply_settlement_still_exits_0(self):
+        _listener, rec = self.peer("cc-target", pid=os.getppid())
+        tid, _rollout = self.one_thread()
+        rc, request, err = self.dispatch("cc:cc-target", tid)
+        self.assertEqual(rc, 0, err)
+        rid = request["request_id"]
+        real = journal._Writer.write_meta
+
+        def flaky(writer, meta):
+            if self.records()[-1]["type"] == "settled":
+                raise OSError(errno.ENOSPC, "No space left on device")
+            return real(writer, meta)
+
+        with mock.patch.object(journal._Writer, "write_meta", flaky):
+            rc, _out, err = self.reply_as(rec["sessionId"], rid, "approved")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self.records()[-1]["type"], "settled")
+        self.assertEqual(self.entry(rid)["settlement"]["state"], "replied")
+
+
 # ==========================================================================
 # Pointer flow and the new commands
 # ==========================================================================
@@ -1203,6 +1229,32 @@ class JournalCommandTests(JournalCliBase):
         rc, out, err = self.cli("inbox", "acks", mid)
         self.assertEqual(rc, 0, err)
         self.assertIn("acked", out)
+
+    def test_acks_and_journal_human_output_show_each_recipients_transport_error(self):
+        _la, first = self.peer("cc-one", pid=os.getpid())
+        _lb, second = self.peer("cc-two", pid=os.getppid())
+        tid, _rollout = self.one_thread()
+        self.as_codex(tid)
+        a, b = "cc:" + first["sessionId"], "cc:" + second["sessionId"]
+        rc, out, err = self.cli("record", "--to", a, "--to", b, "--message", "both", "--json")
+        self.assertEqual(rc, 0, err)
+        mid = json.loads(out)["message_id"]
+        journal.transport_error(mid, a, "err-one")
+        journal.transport_error(mid, b, "err-two")
+        rc, out, err = self.cli("inbox", "acks", mid)
+        self.assertEqual(rc, 0, err)
+        self.assertRegex(out, r"  %s: pending; transport error at \S+: err-one\n" % a)
+        self.assertRegex(out, r"  %s: pending; transport error at \S+: err-two\n" % b)
+        self.assertNotIn("transport error for", out)
+        self.as_cc(first)
+        rc, out, err = self.cli("inbox", "journal")
+        self.assertEqual(rc, 0, err)
+        self.assertRegex(out, r"%s=pending \(transport error at \S+: err-one\)" % a)
+        self.assertNotIn("err-two", out)
+        rc, out, err = self.cli("inbox", "get", mid)
+        self.assertEqual(rc, 0, err)
+        self.assertRegex(out, r"transport error for %s at \S+: err-one" % a)
+        self.assertRegex(out, r"transport error for %s at \S+: err-two" % b)
 
     def test_record_to_several_recipients_acks_per_recipient(self):
         _la, first = self.peer("cc-one", pid=os.getpid())
