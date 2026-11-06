@@ -198,9 +198,9 @@ makes it a Codex sender. Beside a Claude session, an invalid Codex id is
 refused (rc 2): the sender cannot be attributed, nothing is sent. An OpenCode id
 beside a Claude or Codex one, without explicit `--from-*` flags, cannot be
 attributed: with a Claude variable set it is treated as a Claude session for
-the table above. On other routes the existing checks apply: `send` refuses it
-with "pass explicit `--from-*` flags", `ask`/`dispatch` refuse it for lack of
-an attributable origin, and `wait` does not depend on the sender. `ask`, `dispatch` and `wait` validate `--timeout` before the
+the table above. Its other routes are left to each command's existing identity
+checks, unchanged (for example, `send` refuses it with "pass explicit
+`--from-*` flags"). `ask`, `dispatch` and `wait` validate `--timeout` before the
 route check.
 
 Not covered: a native `SendMessage` aimed at a Codex shim never passes through
