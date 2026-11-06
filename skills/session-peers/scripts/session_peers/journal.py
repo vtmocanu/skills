@@ -1708,6 +1708,20 @@ def _show_acks(view):
     _print_state(view)
 
 
+def _write_receipt(grant):
+    """Keep a receipt of a recorded grant so `peers.py handover` survives the journal pruning it.
+
+    A failure only warns: the grant itself is recorded and the exit code stays 0.
+    """
+    try:
+        from . import channels as sp_channels  # channels imports this module
+
+        sp_channels.write_grant_receipt(grant)
+    except Exception as exc:
+        sys.stderr.write("warning: the handover is recorded but its receipt could not be written: %s\n"
+                         % _human(exc))
+
+
 def cmd_inbox_journal(args):
     """`inbox get|journal|acks|handover`: the critical-message journal, for the calling session."""
     as_json = getattr(args, "json", False)
@@ -1722,6 +1736,7 @@ def cmd_inbox_journal(args):
             result, show = acks_view(args.message_id, who), _show_acks
         else:
             result = handover(who, args.to)
+            _write_receipt(result)
             show = lambda rec: print("handover recorded: %s may act for %s on messages up to seq %d" % (
                 _human(rec["to"]), _human(rec["from"]), rec["through_seq"]))
     except JournalError as exc:

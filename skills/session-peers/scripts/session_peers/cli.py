@@ -44,6 +44,8 @@ def build_parser():
 
     _register_channels(sub)
 
+    _register_lifecycle_channels(sub)
+
     _register_maintenance(sub)
 
     return p
@@ -456,6 +458,21 @@ def _register_channels(sub):
     for parser in (p_create, p_join, p_leave, p_remove, p_list, p_members, p_tail):
         parser.set_defaults(func=sp_channels.cmd_channel)
     p_chan.set_defaults(func=sp_channels.cmd_channel, channel_cmd=None)
+
+
+def _register_lifecycle_channels(sub):
+    p_leave = sub.add_parser(
+        "leave", help="leave every stored channel and #general (a session that is done)")
+    p_leave.set_defaults(func=sp_channels.cmd_leave)
+    p_handover = sub.add_parser(
+        "handover",
+        help="move this session's channels to a successor (after `inbox handover --to` recorded the grant)",
+    )
+    p_handover.add_argument(
+        "--to", required=True, metavar="cc:<uuid>|codex:<uuid>|oc:<ses_id>",
+        help="the successor's full typed identity (names are refused)",
+    )
+    p_handover.set_defaults(func=sp_channels.cmd_handover)
 
 
 def _register_maintenance(sub):

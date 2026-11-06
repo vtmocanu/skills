@@ -143,10 +143,22 @@ class ChannelCommandTests(ChannelBase):
         self.assertIn("no channel named #nope", err)
 
     def test_general_is_not_a_stored_channel(self):
-        for verb in ("join", "leave", "tail", "members"):
-            rc, _out, err = self.ch(verb, "general")
-            self.assertEqual(rc, 2, verb)
-            self.assertIn("#general is derived", err)
+        for args in (("create", "general"), ("remove", "general", "cc:" + new_uuid())):
+            rc, _out, err = self.ch(*args)
+            self.assertEqual(rc, 2, args)
+            self.assertIn("derived", err)
+        self.assertIsNone(sp_channels.read_channel("general"))
+        self.assertFalse(os.path.exists(sp_channels._record_path("general")))
+
+    def test_create_refuses_to_overwrite_an_unreadable_record(self):
+        self.ok("create", "ops")
+        with open(sp_channels._record_path("ops"), "w") as fh:
+            fh.write("not json")
+        rc, _out, err = self.ch("create", "ops")
+        self.assertEqual(rc, 2)
+        self.assertIn("exists but its record is unreadable", err)
+        with open(sp_channels._record_path("ops")) as fh:
+            self.assertEqual(fh.read(), "not json")
 
     def test_member_and_channel_caps_name_their_limit(self):
         listener, rec = self.add_listener(name="friend", session_id=new_uuid())

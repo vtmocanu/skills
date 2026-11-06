@@ -219,6 +219,8 @@ def cmd_gc(args):
         sys.stderr.write("error: %s\n" % exc)
         return 2
     buddies = gc_buddy_records(days=days, dry_run=args.dry_run)
+    markers = sp_channels.gc_left_markers(dry_run=args.dry_run)
+    receipts = sp_channels.gc_receipts(dry_run=args.dry_run)
     grants = sp_reply_wake.cleanup(time.time(), dry_run=args.dry_run)
     requests = sp_requests.cleanup_expired_requests(dry_run=args.dry_run)
     if not args.dry_run:
@@ -228,6 +230,6 @@ def cmd_gc(args):
         print("%s expired request %s" % ("would prune" if args.dry_run else "pruned", request_id))
     for message_id in grants:
         print("%s expired reply-wake grant %s" % ("would prune" if args.dry_run else "pruned", message_id))
-    if not removed and not requests and not buddies and not grants:
+    if not removed and not requests and not buddies and not grants and not markers and not receipts:
         print("no stale bridge metadata")
     return 0

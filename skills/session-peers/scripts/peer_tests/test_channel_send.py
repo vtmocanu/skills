@@ -166,11 +166,11 @@ class ChannelSendTests(ChannelSendBase):
         self.assertEqual(rc, 2)
         self.assertIn("cannot tell which session is asking", err)
 
-    def test_general_is_not_sendable_yet(self):
+    def test_general_never_gets_a_stored_record(self):
         self.sender_cc()
-        rc, _out, err = self.cli("send", "--to", "#general", "--message", "hello")
-        self.assertEqual(rc, 2)
-        self.assertIn("#general is not available yet", err)
+        self.cli("send", "--to", "#general", "--message", "hello")
+        self.assertIsNone(sp_channels.read_channel("general"))
+        self.assertFalse(os.path.exists(sp_channels._record_path("general")))
 
     def test_channel_targets_refuse_wake_reply_wake_and_sender_overrides(self):
         self.sender_cc()
@@ -951,6 +951,16 @@ class ChannelRecordTrustTests(ChannelSendBase):
         self.assertEqual(self.history(), [e for e in self.history() if e["kind"] == "channel.created"])
         self.nothing_delivered()
 
+    def test_members_refuses_a_roster_over_the_cap(self):
+        self.channel("ops")
+        extra = ["cc:" + new_uuid() for _ in range(sp_constants.CHANNEL_MAX_MEMBERS + 1)]
+        self.rewrite(lambda rec: rec["members"].extend(extra))
+        rc, out, err = self.cli("channel", "members", "ops")
+        self.assertEqual(rc, 2)
+        self.assertEqual(out, "")
+        self.assertIn("lists %d members" % (len(extra) + 1), err)
+        self.assertIn("CHANNEL_MAX_MEMBERS", err)
+
     def test_a_member_listed_many_times_is_delivered_once(self):
         listener, peer = self.peer_cc("beta")
         self.channel("ops", peer)
@@ -958,6 +968,8 @@ class ChannelRecordTrustTests(ChannelSendBase):
         rc, result, err = self.send()
         self.assertEqual(rc, 0, err)
         self.assertEqual(list(result["outcomes"]), [peer])
+        self.assertTrue(wait_for(lambda: listener.of_type("user")))
+        time.sleep(0.5)  # a duplicate delivery would arrive by now
         self.assertEqual(len(listener.of_type("user")), 1)
 
     def test_malformed_members_are_dropped(self):
@@ -983,6 +995,19 @@ class ChannelRecordTrustTests(ChannelSendBase):
         rc, _result, err = self.send()
         self.assertEqual(rc, 2)
         self.assertIn("no channel named #ops", err)
+        self.nothing_delivered()
+
+    def test_a_body_that_only_the_codex_tag_and_origin_push_over_budget_journals_nothing(self):
+        tid, _rollout = self.one_thread()
+        self.channel("ops", "codex:" + tid)
+        header = sp_channels._delivery_text("ops", new_uuid(), self.me, "codex:" + tid, "", True)
+        # The bare delivery text fits the budget; the transport's tag and origin lines do not.
+        body = "x" * (sp_runtime.argv_text_budget() - sp_runtime.utf8_len(header) - 1)
+        rc, _out, err = self.cli("send", "--to", "#ops", "--message", body, "--record")
+        self.assertEqual(rc, 1, err)
+        self.assertIn("nothing was journaled or sent", err)
+        self.assertEqual(self.journal_entries(), [])
+        self.assertEqual(self.send_entries(), [])
         self.nothing_delivered()
 
     def test_a_body_over_the_codex_argv_budget_with_record_journals_nothing(self):
