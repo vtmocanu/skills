@@ -46,8 +46,9 @@ See [the journal](journal.md) for the full contract.
   reports a delivery failure (`delivery_failed` or a "could not send/queue"
   error), delivery is unconfirmed: check the recipient before resending. Never
   resend blindly on 76.
-- Exit 75 (journal full) and exit 1 on a sending command sent nothing; exit 1
-  also covers read refusals (not a recipient, unknown id). `ack` and
+- A journal failure before sending (75 full, 1 refused or unavailable) sent
+  nothing; exit 1 after a reported transport failure leaves delivery
+  unconfirmed. Exit 1 also covers read refusals (not a recipient, unknown id). `ack` and
   `inbox handover` can return 75 when even the event reserve is exhausted. For
   75 only, recipients `ack` older messages, or wait for expiry.
 - The journal covers only recorded messages. A casual or native message that was

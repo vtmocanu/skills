@@ -64,7 +64,9 @@ Every correlated ask/dispatch request and reply is journaled automatically.
   a correlated request settles by its reply (`replied`/`consumed`) instead. A
   transport receipt, queue acceptance or idle notice is never an ACK, a
   settlement or a verdict.
-- Exit 75 (journal full) and exit 1 on a sending command mean nothing was sent.
+- A journal failure before sending (75 full, 1 refused or unavailable) sent
+  nothing; exit 1 after a reported transport failure leaves delivery
+  unconfirmed.
   Exit 76 means a journal update after a transport attempt failed; read the
   transport result the command printed. If it reports success (sent, queued,
   replied, or the consumed reply body was printed), the message went out or

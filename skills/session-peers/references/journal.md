@@ -134,7 +134,7 @@ An entry past the age cap is shown `[expired]` until a write prunes it.
 | Code | When | Meaning |
 | --- | --- | --- |
 | 75 | Before sending | Journal full. On a sending command nothing was sent. `--json` prints `{"status":"journal_full","detail":...}`. Recipients `ack`, or wait for expiry, then retry. `ack` and `inbox handover` can also return 75 when even the event reserve is exhausted. |
-| 1 | Before sending, or after a reported transport failure | Journal unavailable or refused (bad mode, lock held, not a recipient, unknown id): on a sending command nothing was sent. A transport failure whose `transport_error` was recorded also exits 1; delivery is then unconfirmed, as above. |
+| 1 | Before sending, or after a reported transport failure | Journal unavailable or refused (bad mode, lock held, not a recipient, unknown id): on a sending command nothing was sent. A transport failure whose `transport_error` was recorded also exits 1; delivery is then unconfirmed, as below. |
 | 76 | After transport | A journal update after a transport attempt failed (the command prints `journal update failed: ...` on stderr). The transport itself may have succeeded or failed. |
 
 On 76 read the transport result the command printed:
