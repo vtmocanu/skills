@@ -117,7 +117,7 @@ def _wait_flag(verb):
 def _run_lines(args, verb, typed, extra=()):
     """The indented commands to run: ``extra`` first, then the verb with the other options kept."""
     options, note = _options(args, verb)
-    lines = list(extra) + [" ".join(["peers.py", verb, _wait_flag(verb), typed] + options)]
+    lines = list(extra) + [" ".join(["peers.py", verb, _wait_flag(verb), shlex.quote(typed)] + options)]
     if note:
         lines.append("(write the message to PATH)")
     return "\n".join("  " + line for line in lines)
@@ -131,7 +131,7 @@ def _run_lines(args, verb, typed, extra=()):
 def _request_to_codex(verb, sender, ident):
     text = (
         "error: %s cannot reach Codex thread codex:%s: correlated requests reach "
-        "only Claude Code and OpenCode peers." % (verb, ident)
+        "only Claude Code and OpenCode peers." % (verb, sp_identity.display_id("codex", ident))
     )
     if _claudeish(sender):
         text += " A correlated Claude-to-Codex request does not exist yet (#88)."
@@ -147,7 +147,7 @@ def _shim_running(ident):
 
 
 def _wait_for_codex(args, ident):
-    head = "error: wait reads a Claude-registry status; Codex thread codex:%s " % ident
+    head = "error: wait reads a Claude-registry status; Codex thread codex:%s " % sp_identity.display_id("codex", ident)
     if _shim_running(ident):
         return head + "publishes it through its shim. Run:\n" + _run_lines(args, "wait", "cc:" + ident)
     try:
@@ -156,7 +156,7 @@ def _wait_for_codex(args, ident):
         raise _Refusal(1, "error: %s" % exc)
     if thread.get("live") is True:
         return head + "has no running shim, so no status is published. Run:\n" + _run_lines(
-            args, "wait", "cc:" + ident, extra=("peers.py restart %s" % ident,)
+            args, "wait", "cc:" + ident, extra=("peers.py restart %s" % shlex.quote(ident),)
         )
     return head + "is not live, so no status can be published; there is no equivalent."
 
@@ -192,7 +192,8 @@ def _verified_name(rec):
 def _claude_to_claude(verb, rec):
     sid = rec.get("sessionId")
     name, reason = _verified_name(rec)
-    label = rec.get("name") or "cc:%s" % sid
+    shown = sp_identity.display_id("cc", sid)
+    label = rec.get("name") if sp_protocol.valid_peer_name(rec.get("name")) else "cc:%s" % shown
     if name:
         how = 'Use SendMessage with to: "%s".' % name
     elif reason in ("absent", "duplicate"):
@@ -209,7 +210,7 @@ def _claude_to_claude(verb, rec):
     text = (
         "error: this Claude Code session must reach Claude Code session %s with "
         "native SendMessage, not peers.py. %s Typed ID cc:%s is for "
-        "disambiguation only; do not pass it to SendMessage." % (label, how, sid)
+        "disambiguation only; do not pass it to SendMessage." % (label, how, shown)
     )
     if verb in REQUESTS:
         text += " A correlated ask has no Claude-to-Claude equivalent; SendMessage is asynchronous."
@@ -330,7 +331,10 @@ def _route(args, verb, value):
     raise _Refusal(
         2,
         'error: %s needs a typed target; "%s" is %s %s (%s). Run:\n%s'
-        % (_wait_flag(verb), value, LABELS[kind], typed, _liveness(tgt), _run_lines(args, verb, typed)),
+        % (
+            _wait_flag(verb), value, LABELS[kind], _typed(tgt.runtime, sp_identity.display_id(kind, tgt.ident)),
+            _liveness(tgt), _run_lines(args, verb, typed),
+        ),
     )
 
 

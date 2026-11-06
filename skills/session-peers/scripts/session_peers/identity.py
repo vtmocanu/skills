@@ -181,6 +181,12 @@ def resolve_typed(target, exclude=None):
 _LABELS = {"cc": "Claude session", "codex": "Codex thread", "oc": "OpenCode session"}
 
 
+def display_id(kind, ident):
+    """``ident`` as printed in advice: raw for a well-formed id, else ``%r``-quoted."""
+    ok = sp_opencode.is_session_id(ident) if kind == "oc" else sp_runtime.is_uuid(ident)
+    return str(ident) if ok else repr(ident)
+
+
 def dead_only_duplicates(name, exclude=None):
     """The threads carrying ``name`` when there are two or more and none is live.
 
@@ -213,14 +219,14 @@ def describe_candidates(name, kinds=None, exclude=None):
         for thread in sp_codex.matching_threads(name, exclude=exclude):
             state = _thread_liveness(thread)
             when = sp_runtime.parse_time(thread.get("updated_at")) or 0
-            rows["codex:%s" % thread["id"]] = (_LABELS["codex"], state, ranks[state], when)
+            rows["codex:%s" % display_id("codex", thread["id"])] = (_LABELS["codex"], state, ranks[state], when)
     if "cc" in kinds:
         for rec in sp_claude.claude_record_by_target(name, sp_claude.read_claude_records()):
             sid = rec.get("sessionId")
             state = sp_claude.record_liveness(rec)
             when = sp_runtime.parse_time(rec.get("startedAt")) or 0
             shim = rec.get("entrypoint") == "codex" and sp_runtime.is_uuid(sid)
-            typed = "%s:%s" % ("codex" if shim else "cc", sid)
+            typed = "%s:%s" % ("codex" if shim else "cc", display_id("cc", sid))
             if typed in rows:
                 continue
             rows[typed] = (_LABELS["codex" if shim else "cc"], state, ranks[state], when)
@@ -236,7 +242,7 @@ def describe_candidates(name, kinds=None, exclude=None):
         for session in sessions:
             state = "unknown" if active is None else sp_opencode.state_of(session["id"], active)
             when = (session.get("updated_ms") or 0) / 1000.0
-            rows["oc:%s" % session["id"]] = (_LABELS["oc"], "recent (%s)" % state, ranks["recent"], when)
+            rows["oc:%s" % display_id("oc", session["id"])] = (_LABELS["oc"], "recent (%s)" % state, ranks["recent"], when)
     ordered = sorted(rows.items(), key=lambda item: (item[1][2], -item[1][3], item[0]))
     return ["  %s  %s  %s" % (typed, label, state) for typed, (label, state, _r, _w) in ordered]
 
