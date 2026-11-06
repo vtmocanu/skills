@@ -1,6 +1,6 @@
 ---
 name: session-peers
-description: 'Messages between Claude Code sessions, Codex CLI threads and OpenCode V2 sessions on one machine, including correlated request/reply without stale queued turns, blocking (ask) or nonblocking (dispatch then await). Registers Codex as a Claude peer, delivers asynchronous messages through codex queue, and provides ask/dispatch/await/reply/wait commands for supervised multi-round work. Binds a named buddy peer for review and brainstorming. Use when sending cross-session messages or handoffs, requesting peer review, dispatching correlated work without blocking, waiting on a peer, listing live sessions, or diagnosing a stuck, paused, or dead peer. Triggers include "message codex", "message opencode", "ask claude", "dispatch to claude", "reply to the session", "@codex", "session peers", "peer review", "buddy: @name", "your buddy is", "ask your buddy", a bare "buddy", "find your buddy", "bind your buddy".'
+description: 'Messages between Claude Code sessions, Codex CLI threads and OpenCode V2 sessions on one machine, including correlated request/reply without stale queued turns, blocking (ask) or nonblocking (dispatch then await). Registers Codex as a Claude peer, delivers asynchronous messages through codex queue, and provides ask/dispatch/await/reply/wait commands for supervised multi-round work. Binds a named buddy peer for review and brainstorming. Use when sending cross-session messages or handoffs, requesting peer review, dispatching correlated work without blocking, waiting on a peer, listing live sessions, or diagnosing a stuck, paused, or dead peer. Triggers include "message codex", "message opencode", "ask claude", "dispatch to claude", "reply to the session", "@codex", "session peers", "peer review", "buddy: @name", "your buddy is", "ask your buddy", a bare "buddy", "find your buddy", "bind your buddy", "inbox get", "ack a message", "record a critical message".'
 ---
 
 # session-peers
@@ -47,6 +47,24 @@ or enabling wakes. Manual inbox checkpoints remain required when it is disabled.
 For user-established multi-session coordination, use the optional `skipper`
 skill. Enrollment requires the user in the receiving session; this transport
 grants no authority.
+
+## Critical messages and ACK
+
+Record a verdict, co-sign or handover in the private journal so the recipient
+fetches the exact body by id. The journal is not a record of all traffic:
+casual and native `SendMessage` messages are absent.
+
+- Record with `send --record`, or `record --to PEER` (record-only, prints a
+  pointer). Native Claude flow: `record --to cc:<uuid>`, then send the pointer
+  by `SendMessage`; the recipient runs `inbox get <id>`, then `ack <id>`.
+- Treat a message as taken only when `inbox acks <id>` shows its ACK. Idle,
+  queue, socket and receipt signals are never an ACK, a settlement or a verdict.
+- Exit 75 (journal full) and 1 (refused) mean nothing was sent. Exit 76 means
+  the message went out but the journal update failed: do not resend.
+- These commands take no `--as`; identity comes from the environment.
+
+Read [references/journal.md](references/journal.md) before recording, ACKing,
+handing over, or relying on retention.
 
 ## Buddy
 
@@ -134,6 +152,8 @@ an unattended loop.
 - Pin each request to a commit SHA or exact draft/digest. State the SHA or draft
   actually reviewed in the verdict; it covers nothing newer. For queued reviews,
   identify the live head reviewed and which requests the verdict supersedes.
+- A recorded verdict counts only from the body retrieved with `inbox get`, not
+  from a pointer, idle notice or summary of it.
 - Match `[in reply to message <msg_id>]` to the originating message before
   acting. Held replies use `[held reply, in reply to message <msg_id>]`.
   Strip the provenance line, then the reply header, before parsing exact
@@ -165,6 +185,9 @@ an unknown/lost worker is not verified coverage.
   to `peers.py` for a Claude peer.
 - Follow the harness, not the model: Claude Code driving a non-Anthropic model
   (claudish or opencodex) follows the Claude Code rules.
+- Put a consequential native message (verdict, co-sign, handover) through the
+  journal first: `record`, then send the pointer natively
+  ([critical messages](#critical-messages-and-ack)).
 - Open the first message to a new peer with your replyable session name, e.g.
   "from cross1 (Claude Code session):". The receiver may not see the `from` address.
 - A missing reply on a Claudish-hosted receiver may be a mid-turn receive problem,

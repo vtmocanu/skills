@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `session-peers`: a private critical-message journal and explicit ACKs. `send --record` and `record --to` store a body under `~/.codex/session-peers/journal/` (0700/0600), every correlated `ask`/`dispatch` request and `reply` is journaled, and recipients fetch it with `inbox get`, list pending ones with `inbox journal`, and ACK with `ack`; `inbox acks` shows ACK and `replied`/`consumed` settlement state and `inbox handover` lets a named successor read and ACK. Retention is 14 days with a 16 MiB size cap (lowerable via `SESSION_PEERS_JOURNAL_MAX_BYTES`) that prunes only finished entries. Exit 75 means journal full and exit 1 refused (nothing sent); exit 76 means the journal update failed after sending, so do not resend. The journal is not a record of all traffic, the recipient check is not confidentiality against the same OS user, and it covers process crashes only, not power loss. `ask`/`dispatch` also refuse a `--from-thread` that differs from the environment's Codex thread.
+
 ## [0.49.0] - 2026-11-03
 
 ### Added

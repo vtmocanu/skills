@@ -83,6 +83,19 @@ has read it. A unique live `codex-<UUID prefix>` or raw UUID prefix of at least
 eight hex characters also resolves; ambiguous prefixes fail with candidate
 UUIDs and titles. Use the full UUID for consequential requests.
 
+### Critical-message journal
+
+- `send --record` journals the body before the transport call; the journal id
+  equals the message id, and `--json` adds a `journal` object. A journal failure
+  exits before sending (75 full, 1 otherwise); a failed journal update after a
+  send exits 76 and must not be resent. See [the journal](journal.md).
+- Every correlated `ask`/`dispatch` request and its `reply` is journaled, with no
+  flag. The request is recorded before its mailbox is written or anything is
+  sent, so a journal-full refusal (exit 75) leaves no mailbox.
+- `ask`/`dispatch` refuse (exit 2) a `--from-thread` that differs from the Codex
+  thread the environment names (`CODEX_THREAD_ID`/`CODEX_SESSION_ID`), because
+  the journal's `from` is that identity.
+
 ### Codex to Claude: choose `ask`, `dispatch`/`await`, or `send`
 
 Use `ask` for peer review, brainstorming, or any multi-round task whose answer
