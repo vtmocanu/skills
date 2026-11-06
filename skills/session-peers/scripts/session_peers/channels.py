@@ -533,8 +533,13 @@ def general_members():
     coverage dict states what the OpenCode part covered, or that it failed.
     """
     discovered, coverage = _discover_general()
+    return _without_left(discovered), coverage
+
+
+def _without_left(discovered):
+    """``discovered`` minus the sessions that ran `leave general`."""
     left = _left_digests()
-    return [t for t in discovered if _digest(t) not in left], coverage
+    return [t for t in discovered if _digest(t) not in left]
 
 
 def _discover_general():
@@ -1186,19 +1191,23 @@ def _members_for(key, sender):
 
     A stored channel needs the sender among its members. Derived ``#general``
     has no member cap, but its sender must be a session the #general discovery
-    finds (the same pass that builds the member list, leave markers not applied,
-    so a session that left may still post): ``journal.caller()`` only checks that
-    the environment id is UUID-shaped, so a made-up id would otherwise get its
-    own @all allowance and a forged label.
+    finds (leave markers not applied, so a session that left may still post).
+    That check stops an id with no registry or thread record getting its own
+    @all allowance and label; it does not bind the sender to the calling
+    process, since ``journal.caller()`` trusts the environment.
     """
     if key == sp_constants.CHANNEL_GENERAL:
         discovered, coverage = _discover_general()
         if sender not in discovered:
+            if sender.startswith("oc:") and coverage.get("enumerated") is False:
+                raise ChannelError(
+                    "%s cannot be checked: OpenCode discovery failed (%s); only discovered "
+                    "sessions can post to #general"
+                    % (sp_journal._human(sender), coverage.get("error")))
             raise ChannelError(
                 "%s is not a session peers.py list discovers; only discovered sessions can "
                 "post to #general" % sp_journal._human(sender))
-        left = _left_digests()
-        return [t for t in discovered if _digest(t) not in left], coverage
+        return _without_left(discovered), coverage
     rec = read_channel(key)
     if rec is None:
         raise ChannelError("no channel named #%s; run `peers.py channel list`" % key)

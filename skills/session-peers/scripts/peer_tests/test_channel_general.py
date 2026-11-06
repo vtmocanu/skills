@@ -380,6 +380,54 @@ class GeneralSenderTests(GeneralBase):
         self.assertIn("not a session peers.py list discovers", err)
         self.assert_nothing_recorded(ghost)
 
+    def as_oc_sender(self, sid):
+        for name in ("CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID", "CODEX_SESSION_ID"):
+            os.environ.pop(name, None)
+        os.environ["OPENCODE_SESSION_ID"] = sid
+        os.environ["OPENCODE"] = "1"
+        return "oc:" + sid
+
+    def test_a_session_that_left_general_can_still_post_to_it(self):
+        self.ok("leave", "general")
+        self.assertNotIn(self.me, [m["member"] for m in self.general_members()["members"]])
+        rc, _out, err = self.cli("send", "--to", "#general", "--message", "plain after leaving")
+        self.assertEqual(rc, 0, err)
+        self.wall[0] += 61
+        rc, result, err = self.post()
+        self.assertEqual(rc, 0, err)
+        self.assertNotIn(self.me, result["outcomes"])
+        self.assertEqual(len(self.send_entries("general")), 2)
+
+    def test_a_discovered_codex_thread_can_post(self):
+        self.as_codex(self.tid)
+        rc, _out, err = self.cli("send", "--to", "#general", "--message", "from a codex thread")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self.send_entries("general")[0]["data"]["delivery"], "none")
+
+    def test_a_codex_shim_sender_can_post(self):
+        shim_sid = new_uuid()
+        shim_proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+        self._children.append(shim_proc)
+        self.write_record(shim_proc.pid, "shimmy", shim_sid, str(self.socks / "shim.sock"), entrypoint="codex")
+        self.as_codex(shim_sid)
+        rc, _out, err = self.cli("send", "--to", "#general", "--message", "from a codex shim")
+        self.assertEqual(rc, 0, err)
+
+    def test_a_recent_opencode_sender_can_post(self):
+        self.set_oc(sessions=[oc_session(OC_A, "me"), oc_session(OC_B, "oc-idle")])
+        self.as_oc_sender(OC_A)
+        rc, _out, err = self.cli("send", "--to", "#general", "--message", "from opencode")
+        self.assertEqual(rc, 0, err)
+
+    def test_an_opencode_sender_is_refused_with_the_discovery_error_when_the_walk_fails(self):
+        self.set_oc(sessions=[oc_session(OC_A, "me")], page_size=1, repeat_cursor=True)
+        ghost = self.as_oc_sender(OC_A)
+        rc, _out, err = self.cli("send", "--to", "#general", "--message", "plain note")
+        self.assertEqual(rc, 2, err)
+        self.assertIn("OpenCode discovery failed", err)
+        self.assertNotIn("not a session peers.py list discovers", err)
+        self.assert_nothing_recorded(ghost)
+
 
 class AllowanceClockTests(GeneralBase):
     def test_a_future_dated_stamp_is_refused_like_a_fresh_one(self):
