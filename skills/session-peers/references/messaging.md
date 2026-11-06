@@ -196,10 +196,10 @@ The sender counts as a Claude session when `CLAUDE_CODE_SESSION_ID` or
 (`--from-thread`, `CODEX_THREAD_ID`, `CODEX_SESSION_ID`); a valid Codex id
 makes it a Codex sender. Beside a Claude session, an invalid Codex id is
 refused (rc 2): the sender cannot be attributed, nothing is sent. An OpenCode id
-beside a Claude or Codex one, without explicit `--from-*` flags, cannot be
+beside a Claude or valid Codex one, without explicit `--from-*` flags, cannot be
 attributed: with a Claude variable set it is treated as a Claude session for
-the table above. Its other routes are left to each command's existing identity
-checks, unchanged (for example, `send` refuses it with "pass explicit
+the table above. Once the target resolves, its other routes are left to each
+command's existing identity checks, unchanged (for example, `send` refuses it with "pass explicit
 `--from-*` flags"). `ask`, `dispatch` and `wait` validate `--timeout` before the
 route check.
 
