@@ -87,14 +87,19 @@ UUIDs and titles. Use the full UUID for consequential requests.
 
 - `send --record` journals the body before the transport call; the journal id
   equals the message id, and `--json` adds a `journal` object. A journal failure
-  exits before sending (75 full, 1 otherwise); a failed journal update after a
-  send exits 76 and must not be resent. See [the journal](journal.md).
+  exits before sending (75 full, 1 otherwise). Exit 76 means a journal update
+  after a transport attempt failed: if the printed transport result reports
+  success the message went out, so do not resend; if it reports a delivery
+  failure nothing was delivered and a retry is a fresh send. See
+  [the journal](journal.md#exit-codes).
 - Every correlated `ask`/`dispatch` request and its `reply` is journaled, with no
   flag. The request is recorded before its mailbox is written or anything is
   sent, so a journal-full refusal (exit 75) leaves no mailbox.
-- `ask`/`dispatch` refuse (exit 2) a `--from-thread` that differs from the Codex
-  thread the environment names (`CODEX_THREAD_ID`/`CODEX_SESSION_ID`), because
-  the journal's `from` is that identity.
+- `ask`, `dispatch` and `await` refuse (exit 2) a `--from-thread` that differs
+  from the Codex thread the environment names (`CODEX_THREAD_ID`/
+  `CODEX_SESSION_ID`), because the journal's `from` is that identity. The check
+  is in `_requester` and applies only when both values are UUIDs;
+  `send --from-thread` has no such check.
 
 ### Codex to Claude: choose `ask`, `dispatch`/`await`, or `send`
 

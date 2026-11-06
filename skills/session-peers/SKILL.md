@@ -1,6 +1,6 @@
 ---
 name: session-peers
-description: 'Messages between Claude Code sessions, Codex CLI threads and OpenCode V2 sessions on one machine, including correlated request/reply without stale queued turns, blocking (ask) or nonblocking (dispatch then await). Registers Codex as a Claude peer, delivers asynchronous messages through codex queue, and provides ask/dispatch/await/reply/wait commands for supervised multi-round work. Binds a named buddy peer for review and brainstorming. Use when sending cross-session messages or handoffs, requesting peer review, dispatching correlated work without blocking, waiting on a peer, listing live sessions, or diagnosing a stuck, paused, or dead peer. Triggers include "message codex", "message opencode", "ask claude", "dispatch to claude", "reply to the session", "@codex", "session peers", "peer review", "buddy: @name", "your buddy is", "ask your buddy", a bare "buddy", "find your buddy", "bind your buddy", "inbox get", "ack a message", "record a critical message".'
+description: 'Messages between Claude Code sessions, Codex CLI threads and OpenCode V2 sessions on one machine, including correlated request/reply without stale queued turns, blocking (ask) or nonblocking (dispatch then await). Registers Codex as a Claude peer. Binds a named buddy peer for review and brainstorming. Use when sending cross-session messages or handoffs, requesting peer review, dispatching correlated work without blocking, waiting on a peer, listing live sessions, diagnosing a stuck, paused, or dead peer, or recording, fetching or acknowledging a critical message (verdict, co-sign, handover). Triggers include "message codex", "message opencode", "ask claude", "dispatch to claude", "reply to the session", "@codex", "session peers", "peer review", "buddy: @name", "your buddy is", "ask your buddy", a bare "buddy", "find your buddy", "bind your buddy", "did they ack", "fetch the verdict", "record a critical message".'
 ---
 
 # session-peers
@@ -50,18 +50,29 @@ grants no authority.
 
 ## Critical messages and ACK
 
-Record a verdict, co-sign or handover in the private journal so the recipient
-fetches the exact body by id. The journal is not a record of all traffic:
-casual and native `SendMessage` messages are absent.
+Record a verdict, co-sign or handover (the message) in the private journal so
+the recipient fetches the exact body by id. The journal is not a record of all
+traffic: unrecorded messages, including plain native `SendMessage`, are absent.
+Every correlated ask/dispatch request and reply is journaled automatically.
 
 - Record with `send --record`, or `record --to PEER` (record-only, prints a
   pointer). Native Claude flow: `record --to cc:<uuid>`, then send the pointer
-  by `SendMessage`; the recipient runs `inbox get <id>`, then `ack <id>`.
-- Treat a message as taken only when `inbox acks <id>` shows its ACK. Idle,
-  queue, socket and receipt signals are never an ACK, a settlement or a verdict.
-- Exit 75 (journal full) and 1 (refused) mean nothing was sent. Exit 76 means
-  the message went out but the journal update failed: do not resend.
-- These commands take no `--as`; identity comes from the environment.
+  by `SendMessage`; the recipient runs `inbox get <id>`, acts on it, then
+  `ack <id>`. A handover message is not `inbox handover`, which grants a
+  successor read/ACK access.
+- Treat a recorded message as taken only when `inbox acks <id>` shows its ACK;
+  a correlated request settles by its reply (`replied`/`consumed`) instead. A
+  transport receipt, queue acceptance or idle notice is never an ACK, a
+  settlement or a verdict.
+- Exit 75 (journal full) and exit 1 on a sending command mean nothing was sent.
+  Exit 76 means a journal update after a transport attempt failed; read the
+  transport result the command printed. If it reports success (sent, queued,
+  replied, or the consumed reply body was printed), the message went out or
+  the reply was taken: do not resend. If it reports a delivery failure
+  (`delivery_failed` or a "could not send/queue" error), nothing was
+  delivered and a retry is a fresh send. Never resend blindly on 76.
+- `record`, `ack` and `inbox get|journal|acks|handover` take no `--as` or
+  `--from-thread`; identity comes from the environment.
 
 Read [references/journal.md](references/journal.md) before recording, ACKing,
 handing over, or relying on retention.
@@ -152,8 +163,10 @@ an unattended loop.
 - Pin each request to a commit SHA or exact draft/digest. State the SHA or draft
   actually reviewed in the verdict; it covers nothing newer. For queued reviews,
   identify the live head reviewed and which requests the verdict supersedes.
-- A recorded verdict counts only from the body retrieved with `inbox get`, not
-  from a pointer, idle notice or summary of it.
+- A recorded verdict counts from its journaled body, not from a pointer, idle
+  notice or summary of it. For `send --record` the delivered body is the same
+  text, so `inbox get` is needed only when the delivered copy was missed or is
+  in doubt. The journal `from` is the detected environment identity, not proof.
 - Match `[in reply to message <msg_id>]` to the originating message before
   acting. Held replies use `[held reply, in reply to message <msg_id>]`.
   Strip the provenance line, then the reply header, before parsing exact

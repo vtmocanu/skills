@@ -39,9 +39,17 @@ See [the journal](journal.md) for the full contract.
   lists what is pending for you; `--all` adds ACKed messages.
 - An idle notice is not the message it announces, and never an ACK or verdict.
   Run `inbox acks <id>` to see who ACKed or settled it.
-- Exit 76 means the message was sent or consumed but the journal update failed
-  (stderr: `journal update failed: ...`). Do not resend. Exit 75 (journal full)
-  and 1 sent nothing; recipients `ack` older messages, or wait for expiry.
+- Exit 76 means a journal update after a transport attempt failed (stderr:
+  `journal update failed: ...`). Read the transport result the command printed.
+  If it reports success (sent, queued, replied, or the consumed reply body was
+  printed), the message went out or the reply was taken: do not resend. If it
+  reports a delivery failure (`delivery_failed` or a "could not send/queue"
+  error), nothing was delivered and a retry is a fresh send. Never resend
+  blindly on 76.
+- Exit 75 (journal full) and exit 1 on a sending command sent nothing; exit 1
+  also covers read refusals (not a recipient, unknown id). `ack` and
+  `inbox handover` can return 75 when even the event reserve is exhausted. For
+  75 only, recipients `ack` older messages, or wait for expiry.
 - The journal covers only recorded messages. A casual or native message that was
   never recorded cannot be fetched from it.
 

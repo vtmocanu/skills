@@ -75,10 +75,12 @@ Casual native messages stay unrecorded.
 - The journal's `from` is the detected environment identity, not proof. A
   `send --record` whose identity cannot be detected is recorded with no sender
   and prints `note: sender identity not detected; recorded with no sender`.
-- For correlated requests, `from` follows the `--from-thread` rule. A Codex
-  environment whose thread differs from an explicit `--from-thread` is refused
-  (`ask`/`dispatch` exit 2). A Claude environment may still name a thread, so
-  there `from` is a claim. This is an accepted limit.
+- For correlated requests, `from` follows the `--from-thread` rule. When both
+  an explicit `--from-thread` and the environment's Codex thread are UUIDs and
+  differ, `ask`, `dispatch` and `await` refuse (exit 2). The check lives in
+  `_requester`; `send --from-thread` has no such check. A Claude environment
+  may still name a thread, so there `from` is a claim. This is an accepted
+  limit.
 - Journal commands refuse an environment that names more than one runtime
   (Claude, Codex, OpenCode). Unset the variables of the others, as the error
   text shows, e.g. `env -u CODEX_THREAD_ID -u CODEX_SESSION_ID peers.py ...`.
@@ -105,23 +107,25 @@ detected identity.
 ## Retention
 
 - **Age cap:** 14 days, fixed. Everything older is pruned at the next write.
-- **Size cap:** 16 MiB by default (a 32 MiB journal took 1.24 s to rewrite;
-  16 MiB keeps it near 0.6 s). `SESSION_PEERS_JOURNAL_MAX_BYTES` can only lower
-  it. A 1 MiB reserve above the cap holds events (ACKs, settlements, transport
-  errors, handovers).
+  It overrides everything, including a live mailbox: nothing is kept past 14
+  days.
+- **Size cap:** the default is 16 MiB. `SESSION_PEERS_JOURNAL_MAX_BYTES` can
+  only lower it. A 1 MiB reserve above the cap holds events (ACKs,
+  settlements, transport errors, handovers).
 - **Quotas:** plain recorded messages take at most 50% of the cap; each sender
   at most 25%.
 - **Under size pressure** only finished entries are pruned: every recipient
-  ACKed, or a settled correlated entry. A correlated entry is pruned only once
-  its request mailbox is gone. Un-ACKed young entries are never pruned, and
-  neither are expired requests nor entries with transport errors while they
-  are not ACKed or settled: pruning keys only on ACK and settlement.
+  ACKed, or a settled correlated entry (settlement needs no ACK). A correlated
+  entry is pruned only once its request mailbox is gone. Unfinished young
+  entries (neither fully ACKed nor settled) are never pruned, including
+  expired requests and entries with transport errors: pruning keys only on ACK
+  and settlement.
 - **Clock skew:** records dated up to 14 days ahead are kept. A clock step-back
   of more than 14 days can drop records at the next rewrite.
 - **Retrieval guarantee (#160 channel contract):** a body stays available until
   it is 14 days old while it is un-ACKed and unsettled, or while its
-  correlated mailbox is live. There is no guarantee once it is fully ACKed or
-  settled. A channel history that must keep the body longer should keep its own
+  correlated mailbox is live (never past the 14-day age cap). There is no
+  guarantee once it is fully ACKed or settled. A channel history that must keep the body longer should keep its own
   copy.
 
 An entry past the age cap is shown `[expired]` until a write prunes it.
@@ -130,11 +134,19 @@ An entry past the age cap is shown `[expired]` until a write prunes it.
 
 | Code | When | Meaning |
 | --- | --- | --- |
-| 75 | Before sending | Journal full. Nothing was sent. `--json` prints `{"status":"journal_full","detail":...}`. Recipients `ack`, or wait for expiry, then retry. |
-| 1 | Before sending | Journal unavailable or refused (bad mode, lock held, not a recipient, unknown id). Nothing was sent. |
-| 76 | After transport | The journal update failed after the message was sent or consumed. The command reports the transport result and prints `journal update failed: ...` on stderr. |
+| 75 | Before sending | Journal full. On a sending command nothing was sent. `--json` prints `{"status":"journal_full","detail":...}`. Recipients `ack`, or wait for expiry, then retry. `ack` and `inbox handover` can also return 75 when even the event reserve is exhausted. |
+| 1 | Before sending | Journal unavailable or refused (bad mode, lock held, not a recipient, unknown id). On a sending command nothing was sent; for read refusals (not a recipient, unknown id) nothing is sent by definition. |
+| 76 | After transport | A journal update after a transport attempt failed (the command prints `journal update failed: ...` on stderr). The transport itself may have succeeded or failed. |
 
-On 76 do NOT resend: the message went out. Run `inbox acks MSG_ID` to inspect
+On 76 read the transport result the command printed:
+
+- If it reports success (sent, queued, replied, or the consumed reply body was
+  printed), the message went out or the reply was taken. Do NOT resend.
+- If it reports a delivery failure (`delivery_failed` or a "could not
+  send/queue" error), nothing was delivered: the journal could not even record
+  the `transport_error`. A retry is a fresh send.
+
+Never treat 76 as a reason to resend blindly. Run `inbox acks MSG_ID` to inspect
 the journal, and report the failure. The command never resends or retries.
 
 ## Reply single-assignment
@@ -148,6 +160,11 @@ the journal, and report the failure. The command never resends or retries.
 
 - **Durability:** survives a crash of any `peers.py` process (fsynced appends,
   atomic rewrites). No claim is made about storage loss or power loss.
+- **Temp-file recovery:** an interrupted rewrite leaves the old journal intact.
+  The next locked write removes stale `journal.*.tmp.*` files, and a torn final
+  line is truncated before the next append. Durability holds against a process
+  crash, not against storage or power loss.
 - **Same-OS-user read-only reader:** `journal.read_only_view()` in
-  `scripts/session_peers/journal.py` serves a local dashboard. It is not a
-  session, never ACKs, writes or repairs, checks no identity and has no CLI.
+  `scripts/session_peers/journal.py` is the reader for the planned local
+  dashboard (#161); not yet used. It is not a session, never ACKs, writes or
+  repairs, checks no identity and has no CLI.
