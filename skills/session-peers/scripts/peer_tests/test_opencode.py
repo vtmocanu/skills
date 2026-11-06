@@ -9,6 +9,8 @@ OC_A = "ses_aaaaaaaaaaaaAAAAAAAAAAAAAA"
 OC_B = "ses_bbbbbbbbbbbbBBBBBBBBBBBBBB"
 OC_CHILD = "ses_ccccccccccccCCCCCCCCCCCCCC"
 OC_OLD = "ses_ddddddddddddDDDDDDDDDDDDDD"
+# A correlated Claude replier needs a UUID session id: the journal keys by typed ids.
+CC_REPLIER = "0a1b2c3d-0000-4000-8000-0000000000c1"
 
 
 def oc_session(sid, title, parent=None, updated_ms=None):
@@ -520,7 +522,7 @@ class OpenCodeRequestTests(OpenCodeBase):
                     os.environ[key] = value
 
     def test_opencode_dispatches_to_claude_and_awaits_the_reply(self):
-        listener, _rec = self.add_listener(name="cc-main", session_id="s1")
+        listener, _rec = self.add_listener(name="cc-main", session_id=CC_REPLIER)
         self.as_opencode(OC_A)
         rc, out, err = self.cli("dispatch", "--to", "cc:cc-main", "--message", "review?", "--json")
         self.assertEqual(rc, 0, err)
@@ -534,7 +536,7 @@ class OpenCodeRequestTests(OpenCodeBase):
         # A correlated request is answered through its mailbox, never `send`.
         self.assertNotIn("reply route", body)
         os.environ.pop("OPENCODE_SESSION_ID")
-        rc, _out, err = self._reply_as({"CLAUDE_CODE_SESSION_ID": "s1"}, payload["request_id"], "LGTM")
+        rc, _out, err = self._reply_as({"CLAUDE_CODE_SESSION_ID": CC_REPLIER}, payload["request_id"], "LGTM")
         self.assertEqual(rc, 0, err)
         # Another OpenCode session may not consume it.
         self.as_opencode(OC_B)

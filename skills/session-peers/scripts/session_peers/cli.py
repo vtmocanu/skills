@@ -6,6 +6,7 @@ import sys
 from . import constants as sp_constants
 from . import reply_wake as sp_reply_wake
 from . import inbox as sp_inbox
+from . import journal as sp_journal
 from . import watches as sp_watches
 from . import diagnostics as sp_diagnostics, lifecycle as sp_lifecycle
 from . import shim as sp_shim
@@ -25,6 +26,7 @@ def build_parser():
 
     _register_list(sub)
     _register_inbox(sub)
+    _register_journal(sub)
     _register_watch(sub)
 
     _register_messaging(sub)
@@ -59,7 +61,7 @@ def _register_list(sub):
 
 
 def _register_inbox(sub):
-    parser = sub.add_parser("inbox", help="check this OpenCode session's queued peer input")
+    parser = sub.add_parser("inbox", help="own OpenCode queued input and the critical-message journal")
     commands = parser.add_subparsers(dest="inbox_cmd", required=True)
     listing = commands.add_parser("list", help="read queued peers without consuming input")
     listing.add_argument("--all", action="store_true", help="include locally handled messages")
@@ -74,6 +76,42 @@ def _register_inbox(sub):
         command.add_argument("message_id", help="logical peer message UUID, not native msg_ id")
         command.add_argument("--json", action="store_true")
         command.set_defaults(func=sp_inbox.cmd_inbox)
+    # The journal subcommands take no --as and no --from-thread: the caller is
+    # the session whose environment runs the command.
+    get = commands.add_parser("get", help="read one critical message addressed to this session")
+    get.add_argument("message_id", metavar="MSG_ID")
+    get.add_argument("--json", action="store_true")
+    get.set_defaults(func=sp_journal.cmd_inbox_journal)
+    journal = commands.add_parser("journal", help="metadata of this session's unacknowledged critical messages")
+    journal.add_argument("--all", action="store_true", help="include acknowledged messages")
+    journal.add_argument("--json", action="store_true")
+    journal.set_defaults(func=sp_journal.cmd_inbox_journal)
+    acks = commands.add_parser("acks", help="per-recipient acknowledgement state of one message")
+    acks.add_argument("message_id", metavar="MSG_ID")
+    acks.add_argument("--json", action="store_true")
+    acks.set_defaults(func=sp_journal.cmd_inbox_journal)
+    handover = commands.add_parser("handover", help="let a successor session act for this one")
+    handover.add_argument("--to", required=True, metavar="cc:<uuid>|codex:<uuid>|oc:<ses_id>",
+                          help="the successor's full typed identity (names are refused)")
+    handover.add_argument("--json", action="store_true")
+    handover.set_defaults(func=sp_journal.cmd_inbox_journal)
+
+
+def _register_journal(sub):
+    record = sub.add_parser("record", help="record a critical message for peers without sending it")
+    record.add_argument(
+        "--to", required=True, action="append", metavar="cc:<name|uuid>|codex:<name|uuid>|oc:<title|ses_id>|buddy",
+        help="a recipient; repeat for several (at most %d)" % sp_constants.JOURNAL_MAX_RECIPIENTS,
+    )
+    add_message_source(record)
+    record.add_argument("--json", action="store_true", help="machine-readable result")
+    record.set_defaults(func=sp_journal.cmd_record)
+    ack = sub.add_parser("ack", help="acknowledge a critical message after acting on it")
+    ack.add_argument("message_id", metavar="MSG_ID")
+    ack.add_argument("--for", dest="for_slot", metavar="cc:<uuid>|codex:<uuid>|oc:<ses_id>",
+                     help="the recipient slot, when this session covers several by handover")
+    ack.add_argument("--json", action="store_true")
+    ack.set_defaults(func=sp_journal.cmd_ack)
 
 
 def _register_watch(sub):
@@ -113,6 +151,8 @@ def _register_messaging(sub):
         "--from-socket", metavar="PATH", help="sender socket for the reply tag"
     )
     p_send.add_argument("--json", action="store_true", help="machine-readable result")
+    p_send.add_argument("--record", action="store_true",
+                        help="also record the message in the critical-message journal before sending")
     p_send.add_argument("--wake", action="store_true", help="allow an OpenCode recipient to run without a TUI")
     p_send.add_argument("--allow-reply-wake", nargs="?", const=600, type=float, metavar="SECONDS",
                         help="consent to one matching reply waking this OpenCode sender (default 600s, max 3600s)")

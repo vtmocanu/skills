@@ -49,10 +49,12 @@ import json
 import math
 import os
 import stat
+import sys
 import time
 import uuid
 from . import constants as sp_constants
 from . import claude as sp_claude, codex as sp_codex, identity as sp_identity, opencode as sp_opencode
+from . import buddy as sp_buddy, inbox as sp_inbox, runtime as sp_runtime
 
 JOURNAL_NAME = "journal.jsonl"
 META_NAME = "journal.meta.json"
@@ -1460,3 +1462,218 @@ def acks_view(message_id, caller):
     out["settlement"] = _settlement(entry)
     out["transport_error"] = _transport(entry)
     return out
+
+
+# --------------------------------------------------------------------------
+# CLI
+# --------------------------------------------------------------------------
+
+EXIT_JOURNAL_FULL = 75
+EXIT_UPDATE_FAILED = 76
+
+
+def _human(value):
+    """One display line: peer-controlled text with terminal sequences and newlines removed."""
+    return sp_inbox.human_text(str(value)).replace("\n", " ").replace("\t", " ")
+
+
+def _iso(ts):
+    try:
+        return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts))
+    except (OverflowError, ValueError, OSError, TypeError):
+        return "?"
+
+
+def _dump(payload):
+    print(json.dumps(payload, sort_keys=True))
+
+
+def presend_failed(exc, as_json=False):
+    """Report a journal failure that happened before anything was sent; the exit code.
+
+    JournalFull is 75; unavailable, refused and every other failure is 1.
+    """
+    sys.stderr.write("error: %s\n" % _human(exc))
+    if isinstance(exc, JournalFull):
+        if as_json:
+            _dump({"status": "journal_full", "detail": str(exc)})
+        return EXIT_JOURNAL_FULL
+    return 1
+
+
+def update_failed(exc):
+    """Report a post-transport journal failure (nothing is undone or retried); exit 76."""
+    sys.stderr.write("journal update failed: %s\n" % _human(exc))
+    return EXIT_UPDATE_FAILED
+
+
+def transport_failed(message_id, slot, exc, rc=1):
+    """Append a transport_error after a failed transport call.
+
+    Returns ``rc`` (the caller's exit code for the transport failure) when the
+    append works, else 76 after reporting it. Never resends or retries.
+    """
+    try:
+        transport_error(message_id, slot, exc)
+    except JournalUpdateFailed as failure:
+        return update_failed(failure)
+    return rc
+
+
+def settle_or_report(message_id, state, by, payload=None):
+    """Settle an entry after its file or reply was handled.
+
+    None on success or when the entry is not in the journal. On failure it adds
+    ``journal_error`` to ``payload`` (when given), reports it and returns 76.
+    """
+    try:
+        settle(message_id, state, by)
+    except JournalUpdateFailed as failure:
+        if payload is not None:
+            payload["journal_error"] = str(failure)
+        return update_failed(failure)
+    return None
+
+
+def sender_or_none():
+    """The calling session's typed id for ``from``, or None when it cannot be told."""
+    try:
+        return caller()
+    except JournalError:
+        return None
+
+
+def pointer_text(message_id):
+    return "critical message %s: run peers.py inbox get %s, then peers.py ack %s" % (
+        message_id, message_id, message_id)
+
+
+def cmd_record(args):
+    """Record one critical message for one or more peers; nothing is sent."""
+    as_json = getattr(args, "json", False)
+    try:
+        body = sp_runtime.message_from_args(args)
+    except ValueError as exc:
+        sys.stderr.write("error: %s\n" % _human(exc))
+        return 1
+    if len(args.to) > sp_constants.JOURNAL_MAX_RECIPIENTS:
+        sys.stderr.write("error: at most %d --to recipients\n" % sp_constants.JOURNAL_MAX_RECIPIENTS)
+        return 1
+    try:
+        sender = caller()
+        exclude = sender.partition(":")[2]
+        resolved = []
+        for raw in args.to:
+            ident = sp_identity.resolve_typed(sp_buddy.expand_buddy(raw, args, "send"), exclude=exclude)
+            typed = "%s:%s" % (ident["kind"], ident["uuid"])
+            if typed not in [t for t, _name in resolved]:
+                resolved.append((typed, ident.get("name")))
+        message_id = record_message(sender, [t for t, _name in resolved], body)
+    except sp_buddy.BuddyError as exc:
+        sys.stderr.write("error: %s\n" % _human(exc))
+        return exc.code
+    except sp_codex.ResolveError as exc:
+        sys.stderr.write("error: %s\n" % _human(exc))
+        return 1
+    except JournalError as exc:
+        return presend_failed(exc, as_json)
+    pointer = pointer_text(message_id)
+    if as_json:
+        _dump({"status": "recorded", "message_id": message_id, "to": [t for t, _name in resolved],
+               "pointer": pointer})
+        return 0
+    print(pointer)
+    for typed, name in resolved:
+        print("recorded for %s%s" % (typed, " (%s)" % _human(name) if name else ""))
+    return 0
+
+
+def _print_entry_header(view):
+    print("message %s (%s) from %s at %s%s" % (
+        view["message_id"], view["kind"], _human(view["from"] or "unknown"), _iso(view["at"]),
+        " [expired]" if view.get("expired") else ""))
+
+
+def _print_state(view):
+    for item in view.get("recipients") or []:
+        extra = " by %s at %s" % (_human(item["by"]), _iso(item["at"])) if item["state"] == "acked" else ""
+        print("  %s: %s%s" % (_human(item["slot"]), item["state"], extra))
+    settlement = view.get("settlement")
+    if settlement:
+        print("settled: %s by %s at %s" % (settlement["state"], _human(settlement["by"]), _iso(settlement["at"])))
+    failure = view.get("transport_error")
+    if failure:
+        print("transport error for %s at %s: %s" % (
+            _human(failure["for"]), _iso(failure["at"]), _human(failure["detail"])))
+
+
+def _show_get(view):
+    _print_entry_header(view)
+    print("to: %s" % ", ".join(_human(t) for t in view["to"]))
+    print("your slots: %s" % ", ".join(_human(t) for t in view["slots"]))
+    for item in view["acks"]:
+        print("acknowledged: %s by %s at %s" % (_human(item["for"]), _human(item["by"]), _iso(item["at"])))
+    settlement = view.get("settlement")
+    if settlement:
+        print("settled: %s by %s at %s" % (settlement["state"], _human(settlement["by"]), _iso(settlement["at"])))
+    failure = view.get("transport_error")
+    if failure:
+        print("transport error for %s at %s: %s" % (
+            _human(failure["for"]), _iso(failure["at"]), _human(failure["detail"])))
+    print("---")
+    print(sp_inbox.human_text(view["body"]))
+
+
+def _show_list(views):
+    if not views:
+        print("No critical messages.")
+    for view in views:
+        slots = ", ".join("%s=%s" % (_human(s["slot"]), s["state"]) for s in view["slots"])
+        print("%s %s from %s at %s%s; %s" % (
+            view["message_id"], view["kind"], _human(view["from"] or "unknown"), _iso(view["at"]),
+            " [expired]" if view.get("expired") else "", slots))
+
+
+def _show_acks(view):
+    _print_entry_header(view)
+    print("to: %s" % ", ".join(_human(t) for t in view["to"]))
+    _print_state(view)
+
+
+def cmd_inbox_journal(args):
+    """`inbox get|journal|acks|handover`: the critical-message journal, for the calling session."""
+    as_json = getattr(args, "json", False)
+    sub = args.inbox_cmd
+    try:
+        who = caller()
+        if sub == "get":
+            result, show = get(args.message_id, who), _show_get
+        elif sub == "journal":
+            result, show = list_for(who, include_acked=args.all), _show_list
+        elif sub == "acks":
+            result, show = acks_view(args.message_id, who), _show_acks
+        else:
+            result = handover(who, args.to)
+            show = lambda rec: print("handover recorded: %s may act for %s on messages up to seq %d" % (
+                _human(rec["to"]), _human(rec["from"]), rec["through_seq"]))
+    except JournalError as exc:
+        return presend_failed(exc, as_json)
+    if as_json:
+        _dump(result)
+    else:
+        show(result)
+    return 0
+
+
+def cmd_ack(args):
+    """`ack MSG_ID [--for TYPED]`: record that the caller took the message for one slot."""
+    as_json = getattr(args, "json", False)
+    try:
+        rec = ack(args.message_id, caller(), getattr(args, "for_slot", None))
+    except JournalError as exc:
+        return presend_failed(exc, as_json)
+    if as_json:
+        _dump(rec)
+    else:
+        print("acknowledged %s for %s by %s" % (rec["message_id"], _human(rec["for"]), _human(rec["by"])))
+    return 0

@@ -26,6 +26,12 @@ from .support import (
     wait_for,
 )
 
+# The journal keys entries by typed ids, so a correlated session id must be a UUID.
+S1 = "0a1b2c3d-0000-4000-8000-000000000001"
+S2 = "0a1b2c3d-0000-4000-8000-000000000002"
+# A hand-written mailbox needs the requester a real `ask` or `dispatch` records.
+REQUESTER_THREAD = "0a1b2c3d-0000-4000-8000-0000000000a1"
+
 
 class TestExclusiveReplyWrite(Base):
     def test_permissions_are_restored_before_content_is_written(self):
@@ -413,14 +419,14 @@ class TestCorrelatedAskReply(Base):
         return match.group(1)
 
     def test_ask_returns_one_reply_in_the_current_process_and_cleans_mailbox(self):
-        listener, _rec = self.add_listener(name="cc-main", session_id="s1")
+        listener, _rec = self.add_listener(name="cc-main", session_id=S1)
         tid, _rollout = self.one_thread()
         proc = self.spawn(
             "ask", "--to", "cc:cc-main", "--from-thread", tid,
             "--message", "review this", "--timeout", "30",
         )
         request_id = self._request_id(listener)
-        os.environ["CLAUDE_CODE_SESSION_ID"] = "s1"
+        os.environ["CLAUDE_CODE_SESSION_ID"] = S1
         rc, _out, err = self.cli(
             "reply", "--request", request_id, "--message", "final answer"
         )
@@ -469,12 +475,12 @@ class TestCorrelatedAskReply(Base):
             sp_storage.request_path(request_id),
             {
                 "request_id": request_id,
-                "target_session_id": "s1",
+                "target_session_id": S1,
                 "expires_at": time.time() - 1,
             },
         )
         sp_runtime.write_json_atomic(sp_storage.request_reply_path(request_id), {"partial": True})
-        os.environ["CLAUDE_CODE_SESSION_ID"] = "s1"
+        os.environ["CLAUDE_CODE_SESSION_ID"] = S1
         rc, _out, err = self.cli(
             "reply", "--request", request_id, "--message", "too late"
         )
@@ -489,11 +495,13 @@ class TestCorrelatedAskReply(Base):
             sp_storage.request_path(request_id),
             {
                 "request_id": request_id,
-                "target_session_id": "s1",
+                "requester": "codex:" + REQUESTER_THREAD,
+                "requester_thread_id": REQUESTER_THREAD,
+                "target_session_id": S1,
                 "expires_at": time.time() + 30,
             },
         )
-        os.environ["CLAUDE_CODE_SESSION_ID"] = "s1"
+        os.environ["CLAUDE_CODE_SESSION_ID"] = S1
         self.assertEqual(
             self.cli("reply", "--request", request_id, "--message", "same")[0], 0
         )
@@ -514,19 +522,21 @@ class TestCorrelatedAskReply(Base):
             sp_storage.request_path(request_id),
             {
                 "request_id": request_id,
-                "target_session_id": "s1",
+                "requester": "codex:" + REQUESTER_THREAD,
+                "requester_thread_id": REQUESTER_THREAD,
+                "target_session_id": S1,
                 "expires_at": time.time() + 30,
             },
         )
         reply_path = pathlib.Path(sp_storage.request_reply_path(request_id))
         reply_path.write_text("")
-        os.environ["CLAUDE_CODE_SESSION_ID"] = "s1"
+        os.environ["CLAUDE_CODE_SESSION_ID"] = S1
 
         def finish_winner():
             time.sleep(0.03)
             sp_runtime.write_json_atomic(
                 str(reply_path),
-                {"request_id": request_id, "session_id": "s1", "message": "same"},
+                {"request_id": request_id, "session_id": S1, "message": "same"},
             )
 
         thread = threading.Thread(target=finish_winner)
@@ -544,7 +554,7 @@ class TestCorrelatedAskReply(Base):
         self.assertIn("already replied", out)
 
     def test_ask_timeout_removes_the_request_and_queues_no_late_turn(self):
-        self.add_listener(name="cc-main", session_id="s1")
+        self.add_listener(name="cc-main", session_id=S1)
         tid, _rollout = self.one_thread()
         rc, _out, err = self.cli(
             "ask", "--to", "cc:cc-main", "--from-thread", tid,
@@ -556,7 +566,7 @@ class TestCorrelatedAskReply(Base):
         self.assertEqual(self.queue_calls(), [])
 
     def test_request_content_cannot_close_or_forge_the_envelope(self):
-        listener, _rec = self.add_listener(name="cc-main", session_id="s1")
+        listener, _rec = self.add_listener(name="cc-main", session_id=S1)
         tid, _rollout = self.one_thread()
         rc, _out, _err = self.cli(
             "ask", "--to", "cc:cc-main", "--from-thread", tid,
@@ -586,7 +596,7 @@ class TestCorrelatedAskReply(Base):
         self.assertEqual(list(pathlib.Path(sp_storage.request_dir()).glob("*.json")), [])
 
     def test_wait_observes_a_named_idle_peer(self):
-        self.add_listener(name="cc-main", session_id="s1")
+        self.add_listener(name="cc-main", session_id=S1)
         rc, out, _err = self.cli(
             "wait", "--for", "cc:cc-main", "--state", "idle", "--timeout", "30"
         )
@@ -594,7 +604,7 @@ class TestCorrelatedAskReply(Base):
         self.assertIn("cc-main is idle", out)
 
     def test_wait_observes_a_busy_peer_become_idle(self):
-        _listener, rec = self.add_listener(name="cc-main", session_id="s1")
+        _listener, rec = self.add_listener(name="cc-main", session_id=S1)
         path = self.sessions / ("%s.json" % rec["pid"])
         rec["status"] = "busy"
         path.write_text(json.dumps(rec))
@@ -617,7 +627,7 @@ class TestCorrelatedAskReply(Base):
         self.assertIn("cc-main is idle", out)
 
     def test_wait_times_out_while_a_peer_stays_busy(self):
-        _listener, rec = self.add_listener(name="cc-main", session_id="s1")
+        _listener, rec = self.add_listener(name="cc-main", session_id=S1)
         path = self.sessions / ("%s.json" % rec["pid"])
         rec["status"] = "busy"
         path.write_text(json.dumps(rec))
@@ -656,12 +666,12 @@ class TestNonblockingDispatchAwait(Base):
         self.assertEqual(rc, 0, err)
 
     def test_dispatch_returns_immediately_and_keeps_the_mailbox(self):
-        self.add_listener(name="cc-main", session_id="s1")
+        self.add_listener(name="cc-main", session_id=S1)
         tid, _rollout = self.one_thread()
         payload = self._dispatch("cc:cc-main", tid)
         request_id = payload["request_id"]
         self.assertTrue(sp_runtime.is_uuid(request_id))
-        self.assertEqual(payload["target_session_id"], "s1")
+        self.assertEqual(payload["target_session_id"], S1)
         self.assertIn("expires_at", payload)
         # Unlike `ask`, dispatch must NOT tear the mailbox down on return.
         self.assertTrue(pathlib.Path(sp_storage.request_path(request_id)).exists())
@@ -669,10 +679,10 @@ class TestNonblockingDispatchAwait(Base):
         self.assertEqual(self.queue_calls(), [])
 
     def test_await_consumes_the_exact_reply_exactly_once(self):
-        self.add_listener(name="cc-main", session_id="s1")
+        self.add_listener(name="cc-main", session_id=S1)
         tid, _rollout = self.one_thread()
         request_id = self._dispatch("cc:cc-main", tid)["request_id"]
-        self._reply(request_id, "s1", "final answer")
+        self._reply(request_id, S1, "final answer")
         rc, out, err = self.cli(
             "await", "--request", request_id, "--from-thread", tid,
             "--timeout", "30", "--json",
@@ -681,7 +691,7 @@ class TestNonblockingDispatchAwait(Base):
         payload = json.loads(out)
         self.assertEqual(payload["status"], "replied")
         self.assertEqual(payload["message"], "final answer")
-        self.assertEqual(payload["session_id"], "s1")
+        self.assertEqual(payload["session_id"], S1)
         self.assertFalse(pathlib.Path(sp_storage.request_path(request_id)).exists())
         self.assertFalse(pathlib.Path(sp_storage.request_reply_path(request_id)).exists())
         # A second await cannot re-deliver the consumed reply.
@@ -693,7 +703,7 @@ class TestNonblockingDispatchAwait(Base):
         self.assertEqual(json.loads(out)["status"], "expired")
 
     def test_await_call_timeout_leaves_an_unexpired_mailbox_pending(self):
-        self.add_listener(name="cc-main", session_id="s1")
+        self.add_listener(name="cc-main", session_id=S1)
         tid, _rollout = self.one_thread()
         request_id = self._dispatch("cc:cc-main", tid, timeout="30")["request_id"]
         rc, out, err = self.cli(
@@ -704,7 +714,7 @@ class TestNonblockingDispatchAwait(Base):
         self.assertEqual(json.loads(out)["status"], "pending")
         # The request lives on and is re-awaitable.
         self.assertTrue(pathlib.Path(sp_storage.request_path(request_id)).exists())
-        self._reply(request_id, "s1", "eventually")
+        self._reply(request_id, S1, "eventually")
         rc, out, err = self.cli(
             "await", "--request", request_id, "--from-thread", tid,
             "--timeout", "30", "--json",
@@ -713,7 +723,7 @@ class TestNonblockingDispatchAwait(Base):
         self.assertEqual(json.loads(out)["message"], "eventually")
 
     def test_request_expiry_is_distinct_from_the_await_call_timeout(self):
-        self.add_listener(name="cc-main", session_id="s1")
+        self.add_listener(name="cc-main", session_id=S1)
         tid, _rollout = self.one_thread()
         request_id = self._dispatch("cc:cc-main", tid, timeout="30")["request_id"]
         # Age the request past its lifetime without waiting for wall-clock.
@@ -728,14 +738,14 @@ class TestNonblockingDispatchAwait(Base):
         self.assertEqual(json.loads(out)["status"], "expired")
 
     def test_two_requests_to_one_peer_do_not_cross_when_replied_out_of_order(self):
-        self.add_listener(name="cc-main", session_id="s1")
+        self.add_listener(name="cc-main", session_id=S1)
         tid, _rollout = self.one_thread()
         first = self._dispatch("cc:cc-main", tid, message="task A")["request_id"]
         second = self._dispatch("cc:cc-main", tid, message="task B")["request_id"]
         self.assertNotEqual(first, second)
         # Reply to the second request first.
-        self._reply(second, "s1", "answer-B")
-        self._reply(first, "s1", "answer-A")
+        self._reply(second, S1, "answer-B")
+        self._reply(first, S1, "answer-A")
         rc, out, _err = self.cli(
             "await", "--request", second, "--from-thread", tid,
             "--timeout", "30", "--json",
@@ -748,16 +758,16 @@ class TestNonblockingDispatchAwait(Base):
         self.assertEqual(json.loads(out)["message"], "answer-A")
 
     def test_two_peers_reply_without_crossing_results(self):
-        self.add_listener(name="cc-one", session_id="s1")
+        self.add_listener(name="cc-one", session_id=S1)
         # A second *live* session needs a real live pid distinct from this
         # process; os.getpid()+1 is not reliably a running process (it failed
         # on CI). os.getppid() is live and is treated as "mine" in tearDown.
-        self.add_listener(name="cc-two", session_id="s2", pid=os.getppid())
+        self.add_listener(name="cc-two", session_id=S2, pid=os.getppid())
         tid, _rollout = self.one_thread()
         req1 = self._dispatch("cc:cc-one", tid, message="to one")["request_id"]
         req2 = self._dispatch("cc:cc-two", tid, message="to two")["request_id"]
-        self._reply(req1, "s1", "from one")
-        self._reply(req2, "s2", "from two")
+        self._reply(req1, S1, "from one")
+        self._reply(req2, S2, "from two")
         _rc, out, _err = self.cli(
             "await", "--request", req1, "--from-thread", tid,
             "--timeout", "30", "--json",
@@ -770,25 +780,25 @@ class TestNonblockingDispatchAwait(Base):
         self.assertEqual(json.loads(out)["message"], "from two")
 
     def test_a_rename_during_a_request_keeps_its_uuid_bound_target(self):
-        _listener, rec = self.add_listener(name="cc-main", session_id="s1")
+        _listener, rec = self.add_listener(name="cc-main", session_id=S1)
         tid, _rollout = self.one_thread()
         request_id = self._dispatch("cc:cc-main", tid)["request_id"]
         # The peer renames itself mid-request; the mailbox stays bound to s1.
         renamed = dict(rec)
         renamed["name"] = "cc-renamed"
         (self.sessions / ("%s.json" % rec["pid"])).write_text(json.dumps(renamed))
-        self._reply(request_id, "s1", "still me")
+        self._reply(request_id, S1, "still me")
         _rc, out, err = self.cli(
             "await", "--request", request_id, "--from-thread", tid,
             "--timeout", "30", "--json",
         )
         payload = json.loads(out)
         self.assertEqual(payload["status"], "replied", err)
-        self.assertEqual(payload["session_id"], "s1")
+        self.assertEqual(payload["session_id"], S1)
         self.assertEqual(payload["message"], "still me")
 
     def test_a_late_reply_after_an_await_timeout_never_queues_a_codex_turn(self):
-        self.add_listener(name="cc-main", session_id="s1")
+        self.add_listener(name="cc-main", session_id=S1)
         tid, _rollout = self.one_thread()
         request_id = self._dispatch("cc:cc-main", tid, timeout="30")["request_id"]
         rc, out, _err = self.cli(
@@ -798,7 +808,7 @@ class TestNonblockingDispatchAwait(Base):
         self.assertEqual(json.loads(out)["status"], "pending")
         # The reply arrives after this await gave up. It is a filesystem write,
         # so it can never become a queued Codex user turn.
-        self._reply(request_id, "s1", "late but safe")
+        self._reply(request_id, S1, "late but safe")
         self.assertEqual(self.queue_calls(), [])
         rc, out, _err = self.cli(
             "await", "--request", request_id, "--from-thread", tid,
@@ -808,7 +818,7 @@ class TestNonblockingDispatchAwait(Base):
         self.assertEqual(self.queue_calls(), [])
 
     def test_await_refuses_a_request_owned_by_another_thread(self):
-        self.add_listener(name="cc-main", session_id="s1")
+        self.add_listener(name="cc-main", session_id=S1)
         tid, _rollout = self.one_thread()
         request_id = self._dispatch("cc:cc-main", tid)["request_id"]
         other = str(uuidlib.uuid4())
@@ -822,7 +832,7 @@ class TestNonblockingDispatchAwait(Base):
         self.assertTrue(pathlib.Path(sp_storage.request_path(request_id)).exists())
 
     def test_dispatch_reports_delivery_failure_and_leaves_no_mailbox(self):
-        self.add_listener(name="cc-main", session_id="s1")
+        self.add_listener(name="cc-main", session_id=S1)
         tid, _rollout = self.one_thread()
         original = sp_claude._deliver_claude
 
@@ -866,7 +876,7 @@ class TestNonblockingDispatchAwait(Base):
         self.assertIn("UUID", err)
 
     def test_a_live_dispatched_request_survives_expiry_cleanup(self):
-        self.add_listener(name="cc-main", session_id="s1")
+        self.add_listener(name="cc-main", session_id=S1)
         tid, _rollout = self.one_thread()
         request_id = self._dispatch("cc:cc-main", tid, timeout="30")["request_id"]
         removed = sp_requests.cleanup_expired_requests()
@@ -881,7 +891,7 @@ class TestNonblockingDispatchAwait(Base):
         reply_path = sp_storage.request_reply_path(request_id)
         sp_runtime.write_json_atomic(
             reply_path,
-            {"request_id": request_id, "session_id": "s1", "message": "once"},
+            {"request_id": request_id, "session_id": S1, "message": "once"},
         )
         first = sp_requests._claim_reply(reply_path)
         second = sp_requests._claim_reply(reply_path)
@@ -893,10 +903,10 @@ class TestNonblockingDispatchAwait(Base):
     def test_two_concurrent_awaits_deliver_the_reply_once(self):
         # End-to-end: two separate await processes race on one replied request.
         # Exactly one prints the reply; the other reports it already gone.
-        self.add_listener(name="cc-main", session_id="s1")
+        self.add_listener(name="cc-main", session_id=S1)
         tid, _rollout = self.one_thread()
         request_id = self._dispatch("cc:cc-main", tid, timeout="30")["request_id"]
-        self._reply(request_id, "s1", "shared answer")
+        self._reply(request_id, S1, "shared answer")
         procs = [
             self.spawn(
                 "await", "--request", request_id, "--from-thread", tid,

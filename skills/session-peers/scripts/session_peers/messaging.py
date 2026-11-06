@@ -11,6 +11,7 @@ from . import constants as sp_constants, protocol as sp_protocol, rollout as sp_
 from . import claude as sp_claude, codex as sp_codex, diagnostics as sp_diagnostics, requests as sp_requests, storage as sp_storage
 from . import buddy as sp_buddy, identity as sp_identity, opencode as sp_opencode
 from . import reply_wake as sp_reply_wake
+from . import journal as sp_journal
 
 
 def _validate_reply_wake(args):
@@ -35,9 +36,39 @@ def _issue_reply_wake(args, oc_sender, recipient, message_id):
     args.reply_wake_result = {"message_id": message_id, "expires_at": grant["expires_at"]}
     return message_id
 
+def _record_before_send(args, message_id, recipient):
+    """With `--record`, journal the message just before its transport call.
+
+    None when not recording or recorded; otherwise the exit code of a
+    pre-send journal failure (nothing was sent). A recorded send remembers its
+    slot in ``args.journal_slot`` so a transport failure can append a
+    transport_error.
+    """
+    if not getattr(args, "record", False):
+        return None
+    try:
+        sp_journal.record_message(sp_journal.sender_or_none(), [recipient], args.message, message_id=message_id)
+    except sp_journal.JournalError as exc:
+        return sp_journal.presend_failed(exc, getattr(args, "json", False))
+    args.journal_slot = recipient
+    args.journal_result = {"message_id": message_id, "recorded": True}
+    return None
+
+
+def _transport_failed(args, message_id, exc):
+    """Exit code for a failed transport call: 1 as before, or 76 when `--record`
+    could not append the transport_error."""
+    slot = getattr(args, "journal_slot", None)
+    if slot is None:
+        return 1
+    return sp_journal.transport_failed(message_id, slot, exc)
+
+
 def _print_send_result(args, payload, human):
     if getattr(args, "reply_wake_result", None):
         payload["reply_wake"] = args.reply_wake_result
+    if getattr(args, "journal_result", None):
+        payload["journal"] = args.journal_result
     if getattr(args, "json", False):
         print(json.dumps(payload, sort_keys=True))
     else:
@@ -206,6 +237,11 @@ def _send_opencode(target, args):
             sys.stderr.write("error: %s; nothing queued. Resend without --in-reply-to, and use --wake only if authorized.\n" % exc)
             return 1
         resume = True
+    failed = _record_before_send(args, msg_id, "oc:" + session["id"])
+    if failed is not None:
+        if reply_id:
+            sp_reply_wake.forget(reply_id)
+        return failed
     try:
         inbox_id = sp_opencode.deliver(
             session["id"], text, {"message_id": msg_id, "from": address}, resume=resume
@@ -216,7 +252,7 @@ def _send_opencode(target, args):
         if in_reply_to:
             sys.stderr.write("error: delivery failed or unconfirmed; grant spent; check the recipient before resending. Reissue consent or use --wake only if separately authorized.\n")
         sys.stderr.write("error: could not queue to OpenCode session %s: %s\n" % (session["id"], exc))
-        return 1
+        return _transport_failed(args, msg_id, exc)
     _print_send_result(
         args,
         {
@@ -344,13 +380,16 @@ def _send_codex(target, args, oc_sender=None):
 
 
 def _queue_codex(thread, text, msg_id, args):
+    failed = _record_before_send(args, msg_id, "codex:" + thread["id"])
+    if failed is not None:
+        return failed
     try:
         sp_codex.codex_queue(
             thread["id"], text, cwd=thread.get("cwd"), home=thread.get("codex_home")
         )
     except sp_codex.QueueError as exc:
         sys.stderr.write("error: %s\n" % exc)
-        return 1
+        return _transport_failed(args, msg_id, exc)
     name = thread.get("name") or thread["id"]
     _print_send_result(
         args,
@@ -368,10 +407,12 @@ def _queue_codex(thread, text, msg_id, args):
 
 def _send_claude(target, args, oc_sender=None):
     reply_id = None
+    # One id for the frame, a reply-wake grant and the journal entry.
+    msg_id = str(uuidlib.uuid4())
     try:
         rec = sp_claude._resolve_claude_record(target)
         if oc_sender and getattr(args, "allow_reply_wake", None) is not None:
-            reply_id = _issue_reply_wake(args, oc_sender, "cc:" + rec["sessionId"], str(uuidlib.uuid4()))
+            reply_id = _issue_reply_wake(args, oc_sender, "cc:" + rec["sessionId"], msg_id)
             oc_sender = dict(oc_sender, reply_wake_id=reply_id)
         try:
             thread_id = None if oc_sender else sp_identity._thread_from_args(
@@ -380,19 +421,27 @@ def _send_claude(target, args, oc_sender=None):
         except ValueError as exc:
             sys.stderr.write("error: %s\n" % exc)
             return 2
+        if getattr(args, "record", False):
+            # A near-cap message is refused before it is recorded.
+            sp_claude.claude_body(args.message, thread_id, opencode_sender=oc_sender)
+            failed = _record_before_send(args, msg_id, "cc:" + str(rec.get("sessionId")))
+            if failed is not None:
+                if reply_id:
+                    sp_reply_wake.forget(reply_id)
+                return failed
         msg_id, reply_capable = sp_claude._deliver_claude(
-            rec, args.message, thread_id, opencode_sender=oc_sender
+            rec, args.message, thread_id, opencode_sender=oc_sender, msg_id=msg_id
         )
     except (sp_codex.ResolveError, ValueError) as exc:
         if reply_id:
             sp_reply_wake.forget(reply_id)
         sys.stderr.write("error: %s\n" % exc)
-        return 1
+        return _transport_failed(args, msg_id, exc)
     except OSError as exc:
         if reply_id:
             sp_reply_wake.forget(reply_id)
         sys.stderr.write("error: could not reach %s: %s\n" % (target, exc))
-        return 1
+        return _transport_failed(args, msg_id, exc)
     if thread_id and not reply_capable:
         sp_runtime.log(
             "Codex thread %s has no live shim; the message was sent, but a native "
@@ -417,7 +466,7 @@ def _send_claude(target, args, oc_sender=None):
 
 _RequestSetup = collections.namedtuple(
     "_RequestSetup",
-    "message timeout requester oc_sender record request_id meta_path reply_path expires_at meta",
+    "message timeout requester oc_sender record request_id meta_path reply_path expires_at meta target_typed",
 )
 
 
@@ -507,9 +556,25 @@ def _prepare_request(args, purpose):
     reply_path = sp_storage.request_reply_path(request_id)
     expires_at = time.time() + timeout
     meta = sp_requests._request_meta(request_id, requester, rec, expires_at, reply_path)
+    if kind == "oc":
+        target_typed = "oc:%s" % rec["sessionId"]
+    elif rec.get("entrypoint") == "codex":
+        target_typed = "codex:%s" % rec["sessionId"]
+    else:
+        target_typed = "cc:%s" % rec["sessionId"]
+    meta["target_typed"] = target_typed
+    # Journal first: a refusal here leaves no mailbox and nothing sent.
+    try:
+        sp_journal.record_request(
+            request_id, "%s:%s" % (requester["kind"], requester["uuid"]), [target_typed],
+            message, expires_at, meta_path, fresh_id=True,
+        )
+    except sp_journal.JournalError as exc:
+        return sp_journal.presend_failed(exc, getattr(args, "json", False))
     sp_runtime.write_json_atomic(meta_path, meta)
     return _RequestSetup(
-        message, timeout, requester, oc_sender, rec, request_id, meta_path, reply_path, expires_at, meta
+        message, timeout, requester, oc_sender, rec, request_id, meta_path, reply_path, expires_at, meta,
+        target_typed,
     )
 
 
@@ -551,7 +616,7 @@ def cmd_ask(args):
             message_id, _reply_capable = _send_prepared_request(request)
         except (OSError, ValueError, sp_opencode.OpenCodeError) as exc:
             sys.stderr.write("error: could not send request to %s: %s\n" % (args.to, exc))
-            return 1
+            return sp_journal.transport_failed(request.request_id, request.target_typed, exc)
         sp_runtime.log(
             "request %s sent to %s; waiting up to %.0fs"
             % (request.request_id, request.record.get("name") or request.record.get("sessionId"), request.timeout)
@@ -568,13 +633,20 @@ def cmd_ask(args):
                     "session_name": request.record.get("name"),
                     "message": response["message"],
                 }
+                # The mailbox goes before the settlement, never after.
+                sp_requests._unlink_quiet(request.meta_path)
+                sp_requests._unlink_quiet(request.reply_path)
+                rc = sp_journal.settle_or_report(
+                    sp_journal.reply_message_id(request.request_id), "consumed",
+                    "%s:%s" % (request.requester["kind"], request.requester["uuid"]), payload,
+                ) or 0
                 if args.json:
                     print(json.dumps(payload, sort_keys=True))
                 else:
                     sys.stdout.write(response["message"])
                     if not response["message"].endswith("\n"):
                         sys.stdout.write("\n")
-                return 0
+                return rc
             time.sleep(sp_constants.REQUEST_POLL_INTERVAL)
         sys.stderr.write(
             "error: request %s timed out after %.0f seconds; no reply was queued\n"
@@ -584,6 +656,22 @@ def cmd_ask(args):
     finally:
         sp_requests._unlink_quiet(request.meta_path)
         sp_requests._unlink_quiet(request.reply_path)
+
+
+def _after_reply_validation():
+    """No-op seam between `reply`'s mailbox validation and its journal record.
+
+    A test patches it in a child process to pause there and interleave a
+    competing reply.
+    """
+
+
+def _reply_sender_typed(meta, sid):
+    """The replier's typed id, matching the request entry's recipient slot."""
+    typed = meta.get("target_typed")
+    if isinstance(typed, str) and typed.partition(":")[2] == sid and typed.partition(":")[0] in ("cc", "codex", "oc"):
+        return typed
+    return "%s:%s" % ("oc" if meta.get("target_kind") == "oc" else "cc", sid)
 
 
 def cmd_reply(args):
@@ -624,6 +712,33 @@ def cmd_reply(args):
             % (args.request, noun, meta.get("target_session_id"), sid)
         )
         return 1
+    sid_typed = _reply_sender_typed(meta, sid)
+    requester_typed = meta.get("requester") or "codex:%s" % meta.get("requester_thread_id")
+
+    def revalidate():
+        # Under the journal lock: the mailbox must still exist, be live and name this session.
+        current = sp_runtime.read_json(path, None)
+        if not isinstance(current, dict):
+            raise sp_journal.JournalRefused("request %s is unknown or expired" % args.request)
+        try:
+            live = float(current.get("expires_at", 0)) > time.time()
+        except (TypeError, ValueError):
+            live = False
+        if not live:
+            raise sp_journal.JournalRefused("request %s is expired" % args.request)
+        if current.get("target_session_id") != sid:
+            raise sp_journal.JournalRefused("request %s no longer belongs to %s" % (args.request, sid))
+
+    _after_reply_validation()
+    try:
+        sp_journal.record_reply(
+            args.request, sid_typed, [requester_typed], message, expires_at, path, revalidate=revalidate
+        )
+    except sp_journal.JournalError as exc:
+        if "already has a recorded reply" in str(exc):
+            # Keep the existing refusal wording and add the journal's reason.
+            exc = sp_journal.JournalRefused("request %s already has a different reply (%s)" % (args.request, exc))
+        return sp_journal.presend_failed(exc, getattr(args, "json", False))
     payload = {
         "request_id": args.request,
         "session_id": sid,
@@ -643,12 +758,10 @@ def cmd_reply(args):
         status = "already_replied"
     else:
         status = "replied"
-    _print_send_result(
-        args,
-        {"status": status, "request_id": args.request, "session_id": sid},
-        "%s to request %s" % (status.replace("_", " "), args.request),
-    )
-    return 0
+    result = {"status": status, "request_id": args.request, "session_id": sid}
+    rc = sp_journal.settle_or_report(args.request, "replied", sid_typed, result) or 0
+    _print_send_result(args, result, "%s to request %s" % (status.replace("_", " "), args.request))
+    return rc
 
 
 def cmd_dispatch(args):
@@ -682,7 +795,7 @@ def cmd_dispatch(args):
                 )
             )
         sys.stderr.write("error: could not send request to %s: %s\n" % (args.to, exc))
-        return 1
+        return sp_journal.transport_failed(request.request_id, request.target_typed, exc)
     sp_runtime.log(
         "dispatched request %s to %s; expires in %.0fs"
         % (request.request_id, request.record.get("name") or request.record.get("sessionId"), request.timeout)
@@ -797,13 +910,17 @@ def cmd_await(args):
                 "session_name": meta.get("target_session_name"),
                 "message": claimed["message"],
             }
+            # Claimed and unlinked first; a failed settlement never re-reads or re-claims.
+            rc = sp_journal.settle_or_report(
+                sp_journal.reply_message_id(args.request), "consumed", caller, payload
+            ) or 0
             if args.json:
                 print(json.dumps(payload, sort_keys=True))
             else:
                 sys.stdout.write(claimed["message"])
                 if not claimed["message"].endswith("\n"):
                     sys.stdout.write("\n")
-            return 0
+            return rc
         if time.monotonic() >= deadline:
             break
         time.sleep(sp_constants.REQUEST_POLL_INTERVAL)

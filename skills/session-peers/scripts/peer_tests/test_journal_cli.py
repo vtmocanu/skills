@@ -1,0 +1,879 @@
+"""Journal command line: send --record, correlated requests, exit codes, ACK and inbox commands."""
+
+from __future__ import annotations
+
+import json
+import os
+import pathlib
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+import uuid as uuidlib
+from unittest import mock
+
+from peer_tests.support import (
+    HERE,
+    Base,
+    sp_constants,
+    sp_storage,
+    wait_for,
+)
+from peer_tests.test_opencode import OC_A, OC_B, OpenCodeBase
+from session_peers import identity as sp_identity, journal
+
+CAP_ENV = "SESSION_PEERS_JOURNAL_MAX_BYTES"
+
+
+def new_id():
+    return str(uuidlib.uuid4())
+
+
+class JournalHelpers:
+    """A private writable HOME for the journal, and readers of its state.
+
+    Base keeps its sockets and registry under /tmp; only HOME moves, because the
+    journal lives at ~/.codex/session-peers/journal whatever CODEX_HOME says.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.jhome = tempfile.mkdtemp(prefix="spjh")
+        os.environ["HOME"] = self.jhome
+        os.environ.pop(CAP_ENV, None)
+        self.addCleanup(shutil.rmtree, self.jhome, True)
+
+    # -- identities ---------------------------------------------------------
+
+    def as_cc(self, rec_or_sid):
+        sid = rec_or_sid["sessionId"] if isinstance(rec_or_sid, dict) else rec_or_sid
+        for name in ("CODEX_THREAD_ID", "CODEX_SESSION_ID", "OPENCODE_SESSION_ID"):
+            os.environ.pop(name, None)
+        os.environ["CLAUDE_CODE_SESSION_ID"] = sid
+        if isinstance(rec_or_sid, dict):
+            os.environ["CLAUDE_CODE_MESSAGING_SOCKET"] = rec_or_sid["messagingSocketPath"]
+        else:
+            os.environ.pop("CLAUDE_CODE_MESSAGING_SOCKET", None)
+
+    def as_codex(self, tid):
+        for name in ("CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_MESSAGING_SOCKET", "OPENCODE_SESSION_ID"):
+            os.environ.pop(name, None)
+        os.environ["CODEX_THREAD_ID"] = tid
+
+    def peer(self, name="cc-target", sid=None, pid=None):
+        """A live Claude peer with a UUID session id (the journal keys by typed ids)."""
+        sid = sid or new_id()
+        listener, rec = self.add_listener(name=name, session_id=sid, pid=pid)
+        return listener, rec
+
+    # -- journal state ------------------------------------------------------
+
+    def jpath(self):
+        return os.path.join(journal.journal_dir(), "journal.jsonl")
+
+    def records(self):
+        try:
+            with open(self.jpath(), "rb") as fh:
+                data = fh.read()
+        except FileNotFoundError:
+            return []
+        return [json.loads(line) for line in data.splitlines() if line.strip()]
+
+    def entries(self):
+        return journal.read_only_view()["entries"]
+
+    def entry(self, message_id):
+        for item in self.entries():
+            if item["message_id"] == message_id:
+                return item
+        return None
+
+    def assert_no_acks(self, message_id):
+        self.assertEqual([r for r in self.records() if r["type"] == "ack"], [])
+        item = self.entry(message_id)
+        self.assertIsNotNone(item)
+        self.assertEqual([r["state"] for r in item["recipients"]], ["pending"] * len(item["to"]))
+
+    def prefill_full(self):
+        """Fill the journal with unprunable (unacknowledged, recent) entries, then cap it at its size."""
+        os.environ[CAP_ENV] = "60000"
+        body = "b" * 2000
+        with mock.patch.object(sp_identity, "resolve_typed", lambda target, exclude=None: {}):
+            while sum(len(json.dumps(r)) for r in self.records()) < 20000:
+                journal.record_message("cc:" + new_id(), ["cc:" + new_id()], body)
+        os.environ[CAP_ENV] = str(os.path.getsize(self.jpath()))
+
+    # -- child processes ----------------------------------------------------
+
+    def run_patched(self, patch_code, *argv, wait=True):
+        """Run peers.main in a child after ``patch_code`` patched the child's own modules."""
+        script = (
+            "import json, os, sys, time\n"
+            "sys.path.insert(0, %r)\n"
+            "from session_peers import journal as j, messaging as m\n"
+            "%s\n"
+            "from session_peers.cli import main\n"
+            "sys.exit(main(json.loads(sys.argv[1])))\n" % (str(HERE), patch_code)
+        )
+        proc = subprocess.Popen(
+            [sys.executable, "-c", script, json.dumps(list(argv))],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=dict(os.environ),
+        )
+        self._children.append(proc)
+        if not wait:
+            return proc
+        out, err = proc.communicate(timeout=60)
+        return proc.returncode, out, err
+
+    # -- correlated requests ------------------------------------------------
+
+    def dispatch(self, target, tid, message="please review", extra=()):
+        rc, out, err = self.cli(
+            "dispatch", "--to", target, "--from-thread", tid, "--message", message,
+            "--timeout", "300", "--json", *extra,
+        )
+        return rc, (json.loads(out) if out.strip().startswith("{") else out), err
+
+    def reply_as(self, sid, request_id, message, *extra):
+        saved = {k: os.environ.get(k) for k in ("CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID")}
+        os.environ["CLAUDE_CODE_SESSION_ID"] = sid
+        os.environ.pop("CODEX_THREAD_ID", None)
+        try:
+            return self.cli("reply", "--request", request_id, "--message", message, *extra)
+        finally:
+            for key, value in saved.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+    def mailbox(self, request_id):
+        return sp_storage.request_path(request_id), sp_storage.request_reply_path(request_id)
+
+
+class JournalCliBase(JournalHelpers, Base):
+    pass
+
+
+class JournalOpenCodeBase(JournalHelpers, OpenCodeBase):
+    pass
+
+
+# ==========================================================================
+# send --record
+# ==========================================================================
+
+
+class JournalSendRecordTests(JournalCliBase):
+    def test_codex_target_stores_the_queue_message_id(self):
+        _listener, sender = self.peer("cc-sender", pid=os.getpid())
+        self.as_cc(sender)
+        tid, _rollout = self.one_thread()
+        rc, out, err = self.cli("send", "--to", "codex:%s" % tid, "--message", "hello", "--record", "--json")
+        self.assertEqual(rc, 0, err)
+        payload = json.loads(out)
+        self.assertEqual(payload["status"], "queued")
+        self.assertEqual(payload["journal"], {"message_id": payload["message_id"], "recorded": True})
+        queued = json.dumps(self.queue_calls())
+        self.assertIn("mid=%s" % payload["message_id"], queued)
+        entry = self.entry(payload["message_id"])
+        self.assertEqual(entry["to"], ["codex:" + tid])
+        self.assertEqual(entry["from"], "cc:" + sender["sessionId"])
+        self.assertEqual(entry["body"], "hello")
+        self.assertEqual(entry["kind"], "message")
+
+    def test_claude_target_stores_the_frame_message_id(self):
+        listener, rec = self.peer("cc-target", pid=os.getppid())
+        tid, _rollout = self.one_thread()
+        self.as_codex(tid)
+        rc, out, err = self.cli("send", "--to", "cc:cc-target", "--message", "ping", "--record", "--json")
+        self.assertEqual(rc, 0, err)
+        payload = json.loads(out)
+        frames = wait_for(lambda: listener.of_type("user"))
+        self.assertEqual(len(frames), 1)
+        self.assertEqual(frames[0]["msg_id"], payload["message_id"])
+        self.assertEqual(payload["journal"]["message_id"], frames[0]["msg_id"])
+        entry = self.entry(frames[0]["msg_id"])
+        self.assertEqual(entry["to"], ["cc:" + rec["sessionId"]])
+        self.assertEqual(entry["from"], "codex:" + tid)
+        self.assertEqual(entry["body"], "ping")
+
+    def test_without_record_nothing_is_written_and_no_journal_key_appears(self):
+        listener, _rec = self.peer("cc-target", pid=os.getppid())
+        tid, _rollout = self.one_thread()
+        self.as_codex(tid)
+        rc, out, err = self.cli("send", "--to", "cc:cc-target", "--message", "ping", "--json")
+        self.assertEqual(rc, 0, err)
+        self.assertNotIn("journal", json.loads(out))
+        self.assertEqual(self.records(), [])
+        self.assertFalse(os.path.exists(journal.journal_dir()))
+
+    def test_codex_sender_to_codex_target_records_the_queue_id(self):
+        tid, _rollout = self.one_thread()
+        other = new_id()
+        self.as_codex(other)
+        rc, out, err = self.cli("send", "--to", "codex:%s" % tid, "--message", "via codex", "--record", "--json")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self.entry(json.loads(out)["message_id"])["to"], ["codex:" + tid])
+        self.assertEqual(self.entry(json.loads(out)["message_id"])["from"], "codex:" + other)
+
+
+class JournalOpenCodeSendTests(JournalOpenCodeBase):
+    def test_opencode_target_stores_the_queue_message_id(self):
+        _listener, rec = self.peer("cc-sender", pid=os.getpid())
+        self.as_claude(rec)
+        rc, out, err = self.cli("send", "--to", "oc:%s" % OC_B, "--message", "oc hello", "--record", "--json")
+        self.assertEqual(rc, 0, err)
+        payload = json.loads(out)
+        prompts = self.oc_calls("session.prompt")
+        self.assertEqual(len(prompts), 1)
+        self.assertEqual(prompts[0]["data"]["metadata"]["session_peers"]["message_id"], payload["message_id"])
+        self.assertEqual(payload["journal"], {"message_id": payload["message_id"], "recorded": True})
+        entry = self.entry(payload["message_id"])
+        self.assertEqual(entry["to"], ["oc:" + OC_B])
+        self.assertEqual(entry["from"], "cc:" + rec["sessionId"])
+
+    def test_opencode_sender_with_reply_wake_to_claude_uses_one_id_everywhere(self):
+        listener, rec = self.peer("cc-target", pid=os.getppid())
+        self.as_opencode(OC_A)
+        rc, out, err = self.cli(
+            "send", "--to", "cc:cc-target", "--message", "wake me", "--allow-reply-wake", "--record", "--json",
+        )
+        self.assertEqual(rc, 0, err)
+        payload = json.loads(out)
+        frames = wait_for(lambda: listener.of_type("user"))
+        self.assertEqual(frames[0]["msg_id"], payload["message_id"])
+        self.assertEqual(payload["reply_wake"]["message_id"], payload["message_id"])
+        self.assertEqual(payload["journal"]["message_id"], payload["message_id"])
+        entry = self.entry(payload["message_id"])
+        self.assertEqual(entry["from"], "oc:" + OC_A)
+        self.assertEqual(entry["to"], ["cc:" + rec["sessionId"]])
+
+    def test_opencode_sender_to_codex_records_the_queue_id(self):
+        tid, _rollout = self.one_thread()
+        self.as_opencode(OC_A)
+        rc, out, err = self.cli("send", "--to", "codex:%s" % tid, "--message", "x", "--allow-reply-wake",
+                                "--record", "--json")
+        self.assertEqual(rc, 0, err)
+        payload = json.loads(out)
+        self.assertIn("mid=%s" % payload["message_id"], json.dumps(self.queue_calls()))
+        self.assertEqual(self.entry(payload["message_id"])["from"], "oc:" + OC_A)
+
+    def test_journal_full_refuses_an_opencode_send_before_queueing(self):
+        _listener, rec = self.peer("cc-sender", pid=os.getpid())
+        self.as_claude(rec)
+        self.prefill_full()
+        rc, out, err = self.cli("send", "--to", "oc:%s" % OC_B, "--message", "x", "--record", "--json")
+        self.assertEqual(rc, 75)
+        self.assertEqual(json.loads(out)["status"], "journal_full")
+        self.assertIn("error: ", err)
+        self.assertEqual(self.oc_calls("session.prompt"), [])
+
+    def test_opencode_inbox_handled_and_status_never_acknowledge(self):
+        _listener, rec = self.peer("cc-sender", pid=os.getpid())
+        self.as_claude(rec)
+        rc, out, err = self.cli("send", "--to", "oc:%s" % OC_B, "--message", "x", "--record", "--json")
+        self.assertEqual(rc, 0, err)
+        mid = json.loads(out)["message_id"]
+        for name in ("CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_MESSAGING_SOCKET"):
+            os.environ.pop(name, None)
+        self.as_opencode(OC_B)
+        for name in ("handled", "status"):
+            rc, _out, err = self.cli("inbox", name, "cc:" + rec["sessionId"], mid, "--json")
+            self.assertEqual(rc, 0, err)
+        self.assert_no_acks(mid)
+        rc, out, err = self.cli("inbox", "acks", mid, "--json")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual([r["state"] for r in json.loads(out)["recipients"]], ["pending"])
+
+
+# ==========================================================================
+# Pre-send failures
+# ==========================================================================
+
+
+class JournalPreSendFailureTests(JournalCliBase):
+    def test_journal_full_refuses_every_sending_command_with_75_and_sends_nothing(self):
+        listener, rec = self.peer("cc-target", pid=os.getppid())
+        tid, _rollout = self.one_thread()
+        self.as_codex(tid)
+        # A live request whose reply the journal must refuse for lack of room.
+        rc, request, err = self.dispatch("cc:cc-target", tid)
+        self.assertEqual(rc, 0, err)
+        wait_for(lambda: listener.of_type("user"))
+        frames_before = len(listener.of_type("user"))
+        self.prefill_full()
+        before = self.records()
+
+        rc, out, err = self.cli("send", "--to", "cc:cc-target", "--message", "m", "--record", "--json")
+        self.assertEqual(rc, 75)
+        self.assertEqual(json.loads(out)["status"], "journal_full")
+        self.assertIn("error: ", err)
+        rc, out, err = self.cli("send", "--to", "codex:%s" % tid, "--message", "m", "--record")
+        self.assertEqual(rc, 75, err)
+        rc, out, err = self.cli("dispatch", "--to", "cc:cc-target", "--from-thread", tid, "--message", "m")
+        self.assertEqual(rc, 75, err)
+        rc, out, err = self.cli("ask", "--to", "cc:cc-target", "--from-thread", tid, "--message", "m",
+                                "--timeout", "5", "--json")
+        self.assertEqual(rc, 75, err)
+        self.assertEqual(json.loads(out)["status"], "journal_full")
+        rc, _out, err = self.reply_as(rec["sessionId"], request["request_id"], "an answer")
+        self.assertEqual(rc, 75, err)
+
+        time.sleep(0.2)
+        self.assertEqual(len(listener.of_type("user")), frames_before)
+        self.assertEqual(self.queue_calls(), [])
+        mailboxes = sorted(p.name for p in pathlib.Path(sp_storage.request_dir()).glob("*.json"))
+        self.assertEqual(mailboxes, ["%s.request.json" % request["request_id"]])
+        self.assertFalse(os.path.exists(self.mailbox(request["request_id"])[1]))
+        self.assertEqual(self.records(), before)
+
+    def test_unwritable_journal_directory_refuses_with_1_and_sends_nothing(self):
+        listener, _rec = self.peer("cc-target", pid=os.getppid())
+        tid, _rollout = self.one_thread()
+        self.as_codex(tid)
+        # ~/.codex is a file, so the journal directory cannot be created.
+        pathlib.Path(self.jhome, ".codex").write_text("not a directory")
+        for argv in (
+            ("send", "--to", "cc:cc-target", "--message", "m", "--record"),
+            ("send", "--to", "codex:%s" % tid, "--message", "m", "--record"),
+            ("dispatch", "--to", "cc:cc-target", "--from-thread", tid, "--message", "m"),
+            ("ask", "--to", "cc:cc-target", "--from-thread", tid, "--message", "m", "--timeout", "5"),
+        ):
+            rc, _out, err = self.cli(*argv)
+            self.assertEqual(rc, 1, (argv, err))
+            self.assertIn("error: ", err)
+        time.sleep(0.2)
+        self.assertEqual(listener.of_type("user"), [])
+        self.assertEqual(self.queue_calls(), [])
+        self.assertEqual(list(pathlib.Path(sp_storage.request_dir()).glob("*.json")), [])
+
+    def test_a_near_cap_claude_message_is_refused_before_it_is_recorded(self):
+        listener, _rec = self.peer("cc-target", pid=os.getppid())
+        tid, _rollout = self.one_thread()
+        self.as_codex(tid)
+        body = "x" * sp_constants.MAX_TEXT_CHARS
+        rc, _out, err = self.cli("send", "--to", "cc:cc-target", "--message", body, "--record")
+        self.assertEqual(rc, 1)
+        self.assertIn("peer cap", err)
+        self.assertEqual(self.records(), [])
+        self.assertEqual(listener.of_type("user"), [])
+
+    def test_a_non_uuid_correlated_identity_is_refused_before_sending(self):
+        listener, _rec = self.peer("cc-main", sid="s1", pid=os.getppid())
+        tid, _rollout = self.one_thread()
+        for verb in ("dispatch", "ask"):
+            rc, _out, err = self.cli(verb, "--to", "cc:cc-main", "--from-thread", tid,
+                                     "--message", "m", "--timeout", "5")
+            self.assertEqual(rc, 1, (verb, err))
+            self.assertIn("cannot record this message", err)
+        time.sleep(0.2)
+        self.assertEqual(listener.of_type("user"), [])
+        self.assertEqual(list(pathlib.Path(sp_storage.request_dir()).glob("*.json")), [])
+        self.assertEqual(self.records(), [])
+
+
+# ==========================================================================
+# Post-transport failures (exit 76)
+# ==========================================================================
+
+
+class JournalPostTransportTests(JournalCliBase):
+    def test_a_transport_failure_appends_a_per_slot_transport_error(self):
+        listener, rec = self.peer("cc-target", pid=os.getppid())
+        tid, _rollout = self.one_thread()
+        listener.close()  # the socket file stays, so the connect is refused
+        time.sleep(0.6)  # the accept loop holds the socket until its timeout ends
+        rc, request, err = self.dispatch("cc:cc-target", tid)
+        self.assertEqual(rc, 1)
+        self.assertEqual(request["status"], "delivery_failed")
+        entry = self.entry(request["request_id"])
+        self.assertEqual(entry["transport_error"]["for"], "cc:" + rec["sessionId"])
+        self.assertIn("could not send request", err)
+
+    def test_transport_error_append_failure_reports_the_original_error_and_exits_76(self):
+        os.environ["FAKE_CODEX_RC"] = "1"
+        os.environ["FAKE_CODEX_STDERR"] = "queue backend exploded"
+        tid, _rollout = self.one_thread()
+        _listener, rec = self.peer("cc-sender", pid=os.getpid())
+        self.as_cc(rec)
+        patch = (
+            "def boom(*a, **k):\n    raise j.JournalUpdateFailed('injected transport_error failure')\n"
+            "j.transport_error = boom\n"
+        )
+        rc, out, err = self.run_patched(patch, "send", "--to", "codex:%s" % tid, "--message", "m", "--record")
+        self.assertEqual(rc, 76, err)
+        self.assertIn("queue backend exploded", err)
+        self.assertIn("journal update failed: injected transport_error failure", err)
+        self.assertEqual(len(self.queue_calls()), 1)
+        self.assertEqual(len([r for r in self.records() if r["type"] == "transport_error"]), 0)
+        self.assertEqual(len([r for r in self.records() if r["type"] == "message"]), 1)
+
+    def test_reply_settlement_failure_reports_replied_exits_76_and_keeps_the_file(self):
+        listener, rec = self.peer("cc-target", pid=os.getppid())
+        tid, _rollout = self.one_thread()
+        rc, request, err = self.dispatch("cc:cc-target", tid)
+        self.assertEqual(rc, 0, err)
+        rid = request["request_id"]
+        os.environ["CLAUDE_CODE_SESSION_ID"] = rec["sessionId"]
+        patch = (
+            "real = j.settle\n"
+            "def flaky(mid, state, by):\n"
+            "    if state == 'replied':\n        raise j.JournalUpdateFailed('injected replied failure')\n"
+            "    return real(mid, state, by)\n"
+            "j.settle = flaky\n"
+        )
+        rc, out, err = self.run_patched(patch, "reply", "--request", rid, "--message", "the answer", "--json")
+        self.assertEqual(rc, 76, err)
+        payload = json.loads(out)
+        self.assertEqual(payload["status"], "replied")
+        self.assertEqual(payload["journal_error"], "injected replied failure")
+        self.assertIn("journal update failed: injected replied failure", err)
+        self.assertTrue(os.path.exists(self.mailbox(rid)[1]))
+        # The reply is intact: await still receives it, once.
+        os.environ.pop("CLAUDE_CODE_SESSION_ID")
+        rc, out, err = self.cli("await", "--request", rid, "--from-thread", tid, "--timeout", "5", "--json")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(json.loads(out)["message"], "the answer")
+        rc, out, err = self.cli("await", "--request", rid, "--from-thread", tid, "--timeout", "1", "--json")
+        self.assertEqual(rc, 1)
+        self.assertEqual(json.loads(out)["status"], "expired")
+
+    def test_consume_settlement_failure_still_prints_the_body_exits_76_and_never_reclaims(self):
+        listener, rec = self.peer("cc-target", pid=os.getppid())
+        tid, _rollout = self.one_thread()
+        rc, request, err = self.dispatch("cc:cc-target", tid)
+        self.assertEqual(rc, 0, err)
+        rid = request["request_id"]
+        rc, _out, err = self.reply_as(rec["sessionId"], rid, "the answer")
+        self.assertEqual(rc, 0, err)
+        patch = (
+            "real = j.settle\n"
+            "def flaky(mid, state, by):\n"
+            "    if state == 'consumed':\n        raise j.JournalUpdateFailed('injected consumed failure')\n"
+            "    return real(mid, state, by)\n"
+            "j.settle = flaky\n"
+        )
+        self.as_codex(tid)
+        rc, out, err = self.run_patched(patch, "await", "--request", rid, "--from-thread", tid,
+                                        "--timeout", "5", "--json")
+        self.assertEqual(rc, 76, err)
+        payload = json.loads(out)
+        self.assertEqual(payload["message"], "the answer")
+        self.assertEqual(payload["journal_error"], "injected consumed failure")
+        self.assertIn("journal update failed: injected consumed failure", err)
+        meta, reply = self.mailbox(rid)
+        self.assertFalse(os.path.exists(meta))
+        self.assertFalse(os.path.exists(reply))
+        # No second claim: the next await finds nothing to consume.
+        rc, out, err = self.cli("await", "--request", rid, "--from-thread", tid, "--timeout", "1", "--json")
+        self.assertEqual(rc, 1)
+        self.assertEqual(json.loads(out)["status"], "expired")
+        reply_entry = self.entry(journal.reply_message_id(rid))
+        self.assertIsNone(reply_entry["settlement"])
+
+    def test_human_output_of_a_failed_consume_settlement_still_prints_the_body(self):
+        listener, rec = self.peer("cc-target", pid=os.getppid())
+        tid, _rollout = self.one_thread()
+        rc, request, err = self.dispatch("cc:cc-target", tid)
+        rid = request["request_id"]
+        self.reply_as(rec["sessionId"], rid, "plain answer")
+        patch = "def boom(*a, **k):\n    raise j.JournalUpdateFailed('nope')\nj.settle = boom\n"
+        rc, out, err = self.run_patched(patch, "await", "--request", rid, "--from-thread", tid, "--timeout", "5")
+        self.assertEqual(rc, 76)
+        self.assertEqual(out, "plain answer\n")
+        self.assertIn("journal update failed: nope", err)
+
+
+# ==========================================================================
+# Settlement
+# ==========================================================================
+
+
+class JournalSettlementTests(JournalCliBase):
+    def test_replied_and_consumed_are_recorded_and_the_mailbox_goes_first(self):
+        _listener, rec = self.peer("cc-target", pid=os.getppid())
+        tid, _rollout = self.one_thread()
+        rc, request, err = self.dispatch("cc:cc-target", tid)
+        self.assertEqual(rc, 0, err)
+        rid = request["request_id"]
+        entry = self.entry(rid)
+        self.assertEqual(entry["from"], "codex:" + tid)
+        self.assertEqual(entry["to"], ["cc:" + rec["sessionId"]])
+        self.assertEqual(entry["body"], "please review")
+        rc, out, err = self.reply_as(rec["sessionId"], rid, "approved", "--json")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self.entry(rid)["settlement"]["state"], "replied")
+        reply = self.entry(journal.reply_message_id(rid))
+        self.assertEqual(reply["body"], "approved")
+        self.assertEqual(reply["to"], ["codex:" + tid])
+        self.assertIsNone(reply["settlement"])
+
+        seen = {}
+        real = journal.settle
+
+        def watch(message_id, state, by):
+            seen["state"] = state
+            seen["mailbox"] = [os.path.exists(p) for p in self.mailbox(rid)]
+            return real(message_id, state, by)
+
+        with mock.patch.object(journal, "settle", watch):
+            rc, out, err = self.cli("await", "--request", rid, "--from-thread", tid, "--timeout", "5", "--json")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(json.loads(out)["message"], "approved")
+        self.assertEqual(seen, {"state": "consumed", "mailbox": [False, False]})
+        self.assertEqual(self.entry(journal.reply_message_id(rid))["settlement"]["state"], "consumed")
+        self.assertEqual(self.entry(journal.reply_message_id(rid))["settlement"]["by"], "codex:" + tid)
+
+    def test_ask_unlinks_the_mailbox_then_settles_consumed(self):
+        listener, rec = self.peer("cc-target", pid=os.getppid())
+        tid, _rollout = self.one_thread()
+        proc = self.spawn("ask", "--to", "cc:cc-target", "--from-thread", tid, "--message", "q?",
+                          "--timeout", "30", "--json")
+        frame = wait_for(lambda: listener.of_type("user"))[0]
+        rid = json.loads(json.dumps(frame))["message"]["content"].split('id="')[1].split('"')[0]
+        rc, _out, err = self.reply_as(rec["sessionId"], rid, "ans")
+        self.assertEqual(rc, 0, err)
+        out, _unused = proc.communicate(timeout=30)
+        self.assertEqual(proc.returncode, 0, out)
+        self.assertEqual(json.loads(out.strip().splitlines()[-1])["message"], "ans")
+        self.assertFalse(os.path.exists(self.mailbox(rid)[0]))
+        self.assertEqual(self.entry(rid)["settlement"]["state"], "replied")
+        self.assertEqual(self.entry(journal.reply_message_id(rid))["settlement"]["state"], "consumed")
+
+    def test_a_same_body_reply_retry_is_idempotent(self):
+        _listener, rec = self.peer("cc-target", pid=os.getppid())
+        tid, _rollout = self.one_thread()
+        _rc, request, _err = self.dispatch("cc:cc-target", tid)
+        rid = request["request_id"]
+        self.assertEqual(self.reply_as(rec["sessionId"], rid, "same")[0], 0)
+        rc, out, err = self.reply_as(rec["sessionId"], rid, "same")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("already replied", out)
+        replies = [r for r in self.records() if r["type"] == "message" and r["kind"] == "reply"]
+        self.assertEqual(len(replies), 1)
+        rc, _out, err = self.reply_as(rec["sessionId"], rid, "different")
+        self.assertEqual(rc, 1)
+        self.assertIn("different reply", err)
+
+    def test_a_retry_after_a_kill_following_the_record_works_and_the_requester_can_get_it(self):
+        _listener, rec = self.peer("cc-target", pid=os.getppid())
+        tid, _rollout = self.one_thread()
+        _rc, request, _err = self.dispatch("cc:cc-target", tid)
+        rid = request["request_id"]
+        meta_path, reply_path = self.mailbox(rid)
+        meta = json.loads(pathlib.Path(meta_path).read_text())
+        # The replier was killed after the journal record, before the reply file existed.
+        journal.record_reply(rid, "cc:" + rec["sessionId"], [meta["requester"]], "after the kill",
+                             meta["expires_at"], meta_path)
+        self.assertFalse(os.path.exists(reply_path))
+        rc, _out, err = self.reply_as(rec["sessionId"], rid, "after the kill")
+        self.assertEqual(rc, 0, err)
+        self.assertTrue(os.path.exists(reply_path))
+        self.assertEqual(self.entry(rid)["settlement"]["state"], "replied")
+        self.as_codex(tid)
+        rc, out, err = self.cli("inbox", "get", journal.reply_message_id(rid), "--json")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(json.loads(out)["body"], "after the kill")
+
+
+# ==========================================================================
+# Race interleavings
+# ==========================================================================
+
+
+class JournalReplyRaceTests(JournalCliBase):
+    def _paused_reply(self, sid, rid, body):
+        ready = os.path.join(self.jhome, "ready-%s" % new_id())
+        go = os.path.join(self.jhome, "go-%s" % new_id())
+        patch = (
+            "def hook():\n"
+            "    open(%r, 'w').close()\n"
+            "    deadline = time.time() + 30\n"
+            "    while not os.path.exists(%r) and time.time() < deadline:\n        time.sleep(0.02)\n"
+            "m._after_reply_validation = hook\n" % (ready, go)
+        )
+        saved = os.environ.get("CLAUDE_CODE_SESSION_ID")
+        os.environ["CLAUDE_CODE_SESSION_ID"] = sid
+        try:
+            proc = self.run_patched(patch, "reply", "--request", rid, "--message", body, wait=False)
+        finally:
+            if saved is None:
+                os.environ.pop("CLAUDE_CODE_SESSION_ID", None)
+            else:
+                os.environ["CLAUDE_CODE_SESSION_ID"] = saved
+        self.assertTrue(wait_for(lambda: os.path.exists(ready), timeout=30), "child never reached the hook")
+        return proc, go
+
+    def _pressure(self):
+        """A lowered cap and an unrelated record: whatever may be pruned is pruned now."""
+        os.environ[CAP_ENV] = str(os.path.getsize(self.jpath()))
+        with mock.patch.object(sp_identity, "resolve_typed", lambda target, exclude=None: {}):
+            try:
+                journal.record_message("cc:" + new_id(), ["cc:" + new_id()], "unrelated")
+            except journal.JournalFull:
+                pass
+
+    def test_a_live_mailbox_keeps_the_first_reply_when_a_paused_reply_resumes(self):
+        _listener, rec = self.peer("cc-target", pid=os.getppid())
+        tid, _rollout = self.one_thread()
+        _rc, request, _err = self.dispatch("cc:cc-target", tid)
+        rid = request["request_id"]
+        proc, go = self._paused_reply(rec["sessionId"], rid, "Y: the loser")
+        rc, _out, err = self.reply_as(rec["sessionId"], rid, "X: the winner")
+        self.assertEqual(rc, 0, err)
+        reply_id = journal.reply_message_id(rid)
+        self.as_codex(tid)
+        self.assertEqual(self.cli("inbox", "get", reply_id)[0], 0)
+        self.assertEqual(self.cli("ack", reply_id)[0], 0)
+        self._pressure()
+        pathlib.Path(go).touch()
+        out, err = proc.communicate(timeout=60)
+        self.assertEqual(proc.returncode, 1, err)
+        self.assertIn("different reply", err)
+        self.assertEqual(self.entry(reply_id)["body"], "X: the winner")
+        reply_file = json.loads(pathlib.Path(self.mailbox(rid)[1]).read_text())
+        self.assertEqual(reply_file["message"], "X: the winner")
+
+    def test_a_consumed_request_refuses_a_paused_reply_with_a_different_body(self):
+        _listener, rec = self.peer("cc-target", pid=os.getppid())
+        tid, _rollout = self.one_thread()
+        _rc, request, _err = self.dispatch("cc:cc-target", tid)
+        rid = request["request_id"]
+        proc, go = self._paused_reply(rec["sessionId"], rid, "Y: too late")
+        self.assertEqual(self.reply_as(rec["sessionId"], rid, "X: first")[0], 0)
+        rc, out, err = self.cli("await", "--request", rid, "--from-thread", tid, "--timeout", "5", "--json")
+        self.assertEqual(rc, 0, err)
+        self._pressure()
+        pathlib.Path(go).touch()
+        out, err = proc.communicate(timeout=60)
+        self.assertEqual(proc.returncode, 1, err)
+        self.assertIn("error: ", err)
+        self.assertFalse(os.path.exists(self.mailbox(rid)[1]))
+        self.assertFalse(os.path.exists(self.mailbox(rid)[0]))
+        self.assertEqual([e for e in self.entries() if e["body"] == "Y: too late"], [])
+
+
+# ==========================================================================
+# No ACK from any other path
+# ==========================================================================
+
+
+class JournalNoImplicitAckTests(JournalCliBase):
+    def test_codex_queue_acceptance_is_not_an_ack(self):
+        _listener, sender = self.peer("cc-sender", pid=os.getpid())
+        self.as_cc(sender)
+        tid, _rollout = self.one_thread()
+        rc, out, err = self.cli("send", "--to", "codex:%s" % tid, "--message", "x", "--record", "--json")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(len(self.queue_calls()), 1)
+        self.assert_no_acks(json.loads(out)["message_id"])
+
+    def test_a_claude_socket_write_is_not_an_ack(self):
+        listener, _rec = self.peer("cc-target", pid=os.getppid())
+        tid, _rollout = self.one_thread()
+        self.as_codex(tid)
+        rc, out, err = self.cli("send", "--to", "cc:cc-target", "--message", "x", "--record", "--json")
+        self.assertEqual(rc, 0, err)
+        wait_for(lambda: listener.of_type("user"))
+        self.assert_no_acks(json.loads(out)["message_id"])
+
+    def test_waiting_for_idle_is_not_an_ack(self):
+        _listener, rec = self.peer("cc-target", pid=os.getppid())
+        tid, _rollout = self.one_thread()
+        self.as_codex(tid)
+        rc, out, err = self.cli("send", "--to", "cc:cc-target", "--message", "x", "--record", "--json")
+        self.assertEqual(rc, 0, err)
+        rc, _out, err = self.cli("wait", "--for", "cc:cc-target", "--state", "idle", "--timeout", "5")
+        self.assertEqual(rc, 0, err)
+        self.assert_no_acks(json.loads(out)["message_id"])
+
+    def test_a_fully_settled_exchange_has_no_ack(self):
+        _listener, rec = self.peer("cc-target", pid=os.getppid())
+        tid, _rollout = self.one_thread()
+        _rc, request, _err = self.dispatch("cc:cc-target", tid)
+        rid = request["request_id"]
+        self.assertEqual(self.reply_as(rec["sessionId"], rid, "done")[0], 0)
+        rc, _out, err = self.cli("await", "--request", rid, "--from-thread", tid, "--timeout", "5")
+        self.assertEqual(rc, 0, err)
+        self.assert_no_acks(rid)
+        self.assert_no_acks(journal.reply_message_id(rid))
+        self.assertEqual(self.entry(rid)["settlement"]["state"], "replied")
+        self.assertEqual(self.entry(journal.reply_message_id(rid))["settlement"]["state"], "consumed")
+
+
+# ==========================================================================
+# Pointer flow and the new commands
+# ==========================================================================
+
+
+class JournalCommandTests(JournalCliBase):
+    def test_record_get_ack_for_a_claude_recipient(self):
+        _la, sender = self.peer("cc-sender", pid=os.getpid())
+        _lb, target = self.peer("cc-target", pid=os.getppid())
+        self.as_cc(sender)
+        rc, out, err = self.cli("record", "--to", "cc:%s" % target["sessionId"], "--message", "act on this now")
+        self.assertEqual(rc, 0, err)
+        mid = out.splitlines()[0].split()[2].rstrip(":")
+        self.assertEqual(
+            out.splitlines()[0],
+            "critical message %s: run peers.py inbox get %s, then peers.py ack %s" % (mid, mid, mid),
+        )
+        self.assertEqual(listener_frames(_lb), [])  # record-only: nothing is sent
+        self.as_cc(target)
+        rc, out, err = self.cli("inbox", "journal", "--json")
+        self.assertEqual(rc, 0, err)
+        listing = json.loads(out)
+        self.assertEqual([i["message_id"] for i in listing], [mid])
+        self.assertNotIn("body", listing[0])
+        rc, out, err = self.cli("inbox", "get", mid)
+        self.assertEqual(rc, 0, err)
+        self.assertIn("act on this now", out)
+        rc, out, err = self.cli("ack", mid, "--json")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(json.loads(out)["for"], "cc:" + target["sessionId"])
+        self.assertEqual(json.loads(self.cli("inbox", "journal", "--json")[1]), [])
+        self.assertEqual(len(json.loads(self.cli("inbox", "journal", "--all", "--json")[1])), 1)
+        rc, out, err = self.cli("inbox", "acks", mid)
+        self.assertEqual(rc, 0, err)
+        self.assertIn("acked", out)
+
+    def test_record_to_several_recipients_acks_per_recipient(self):
+        _la, first = self.peer("cc-one", pid=os.getpid())
+        _lb, second = self.peer("cc-two", pid=os.getppid())
+        tid, _rollout = self.one_thread()
+        self.as_codex(tid)
+        rc, out, err = self.cli(
+            "record", "--to", "cc:%s" % first["sessionId"], "--to", "cc:%s" % second["sessionId"],
+            "--message", "both of you", "--json",
+        )
+        self.assertEqual(rc, 0, err)
+        mid = json.loads(out)["message_id"]
+        self.assertEqual(sorted(json.loads(out)["to"]),
+                         sorted(["cc:" + first["sessionId"], "cc:" + second["sessionId"]]))
+        self.as_cc(second)
+        self.assertEqual(self.cli("ack", mid)[0], 0)
+        rc, out, err = self.cli("inbox", "acks", mid, "--json")
+        self.assertEqual(rc, 0, err)
+        states = {r["slot"]: r["state"] for r in json.loads(out)["recipients"]}
+        self.assertEqual(states, {"cc:" + first["sessionId"]: "pending", "cc:" + second["sessionId"]: "acked"})
+        # The sender sees the same per-recipient state.
+        self.as_codex(tid)
+        rc, out, err = self.cli("inbox", "acks", mid, "--json")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual({r["slot"]: r["state"] for r in json.loads(out)["recipients"]}, states)
+
+    def test_record_needs_an_identifiable_caller_and_at_most_64_recipients(self):
+        _lb, target = self.peer("cc-target", pid=os.getppid())
+        rc, _out, err = self.cli("record", "--to", "cc:%s" % target["sessionId"], "--message", "x")
+        self.assertEqual(rc, 1)
+        self.assertIn("cannot tell which session is asking", err)
+        tid, _rollout = self.one_thread()
+        self.as_codex(tid)
+        args = []
+        for _i in range(sp_constants.JOURNAL_MAX_RECIPIENTS + 1):
+            args += ["--to", "cc:%s" % target["sessionId"]]
+        rc, _out, err = self.cli("record", *args, "--message", "x")
+        self.assertEqual(rc, 1)
+        self.assertIn("at most", err)
+
+    def test_handover_lets_the_successor_read_and_ack(self):
+        _la, first = self.peer("cc-first", pid=os.getpid())
+        _lb, second = self.peer("cc-second", pid=os.getppid())
+        tid, _rollout = self.one_thread()
+        self.as_codex(tid)
+        _rc, out, _err = self.cli("record", "--to", "cc:%s" % first["sessionId"], "--message", "carry on", "--json")
+        mid = json.loads(out)["message_id"]
+        self.as_cc(first)
+        rc, out, err = self.cli("inbox", "handover", "--to", "cc:%s" % second["sessionId"], "--json")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(json.loads(out)["to"], "cc:" + second["sessionId"])
+        self.as_cc(second)
+        self.assertEqual(self.cli("inbox", "get", mid)[0], 0)
+        rc, out, err = self.cli("ack", mid, "--for", "cc:%s" % first["sessionId"], "--json")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(json.loads(out)["by"], "cc:" + second["sessionId"])
+
+    def test_a_handover_names_a_typed_identity_not_a_name(self):
+        _la, first = self.peer("cc-first", pid=os.getpid())
+        _lb, _second = self.peer("cc-second", pid=os.getppid())
+        self.as_cc(first)
+        rc, _out, err = self.cli("inbox", "handover", "--to", "cc-second")
+        self.assertEqual(rc, 1)
+        self.assertIn("typed identity", err)
+        self.assertEqual([r for r in self.records() if r["type"] == "handover"], [])
+
+    def test_the_new_commands_take_no_as_or_from_thread(self):
+        mid = new_id()
+        for argv in (
+            ("record", "--to", "cc:x", "--message", "m"),
+            ("inbox", "get", mid),
+            ("inbox", "journal"),
+            ("inbox", "acks", mid),
+            ("inbox", "handover", "--to", "cc:" + new_id()),
+            ("ack", mid),
+        ):
+            for flag in (("--as", "cc:" + new_id()), ("--from-thread", new_id())):
+                with self.subTest(argv=argv, flag=flag[0]):
+                    with self.assertRaises(SystemExit) as raised:
+                        self.cli(*argv, *flag)
+                    self.assertEqual(raised.exception.code, 2)
+
+    def test_existing_inbox_commands_keep_their_own_routing(self):
+        # `list` still needs an OpenCode session; the journal subcommands do not.
+        self.as_codex(new_id())
+        rc, _out, err = self.cli("inbox", "list")
+        self.assertEqual(rc, 1)
+        self.assertIn("OPENCODE_SESSION_ID", err)
+
+
+def listener_frames(listener):
+    time.sleep(0.2)
+    return listener.of_type("user")
+
+
+# ==========================================================================
+# Regressions
+# ==========================================================================
+
+
+class JournalRegressionTests(JournalCliBase):
+    def test_a_mixed_claude_and_codex_environment_ask_behaves_as_before_and_records_the_requester(self):
+        listener, rec = self.peer("cc-target", pid=os.getppid())
+        _lo, other = self.peer("cc-other", pid=os.getpid())
+        tid, _rollout = self.one_thread()
+        os.environ["CLAUDE_CODE_SESSION_ID"] = other["sessionId"]
+        os.environ["CODEX_THREAD_ID"] = tid
+        proc = self.spawn("ask", "--to", "cc:cc-target", "--message", "q?", "--timeout", "30", "--json")
+        frame = wait_for(lambda: listener.of_type("user"))[0]
+        rid = frame["message"]["content"].split('id="')[1].split('"')[0]
+        entry = self.entry(rid)
+        self.assertEqual(entry["from"], "codex:" + tid)
+        self.assertEqual(entry["to"], ["cc:" + rec["sessionId"]])
+        rc, _out, err = self.reply_as(rec["sessionId"], rid, "ok")
+        self.assertEqual(rc, 0, err)
+        out, _unused = proc.communicate(timeout=30)
+        self.assertEqual(proc.returncode, 0, out)
+        self.assertEqual(json.loads(out.strip().splitlines()[-1])["message"], "ok")
+
+    def test_control_characters_in_names_and_bodies_are_sanitized_in_human_output_only(self):
+        hostile = "evil\x1b[31mred\x1b[0m\x07\nsecond line"
+        _lb, target = self.peer(hostile, pid=os.getppid())
+        tid, _rollout = self.one_thread()
+        self.as_codex(tid)
+        body = "a\x1b[31mred\x1b[0m\x07b\x00c"
+        rc, out, err = self.cli("record", "--to", "cc:%s" % target["sessionId"], "--message", body)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(len(out.splitlines()), 2, out)
+        for bad in ("\x1b", "\x07", "\x00"):
+            self.assertNotIn(bad, out)
+        self.assertIn("evilred", out)
+        mid = out.splitlines()[0].split()[2].rstrip(":")
+        self.as_cc(target)
+        rc, out, err = self.cli("inbox", "get", mid)
+        self.assertEqual(rc, 0, err)
+        for bad in ("\x1b", "\x07", "\x00"):
+            self.assertNotIn(bad, out)
+        rc, out, err = self.cli("inbox", "get", mid, "--json")
+        self.assertEqual(json.loads(out)["body"], body)
