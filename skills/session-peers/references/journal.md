@@ -77,10 +77,9 @@ Casual native messages stay unrecorded.
   and prints `note: sender identity not detected; recorded with no sender`.
 - For correlated requests, `from` follows the `--from-thread` rule. When both
   an explicit `--from-thread` and the environment's Codex thread are UUIDs and
-  differ, `ask`, `dispatch` and `await` refuse (exit 2). The check lives in
-  `_requester`; `send --from-thread` has no such check. A Claude environment
-  may still name a thread, so there `from` is a claim. This is an accepted
-  limit.
+  differ, `ask`, `dispatch` and `await` refuse (exit 2); `send --from-thread`
+  has no such check. A Claude environment may still name a thread, so there
+  `from` is a claim. This is an accepted limit.
 - Journal commands refuse an environment that names more than one runtime
   (Claude, Codex, OpenCode). Unset the variables of the others, as the error
   text shows, e.g. `env -u CODEX_THREAD_ID -u CODEX_SESSION_ID peers.py ...`.
@@ -125,8 +124,8 @@ detected identity.
 - **Retrieval guarantee (#160 channel contract):** a body stays available until
   it is 14 days old while it is un-ACKed and unsettled, or while its
   correlated mailbox is live (never past the 14-day age cap). There is no
-  guarantee once it is fully ACKed or settled. A channel history that must keep the body longer should keep its own
-  copy.
+  guarantee once it is fully ACKed or settled. A channel history that must keep the body
+  longer should keep its own copy.
 
 An entry past the age cap is shown `[expired]` until a write prunes it.
 
@@ -135,16 +134,17 @@ An entry past the age cap is shown `[expired]` until a write prunes it.
 | Code | When | Meaning |
 | --- | --- | --- |
 | 75 | Before sending | Journal full. On a sending command nothing was sent. `--json` prints `{"status":"journal_full","detail":...}`. Recipients `ack`, or wait for expiry, then retry. `ack` and `inbox handover` can also return 75 when even the event reserve is exhausted. |
-| 1 | Before sending | Journal unavailable or refused (bad mode, lock held, not a recipient, unknown id). On a sending command nothing was sent; for read refusals (not a recipient, unknown id) nothing is sent by definition. |
+| 1 | Before sending, or after a reported transport failure | Journal unavailable or refused (bad mode, lock held, not a recipient, unknown id): on a sending command nothing was sent. A transport failure whose `transport_error` was recorded also exits 1; delivery is then unconfirmed, as above. |
 | 76 | After transport | A journal update after a transport attempt failed (the command prints `journal update failed: ...` on stderr). The transport itself may have succeeded or failed. |
 
 On 76 read the transport result the command printed:
 
 - If it reports success (sent, queued, replied, or the consumed reply body was
   printed), the message went out or the reply was taken. Do NOT resend.
-- If it reports a delivery failure (`delivery_failed` or a "could not
-  send/queue" error), nothing was delivered: the journal could not even record
-  the `transport_error`. A retry is a fresh send.
+- If it reports a delivery failure (for example `delivery_failed`, "could not
+  send/queue", "codex queue failed" or "nothing queued"), the transport reported
+  failure, but delivery is unconfirmed: a timed-out queue or API call may still
+  have delivered. Check the recipient before resending.
 
 Never treat 76 as a reason to resend blindly. Run `inbox acks MSG_ID` to inspect
 the journal, and report the failure. The command never resends or retries.
@@ -162,9 +162,7 @@ the journal, and report the failure. The command never resends or retries.
   atomic rewrites). No claim is made about storage loss or power loss.
 - **Temp-file recovery:** an interrupted rewrite leaves the old journal intact.
   The next locked write removes stale `journal.*.tmp.*` files, and a torn final
-  line is truncated before the next append. Durability holds against a process
-  crash, not against storage or power loss.
-- **Same-OS-user read-only reader:** `journal.read_only_view()` in
-  `scripts/session_peers/journal.py` is the reader for the planned local
-  dashboard (#161); not yet used. It is not a session, never ACKs, writes or
+  line is truncated before the next append.
+- **Same-OS-user read-only reader:** `journal.read_only_view()` is a
+  read-only reader for the same OS user. It is not a session, never ACKs, writes or
   repairs, checks no identity and has no CLI.

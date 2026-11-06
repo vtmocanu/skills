@@ -44,8 +44,8 @@ See [the journal](journal.md) for the full contract.
   If it reports success (sent, queued, replied, or the consumed reply body was
   printed), the message went out or the reply was taken: do not resend. If it
   reports a delivery failure (`delivery_failed` or a "could not send/queue"
-  error), nothing was delivered and a retry is a fresh send. Never resend
-  blindly on 76.
+  error), delivery is unconfirmed: check the recipient before resending. Never
+  resend blindly on 76.
 - Exit 75 (journal full) and exit 1 on a sending command sent nothing; exit 1
   also covers read refusals (not a recipient, unknown id). `ack` and
   `inbox handover` can return 75 when even the event reserve is exhausted. For

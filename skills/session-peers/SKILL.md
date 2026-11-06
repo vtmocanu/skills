@@ -68,9 +68,9 @@ Every correlated ask/dispatch request and reply is journaled automatically.
   Exit 76 means a journal update after a transport attempt failed; read the
   transport result the command printed. If it reports success (sent, queued,
   replied, or the consumed reply body was printed), the message went out or
-  the reply was taken: do not resend. If it reports a delivery failure
-  (`delivery_failed` or a "could not send/queue" error), nothing was
-  delivered and a retry is a fresh send. Never resend blindly on 76.
+  the reply was taken: do not resend. If it reports a delivery failure,
+  delivery is unconfirmed (a timed-out call may still have delivered): check
+  the recipient before resending. Never resend blindly on 76.
 - `record`, `ack` and `inbox get|journal|acks|handover` take no `--as` or
   `--from-thread`; identity comes from the environment.
 

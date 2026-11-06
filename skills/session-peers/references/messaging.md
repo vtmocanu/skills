@@ -90,7 +90,7 @@ UUIDs and titles. Use the full UUID for consequential requests.
   exits before sending (75 full, 1 otherwise). Exit 76 means a journal update
   after a transport attempt failed: if the printed transport result reports
   success the message went out, so do not resend; if it reports a delivery
-  failure nothing was delivered and a retry is a fresh send. See
+  failure, delivery is unconfirmed, so check the recipient before resending. See
   [the journal](journal.md#exit-codes).
 - Every correlated `ask`/`dispatch` request and its `reply` is journaled, with no
   flag. The request is recorded before its mailbox is written or anything is
@@ -98,8 +98,8 @@ UUIDs and titles. Use the full UUID for consequential requests.
 - `ask`, `dispatch` and `await` refuse (exit 2) a `--from-thread` that differs
   from the Codex thread the environment names (`CODEX_THREAD_ID`/
   `CODEX_SESSION_ID`), because the journal's `from` is that identity. The check
-  is in `_requester` and applies only when both values are UUIDs;
-  `send --from-thread` has no such check.
+  applies only when both values are UUIDs; `send --from-thread` has no such
+  check.
 
 ### Codex to Claude: choose `ask`, `dispatch`/`await`, or `send`
 
