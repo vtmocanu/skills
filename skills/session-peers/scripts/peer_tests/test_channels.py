@@ -279,6 +279,20 @@ class ChannelHistoryTests(ChannelBase):
         self.assertEqual(len(after["members"]), len(before["members"]) + 1)
         self.assertEqual(self.kinds("ops"), ["channel.created"])
 
+    def test_unusable_history_dir_is_a_clean_error_after_membership(self):
+        self.ok("create", "ops")
+        before = sp_channels.read_channel("ops")
+        history = pathlib.Path(sp_channels.history_dir())
+        shutil.rmtree(str(history))
+        history.write_text("not a directory")
+        self.as_cc()
+        rc, out, err = self.ch("join", "ops")
+        self.assertEqual(rc, 1)
+        self.assertTrue(err.startswith("error:"), err)
+        self.assertNotIn("Traceback", err)
+        after = sp_channels.read_channel("ops")
+        self.assertEqual(len(after["members"]), len(before["members"]) + 1)
+
     def test_create_writes_membership_before_history(self):
         with mock.patch.object(sp_channels, "_failpoint", side_effect=RuntimeError("crash")):
             with self.assertRaises(RuntimeError):

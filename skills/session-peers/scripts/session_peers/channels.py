@@ -275,8 +275,8 @@ def append_history(key, kind, actor, data=None):
 
     ``actor`` is a typed id. Raises ChannelError(code 1) when the append fails.
     """
-    _ensure_dir(history_dir())
     try:
+        _ensure_dir(history_dir())
         return sp_topics.topic_post(
             topic_name(key), _actor_identity(actor) if actor else {}, kind=kind,
             data=data if data is not None else {}, base=history_dir(),

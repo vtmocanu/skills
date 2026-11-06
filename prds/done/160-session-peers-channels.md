@@ -21,7 +21,7 @@ Named **channels** with explicit membership. A channel is a member list plus a h
 
 Commands:
 
-- `peers.py channel create NAME [--member ADDR]...`, `channel join NAME`, `channel leave NAME`, `channel remove NAME ADDR` (the channel's owner only: its creator, or for a buddy channel the lead), `channel list [--json]`, `channel members NAME [--json]`, `channel tail NAME [--since SEQ] [--json]`. ACK state for a journaled message is #157's `peers.py inbox acks MSG_ID` (no separate channel command).
+- `peers.py channel create NAME [--member ADDR]...`, `channel join NAME`, `channel leave NAME`, `channel remove NAME ADDR` (the channel's owner only: its creator, or for a buddy channel the lead, or its handover successor), `channel list [--json]`, `channel members NAME [--json]`, `channel tail NAME [--since SEQ] [--json]`. ACK state for a journaled message is #157's `peers.py inbox acks MSG_ID` (no separate channel command).
 - `peers.py send --to '#NAME' (--message TEXT | --message-file PATH) [--record]` appends the message to the channel history (journaling it first, as one #157 entry naming every intended recipient, when `--record` is given or the text starts with `@all`), then delivers to each member except the sender.
 - `peers.py leave` and `peers.py handover --to TYPED_ADDR` (lifecycle, below).
 

@@ -16,7 +16,7 @@ Ordinary [topics](topics.md) stay scoped to `CODEX_HOME`.
 | --- | --- |
 | `<key>.json`, `<key>.lock` | Membership record of one stored channel (atomic replace) and its flock. |
 | `.channels.lock` | Store lock, taken by `create` (the leading dot keeps it out of the name space). |
-| `history/` | One topic log per channel, `channel:<key>`. |
+| `history/` | One topic log per channel, topic `channel:<key>`; the files are named by a digest of that topic. |
 | `sends/<mid>.lock` | Per-send flock, held while a fan-out is in flight. |
 | `left/` | Leave markers of derived `#general`, `<sha256 of typed id>.json`. |
 | `allcast/` | `@all` allowance stamp and lock per sender, `<sha256 of typed id>.json`/`.lock`. |
@@ -34,7 +34,7 @@ failed.
 | --- | --- |
 | `channel create NAME [--member ADDR]...` | Create a channel you own; you are a member. `ADDR` is a typed id or a name (an ambiguous name is refused with candidates). |
 | `channel join NAME` / `channel leave NAME` | Add or remove yourself. Idempotent (`already a member of`, `not a member of`). Buddy channels cannot be joined. |
-| `channel remove NAME ADDR` | Owner only: its creator, or for a buddy channel the lead. Accepts a typed id of a session that no longer exists. |
+| `channel remove NAME ADDR` | Owner only: the current owner (its creator, the lead of a buddy channel, or a handover successor). Accepts a typed id of a session that no longer exists. |
 | `channel list [--json]` | Stored channels with kind, member count, your role (`owner`, `member`, `-`) and owner. |
 | `channel members NAME [--json]` | Members with `live`, `unverified` or `gone` ([liveness](#liveness)); the owner is marked. |
 | `channel tail NAME [--since SEQ] [--limit N] [--json]` | History after a cursor, ending with `next: --since N`; a cursor behind the oldest entry prints `gap: entries A..B pruned`. Default limit 20. `--json` adds a `view` (delivery state) to each send entry. |
@@ -76,9 +76,11 @@ failed.
 - `--record` journals the message first as one [journal](journal.md) entry
   naming every deliverable recipient, so each can `ack` it. Check with
   `inbox acks MSG_ID`; the sender is not in the tally.
-- Before anything is journaled the wrapped size is checked for Claude members
-  and the argv budget for Codex members; an oversize message exits 1 with
-  nothing journaled or sent. The 1 MiB cap applies as for `send`.
+- Before anything is journaled the wrapped size is checked: the Claude wrapper
+  limit (measured with the largest Claude or OpenCode framing) applies to every
+  post with any recipient, and the Codex argv budget only when a Codex member
+  is addressed. An oversize message exits 1 with nothing journaled or sent. The
+  1 MiB cap applies as for `send`.
 - One member's failure is recorded and does not stop the rest.
 
 ### Outcomes
@@ -178,13 +180,13 @@ sender.
   wait). The allowance is spent when the post is reserved, before the journal
   write, and restored if the journal refuses it.
 - A future-dated stamp (after the clock stepped back, or a planted file)
-  refuses until the clock catches up. To recover sooner, delete
+  refuses until 60 s after the stamp time. To recover sooner, delete
   `~/.codex/session-peers/channels/allcast/<sha256 of your typed id>.json`.
 - The limits live in the fan-out, so a CLI caller is bounded too.
 
 ```bash
-peers.py send --to '#general' --message '@all freeze main until the release is tagged'
-peers.py inbox acks MSG_ID
+<this skill's directory>/scripts/peers.py send --to '#general' --message '@all freeze main until the release is tagged'
+<this skill's directory>/scripts/peers.py inbox acks MSG_ID
 ```
 
 ## Leave and handover
@@ -193,7 +195,10 @@ peers.py inbox acks MSG_ID
   appends `left`, then writes the `#general` leave marker (the session stays
   live; derived `#general` omits it). Ownership is kept. A failure on one
   channel is reported, the rest still run, and the exit is 1. A session that
-  already left everywhere exits 0.
+  already left everywhere exits 0. This includes the lead's own buddy channel:
+  `buddy set` only adds the buddy and never re-adds a lead that left, so the
+  lead is back in it only if the channel is created anew; `channel join` is
+  refused for a buddy channel.
 - `handover` is two commands in order: `peers.py inbox handover --to TYPED`,
   then `peers.py handover --to TYPED`. The second needs that grant recorded and
   never creates one: otherwise it exits 2 and prints the `inbox handover`
@@ -240,11 +245,6 @@ apply.
 
 ## Decisions
 
-- **Every message keeps its body in history; journaling is for consequential
-  ones.** The journal may prune a fully ACKed or settled body, so history never
-  relies on it.
-D1 to D3 were decided by the lander and its buddy on 2026-11-06.
-
 - **D1:** a member the journal cannot address (its recipient check fails) is
   not delivered to and is reported `refused: <reason>` with `ACK not requested
   (unverified)`, outside the `inbox acks` denominator; the rest are delivered
@@ -255,7 +255,6 @@ D1 to D3 were decided by the lander and its buddy on 2026-11-06.
   lookup of that session says not found; anything less leaves it unverified,
   delivered without waking it. Only runtime-verified absence marks any member
   gone.
-- Channel handover reuses `inbox handover`'s grant: one verification concept.
 
 ## Failure model and limits
 

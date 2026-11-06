@@ -1,6 +1,6 @@
 ---
 name: done
-description: Wraps up a working session. Checks git state in every directory the session touched, removes git artifacts the session created once they are safely unneeded, reviews unfinished work, and gives a plain verdict on whether the session can close. Use when the user invokes /done or asks whether the session is done or can be closed.
+description: Wraps up a working session. Checks git state in every directory the session touched, removes git artifacts the session created once they are safely unneeded, reviews unfinished work, and gives a plain verdict on whether the session can close, leaving its session-peers channels when it can. Use when the user invokes /done or asks whether the session is done or can be closed.
 ---
 
 # Done
@@ -21,6 +21,9 @@ Are we done here? Can we close this session? Decide and tell me, after checking:
 
   Never force a removal past git's own safety checks, except deleting a branch whose work the preservation test above has proven. Never touch the `main` worktree, stashes, remote branches, or anything another session or the user created. List what you removed.
 - **Outstanding work**: review this session for anything unfinished: partial edits, failed or skipped steps, open TODOs, loose ends.
-- **Channels**: only when your verdict is that the session can close, run `~/.agents/skills/session-peers/scripts/peers.py leave` to leave every session-peers channel and `#general`, and report its result. Skip it when anything is left to do, when the session stays open, or when session-peers is not installed.
 
-Then give me a plain verdict: can we close the session, or is there something left to do? Apart from that cleanup and the channel leave, do not commit, push, or change anything; report only.
+Then give me a plain verdict: can we close the session, or is there something left to do?
+
+If the verdict is that the session can close, then leave its session-peers channels. Run `peers.py leave` from the installed session-peers skill, `~/.agents/skills/session-peers/scripts/peers.py`, else `~/.claude/skills/session-peers/scripts/peers.py`; if neither exists, skip this step. `leave` takes the session out of every stored channel it is in and out of `#general`. Report its output and exit code. On a non-zero exit, name what was not left, do not retry, and do not change the verdict. Skip the step when anything is left to do or the session stays open.
+
+Apart from that cleanup and the channel leave, do not commit, push, or change anything; report only.
