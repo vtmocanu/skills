@@ -468,9 +468,9 @@ class OpenCodeSendTests(OpenCodeBase):
         self.assertEqual(rc, 2)
         self.assertEqual(
             err,
-            "error: this Claude Code session must reach Claude Code session cc-main with "
-            "native SendMessage, not peers.py. Use SendMessage with to: \"cc-main\". Typed ID "
-            "cc:'s1' is for disambiguation only; do not pass it to SendMessage.\n",
+            "error: this environment names an OpenCode session and a Claude Code or Codex "
+            "session, so the sender cannot be attributed; pass explicit --from-* flags. "
+            "Nothing was sent.\n",
         )
         time.sleep(0.2)
         self.assertEqual(listener.of_type("user"), [])
