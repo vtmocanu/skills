@@ -796,6 +796,22 @@ class ChannelInterruptedSendTests(ChannelSendBase):
         self.assertEqual(view["state"], "unverified")
         self.assertEqual([r["state"] for r in view["recipients"]], ["unverified"])
 
+    def test_an_outcome_that_lands_between_the_lock_probe_and_the_re_search_reads_complete(self):
+        mid = self.crash_at("send_before_outcome")
+        real_probe = sp_channels._probe_send_lock
+
+        def land_then_free(message_id):
+            real_probe(message_id)
+            sp_channels.append_history("ops", "channel.outcome", self.me, {
+                "message_id": message_id, "outcomes": {"codex:" + self.tid: "transport accepted"}})
+            return "free"
+
+        with mock.patch.object(sp_channels, "_probe_send_lock", land_then_free):
+            view = self.view_of()
+        self.assertEqual(view["state"], "complete")
+        self.assertEqual([r["state"] for r in view["recipients"]], ["transport accepted"])
+        self.assertTrue(mid)
+
     def test_a_missing_lock_without_an_outcome_reads_unknown(self):
         mid = self.crash_at("send_after_history")
         self.lock_file(mid).unlink()
@@ -908,3 +924,76 @@ class ChannelInterruptedSendTests(ChannelSendBase):
             rc, _result, err = self.send()
         self.assertEqual(rc, 0, err)
         self.assertFalse(list(pathlib.Path(sp_channels.sends_dir()).glob("*.lock")))
+
+
+class ChannelRecordTrustTests(ChannelSendBase):
+    """A membership file is peer-writable and is not trusted on read."""
+
+    def setUp(self):
+        super().setUp()
+        self.sender_cc()
+
+    def rewrite(self, mutate, name="ops"):
+        path = sp_channels._record_path(name)
+        with open(path) as fh:
+            rec = json.load(fh)
+        mutate(rec)
+        with open(path, "w") as fh:
+            json.dump(rec, fh)
+
+    def test_a_roster_over_the_member_cap_is_refused_not_truncated(self):
+        self.channel("ops")
+        extra = ["cc:" + new_uuid() for _ in range(sp_constants.CHANNEL_MAX_MEMBERS + 1)]
+        self.rewrite(lambda rec: rec["members"].extend(extra))
+        rc, _result, err = self.send()
+        self.assertEqual(rc, 2)
+        self.assertIn("CHANNEL_MAX_MEMBERS", err)
+        self.assertEqual(self.history(), [e for e in self.history() if e["kind"] == "channel.created"])
+        self.nothing_delivered()
+
+    def test_a_member_listed_many_times_is_delivered_once(self):
+        listener, peer = self.peer_cc("beta")
+        self.channel("ops", peer)
+        self.rewrite(lambda rec: rec["members"].extend([peer] * 20 + [peer.upper().replace("CC:", "cc:")]))
+        rc, result, err = self.send()
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(list(result["outcomes"]), [peer])
+        self.assertEqual(len(listener.of_type("user")), 1)
+
+    def test_malformed_members_are_dropped(self):
+        self.channel("ops")
+        self.rewrite(lambda rec: rec["members"].extend([7, None, {"a": 1}, "nonsense", "cc:short", ["cc:x"]]))
+        self.assertEqual(sp_channels.read_channel("ops")["members"], [self.me])
+        rc, result, err = self.send()
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(result["outcomes"], {})
+
+    def test_a_record_with_a_non_string_field_reads_as_absent(self):
+        self.channel("ops")
+        for field in ("display", "kind", "owner"):
+            self.rewrite(lambda rec: rec.__setitem__(field, 5))
+            self.assertIsNone(sp_channels.read_channel("ops"), field)
+            self.rewrite(lambda rec: rec.__setitem__(field, "ops"))
+        self.assertIsNotNone(sp_channels.read_channel("ops"))
+
+    def test_an_oversized_record_file_is_refused_unread(self):
+        self.channel("ops")
+        self.rewrite(lambda rec: rec.__setitem__("pad", "x" * sp_channels.RECORD_MAX_BYTES))
+        self.assertIsNone(sp_channels.read_channel("ops"))
+        rc, _result, err = self.send()
+        self.assertEqual(rc, 2)
+        self.assertIn("no channel named #ops", err)
+        self.nothing_delivered()
+
+    def test_a_body_over_the_codex_argv_budget_with_record_journals_nothing(self):
+        tid, _rollout = self.one_thread()
+        self.channel("ops", "codex:" + tid)
+        body = "x" * (sp_runtime.argv_text_budget() + 10)
+        self.assertLess(len(body), sp_constants.MAX_TEXT_CHARS)
+        rc, _out, err = self.cli("send", "--to", "#ops", "--message", body, "--record")
+        self.assertEqual(rc, 1)
+        self.assertIn("codex queue", err)
+        self.assertIn("nothing was journaled or sent", err)
+        self.assertEqual(self.journal_entries(), [])
+        self.assertEqual(self.send_entries(), [])
+        self.nothing_delivered()

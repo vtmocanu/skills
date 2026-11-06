@@ -80,6 +80,35 @@ class ChannelCommandTests(ChannelBase):
         self.assertEqual(tail["next"], 5)
         self.assertIn("removed", self.ok("tail", "ops", "--since", "4"))
 
+    def test_list_escapes_a_record_kind_in_human_output(self):
+        self.ok("create", "ops")
+        path = sp_channels._record_path("ops")
+        rec = json.load(open(path))
+        rec["kind"] = "named\x1b]0;pwned\x07\x1b[31mred"
+        json.dump(rec, open(path, "w"))
+        out = self.ok("list")
+        self.assertNotIn("\x1b", out)
+        self.assertNotIn("\x07", out)
+        self.assertIn("#ops", out)
+
+    def test_channel_json_escapes_bidi_and_c1_controls(self):
+        self.ok("create", "ops")
+        sp_channels.append_history("ops", "channel.note", self.me, {"body": "a\u202eb\x9bc"})
+        rc, out, err = self.ch("tail", "ops", "--json")
+        self.assertEqual(rc, 0, err)
+        for raw in ("\u202e", "\x9b"):
+            self.assertNotIn(raw, out)
+        self.assertIn("\\u202e", out)
+        self.assertIn("\\u009b", out)
+        self.assertEqual(json.loads(out)["entries"][-1]["data"]["body"], "a\u202eb\x9bc")
+
+    def test_describe_entry_tolerates_a_malformed_outcomes_value(self):
+        entry = {"seq": 3, "ts": "t\x1b[2Jx", "kind": "channel.outcome", "from_kind": "cc", "from_sid": "s",
+                 "data": {"message_id": "m", "outcomes": "nope"}}
+        line = sp_channels.describe_entry(entry)
+        self.assertIn("for 0 recipients", line)
+        self.assertNotIn("\x1b", line)
+
     def test_remove_is_owner_only_and_needs_a_member(self):
         self.ok("create", "ops")
         other = self.as_cc()

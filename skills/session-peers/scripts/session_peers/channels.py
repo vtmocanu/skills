@@ -57,6 +57,9 @@ _sleep = time.sleep
 # name can produce it, so ``<key>.lock`` never aliases it.
 STORE_LOCK = ".channels.lock"
 
+# A membership record larger than this is refused unread (a real one is a few KiB).
+RECORD_MAX_BYTES = 256 * 1024
+
 
 class ChannelError(Exception):
     """A refused channel operation; carries the exit code."""
@@ -160,11 +163,36 @@ def stored_key(value):
 
 
 def read_channel(key):
-    """The membership record of ``key``, or None."""
-    rec = sp_runtime.read_json(_record_path(key), None)
+    """The membership record of ``key``, or None.
+
+    The file is peer-writable, so it is not trusted: one over ``RECORD_MAX_BYTES``
+    or with a non-string key, display, kind or owner reads as absent. Members are
+    canonicalised, and a non-string, invalid or repeated one is dropped. A roster
+    still over ``CHANNEL_MAX_MEMBERS`` is returned whole; ``_members_for`` refuses
+    a send to it.
+    """
+    path = _record_path(key)
+    try:
+        if os.stat(path).st_size > RECORD_MAX_BYTES:
+            return None
+    except OSError:
+        return None
+    rec = sp_runtime.read_json(path, None)
     if not isinstance(rec, dict) or rec.get("key") != key or not isinstance(rec.get("members"), list):
         return None
-    return rec
+    if not all(isinstance(rec.get(f), str) for f in ("display", "kind", "owner")):
+        return None
+    members = []
+    for member in rec["members"]:
+        if not isinstance(member, str):
+            continue
+        try:
+            member = sp_journal._norm(member)
+        except ValueError:
+            continue
+        if member not in members:
+            members.append(member)
+    return dict(rec, members=members)
 
 
 def list_keys():
@@ -548,13 +576,13 @@ def _cmd_list(args, me):
             "owner": rec.get("owner"), "members": len(rec["members"]), "you": role,
         })
     if args.json:
-        print(json.dumps(rows, ensure_ascii=False))
+        print(json.dumps(rows))
         return 0
     if not rows:
         print("no channels")
     for row in rows:
         print("#%s  %s  %d members  %s  owner %s" % (
-            row["name"], row["kind"], row["members"], row["you"],
+            row["name"], sp_journal._human(row["kind"]), row["members"], row["you"],
             sp_journal._human(row["owner"]),
         ))
     return 0
@@ -568,8 +596,7 @@ def _cmd_members(args, me):
         for m in rec["members"]
     ]
     if args.json:
-        print(json.dumps({"channel": rec["key"], "display": rec.get("display"), "members": rows},
-                         ensure_ascii=False))
+        print(json.dumps({"channel": rec["key"], "display": rec.get("display"), "members": rows}))
         return 0
     for row in rows:
         print("%s  %s%s" % (sp_journal._human(row["member"]), row["liveness"],
@@ -593,14 +620,15 @@ def describe_entry(entry):
     elif kind == EVENT_REMOVED:
         summary = "%s removed" % member
     elif kind == EVENT_OUTCOME:
+        outcomes = data.get("outcomes")
         summary = "outcomes of message %s for %d recipients" % (
-            data.get("message_id"), len(data.get("outcomes") or {}))
+            data.get("message_id"), len(outcomes) if isinstance(outcomes, dict) else 0)
     elif isinstance(data.get("body"), str):
         summary = data["body"]
     else:
-        summary = json.dumps(data, ensure_ascii=False, sort_keys=True)
+        summary = json.dumps(data, sort_keys=True)
     return "#%d %s %s [%s]: %s" % (
-        entry["seq"], entry.get("ts"), sp_journal._human(who), sp_journal._human(kind),
+        entry["seq"], sp_journal._human(entry.get("ts")), sp_journal._human(who), sp_journal._human(kind),
         sp_journal._human(summary),
     )
 
@@ -620,7 +648,7 @@ def _cmd_tail(args, me):
     }
     if args.json:
         entries = [dict(e, view=views[e["seq"]]) if e["seq"] in views else e for e in result["entries"]]
-        print(json.dumps(dict(result, entries=entries, channel=key), ensure_ascii=False))
+        print(json.dumps(dict(result, entries=entries, channel=key)))
         return 0
     gap = result["gap"]
     if gap:
@@ -688,6 +716,7 @@ def _members_for(key, sender):
             "%s is not a member of #%s; only members can send to it (`peers.py channel join %s`)"
             % (sp_journal._human(sender), key, key)
         )
+    _check_member_cap(len(rec["members"]))  # refused, never truncated
     return list(rec["members"]), None
 
 
@@ -726,6 +755,12 @@ def _check_size(key, mid, sender, members, body, journaled):
         )
     except ValueError as exc:
         raise ChannelError("%s; nothing was journaled or sent" % exc, 1)
+    if any(m.startswith("codex:") for m in members):
+        # Plain `send --record` runs this ahead of journaling for a Codex target.
+        try:
+            sp_codex.check_queue_text(longest)
+        except sp_codex.QueueError as exc:
+            raise ChannelError("%s; nothing was journaled or sent" % exc, 1)
 
 
 def _journal_preflight(members):
