@@ -166,7 +166,8 @@ the journal, and report the failure. The command never resends or retries.
 - **Commit point:** a record or event is committed once its line is fsynced
   (append) or its rewrite is renamed. A later failure writing
   `journal.meta.json` is ignored. Meta is a validated cache, trusted only when
-  its recorded inode and size match the journal; otherwise the journal is parsed
+  its recorded inode and size match the journal and its `next_seq` is above the
+  last line's seq; otherwise the journal is parsed
   and the next seq is max(meta `next_seq`, last seq + 1).
 - **Seq reuse (residual):** the seq can be reused in these cases:
   - Meta is lost or invalid while the journal is empty (everything pruned): seq
@@ -179,15 +180,13 @@ the journal, and report the failure. The command never resends or retries.
     unaffected: no retained grant's `through_seq` reaches it. Low likelihood:
     meta is replaced atomically.
   - Rarely (two consecutive meta write failures on rewrites, plus an inode reuse
-    and an exact size match) a stale meta could be trusted.
+    and an exact size match) a stale meta matches by inode and size. The fast
+    append path also requires the journal's last line to sit below meta's
+    `next_seq`; otherwise it falls back to a full parse, so such a meta never
+    assigns a seq at or below a retained line's.
 
-  For the first two cases the reused seq is harmless (above every retained
-  line). In the stale-meta case the fast append path (every ask/dispatch request
-  and any record without a supplied id) can assign a seq at or below a retained
-  line's. Each later fast append keeps that meta trusted, so every fast-path
-  record appended before the seq passes the highest retained seq (or a parsing
-  write runs) is counted malformed, skipped by the reader and dropped by the
-  next rewrite: one or more records are lost.
+  In every case the reused seq is above every retained line, so handover
+  coverage is unaffected.
 - **Temp-file recovery:** an interrupted rewrite leaves the old journal intact.
   The next locked write removes stale `journal.*.tmp.*` files, and a torn final
   line is truncated before the next append.

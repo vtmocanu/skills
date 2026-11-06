@@ -940,6 +940,22 @@ class JournalMetaFailureTests(JournalBase):
         self.assertEqual(self.meta()["next_seq"], last_before + 3)
         self.assertEqual(self.leftovers(), [])
 
+    def test_a_stale_meta_matching_inode_and_size_is_not_trusted(self):
+        # Inode reuse after failed meta writes: inode and size match, next_seq is old.
+        self.msg()
+        self.msg(body="second")
+        self.msg(body="third")
+        meta = self.meta()
+        meta["next_seq"] = 2
+        with open(self.mpath, "w") as fh:
+            json.dump(meta, fh)
+        os.chmod(self.mpath, 0o600)
+        rid = str(uuid.uuid4())
+        journal.record_request(rid, cc(), [self.A], "ask", self.now + 600, "/nonexistent/x", fresh_id=True)
+        self.assertIsNotNone(self.entry(rid))
+        self.assertEqual(self.entry(rid)["seq"], 4)
+        self.assertEqual(journal.read_only_view()["malformed_lines"], 0)
+
     def test_fast_path_append_succeeds_when_the_meta_write_fails(self):
         self.msg()
         last = self.last_seq()

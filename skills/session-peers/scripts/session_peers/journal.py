@@ -352,10 +352,8 @@ def _parse(data, now):
     Any line with an integer ``seq`` advances the last seq, even a malformed or
     skipped one, so a seq is not reused while that line survives (a rewrite that
     drops the highest-seq record, or an empty journal with no meta, can reuse
-    it). One residual: a stale meta that is still trusted on the fast append
-    path can hand out seqs at or below a retained line's; each such record is
-    then counted malformed here and lost, one or more (references/journal.md,
-    "Durability"). A final line without its newline is a
+    it). The fast append path trusts meta only when the last line's seq is
+    below its next seq (`_Writer.trusted_meta`). A final line without its newline is a
     torn or in-flight write: ignored.
     """
     recs, malformed, last_seq, pos = [], 0, 0, 0
@@ -843,9 +841,37 @@ class _Writer:
         return _Model(recs), next_seq, malformed
 
     def trusted_meta(self):
+        """Meta for a fast append, or None to fall back to a full parse.
+
+        Inode and size alone can match a stale meta (inode reuse after two failed
+        meta writes), so the journal's last line must also sit below its next seq.
+        """
         self.repair_tail()
         meta, trusted = self.read_meta()
-        return meta if trusted else None
+        if not trusted:
+            return None
+        tail = self._tail_seq()
+        if tail is None or meta["next_seq"] <= tail:
+            return None
+        return meta
+
+    def _tail_seq(self):
+        """The ``seq`` of the last complete line (0 when empty), or None when unreadable."""
+        size = self.size()
+        if size == 0:
+            return 0
+        start, chunk = size, 1 << 16
+        while True:
+            start = max(0, start - chunk)
+            os.lseek(self.jfd, start, os.SEEK_SET)
+            data = os.read(self.jfd, size - start)
+            nl = data.rfind(b"\n", 0, len(data) - 1)
+            if nl >= 0 or start == 0:
+                break
+            if size - start > sp_constants.JOURNAL_READ_CEILING:
+                return None
+        seq = _loose_seq(data[nl + 1:-1])
+        return seq or None
 
     # -- writing ------------------------------------------------------------
 
