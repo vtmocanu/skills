@@ -124,7 +124,15 @@ def recent_sessions(hours=None):
     """Top-level sessions updated within ``hours`` (newest first)."""
     if hours is None:
         hours = sp_runtime._float_env("SESSION_PEERS_OPENCODE_RECENT_HOURS", 24.0)
-    cutoff_ms = (time.time() - hours * 3600.0) * 1000.0
+    return session_walk((time.time() - hours * 3600.0) * 1000.0)
+
+
+def session_walk(cutoff_ms=None):
+    """Every top-level session, or only those updated at or after ``cutoff_ms``.
+
+    Raises OpenCodeError unless the walk finished: an incomplete walk proves
+    nothing about which sessions exist.
+    """
     out = []
     cursor, seen_cursors, seen_ids = None, set(), set()
     for _page in range(MAX_SESSION_PAGES):
@@ -144,7 +152,8 @@ def recent_sessions(hours=None):
             if view["parent_id"] is not None or view["id"] in seen_ids:
                 continue
             seen_ids.add(view["id"])
-            if isinstance(view["updated_ms"], (int, float)) and view["updated_ms"] < cutoff_ms:
+            if (cutoff_ms is not None and isinstance(view["updated_ms"], (int, float))
+                    and view["updated_ms"] < cutoff_ms):
                 continue
             out.append(view)
         # Cursor order is opaque: an old row cannot prove later rows are old.

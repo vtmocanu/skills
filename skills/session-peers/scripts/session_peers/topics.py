@@ -44,12 +44,46 @@ def validate_topic(topic):
     return topic
 
 
-def _topic_paths(topic):
+def _topic_paths(topic, base=None):
     """(log, meta, lock) paths. The file name is a digest, never the topic,
-    so no topic string can name a path outside the topics directory."""
+    so no topic string can name a path outside the topics directory.
+
+    ``base`` roots the files elsewhere (channel history lives under a
+    user-wide directory); it defaults to the CODEX_HOME-scoped topics dir."""
     digest = hashlib.sha256(topic.encode("utf-8")).hexdigest()[:40]
-    base = os.path.join(topics_dir(), digest)
-    return base + ".jsonl", base + ".meta.json", base + ".lock"
+    if base is None:
+        base = topics_dir()
+    else:
+        os.makedirs(base, mode=0o700, exist_ok=True)
+        os.chmod(base, 0o700)
+    stem = os.path.join(base, digest)
+    return stem + ".jsonl", stem + ".meta.json", stem + ".lock"
+
+
+def _repair_torn_tail(log_path):
+    """Cut a final line that lacks its newline (a crashed append). Call under
+    the lock: the next append would otherwise glue onto the torn bytes."""
+    try:
+        fd = os.open(log_path, os.O_RDWR)
+    except FileNotFoundError:
+        return
+    try:
+        size = os.fstat(fd).st_size
+        if size == 0 or os.pread(fd, 1, size - 1) == b"\n":
+            return
+        keep, pos = 0, size
+        while pos > 0:
+            start = max(0, pos - 65536)
+            chunk = os.pread(fd, pos - start, start)
+            idx = chunk.rfind(b"\n")
+            if idx >= 0:
+                keep = start + idx + 1
+                break
+            pos = start
+        os.ftruncate(fd, keep)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 @contextlib.contextmanager
@@ -134,7 +168,7 @@ def _write_topic_meta(meta_path, topic, next_seq, last_ts):
     )
 
 
-def topic_post(topic, from_identity, kind=None, text=None, data=sp_constants._NO_DATA):
+def topic_post(topic, from_identity, kind=None, text=None, data=sp_constants._NO_DATA, base=None):
     """Append one entry and return it. Seq is unique and monotonic per topic."""
     validate_topic(topic)
     if kind is not None and not sp_constants.TOPIC_KIND_RE.match(kind):
@@ -142,8 +176,9 @@ def topic_post(topic, from_identity, kind=None, text=None, data=sp_constants._NO
             "--kind must be 1-64 characters of letters, digits, '.', '_', ':' "
             "or '-', starting with a letter or digit", 2
         )
-    log_path, meta_path, lock_path = _topic_paths(topic)
+    log_path, meta_path, lock_path = _topic_paths(topic, base)
     with _topic_lock(lock_path):
+        _repair_torn_tail(log_path)
         now = time.time()
         _entries, next_seq = _topic_state(topic, log_path, meta_path, now)
         entry = {
@@ -170,12 +205,19 @@ def topic_post(topic, from_identity, kind=None, text=None, data=sp_constants._NO
     return entry
 
 
-def topic_tail(topic, since=None, limit=sp_constants.TOPIC_TAIL_DEFAULT):
+def topic_prune(topic, base=None):
+    """Apply retention to one topic (under ``base``) now."""
+    log_path, meta_path, lock_path = _topic_paths(topic, base)
+    with _topic_lock(lock_path):
+        _topic_state(topic, log_path, meta_path, time.time())
+
+
+def topic_tail(topic, since=None, limit=sp_constants.TOPIC_TAIL_DEFAULT, base=None):
     """{"entries", "next", "gap"}: entries with seq > since in order, or the
     last ``limit`` when since is None. ``gap`` names pruned seqs the cursor
     skipped, so a slow reader learns it lost entries instead of guessing."""
     validate_topic(topic)
-    log_path, meta_path, lock_path = _topic_paths(topic)
+    log_path, meta_path, lock_path = _topic_paths(topic, base)
     if not os.path.exists(meta_path) and not os.path.exists(log_path):
         return {"topic": topic, "entries": [], "next": since or 0, "gap": None}
     with _topic_lock(lock_path):
@@ -310,6 +352,11 @@ def cmd_topic(args):
 
 def _cmd_topic_post(args):
     validate_topic(args.topic)
+    if args.topic.startswith(sp_constants.CHANNEL_TOPIC_PREFIX):
+        raise TopicError(
+            "topics starting with %r are reserved for channels; use peers.py send "
+            "--to '#NAME'" % sp_constants.CHANNEL_TOPIC_PREFIX, 2
+        )
     data, text = sp_constants._NO_DATA, None
     try:
         if args.json_file:

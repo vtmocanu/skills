@@ -142,6 +142,15 @@ TOPIC_BAD_CHARS_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 
 _NO_DATA = object()
 
+# Channels: named member lists with a shared history under a user-wide root.
+CHANNEL_NAME_RE = re.compile(r"^[a-z0-9-]{1,64}$")
+CHANNEL_MAX_MEMBERS = 64
+CHANNEL_MAX_CHANNELS = 256
+CHANNEL_TOPIC_PREFIX = "channel:"
+CHANNEL_GENERAL = "general"
+CHANNEL_BUDDY_PREFIX = "buddy-"
+CHANNEL_TMP_MAX_AGE = 3600.0
+
 # The SessionStart hook's detached attach loop: poll every FAST_STEP seconds for
 # the first FAST_WINDOW seconds, then every SLOW_STEP, until WAIT seconds pass.
 HOOK_ATTACH_WAIT = 60.0
