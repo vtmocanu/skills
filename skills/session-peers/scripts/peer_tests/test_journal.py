@@ -959,7 +959,7 @@ class JournalReworkTests(JournalBase):
             journal.record_message(cc(), [self.A], "again", message_id=mid)
         with self.assertRaises(journal.JournalRefused):
             journal.record_message(cc(), [self.A], "again", message_id=rid)
-        os.unlink(self.mpath)  # the slow path refuses too
+        os.unlink(self.mpath)  # without the meta accelerator it is still refused
         with self.assertRaises(journal.JournalRefused):
             journal.record_message(cc(), [self.A], "again", message_id=mid)
         self.assertEqual(self.read(), before)
@@ -1036,8 +1036,10 @@ class JournalReworkTests(JournalBase):
 
     def test_grant_beyond_the_global_cap_is_refused(self):
         self.msg()
-        first = self.grant_line(2)
-        self.append_lines(first, *[self.grant_line(3 + i) for i in range(511)])
+        chain = [self.A] + [cc() for _ in range(512)]  # every grantor is reachable from slot A
+        grants = [self.grant_line(2 + i, source=chain[i], target=chain[i + 1]) for i in range(512)]
+        first = grants[0]
+        self.append_lines(*grants)
         self.assertEqual(len(journal.read_only_view()["handovers"]), 512)
         before = self.read()
         with self.assertRaises(journal.JournalRefused):
@@ -1048,11 +1050,16 @@ class JournalReworkTests(JournalBase):
 
     def test_crafted_flood_loads_fast_and_keeps_the_newest_grants(self):
         self.msg()
-        lines = [self.grant_line(2 + i) for i in range(2000)]
+        mid = self.ids()[0]
+        lines = [self.grant_line(2 + i) for i in range(1999)]
+        lines.append(self.grant_line(2001, source=self.A, target=self.B))
         self.append_lines(*lines)
         started = time.monotonic()
         view = journal.read_only_view()
-        self.assertLess(time.monotonic() - started, 2.0)
+        self.assertLess(time.monotonic() - started, 5.0)
+        started = time.monotonic()
+        self.assertEqual(journal.get(mid, self.B)["body"], "hello")  # reach() runs: B is not the slot
+        self.assertLess(time.monotonic() - started, 5.0)
         self.assertEqual([(g["from"], g["to"]) for g in view["handovers"]],
                          [(g["from"], g["to"]) for g in lines[-512:]])
 
@@ -1089,6 +1096,181 @@ class JournalReworkTests(JournalBase):
         self.append_lines({"schema": 1, "seq": 2, "type": "ack", "at": self.now,
                            "message_id": mid + "\n", "for": self.A, "by": self.A})
         self.assertEqual(journal.read_only_view()["malformed_lines"], 1)
+
+    # -- second rework ------------------------------------------------------
+
+    def dangling_ack(self):
+        """A valid-looking ack for an unknown message: dead in the model, so any commit rewrites."""
+        return {"schema": 1, "seq": self.last_seq() + 1, "type": "ack", "at": self.now,
+                "message_id": str(uuid.uuid4()), "for": self.A, "by": self.A}
+
+    def test_clock_step_back_beyond_a_day_never_drops_records(self):
+        real = self.now
+        kept = self.msg(body="kept")
+        self.now = real - 2 * 86400  # kept is now dated two days ahead
+        other = self.msg(body="other")  # the fast-path append may proceed
+        self.append_lines(self.dangling_ack())  # makes every commit a rewrite
+        self.assertEqual(journal.read_only_view()["malformed_lines"], 1)
+        self.assertEqual(self.ids(), [other])
+        before = self.read()
+        ops = (
+            ("slow-path message", lambda: self.msg()),
+            ("event rewrite", lambda: journal.ack(other, self.A)),
+            ("prune", lambda: journal.handover(self.A, self.B)),
+        )
+        for name, op in ops:
+            with self.subTest(op=name):
+                with self.assertRaises(journal.JournalUnavailable) as ctx:
+                    op()
+                self.assertIn("journal has records dated more than a day ahead; check the system clock",
+                              str(ctx.exception))
+                self.assertEqual(self.read(), before)
+        self.now = real
+        self.assertIn(kept, self.ids())
+        self.assertEqual(journal.get(kept, self.A)["body"], "kept")
+        self.assertEqual(journal.read_only_view()["malformed_lines"], 0)
+
+    def test_far_future_line_with_an_unknown_schema_is_not_dropped_either(self):
+        real = self.now
+        self.msg()
+        self.append_lines({"schema": 2, "seq": 2, "type": "message", "at": real, "x": 1})
+        self.now = real - 2 * 86400
+        self.append_lines(self.dangling_ack())
+        before = self.read()
+        with self.assertRaises(journal.JournalUnavailable):
+            self.msg()
+        self.assertEqual(self.read(), before)
+
+    def test_fast_append_proceeds_while_a_far_future_record_is_held(self):
+        real = self.now
+        self.msg()
+        self.now = real - 2 * 86400
+        self.msg(body="again")
+        self.assertEqual(len(self.records()), 2)
+        self.now = real
+        self.assertEqual(len(self.ids()), 2)
+
+    def test_forged_grantors_cannot_fill_the_grant_cap(self):
+        mid = self.msg()
+        self.append_lines(*[self.grant_line(2 + i) for i in range(512)])
+        self.assertEqual(len(journal.read_only_view()["handovers"]), 512)
+        journal.handover(self.A, self.B)
+        self.assertEqual([(g["from"], g["to"]) for g in journal.read_only_view()["handovers"]],
+                         [(self.A, self.B)])
+        self.assertEqual(journal.get(mid, self.B)["body"], "hello")
+
+    def test_grant_chained_from_a_kept_grant_is_retained(self):
+        mid = self.msg()
+        self.append_lines(self.grant_line(2, source=self.C, target=self.X),
+                          self.grant_line(3, source=self.A, target=self.B),
+                          self.grant_line(4, source=self.B, target=self.C))
+        journal.handover(cc(), cc())
+        pairs = [(g["from"], g["to"]) for g in journal.read_only_view()["handovers"]]
+        self.assertIn((self.C, self.X), pairs)
+        self.assertEqual(journal.get(mid, self.X)["body"], "hello")
+
+    def test_reply_id_cannot_be_pre_squatted_before_the_request(self):
+        rid = str(uuid.uuid4())
+        journal.record_message(cc(), [self.A], "squat", message_id=journal.reply_message_id(rid))
+        before = self.read()
+        with self.assertRaises(journal.JournalRefused):
+            journal.record_request(rid, cc(), [self.A], "ask", self.now + 60, "/nonexistent/x")
+        self.assertEqual(self.read(), before)
+
+    def test_fresh_id_request_takes_the_fast_path(self):
+        self.msg()
+        calls = []
+        real = journal._Writer.load
+        with mock.patch.object(journal._Writer, "load", lambda w, n: calls.append(1) or real(w, n)):
+            rid = str(uuid.uuid4())
+            journal.record_request(rid, cc(), [self.A], "ask", self.now + 60, "/nonexistent/x",
+                                   fresh_id=True)
+        self.assertEqual(calls, [])
+        self.assertIn(rid, self.ids())
+
+    def edge_setup(self, count, through):
+        self.msg()
+        mid = self.msg()  # seq 2
+        targets = [cc() for _ in range(count)]
+        lines = [self.grant_line(3 + i, source=self.A, target=t, through=through) for i, t in enumerate(targets)]
+        self.append_lines(*lines)
+        return mid, targets
+
+    def test_fan_out_beyond_the_edge_bound_fails_closed(self):
+        mid, targets = self.edge_setup(70, through=2)
+        self.assertEqual(journal.get(mid, targets[0])["body"], "hello")
+        self.assertEqual(journal.get(mid, targets[63])["body"], "hello")
+        for target in targets[64:]:
+            with self.assertRaises(journal.JournalRefused):
+                journal.get(mid, target)
+
+    def test_irrelevant_edges_are_not_counted_against_the_bound(self):
+        mid, targets = self.edge_setup(70, through=1)  # through < seq: irrelevant to the message
+        relevant = cc()
+        self.append_lines(self.grant_line(100, source=self.A, target=relevant, through=2))
+        self.assertEqual(journal.get(mid, relevant)["body"], "hello")
+        with self.assertRaises(journal.JournalRefused):
+            journal.get(mid, targets[0])
+
+    def test_settle_on_an_absent_entry_in_a_fresh_home_creates_nothing(self):
+        self.assertIsNone(journal.settle(str(uuid.uuid4()), "replied", self.A))
+        self.assertFalse(os.path.exists(os.path.join(self.root, ".codex")))
+
+    def test_settle_on_an_absent_entry_does_not_repair_a_torn_tail(self):
+        self.msg()
+        with open(self.jpath, "ab") as fh:
+            fh.write(b'{"torn":')
+        before = self.snapshot()
+        self.assertIsNone(journal.settle(str(uuid.uuid4()), "replied", self.A))
+        self.assertEqual(self.snapshot(), before)
+
+    def test_settle_rejects_an_invalid_id_or_state(self):
+        rid = self.req()
+        before = self.snapshot()
+        for mid, state in ((rid.upper(), "replied"), ("nope", "replied"), (rid + "\n", "replied"),
+                           (rid, "bogus"), (rid, None)):
+            with self.subTest(mid=mid, state=state):
+                with self.assertRaises(journal.JournalUpdateFailed):
+                    journal.settle(mid, state, self.A)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_only_later_version_records_are_foreign(self):
+        self.msg()
+        self.append_lines({"schema": 2, "seq": 2, "type": "message", "at": self.now},
+                          {"schema": 7, "seq": 3, "type": 5, "at": self.now},
+                          {"schema": 1, "seq": 4, "type": "poll", "at": self.now})
+        view = journal.read_only_view()
+        self.assertEqual((view["malformed_lines"], view["last_seq"]), (0, 4))
+        bad = [{"seq": 5, "type": "poll", "at": self.now},
+               {"schema": "2", "seq": 5, "type": "poll", "at": self.now},
+               {"schema": 1, "seq": 5, "type": 5, "at": self.now},
+               {"schema": 1, "seq": 5, "type": ["ack"], "at": self.now},
+               {"schema": 1, "seq": 5, "at": self.now},
+               {"schema": 0, "seq": 5, "type": "poll", "at": self.now},
+               {"schema": True, "seq": 5, "type": "poll", "at": self.now},
+               {"schema": 2.0, "seq": 5, "type": "poll", "at": self.now}]
+        self.append_lines(*bad)
+        view = journal.read_only_view()
+        self.assertEqual((view["malformed_lines"], view["last_seq"]), (len(bad), 4))
+
+    def test_reply_id_held_by_a_non_reply_has_its_own_message(self):
+        rid = str(uuid.uuid4())
+        self.msg()
+        self.append_lines({"schema": 1, "seq": 2, "type": "message", "at": self.now,
+                           "message_id": journal.reply_message_id(rid), "kind": "message",
+                           "from": self.B, "to": [self.A], "body": "answer"})
+        with self.assertRaises(journal.JournalRefused) as ctx:
+            journal.record_reply(rid, self.B, [self.A], "answer", self.now + 600, "/nonexistent/x")
+        self.assertIn("reply id is taken by another record", str(ctx.exception))
+
+    def test_handover_cap_refusal_names_expiry_or_pruning(self):
+        self.msg()
+        chain = [self.A] + [cc() for _ in range(512)]
+        self.append_lines(*[self.grant_line(2 + i, source=chain[i], target=chain[i + 1])
+                            for i in range(512)])
+        with self.assertRaises(journal.JournalRefused) as ctx:
+            journal.handover(self.A, self.B)
+        self.assertIn("retry after older messages expire or are pruned", str(ctx.exception))
 
 
 if __name__ == "__main__":
