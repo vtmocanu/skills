@@ -903,7 +903,9 @@ class _Writer:
 
 def _commit(w, m, new, next_seq, malformed):
     """Persist ``m`` whose last record is ``new``: an append, or one atomic rewrite."""
-    if m.has_dead():
+    # Complete malformed lines are not in the model's byte totals: a rewrite drops
+    # them, so they cannot escape the cap through the append path.
+    if m.has_dead() or malformed:
         w.rewrite([rec.line for rec in m.live()], m.meta(next_seq + 1, 0))
     else:
         w.append(new.line, m.meta(next_seq + 1, malformed))
@@ -1304,9 +1306,14 @@ def handover(caller, target_typed):
     if target == who:
         raise JournalRefused("a session cannot hand over to itself")
     try:
-        sp_identity.resolve_typed(target)
+        resolved = sp_identity.resolve_typed(target)
     except sp_codex.ResolveError as exc:
         raise JournalRefused("handover successor %s is not an existing session: %s" % (target, exc))
+    if resolved["kind"] != target.partition(":")[0]:
+        raise JournalRefused(
+            "handover successor %s is a %s session: use %s:%s"
+            % (target, resolved["kind"], resolved["kind"], target.partition(":")[2])
+        )
 
     def make(m, now, seq):
         m.age_prune(now)

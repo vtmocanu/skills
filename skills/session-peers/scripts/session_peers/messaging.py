@@ -231,6 +231,14 @@ def _send_opencode(target, args):
     if address:
         lines.append(sp_protocol.reply_route_hint(address, reply_id))
     text = "\n".join(lines + [args.message])
+    try:
+        sp_opencode.check_text_size(text)
+    except ValueError as exc:
+        # Refused before the journal, the wake grant or the API is touched.
+        if reply_id:
+            sp_reply_wake.forget(reply_id)
+        sys.stderr.write("error: %s\n" % exc)
+        return 1
     state = sp_opencode.state_of(session["id"])
     resume = _may_wake_opencode(args, session["id"])
     in_reply_to = getattr(args, "in_reply_to", None)
@@ -397,6 +405,12 @@ def _send_codex(target, args, oc_sender=None):
 
 
 def _queue_codex(thread, text, msg_id, args):
+    # A local size refusal comes before anything is recorded.
+    try:
+        sp_codex.check_queue_text(text)
+    except sp_codex.QueueError as exc:
+        sys.stderr.write("error: %s\n" % exc)
+        return _transport_failed(args, msg_id, exc)
     failed = _record_before_send(args, msg_id, "codex:" + thread["id"])
     if failed is not None:
         return failed
@@ -578,6 +592,12 @@ def _prepare_request(args, purpose):
 
     sp_requests.cleanup_expired_requests()
     request_id = str(uuidlib.uuid4())
+    try:
+        # The final transport payload is checked before the journal or a mailbox exists.
+        _check_request_payload(rec, requester, oc_sender, request_id, message, timeout)
+    except ValueError as exc:
+        sys.stderr.write("error: %s\n" % exc)
+        return 2
     meta_path = sp_storage.request_path(request_id)
     reply_path = sp_storage.request_reply_path(request_id)
     expires_at = time.time() + timeout
@@ -604,19 +624,39 @@ def _prepare_request(args, purpose):
     )
 
 
+def _opencode_request_text(record, requester, oc_sender, request_id, message, timeout):
+    """The text a correlated request queues to an OpenCode session."""
+    envelope = sp_requests._request_envelope(request_id, message, timeout)
+    runtime = {"cc": "claude", "codex": "codex", "oc": "opencode"}[requester["kind"]]
+    name = oc_sender.get("title") if oc_sender else None
+    if requester["kind"] == "cc":
+        matches = sp_claude.claude_record_by_target(requester["uuid"])
+        name = matches[0].get("name") if len(matches) == 1 else None
+    elif requester["kind"] == "codex":
+        state = sp_runtime.read_json(sp_storage.thread_state_path(requester["uuid"]), {}) or {}
+        name = state.get("name")
+    return "%s\n%s" % (sp_protocol.build_origin(runtime, name, requester["uuid"]), envelope)
+
+
+def _check_request_payload(record, requester, oc_sender, request_id, message, timeout):
+    """Raise ValueError when the request's transport payload is over the peer cap."""
+    if record.get("_runtime") == "opencode":
+        sp_opencode.check_text_size(_opencode_request_text(record, requester, oc_sender, request_id, message, timeout))
+    else:
+        envelope = sp_requests._request_envelope(request_id, message, timeout)
+        sp_claude.claude_body(
+            envelope, requester["uuid"] if requester["kind"] == "codex" else None,
+            reply_route=False, opencode_sender=oc_sender,
+        )
+
+
 def _send_prepared_request(request):
     envelope = sp_requests._request_envelope(request.request_id, request.message, request.timeout)
     requester = request.requester
     if request.record.get("_runtime") == "opencode":
-        runtime = {"cc": "claude", "codex": "codex", "oc": "opencode"}[requester["kind"]]
-        name = request.oc_sender.get("title") if request.oc_sender else None
-        if requester["kind"] == "cc":
-            matches = sp_claude.claude_record_by_target(requester["uuid"])
-            name = matches[0].get("name") if len(matches) == 1 else None
-        elif requester["kind"] == "codex":
-            state = sp_runtime.read_json(sp_storage.thread_state_path(requester["uuid"]), {}) or {}
-            name = state.get("name")
-        text = "%s\n%s" % (sp_protocol.build_origin(runtime, name, requester["uuid"]), envelope)
+        text = _opencode_request_text(
+            request.record, requester, request.oc_sender, request.request_id, request.message, request.timeout
+        )
         inbox_id = sp_opencode.deliver(
             request.record["sessionId"], text,
             {"request_id": request.request_id, "from": "%s:%s" % (requester["kind"], requester["uuid"])},

@@ -905,6 +905,92 @@ class JournalSettlementTests(JournalCliBase):
 
 
 # ==========================================================================
+# Local size refusals leave nothing behind
+# ==========================================================================
+
+
+def _near_cap():
+    """A message that passes the CLI bound but whose wrapped payload does not."""
+    return "x" * (sp_constants.MAX_TEXT_CHARS - 50)
+
+
+class JournalLocalSizeRefusalTests(JournalCliBase):
+    def _nothing_left(self, listener=None):
+        self.assertEqual(self.records(), [])
+        self.assertEqual(self.queue_calls(), [])
+        if listener is not None:
+            time.sleep(0.2)
+            self.assertEqual(listener.of_type("user"), [])
+        self.assertEqual(list(pathlib.Path(sp_storage.request_dir()).glob("*.json")), [])
+
+    def test_an_oversize_codex_queue_is_refused_before_it_is_recorded(self):
+        _listener, sender = self.peer("cc-sender", pid=os.getpid())
+        self.as_cc(sender)
+        tid, _rollout = self.one_thread()
+        rc, _out, err = self.cli("send", "--to", "codex:%s" % tid, "--message", _near_cap(), "--record")
+        self.assertEqual(rc, 1)
+        self.assertIn("error: ", err)
+        self._nothing_left()
+
+    def test_an_oversize_correlated_claude_request_is_refused_before_any_record_or_mailbox(self):
+        listener, _rec = self.peer("cc-target", pid=os.getppid())
+        tid, _rollout = self.one_thread()
+        for verb in ("dispatch", "ask"):
+            rc, _out, err = self.cli(verb, "--to", "cc:cc-target", "--from-thread", tid,
+                                     "--message", _near_cap(), "--timeout", "5")
+            self.assertEqual(rc, 2, (verb, err))
+            self.assertIn("peer cap", err)
+        self._nothing_left(listener)
+
+    def test_a_handover_to_a_codex_shim_by_its_cc_address_is_refused(self):
+        tid, _rollout = self.one_thread()
+        JournalSendRecordTests._codex_shim(self, tid)
+        _la, first = self.peer("cc-first", pid=os.getpid())
+        self.as_cc(first)
+        rc, _out, err = self.cli("inbox", "handover", "--to", "cc:" + tid)
+        self.assertEqual(rc, 1)
+        self.assertIn("codex:" + tid, err)
+        self.assertEqual([r for r in self.records() if r["type"] == "handover"], [])
+        self.as_codex(new_id())
+        _rc, out, _err = self.cli("record", "--to", "cc:%s" % first["sessionId"], "--message", "carry on", "--json")
+        mid = json.loads(out)["message_id"]
+        self.as_cc(first)
+        rc, out, err = self.cli("inbox", "handover", "--to", "codex:" + tid, "--json")
+        self.assertEqual(rc, 0, err)
+        self.as_codex(tid)
+        rc, out, err = self.cli("inbox", "get", mid, "--json")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(json.loads(out)["body"], "carry on")
+
+
+class JournalOpenCodeLocalSizeRefusalTests(JournalOpenCodeBase):
+    def test_an_oversize_opencode_send_is_refused_with_the_grant_intact(self):
+        _listener, rec = self.peer("cc-sender", pid=os.getpid())
+        self.as_claude(rec)
+        grant_id = new_id()
+        sp_reply_wake.issue(grant_id, "oc:" + OC_B, "cc:" + rec["sessionId"], 600)
+        grant = pathlib.Path(sp_reply_wake.path_for(grant_id))
+        rc, _out, err = self.cli("send", "--to", "oc:%s" % OC_B, "--message", _near_cap(),
+                                 "--in-reply-to", grant_id, "--record")
+        self.assertEqual(rc, 1)
+        self.assertIn("peer cap", err)
+        self.assertTrue(grant.exists())
+        self.assertEqual(self.records(), [])
+        self.assertEqual(self.oc_calls("session.prompt"), [])
+
+    def test_an_oversize_opencode_request_is_refused_before_any_record_or_mailbox(self):
+        _listener, rec = self.peer("cc-main", pid=os.getpid())
+        self.as_claude(rec)
+        rc, _out, err = self.cli("dispatch", "--to", "oc:%s" % OC_B, "--wake", "--message", "x" * (
+            sp_constants.MAX_TEXT_CHARS - 50), "--json")
+        self.assertEqual(rc, 2)
+        self.assertIn("peer cap", err)
+        self.assertEqual(self.records(), [])
+        self.assertEqual(self.oc_calls("session.prompt"), [])
+        self.assertEqual(list(pathlib.Path(sp_storage.request_dir()).glob("*.json")), [])
+
+
+# ==========================================================================
 # Race interleavings
 # ==========================================================================
 
@@ -932,15 +1018,22 @@ class JournalReplyRaceTests(JournalCliBase):
         self.assertTrue(wait_for(lambda: os.path.exists(ready), timeout=30), "child never reached the hook")
         return proc, go
 
-    def _pressure(self):
-        """Lower the cap to the journal's size and add an unrelated record, so the
-        next write has to prune whatever is eligible (here, acknowledged entries)."""
-        os.environ[CAP_ENV] = str(os.path.getsize(self.jpath()))
+    def _pressure(self, rounds=1):
+        """Add finished (acknowledged) filler entries, lower the cap to the journal's
+        size, then write an unrelated record: it only fits if the oldest eligible
+        entries are pruned. Asserts the record was written and something was pruned."""
+        slot = "cc:" + new_id()
         with mock.patch.object(sp_identity, "resolve_typed", lambda target, exclude=None: {"kind": target.partition(":")[0]}):
-            try:
-                journal.record_message("cc:" + new_id(), ["cc:" + new_id()], "unrelated")
-            except journal.JournalFull:
-                pass
+            for _ in range(rounds):
+                os.environ.pop(CAP_ENV, None)
+                before = [e["message_id"] for e in self.entries()]
+                fillers = [journal.record_message("cc:" + new_id(), [slot], "f" * 500) for _ in range(4)]
+                for mid in fillers:
+                    journal.ack(mid, slot)
+                os.environ[CAP_ENV] = str(os.path.getsize(self.jpath()))
+                unrelated = journal.record_message("cc:" + new_id(), ["cc:" + new_id()], "unrelated")
+                self.assertIsNotNone(self.entry(unrelated), "the pressure record was not written")
+                self.assertTrue([m for m in before + fillers if self.entry(m) is None], "pressure pruned nothing")
 
     def test_a_live_mailbox_keeps_the_first_reply_when_a_paused_reply_resumes(self):
         _listener, rec = self.peer("cc-target", pid=os.getppid())
@@ -955,6 +1048,9 @@ class JournalReplyRaceTests(JournalCliBase):
         self.assertEqual(self.cli("inbox", "get", reply_id)[0], 0)
         self.assertEqual(self.cli("ack", reply_id)[0], 0)
         self._pressure()
+        # The mailbox is live: neither the request nor the reply may be pruned.
+        self.assertIsNotNone(self.entry(rid))
+        self.assertEqual(self.entry(reply_id)["body"], "X: the winner")
         pathlib.Path(go).touch()
         out, err = proc.communicate(timeout=60)
         self.assertEqual(proc.returncode, 1, err)
@@ -972,7 +1068,13 @@ class JournalReplyRaceTests(JournalCliBase):
         self.assertEqual(self.reply_as(rec["sessionId"], rid, "X: first")[0], 0)
         rc, out, err = self.cli("await", "--request", rid, "--from-thread", tid, "--timeout", "5", "--json")
         self.assertEqual(rc, 0, err)
-        self._pressure()
+        reply_id = journal.reply_message_id(rid)
+        self.assertIsNotNone(self.entry(reply_id))
+        for _ in range(5):
+            if self.entry(reply_id) is None:
+                break
+            self._pressure()
+        self.assertIsNone(self.entry(reply_id), "the consumed reply was never pruned")
         pathlib.Path(go).touch()
         out, err = proc.communicate(timeout=60)
         self.assertEqual(proc.returncode, 1, err)

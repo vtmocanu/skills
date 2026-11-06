@@ -408,6 +408,19 @@ class JournalAckTests(JournalBase):
             journal.settle(mid, "consumed", self.A)
         self.assertFalse(any(r["type"] in ("settled", "transport_error") for r in self.records()))
 
+    def test_malformed_bytes_cannot_escape_the_cap_through_the_append_path(self):
+        self.set_cap(5000)
+        keep = self.msg(body="x" * 300)
+        with open(self.jpath, "ab") as fh:
+            fh.write((b"garbage-" + b"g" * 100 + b"\n") * 45)
+        self.assertGreater(self.size(), 5000)
+        for _ in range(3):
+            self.msg(body="y" * 100)
+            self.assertNotIn(b"garbage-", self.read())
+            self.assertLessEqual(self.size(), 5000)
+        self.assertIn(keep, self.ids())
+        self.assertEqual(journal.read_only_view()["malformed_lines"], 0)
+
 
 class JournalRetentionTests(JournalBase):
     def test_age_cap_prunes_unacked_and_entries_with_a_live_mailbox(self):
