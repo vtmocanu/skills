@@ -532,6 +532,24 @@ class JournalPreSendFailureTests(JournalCliBase):
             self.assert_nothing_left_or_sent(listener)
         self.assertIs(journal.record_request, real)
 
+    def test_an_interrupt_while_recording_removes_the_mailbox_and_exits_130(self):
+        listener, _rec = self.peer("cc-target", pid=os.getppid())
+        tid, _rollout = self.one_thread()
+        self.as_codex(tid)
+        for verb in ("dispatch", "ask"):
+            seen = []
+
+            def interrupted(request_id, requester, to, message, expires_at, mailbox, **kw):
+                seen.append(os.path.exists(mailbox))
+                raise KeyboardInterrupt()
+
+            # cli.main turns the re-raised KeyboardInterrupt into exit 130.
+            with mock.patch.object(journal, "record_request", interrupted):
+                rc, _out, err = self.cli(*self.request_argv(verb, tid))
+            self.assertEqual(rc, 130, (verb, err))
+            self.assertEqual(seen, [True], verb)
+            self.assert_nothing_left_or_sent(listener)
+
     def test_a_near_cap_claude_message_is_refused_before_it_is_recorded(self):
         listener, _rec = self.peer("cc-target", pid=os.getppid())
         tid, _rollout = self.one_thread()
@@ -1228,7 +1246,6 @@ class JournalNoImplicitAckTests(JournalCliBase):
         self.assert_no_acks(journal.reply_message_id(rid))
         self.assertEqual(self.entry(rid)["settlement"]["state"], "replied")
         self.assertEqual(self.entry(journal.reply_message_id(rid))["settlement"]["state"], "consumed")
-
 
     def test_a_failed_meta_write_after_the_reply_settlement_still_exits_0(self):
         _listener, rec = self.peer("cc-target", pid=os.getppid())

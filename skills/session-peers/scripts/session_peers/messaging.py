@@ -626,6 +626,9 @@ def _prepare_request(args, purpose):
     # uuid4 request id is not exposed to anyone until the send, so no reply or await can address
     # a mailbox that is not yet journaled. A crash between the mailbox write and the journal
     # record leaves only an unjournaled mailbox, which cleanup_expired_requests reclaims at expiry.
+    # An interrupt after the request is journaled but before record_request returns (e.g. during
+    # the meta write) removes the mailbox while the request stays journaled and unsent, the same
+    # end state as the old order.
     try:
         sp_runtime.write_json_atomic(meta_path, meta)
     except OSError as exc:

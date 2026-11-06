@@ -27,7 +27,7 @@ Run each as `<this skill's directory>/scripts/peers.py ...`. All take `--json`.
 | `send --to PEER ... --record` | Journals the body, then sends. The journal id equals the transport message id; `--json` adds `"journal": {"message_id": ..., "recorded": true}`. |
 | `record --to PEER [--to PEER ...]` (`--message` or `--message-file`) | Record-only; nothing is sent. At most 64 recipients, each an existing session. |
 | `inbox get MSG_ID` | Prints the body, your slots, ACKs, settlement and any transport errors (one line per recipient slot with an error). Recipients (and covered successors) only. |
-| `inbox journal [--all]` | Lists metadata, no bodies, of messages you may read and have not ACKed; `--all` includes ACKed ones. |
+| `inbox journal [--all]` | Lists metadata, no bodies, of messages you may read and have not ACKed; `--all` includes ACKed ones. Each slot shows its own transport error when it has one. |
 | `inbox acks MSG_ID` | Per-recipient ACK state, settlement and transport error (each recipient's own), no body. The sender, any recipient and covered successors may run it. |
 | `inbox handover --to TYPED` | Lets a successor act for you (see Handover). |
 | `ack MSG_ID [--for TYPED]` | Records your ACK. `--for` names the recipient slot when you cover several by handover. Idempotent. |
@@ -173,14 +173,18 @@ the journal, and report the failure. The command never resends or retries.
     restarts at 1.
   - Meta is lost, invalid, or its write fails after a rewrite dropped the
     highest-seq record (for example an event whose pruning rewrite removed its
-    own entry): the next seq falls back to the last retained seq + 1. An older
-    handover's `through_seq` could then cover a reused seq. Low likelihood: meta
-    is replaced atomically.
+    own entry): the next seq falls back to the last retained seq + 1. The reused
+    seq is still above every retained record, so handover coverage is
+    unaffected: no retained grant's `through_seq` reaches it. Low likelihood:
+    meta is replaced atomically.
   - Rarely (two consecutive meta write failures on rewrites, plus an inode reuse
     and an exact size match) a stale meta could be trusted.
 
-  This affects handover coverage (`through_seq`); elsewhere seq only orders
-  listings.
+  For the first two cases the reused seq is harmless (above every retained
+  line). In the stale-meta case the fast append path (every ask/dispatch request
+  and any record without a supplied id) can assign a seq at or below a retained
+  line's; the reader counts that new line as malformed and skips it, and the next
+  rewrite drops it, so that one record is lost.
 - **Temp-file recovery:** an interrupted rewrite leaves the old journal intact.
   The next locked write removes stale `journal.*.tmp.*` files, and a torn final
   line is truncated before the next append.

@@ -34,7 +34,7 @@ their ``at``. A record dated further ahead is malformed and a rewrite drops it:
 the residual is that a clock step-back of more than 14 days can lose records at
 the next rewrite. Every line with an integer ``seq`` advances the last seen seq
 even when it is otherwise malformed, so a lost meta file does not normally make
-a seq be reused. Not absolute: with lost, invalid or unwritable meta and an empty
+a seq be reused. Not absolute: with lost or invalid meta and an empty
 journal the seq restarts at 1, and after a rewrite dropped the highest-seq record
 the next seq falls back to the last retained seq + 1 (see references/journal.md,
 "Durability" residuals). A line that is a
@@ -351,7 +351,10 @@ def _parse(data, now):
     Any line with an integer ``seq`` advances the last seq, even a malformed or
     skipped one, so a seq is not reused while that line survives (a rewrite that
     drops the highest-seq record, or an empty journal with no meta, can reuse
-    it). A final line without its newline is a
+    it). One residual: a stale meta that is still trusted on the fast append
+    path can hand out a seq at or below a retained line's; the reusing record is
+    then counted malformed here and is the one lost (references/journal.md,
+    "Durability"). A final line without its newline is a
     torn or in-flight write: ignored.
     """
     recs, malformed, last_seq, pos = [], 0, 0, 0
