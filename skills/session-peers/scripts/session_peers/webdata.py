@@ -78,12 +78,20 @@ class WebDataError(Exception):
 _INVISIBLE_RANGES = (
     (0x00AD, 0x00AD), (0x034F, 0x034F), (0x115F, 0x1160), (0x17B4, 0x17B5), (0x180B, 0x180F),
     (0x2800, 0x2800), (0x3164, 0x3164), (0xFE00, 0xFE0F), (0xFEFF, 0xFEFF), (0xFFA0, 0xFFA0),
-    (0x1BCA0, 0x1BCA3), (0xE0000, 0xE0FFF),
+    (0x1BCA0, 0x1BCA3), (0xE0000, 0xE0FFF), (0x2065, 0x2065), (0xFFF0, 0xFFF8),
 )
 _BIDI_CODES = frozenset(
     list(range(0x202A, 0x202F)) + list(range(0x2066, 0x206A)) + [0x200E, 0x200F, 0x061C, 0x2028, 0x2029])
-# A message body keeps these (emoji joiners, variation selectors, subdivision-flag tag characters).
-_BODY_KEEP = frozenset([0x200C, 0x200D, 0xFE0E, 0xFE0F] + list(range(0xE0020, 0xE0080)))
+# A message body keeps these only in context (see ``_body_keeps``): emoji joiners, variation selectors and
+# subdivision-flag tag characters.
+_ZWNJ, _ZWJ, _VS15, _VS16 = 0x200C, 0x200D, 0xFE0E, 0xFE0F
+_FLAG_RE = re.compile("\U0001F3F4[\U000E0020-\U000E007E]+\U000E007F")
+_EMOJI_RANGES = (
+    (0x1F000, 0x1FAFF), (0x2600, 0x27BF), (0x1F1E6, 0x1F1FF), (0x2190, 0x21FF), (0x2B00, 0x2BFF),
+    (0x3030, 0x3030), (0x303D, 0x303D), (0x3297, 0x3297), (0x3299, 0x3299), (0x00A9, 0x00A9),
+    (0x00AE, 0x00AE), (0x203C, 0x203C), (0x2049, 0x2049), (0x2122, 0x2122), (0x2139, 0x2139),
+    (0x231A, 0x23FF), (0x25AA, 0x25FE), (0x2934, 0x2935), (0x1F3FB, 0x1F3FF),
+)
 _INVISIBLE_RE = re.compile(
     "[" + "".join("\\U%08x-\\U%08x" % pair for pair in _INVISIBLE_RANGES) + "]")
 _RUN_RE = re.compile("[^\u0020-\u007e]+")
@@ -94,30 +102,63 @@ def _hidden(code):
     """True for a Cf character or one of the listed invisible ones."""
     if any(low <= code <= high for low, high in _INVISIBLE_RANGES):
         return True
-    return unicodedata.category(chr(code)) == "Cf"
+    return unicodedata.category(chr(code)) in ("Cf", "Cs")
 
 
-def _escape_char(ch, body):
+def _is_emoji(code):
+    return any(low <= code <= high for low, high in _EMOJI_RANGES)
+
+
+def _body_keeps(text, index, flags):
+    """True when the hidden character at ``text[index]`` is legitimate in a message body: a tag character
+    inside a well-formed subdivision-flag sequence (``flags`` holds those indices), a ZWJ between two emoji,
+    a ZWNJ between two non-ASCII letters, or a variation selector right after a non-format base character."""
+    code = ord(text[index])
+    if code in _BIDI_CODES:
+        return False
+    if 0xE0020 <= code <= 0xE007F:
+        return index in flags
+    before = text[index - 1] if index > 0 else ""
+    after = text[index + 1] if index + 1 < len(text) else ""
+    if code == _ZWJ:
+        if before and ord(before) == _VS16 and index > 1:
+            before = text[index - 2]
+        return bool(before and after and _is_emoji(ord(before)) and _is_emoji(ord(after)))
+    if code == _ZWNJ:
+        return bool(before and after and ord(before) > 0x7F and ord(after) > 0x7F
+                    and unicodedata.category(before).startswith("L") and unicodedata.category(after).startswith("L"))
+    if code in (_VS15, _VS16):
+        if not before:
+            return False
+        prior = ord(before)
+        return not (prior <= 0x1F or 0x7F <= prior <= 0x9F or _hidden(prior))
+    return False
+
+
+def _escape_char(text, index, body, flags):
+    ch = text[index]
     code = ord(ch)
     if code <= 0x1F or 0x7F <= code <= 0x9F or code in _BIDI_CODES:
         if body and code in (0x09, 0x0A):
             return ch
         return "\\u%04x" % code
-    if _hidden(code) and not (body and code in _BODY_KEEP):
+    if _hidden(code) and not (body and _body_keeps(text, index, flags)):
         return "\\u%04x" % code if code <= 0xFFFF else "\\U%08x" % code
     return ch
 
 
-def _escape_run(match, body):
+def _escape_run(match, body, text, flags):
     run = match.group(0)
     if run.isprintable() and not _INVISIBLE_RE.search(run):
         return run
-    return "".join(_escape_char(ch, body) for ch in run)
+    start = match.start()
+    return "".join(_escape_char(text, start + offset, body, flags) for offset in range(len(run)))
 
 
 def _escape(value, body):
     text = value if isinstance(value, str) else str(value)
-    return _RUN_RE.sub(lambda m: _escape_run(m, body), text)
+    flags = frozenset(i for m in _FLAG_RE.finditer(text) for i in range(m.start() + 1, m.end())) if body else ()
+    return _RUN_RE.sub(lambda m: _escape_run(m, body, text, flags), text)
 
 
 def escape_text(value):
@@ -152,7 +193,7 @@ def _clean(value, key=None, depth=0, plain=False):
     if isinstance(value, dict):
         return {escape_text(k): _clean(v, k, depth + 1, plain or k in _PLAIN_KEYS) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
-        return [_clean(v, key, depth + 1, plain) for v in value]
+        return [_clean(v, None, depth + 1, plain) for v in value]
     if isinstance(value, str):
         return escape_body(value) if key in _BODY_KEYS and not plain else escape_text(value)
     return value
