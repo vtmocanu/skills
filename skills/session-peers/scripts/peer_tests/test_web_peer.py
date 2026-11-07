@@ -579,6 +579,17 @@ class WebPeerInboxTests(WebPeerBase):
         self.assertIn("not delivered", err)
         self.assertEqual(self.inbound, [])
 
+    def test_cli_record_refuses_an_oversized_wrapped_body_before_journaling(self):
+        # The message fits the journal, but its provenance line takes the
+        # wrapped frame over the peer cap: nothing may be recorded or sent.
+        peer = self.start_peer()
+        text = "x" * (sp_constants.MAX_TEXT_CHARS - 4)
+        rc, _out, err = self.cli("send", "--record", "--to", peer.typed, "--message", text)
+        self.assertEqual(rc, 1, err)
+        self.assertIn("nothing was recorded or delivered", err)
+        self.assertEqual(self.records(), [])
+        self.assertEqual(self.inbound, [])
+
     def test_verified_claude_sender_is_typed_cc(self):
         peer = self.start_peer()
         listener, rec = self.sender()

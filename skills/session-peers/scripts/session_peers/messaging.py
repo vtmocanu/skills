@@ -276,13 +276,6 @@ def _send_web(ident, args, oc_sender=None):
         runtime = sp_protocol.sender_runtime(sender_rec)
         from_name = sender_rec.get("name")
         address = "%s:%s" % (_record_kind(sender_rec), sender_rec["sessionId"])
-    msg_id = _new_msg_id(args)
-    failed = _record_before_send(args, msg_id, "web:" + ident)
-    if failed is not None:
-        return failed
-    if rec is None:
-        sys.stderr.write("error: browser peer web:%s is not running; nothing was delivered\n" % ident)
-        return _transport_failed(args, msg_id, "browser peer is not running")
     sender_ident = address.partition(":")[2] if address else None
     lines = [sp_protocol.build_origin(runtime, from_name, sender_ident)]
     reply_socket = sender_rec.get("messagingSocketPath") if sender_rec else None
@@ -290,10 +283,19 @@ def _send_web(ident, args, oc_sender=None):
         lines.append(sp_protocol.reply_route_hint(address))
     body = "\n".join(lines + [args.message])
     try:
+        # Before any journal write: a body that fits the journal but not the
+        # wire once wrapped must leave no record that nothing will ever settle.
         sp_claude.check_wrapped_size(body)
     except ValueError as exc:
-        sys.stderr.write("error: %s\n" % exc)
-        return _transport_failed(args, msg_id, exc)
+        sys.stderr.write("error: %s; nothing was recorded or delivered\n" % exc)
+        return 1
+    msg_id = _new_msg_id(args)
+    failed = _record_before_send(args, msg_id, "web:" + ident)
+    if failed is not None:
+        return failed
+    if rec is None:
+        sys.stderr.write("error: browser peer web:%s is not running; nothing was delivered\n" % ident)
+        return _transport_failed(args, msg_id, "browser peer is not running")
     frame = sp_protocol.build_user_frame(body, reply_socket, msg_id)
     frame[sp_constants.WEB_ANSWER_FIELD] = 1  # opt in to the inbox's answer line
     try:
