@@ -207,7 +207,7 @@ known:
 | --- | --- |
 | 0 | Delivered: the browser peer journaled the message and acknowledged it. |
 | 1, not delivered | The browser peer refused it (for example journal full) or could not be reached. |
-| 1, outcome unknown | No acknowledgement within 15 s, or the connection closed first. The message may or may not have been kept; check before resending: the page's Browser feed, or `peers.py inbox acks <id>` for a `--record` send (it shows whether the browser peer's record exists; the body is not readable back through the CLI). |
+| 1, outcome unknown | No acknowledgement within 15 s, or the connection closed first. The message may or may not have been kept; check before resending in the page's Browser feed. The CLI cannot tell: `peers.py inbox acks <id>` on a `--record` send shows only the sender's own record and its transport error, not whether the browser peer kept the message. |
 | 75 | `--record` with a full journal: nothing was sent. |
 | 76 | With `--record`, a refused or unknown outcome whose transport error could not be journaled. |
 
@@ -218,7 +218,8 @@ known:
   browser identity and an empty feed, and never imports earlier journal
   records. Its recipient is the old `web:<uuid>`, so no session can read it
   back through `inbox journal` or `inbox get`; `peers.py inbox acks <id>` only
-  confirms it was kept.
+  confirms the sender's own record was kept (and only when the sender was
+  identified: a message recorded with no sender cannot be queried).
 - **Duplicate record:** with `--record` a delivered message leaves two journal
   records, the sender's own and the browser peer's inbox record. Both count
   against retention. The sender's own record counts against its quota; the
