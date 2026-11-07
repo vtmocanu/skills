@@ -1379,7 +1379,9 @@ def _check_size(key, mid, sender, members, body, journaled):
     # filler (the character cap binds) and a four-byte one (the byte cap binds).
     # Only the session name can carry non-ASCII; the id fields stay ASCII.
     ident = "i" * sp_constants.MAX_TAG_FIELD_CHARS
-    for char in ("n", "\U0001F600"):
+    # The Claude wrapper also XML-escapes the name: a double quote grows to six
+    # bytes (&quot;), the worst per-character growth, so it is measured as well.
+    for char in ("n", "\U0001F600", '"'):
         name = char * sp_constants.MAX_TAG_FIELD_CHARS
         tag_origin = "\n".join([
             sp_protocol.build_tag(name, ident, "/" + "p" * 107, ident),

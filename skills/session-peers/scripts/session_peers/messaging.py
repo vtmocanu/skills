@@ -561,7 +561,14 @@ def _send_claude_channel(target, args, sender_sid):
         sender_sock = sender_rec.get("messagingSocketPath") if sender_rec else None
         inner = "%s\n%s" % (sp_protocol.build_origin("claude", name, sender_sid), args.message)
         # Without a registry record there is no reply socket to name: a bare body, as a shim-less Codex sender.
-        body = sp_protocol.build_wrapper(inner, sender_sock, sender_sid, name) if sender_sock else inner
+        # Cut the wrapper's name as build_tag cuts its own (control characters out, then
+        # MAX_TAG_FIELD_CHARS characters) so it stays within what channels._check_size measured.
+        wrapper_name = (
+            sp_constants.C0_RE.sub("", str(name))[:sp_constants.MAX_TAG_FIELD_CHARS] if name is not None else None
+        )
+        body = (
+            sp_protocol.build_wrapper(inner, sender_sock, sender_sid, wrapper_name) if sender_sock else inner
+        )
         sp_claude.check_wrapped_size(body)
         frame = sp_protocol.build_user_frame(body, sender_sock, msg_id=msg_id)
         sp_claude.send_frame(rec["messagingSocketPath"], frame, auth_token=sp_claude.peer_token_for(rec))

@@ -370,6 +370,27 @@ class ChannelSendTests(ChannelSendBase):
         rc, _result, err = self.send(message="y" * 1000)
         self.assertEqual(rc, 0, err)
 
+    def test_claude_sender_with_a_quote_heavy_name_is_never_journaled_then_refused(self):
+        # A double quote escapes to six bytes in the wrapper's from-name; a long
+        # registry name must be cut and measured so the preflight stays an upper bound.
+        self.sender_cc('"' * 5000)
+        peer, peer_typed = self.peer_cc("bravo")
+        self.channel("ops", peer_typed)
+        body = "x" * (sp_constants.MAX_TEXT_CHARS - 10000)
+        rc, result, err = self.send("--record", message=body)
+        if rc == 0:
+            frames = wait_for(lambda: peer.of_type("user"))
+            self.assertEqual(len(frames), 1)
+            content = frames[0]["message"]["content"]
+            self.assertLessEqual(len(content.encode("utf-8")), sp_constants.MAX_TEXT_CHARS)
+            self.assertIn('from-name="%s"' % ("&quot;" * sp_constants.MAX_TAG_FIELD_CHARS), content)
+        else:
+            self.assertEqual(rc, 1)
+            self.assertIn("nothing was journaled or sent", err)
+            self.assertEqual(self.journal_entries(), [])
+            self.assertEqual([e["kind"] for e in self.history()], ["channel.created"])
+            self.assertEqual(peer.of_type("user"), [])
+
     def test_body_over_the_message_cap_is_refused_like_send(self):
         self.sender_cc()
         self.channel("ops")
