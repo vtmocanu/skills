@@ -1464,14 +1464,18 @@ _READ_CHUNK = 64 * 1024
 _EVENT_TYPES = ("ack", "transport_error", "settled")
 
 
+_FINISH_STEP = 4 * 1024
+
+
 def _fingerprint_of(st):
-    return "%d:%d:%d" % (st.st_size, st.st_ino, st.st_mtime_ns)
+    return "%d:%d:%d:%d:%d:%d" % (st.st_size, st.st_ino, st.st_mtime_ns, st.st_mode, st.st_uid, st.st_ctime_ns)
 
 
 def journal_fingerprint():
-    """``"<size>:<inode>:<mtime_ns>"`` of the journal file, or None when it cannot be statted.
+    """``"<size>:<inode>:<mtime_ns>:<mode>:<uid>:<ctime_ns>"`` of the journal file, or None.
 
-    Stat only: nothing is opened, locked, created or repaired.
+    None when it cannot be statted. Mode, owner and ctime are part of it so a chmod or chown
+    never short-circuits ``read_since``. Stat only: nothing is opened, locked, created or repaired.
     """
     try:
         return _fingerprint_of(os.stat(os.path.join(journal_dir(), JOURNAL_NAME), follow_symlinks=False))
@@ -1479,46 +1483,106 @@ def journal_fingerprint():
         return None
 
 
-def _read_window(fd, size, budget):
-    """Read backward from ``size``; return ``(window, reached_start, bytes_read, oversized)``.
+class _Scan:
+    """Whole lines of the window, fed newest first, and what they say about stopping early."""
 
-    ``window`` holds only whole, newline-terminated lines. Reads are at most 64 KiB and
-    total at most ``budget``, except that the first whole line is read to the end
-    (up to JOURNAL_LINE_MAX) even when the budget is spent.
+    def __init__(self, now, cursor, wanted):
+        self.now, self.cursor, self.wanted = now, cursor, set(wanted)
+        self.items = []  # newest first: (parsed or None, loose seq of an unusable line)
+        self.lines = self.oversized = 0
+        self.passed = False  # a seq-bearing line at or below the cursor was seen
+        self.messages, self.referenced = set(), set()
+
+    def add(self, raw):
+        self.lines += 1
+        if len(raw) > JOURNAL_LINE_MAX:
+            # Skipped, not a valid record. read_only_view parses such a line (and may keep it);
+            # the two differ only for such foreign or corrupt lines.
+            self.oversized += 1
+            return
+        parsed = _parse_line(raw, self.now)
+        loose = 0 if parsed is not None else _loose_seq(raw)
+        self.items.append((parsed, loose))
+        seq = loose
+        if parsed is not None:
+            d = parsed[0]
+            seq = d["seq"]
+            if not parsed[1]:
+                if d["type"] == "message":
+                    self.messages.add(d["message_id"])
+                elif d["type"] in _EVENT_TYPES and self.cursor is not None and seq > self.cursor:
+                    self.referenced.add(d["message_id"])
+        if self.cursor is not None and 0 < seq <= self.cursor:
+            self.passed = True
+
+    def satisfied(self):
+        """True when nothing more is needed: wanted messages (and, after a cursor, its reach) are in."""
+        if self.cursor is None:
+            return bool(self.wanted) and self.wanted <= self.messages
+        return self.passed and self.referenced <= self.messages and self.wanted <= self.messages
+
+
+def _read_window(fd, size, budget, scan):
+    """Read backward from ``size`` into ``scan``; return ``(reached_start, bytes_read)``.
+
+    Reads are at most 64 KiB and total at most ``budget``. Once the budget is spent it
+    reads on only until one whole line is in (up to JOURNAL_LINE_MAX), in steps from 4 KiB
+    doubling to 64 KiB. It also stops as soon as ``scan.satisfied()``. A final line
+    without its newline is a torn or in-flight write and is ignored. A partial first line
+    longer than JOURNAL_LINE_MAX ends the read and is counted in ``scan.oversized``.
     """
-    buf, pos, total, oversized = b"", size, 0, 0
+    pos, total, finish = size, 0, _FINISH_STEP
+    partial, partial_len, seen_end = [], 0, False  # older pieces appended; file order is reversed
     while pos > 0:
-        newlines = buf.count(b"\n")
-        have_line = newlines >= 2 or (pos == 0 and newlines >= 1)
         left = budget - total
-        if left <= 0 and have_line:
+        if left > 0:
+            step = min(_READ_CHUNK, pos, left)
+        elif scan.lines:
             break
-        step = min(_READ_CHUNK, pos) if left <= 0 else min(_READ_CHUNK, pos, left)
+        else:
+            step = min(finish, pos)
+            finish = min(finish * 2, _READ_CHUNK)
         chunk = os.pread(fd, step, pos - step)
         if len(chunk) != step:
             raise _unavailable("journal changed while it was being read")
         pos -= step
         total += step
-        buf = chunk + buf
-        first = buf.find(b"\n")
-        if pos > 0 and (len(buf) if first < 0 else first) > JOURNAL_LINE_MAX:
-            oversized += 1
-            break
-    reached = pos == 0 and not oversized
-    end = buf.rfind(b"\n")
-    if end < 0:
-        return b"", reached, total, oversized
-    buf = buf[:end + 1]
-    if pos > 0:
-        buf = buf[buf.find(b"\n") + 1:]
-    return buf, reached, total, oversized
+        if not seen_end:
+            end = chunk.rfind(b"\n")
+            if end < 0:
+                partial_len += step  # still inside the torn tail; nothing to keep
+            else:
+                seen_end = True
+                chunk = chunk[:end]  # drops the torn tail and the last line's own newline
+                partial_len = 0
+        if seen_end:
+            pieces = chunk.split(b"\n")
+            if len(pieces) == 1:
+                partial.append(chunk)
+                partial_len += len(chunk)
+            else:
+                scan.add(pieces[-1] + b"".join(reversed(partial)))
+                for piece in reversed(pieces[1:-1]):
+                    scan.add(piece)
+                partial, partial_len = [pieces[0]], len(pieces[0])
+        if pos > 0 and partial_len > JOURNAL_LINE_MAX:
+            scan.oversized += 1
+            return False, total
+        if pos > 0 and scan.satisfied():
+            return False, total
+    if pos == 0 and seen_end:
+        first = b"".join(reversed(partial))
+        if first:
+            scan.add(first)
+    return pos == 0, total
 
 
 def _unchanged_result(cursor, fingerprint):
+    """Nothing was read, so completeness, prefix and gap are unknown (None), never claimed."""
     return {
         "messages": [], "events": [], "context": {}, "bytes": 0,
-        "next": cursor if cursor is not None else 0, "complete": True,
-        "journal_prefix": "read", "window_regression": False, "oversized": 0, "gap": None,
+        "next": cursor if cursor is not None else 0, "complete": None,
+        "journal_prefix": None, "window_regression": False, "oversized": 0, "gap": None,
         "fingerprint": fingerprint, "unchanged": True,
     }
 
@@ -1530,16 +1594,21 @@ def read_since(cursor, budget, want=None, known_fingerprint=None):
     Same-OS-user trust exception like ``read_only_view``; never locks, repairs, creates
     or writes anything, and unsafe modes or ownership raise JournalUnavailable.
     Reads backward from the end in chunks of at most 64 KiB, at most ``budget`` bytes,
-    except that the first whole line is always read (up to JOURNAL_LINE_MAX); ``bytes``
-    reports what was really read. The window is replayed in file order with the
-    ``_parse`` and ``_Model`` rules. Returns ``messages`` and ``events`` after
-    ``cursor``, ``context`` (per referenced or wanted message id: ``found`` with its
+    except that when no whole line fits (budget 0 included) it reads on until the first
+    whole line is in (up to JOURNAL_LINE_MAX); ``bytes`` reports what was really read. It
+    stops early once every ``want`` id (and, with a cursor, the cursor and the messages of
+    the events after it) is reached, so ``journal_prefix`` may then be "unread". The window
+    is replayed in file order with the ``_parse`` and ``_Model`` rules. Returns ``messages``
+    and ``events`` after ``cursor`` (an event whose message lies before the window carries
+    ``"unverified": True``; it is dropped only when the whole journal was read),
+    ``context`` (per referenced or wanted message id: ``found`` with its
     recipients' ACKs and transport errors, ``unreached`` when its message lies before the
     window, ``absent`` when the whole journal was read and has no such message),
     ``bytes``, ``next``, ``complete``, ``journal_prefix`` ("read" when the window starts
     at the file start, else "unread"), ``window_regression``, ``oversized``, ``gap``
-    (None, or ``{"from", "to", "reason"}``) and ``fingerprint``. When
-    ``known_fingerprint`` equals the current one, nothing is read and ``unchanged`` is true.
+    (None, or ``{"from", "to", "reason"}``), ``fingerprint`` and ``unchanged``. When
+    ``known_fingerprint`` equals the current one, nothing is read: ``unchanged`` is true,
+    ``bytes`` 0 and ``complete``, ``journal_prefix`` and ``gap`` are None (unknown).
     """
     if cursor is not None and not (_is_int(cursor) and cursor >= 0):
         raise ValueError("cursor must be None or an integer >= 0")
@@ -1549,46 +1618,31 @@ def read_since(cursor, budget, want=None, known_fingerprint=None):
     if known_fingerprint is not None and known_fingerprint == journal_fingerprint():
         return _unchanged_result(cursor, known_fingerprint)
     now = _now()
-    empty = {
-        "messages": [], "events": [], "context": {}, "bytes": 0, "next": cursor or 0, "complete": True,
-        "journal_prefix": "read", "window_regression": False, "oversized": 0, "gap": None, "fingerprint": None,
-    }
+    scan = _Scan(now, cursor, wanted)
+    fingerprint, reached, nbytes = None, True, 0
     try:
         dfd = _open_dir(journal_dir(), False)
     except FileNotFoundError:
         dfd = None
-    if dfd is None:
-        data, fingerprint, reached, nbytes, oversized = b"", None, True, 0, 0
-    else:
+    if dfd is not None:
         try:
             try:
                 fd, st = _open_file(dfd, JOURNAL_NAME, os.O_RDONLY, False)
             except FileNotFoundError:
                 fd = None
-            if fd is None:
-                data, fingerprint, reached, nbytes, oversized = b"", None, True, 0, 0
-            else:
+            if fd is not None:
                 try:
                     fingerprint = _fingerprint_of(st)
-                    data, reached, nbytes, oversized = _read_window(fd, st.st_size, budget)
+                    reached, nbytes = _read_window(fd, st.st_size, budget, scan)
                 finally:
                     os.close(fd)
         finally:
             os.close(dfd)
+    oversized = scan.oversized
 
-    recs, last_seq, low, regression, pos = [], 0, None, False, 0
-    while True:
-        nl = data.find(b"\n", pos)
-        if nl < 0:
-            break
-        raw = data[pos:nl]
-        pos = nl + 1
-        if len(raw) > JOURNAL_LINE_MAX:
-            oversized += 1
-            continue
-        parsed = _parse_line(raw, now)
+    recs, last_seq, low, regression = [], 0, None, False
+    for parsed, loose in reversed(scan.items):
         if parsed is None:
-            loose = _loose_seq(raw)
             last_seq = max(last_seq, loose)
             if loose:
                 low = loose if low is None else min(low, loose)
@@ -1599,7 +1653,7 @@ def read_since(cursor, budget, want=None, known_fingerprint=None):
             regression = True
             continue
         last_seq = seq
-        recs.append(_Rec(parsed[0], raw, parsed[1]))
+        recs.append(_Rec(parsed[0], b"", parsed[1]))  # the line bytes only feed byte totals the reader never uses
     model = _Model(recs)
 
     def fresh(seq):
@@ -1615,29 +1669,36 @@ def read_since(cursor, budget, want=None, known_fingerprint=None):
                 if key in d:
                     item[key] = d[key]
             messages.append(item)
+    def event_item(d):
+        item = {"type": d["type"], "message_id": d["message_id"], "seq": d["seq"], "at": d["at"]}
+        if d["type"] == "ack":
+            item["for"], item["by"] = d["for"], d["by"]
+        elif d["type"] == "transport_error":
+            item["for"], item["detail"] = d["for"], d["detail"]
+        else:
+            item["state"], item["by"] = d["state"], d["by"]
+        return item
+
     events = []
     for entry in model.entries.values():
         for rec in entry.events:
-            d = rec.d
-            if not fresh(d["seq"]):
-                continue
-            item = {"type": d["type"], "message_id": d["message_id"], "seq": d["seq"], "at": d["at"]}
-            if d["type"] == "ack":
-                item["for"], item["by"] = d["for"], d["by"]
-            elif d["type"] == "transport_error":
-                item["for"], item["detail"] = d["for"], d["detail"]
-            else:
-                item["state"], item["by"] = d["state"], d["by"]
-            events.append(item)
-    events.sort(key=lambda e: e["seq"])
+            if fresh(rec.d["seq"]):
+                events.append(event_item(rec.d))
     referenced = [e["message_id"] for e in events]
     unreached = []
     if not reached:
+        # The message lies before the window, so the slot cannot be checked: report the event
+        # as unverified. With the whole journal read the message is truly absent and the event
+        # is dangling, so it is dropped.
         for rec in recs:
             d = rec.d
             if (not rec.foreign and d["type"] in _EVENT_TYPES and fresh(d["seq"])
                     and d["message_id"] not in model.entries):
+                item = event_item(d)
+                item["unverified"] = True
+                events.append(item)
                 unreached.append(d["message_id"])
+    events.sort(key=lambda e: e["seq"])
     context = {}
     for mid in referenced + unreached + wanted:
         if mid in context:
@@ -1652,7 +1713,9 @@ def read_since(cursor, budget, want=None, known_fingerprint=None):
             context[mid] = {"state": "unreached" if not reached else "absent"}
     gap = None
     if cursor is not None:
-        if last_seq < cursor:
+        if last_seq < cursor and (reached or last_seq > 0):
+            # The journal ends below the cursor: only claimed when the window holds a seq (or the
+            # whole file was read), never because the window held no seq-bearing line at all.
             gap = {"from": cursor, "to": low, "reason": "regression"}
         elif not reached and (low is None or low > cursor + 1):
             gap = {"from": cursor, "to": low, "reason": "budget"}
@@ -1660,15 +1723,13 @@ def read_since(cursor, budget, want=None, known_fingerprint=None):
             gap = {"from": cursor, "to": low, "reason": "pruned"}
     complete = reached or (cursor is not None and gap is None and not unreached and all(
         v["state"] == "found" for v in context.values()))
-    out = empty
-    out.update({
+    return {
         "messages": messages, "events": events, "context": context, "bytes": nbytes,
         "next": last_seq if last_seq > 0 else (cursor or 0), "complete": complete,
         "journal_prefix": "read" if reached else "unread",
         "window_regression": regression and not reached, "oversized": oversized, "gap": gap,
-        "fingerprint": fingerprint,
-    })
-    return out
+        "fingerprint": fingerprint, "unchanged": False,
+    }
 
 
 @_api

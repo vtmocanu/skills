@@ -88,7 +88,8 @@ class BudgetTests(ReaderBase):
     def test_unchanged_poll_reads_nothing(self):
         self.msg()
         first = journal.read_since(None, BIG)
-        self.assertRegex(first["fingerprint"], r"^\d+:\d+:\d+$")
+        self.assertRegex(first["fingerprint"], r"^\d+(:\d+){5}$")
+        self.assertFalse(first["unchanged"])
         self.assertEqual(first["fingerprint"], journal.journal_fingerprint())
         self.reset_preads()
         again = journal.read_since(first["next"], BIG, known_fingerprint=first["fingerprint"])
@@ -97,10 +98,91 @@ class BudgetTests(ReaderBase):
         self.assertTrue(again["unchanged"])
         self.assertEqual(again["messages"] + again["events"], [])
         self.assertEqual(again["next"], first["next"])
+        self.assertEqual(again["context"], {})
+        for key in ("complete", "journal_prefix", "gap"):
+            self.assertIsNone(again[key])
         self.msg()
         changed = journal.read_since(first["next"], BIG, known_fingerprint=first["fingerprint"])
-        self.assertNotIn("unchanged", changed)
+        self.assertFalse(changed["unchanged"])
         self.assertEqual(len(changed["messages"]), 1)
+
+    def test_chmod_invalidates_fingerprint(self):
+        self.msg()
+        fp = journal.read_since(None, BIG)["fingerprint"]
+        os.chmod(self.jpath, 0o644)
+        self.assertNotEqual(journal.journal_fingerprint(), fp)
+        with self.assertRaises(journal.JournalUnavailable):
+            journal.read_only_view()
+        with self.assertRaises(journal.JournalUnavailable):
+            journal.read_since(None, BIG, known_fingerprint=fp)
+
+    def test_inode_change_invalidates_fingerprint(self):
+        self.put(self.mrec(1), self.mrec(2))
+        old = os.stat(self.jpath)
+        fp = journal.journal_fingerprint()
+        tmp = self.jpath + ".swap"
+        with open(tmp, "wb") as fh:
+            fh.write(self.read())
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, self.jpath)
+        os.utime(self.jpath, ns=(old.st_atime_ns, old.st_mtime_ns))
+        new_fp = journal.journal_fingerprint()
+        old_fields, new_fields = fp.split(":"), new_fp.split(":")
+        self.assertEqual((old_fields[0], old_fields[2]), (new_fields[0], new_fields[2]))
+        self.assertNotEqual(old_fields[1], new_fields[1])
+        self.assertNotEqual(fp, new_fp)
+        res = journal.read_since(None, BIG, known_fingerprint=fp)
+        self.assertFalse(res["unchanged"])
+        self.assertEqual(len(res["messages"]), 2)
+
+    def test_final_complete_record_without_newline_ignored(self):
+        self.put(self.mrec(1), tail=self.mrec(2).rstrip(b"\n"))
+        res = journal.read_since(None, BIG)
+        self.assertEqual([m["seq"] for m in res["messages"]], [1])
+        self.assertEqual(res["next"], 1)
+
+    def test_budget_just_below_size_leaves_prefix_unread(self):
+        self.put(*[self.mrec(i) for i in range(1, 6)])
+        size = os.path.getsize(self.jpath)
+        res = journal.read_since(None, size - 1)
+        self.assertEqual(res["journal_prefix"], "unread")
+        self.assertFalse(res["complete"])
+        self.assertEqual(res["bytes"], size - 1)
+        exact = journal.read_since(None, size)
+        self.assertEqual(exact["journal_prefix"], "read")
+
+    def test_short_read_is_unavailable(self):
+        self.put(*[self.mrec(i) for i in range(1, 6)])
+        counting = os.pread
+        with mock.patch.object(os, "pread", lambda fd, n, off: counting(fd, max(n - 1, 0), off)):
+            with self.assertRaises(journal.JournalUnavailable):
+                journal.read_since(None, BIG)
+
+    def test_small_budget_reads_only_one_line_plus_a_step(self):
+        self.put(*[self.mrec(i, body="x" * 250) for i in range(1, 1001)])
+        size = os.path.getsize(self.jpath)
+        line = len(self.mrec(1, body="x" * 250))
+        self.assertGreater(size, 100 * line)
+        for budget in (0, 10, 200):
+            self.reset_preads()
+            res = journal.read_since(None, budget)
+            self.assertEqual(res["bytes"], sum(self.preads))
+            self.assertLess(res["bytes"], 8 * 1024)
+            self.assertGreaterEqual(len(res["messages"]), 1)
+            self.assertEqual(res["next"], 1000)
+        for budget in (1000, 5000):
+            self.reset_preads()
+            res = journal.read_since(None, budget)
+            self.assertLessEqual(res["bytes"], budget)
+            self.assertEqual(res["bytes"], sum(self.preads))
+            self.assertGreaterEqual(len(res["messages"]), 1)
+
+    def test_complete_line_in_window_reads_nothing_beyond_budget(self):
+        self.put(*[self.mrec(i, body="x" * 250) for i in range(1, 1001)])
+        line = len(self.mrec(1, body="x" * 250))
+        res = journal.read_since(None, 3 * line)
+        self.assertEqual(res["bytes"], 3 * line)
+        self.assertEqual(sum(self.preads), 3 * line)
 
     def test_torn_final_line_ignored(self):
         self.put(self.mrec(1), self.mrec(2), tail=b'{"seq":3,"schema":1,"type":"mess')
@@ -124,20 +206,46 @@ class GapTests(ReaderBase):
     def test_cursor_above_highest_seq(self):
         self.put(self.mrec(1), self.mrec(2))
         res = journal.read_since(50, BIG)
-        self.assertIsNotNone(res["gap"])
+        self.assertEqual(res["gap"], {"from": 50, "to": 1, "reason": "regression"})
+
+    def test_window_without_seq_is_not_a_regression(self):
+        self.put(*[self.mrec(i, body="x" * 400) for i in range(1, 300)], b"garbage\n")
+        res = journal.read_since(299, 1)
+        self.assertEqual(res["journal_prefix"], "unread")
+        self.assertIsNone(res["gap"])
+        self.assertEqual(res["next"], 299)
+        self.put(*[self.mrec(i, body="x" * 100000) for i in range(1, 4)], b"g" * 6000 + b"\n")
+        res = journal.read_since(299, 1)
+        self.assertEqual(res["gap"], {"from": 299, "to": None, "reason": "budget"})
+        self.assertEqual(res["next"], 299)
+
+    def test_unread_window_below_cursor_is_a_regression(self):
+        self.put(*[self.mrec(i, body="x" * 400) for i in range(1, 100)])
+        res = journal.read_since(500, 1000)
+        self.assertEqual(res["journal_prefix"], "unread")
+        self.assertEqual(res["gap"]["reason"], "regression")
+        self.assertEqual(res["gap"]["from"], 500)
 
     def test_budget_too_small_to_reach_cursor(self):
         self.put(*[self.mrec(i, body="y" * 100) for i in range(1, 41)])
         res = journal.read_since(1, 500)
-        self.assertIsNotNone(res["gap"])
+        self.assertEqual(res["gap"]["reason"], "budget")
+        self.assertEqual((res["gap"]["from"], res["gap"]["to"]), (1, res["messages"][0]["seq"]))
+        self.assertGreater(res["gap"]["to"], 2)
         self.assertEqual(res["journal_prefix"], "unread")
         near = journal.read_since(39, 500)
         self.assertIsNone(near["gap"])
         self.assertEqual([m["seq"] for m in near["messages"]], [40])
 
+    def test_malformed_line_seqs_count_for_the_pruned_gap(self):
+        bad = self.line({"seq": 4, "pad": "q"})
+        self.put(bad, self.mrec(5))
+        self.assertIsNone(journal.read_since(3, BIG)["gap"])
+        self.assertEqual(journal.read_since(2, BIG)["gap"], {"from": 2, "to": 4, "reason": "pruned"})
+
     def test_start_reached_with_first_seq_beyond_cursor(self):
         self.put(self.mrec(10), self.mrec(11))
-        self.assertIsNotNone(journal.read_since(3, BIG)["gap"])
+        self.assertEqual(journal.read_since(3, BIG)["gap"], {"from": 3, "to": 10, "reason": "pruned"})
         self.assertIsNone(journal.read_since(9, BIG)["gap"])
         self.assertIsNone(journal.read_since(None, BIG)["gap"])
         self.assertIsNone(journal.read_since(0, BIG)["gap"])
@@ -296,10 +404,80 @@ class PrefixTests(ReaderBase):
         self.put(self.mrec(1, mid), *[self.mrec(i, body="f" * 50) for i in range(2, 30)], ack)
         res = journal.read_since(None, len(ack) + 5, want=[mid])
         self.assertEqual(res["context"][mid], {"state": "unreached"})
-        self.assertEqual(res["events"], [])
+        self.assertEqual([(e["seq"], e.get("unverified")) for e in res["events"]], [(60, True)])
         self.assertFalse(res["complete"])
         full = journal.read_since(None, BIG, want=[mid])
         self.assertEqual(full["context"][mid]["state"], "found")
+
+    def filler_journal(self, count=1000):
+        self.mid = str(uuid.uuid4())
+        self.fill = [self.mrec(i, body="x" * 300) for i in range(1, count)]
+        self.last = self.mrec(count, self.mid)
+        self.put(*self.fill, self.last, self.ev(count + 1, "ack", self.mid, **{"for": self.A, "by": self.A}))
+        return os.path.getsize(self.jpath)
+
+    def test_want_stops_reading_at_the_wanted_message(self):
+        size = self.filler_journal()
+        res = journal.read_since(None, BIG, want=[self.mid])
+        self.assertLess(res["bytes"], size // 4)
+        self.assertEqual(res["journal_prefix"], "unread")
+        self.assertEqual(res["context"][self.mid]["state"], "found")
+        self.assertEqual(res["context"][self.mid]["acked"], [self.A])
+        self.assertEqual([e["type"] for e in res["events"]], ["ack"])
+
+    def test_cursor_stops_reading_once_passed(self):
+        size = self.filler_journal()
+        res = journal.read_since(990, BIG)
+        self.assertLess(res["bytes"], size // 4)
+        self.assertEqual(res["journal_prefix"], "unread")
+        self.assertIsNone(res["gap"])
+        self.assertEqual([m["seq"] for m in res["messages"]][-1], 1000)
+
+    def test_cursor_reads_on_to_the_message_of_a_later_event(self):
+        mid = str(uuid.uuid4())
+        lines = [self.mrec(1, mid)] + [self.mrec(i, body="x" * 300) for i in range(2, 1000)]
+        self.put(*lines, self.ev(1000, "ack", mid, **{"for": self.A, "by": self.A}))
+        res = journal.read_since(990, BIG)
+        self.assertEqual(res["journal_prefix"], "read")
+        self.assertEqual(res["context"][mid]["state"], "found")
+        self.assertEqual(res["context"][mid]["acked"], [self.A])
+        self.assertEqual([("unverified" in e) for e in res["events"]], [False])
+
+    def test_event_with_unreached_message_is_unverified(self):
+        mid = str(uuid.uuid4())
+        ack = self.ev(60, "ack", mid, **{"for": self.A, "by": self.A})
+        self.put(self.mrec(1, mid), *[self.mrec(i, body="f" * 50) for i in range(2, 60)], ack)
+        res = journal.read_since(59, len(ack) + 5)
+        self.assertEqual(res["journal_prefix"], "unread")
+        self.assertEqual([(e["seq"], e["message_id"], e.get("unverified")) for e in res["events"]], [(60, mid, True)])
+        self.assertEqual(res["context"][mid], {"state": "unreached"})
+        self.assertEqual(res["next"], 60)
+        self.assertFalse(res["complete"])
+
+    def test_dangling_event_dropped_when_journal_fully_read(self):
+        ghost = str(uuid.uuid4())
+        self.put(self.mrec(1), self.ev(2, "ack", ghost, **{"for": self.A, "by": self.A}))
+        res = journal.read_since(None, BIG)
+        self.assertEqual(res["events"], [])
+        self.assertEqual(res["next"], 2)
+
+    def test_events_at_or_below_cursor_are_not_returned(self):
+        mid = str(uuid.uuid4())
+        self.put(self.mrec(1, mid, to=[self.A, self.B]),
+                 self.ev(2, "ack", mid, **{"for": self.A, "by": self.A}),
+                 self.mrec(3),
+                 self.ev(4, "transport_error", mid, **{"for": self.B, "detail": "d"}))
+        res = journal.read_since(2, BIG)
+        self.assertEqual([e["seq"] for e in res["events"]], [4])
+        self.assertEqual([m["seq"] for m in res["messages"]], [3])
+        self.assertEqual(res["context"][mid]["acked"], [self.A])
+
+    def test_foreign_records_in_window_are_ignored(self):
+        self.put(self.mrec(1), self.line({"seq": 2, "schema": 2, "type": "zzz"}),
+                 self.line({"seq": 3, "type": "future"}), self.mrec(4))
+        res = journal.read_since(None, BIG)
+        self.assertEqual([m["seq"] for m in res["messages"]], [1, 4])
+        self.assertEqual((res["events"], res["oversized"], res["next"]), ([], 0, 4))
 
     def test_absent_when_whole_journal_read(self):
         self.put(self.mrec(1))
@@ -331,6 +509,16 @@ class NearCapTests(ReaderBase):
         self.assertEqual(res["messages"], [])
         self.assertEqual(res["oversized"], 1)
         self.assertLessEqual(res["bytes"], journal.JOURNAL_LINE_MAX + 128 * 1024)
+
+    def test_oversized_first_line_is_counted_and_skipped(self):
+        base = len(self.mrec(1, body="")) - 1
+        over = self.mrec(1, body="x" * (journal.JOURNAL_LINE_MAX + 1 - base))
+        self.assertEqual(len(over) - 1, journal.JOURNAL_LINE_MAX + 1)
+        self.put(over, self.mrec(2))
+        res = journal.read_since(None, BIG)
+        self.assertEqual(res["oversized"], 1)
+        self.assertEqual([m["seq"] for m in res["messages"]], [2])
+        self.assertEqual(res["journal_prefix"], "read")
 
 
 if __name__ == "__main__":
