@@ -164,6 +164,13 @@ kind of peer (such as a browser peer) is excluded by construction.
   The second line replaces the first when the OpenCode listing failed: the
   member list then covers Claude and Codex only. An OpenCode session outside
   the window is not a member, so do not read `#general` as "every session".
+- Claude and Codex discovery is best effort, but an incomplete read (an
+  unreadable or malformed Claude registry file, an unreadable Codex thread
+  state) is never silent: the post prints one
+  `note: discovery incomplete: <reason>` line per gap, and `--json`, the
+  history entry and `channel members general --json` carry
+  `discovery_incomplete`. Sessions that read missed are not members and are
+  absent from the ACK tally.
   The line is printed for `#general` posts, `@all` there included, and for
   `channel members general`; not for `@all` on a stored channel, whose explicit
   member list involves no enumeration.
@@ -249,7 +256,9 @@ channel exists and the sender is a member, so it reaches a Claude member from a
 Claude sender. Consequence: adding a Claude session as a member needs no
 consent from it, so a two-member channel reaches another Claude session
 without `SendMessage`. The header, pacing and delivery verification still
-apply.
+apply. The provenance line says `Claude Code session` and names a reply socket
+only when a live registry record carries the sender's session id; otherwise
+it reads `peer of unverified runtime` and no reply route is named.
 
 ## Decisions
 

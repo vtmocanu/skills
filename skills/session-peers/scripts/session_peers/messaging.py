@@ -557,9 +557,14 @@ def _send_claude_channel(target, args, sender_sid):
         sender_rec = matches[0] if len(matches) == 1 else (
             sp_claude.claude_record_by_socket(sock) if sock else None
         )
+        if not isinstance(sender_rec, dict) or sender_rec.get("sessionId") != sender_sid:
+            # No live registry record proves this environment's session id: the
+            # origin is labelled unverified and no reply route is named.
+            sender_rec = None
         name = sender_rec.get("name") if sender_rec else None
         sender_sock = sender_rec.get("messagingSocketPath") if sender_rec else None
-        inner = "%s\n%s" % (sp_protocol.build_origin("claude", name, sender_sid), args.message)
+        origin = sp_protocol.build_origin(sp_protocol.sender_runtime(sender_rec), name, sender_sid)
+        inner = "%s\n%s" % (origin, args.message)
         # Without a registry record there is no reply socket to name: a bare body, as a shim-less Codex sender.
         # Cut the wrapper's name as build_tag cuts its own (control characters out, then
         # MAX_TAG_FIELD_CHARS characters) so it stays within what channels._check_size measured.

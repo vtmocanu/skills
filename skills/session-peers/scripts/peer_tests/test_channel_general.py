@@ -246,6 +246,39 @@ class GeneralBroadcastTests(GeneralBase):
         self.assertTrue(self.stamp_path().exists())  # the message exists, so the allowance stays spent
 
 
+class GeneralDiscoveryGapTests(GeneralBase):
+    def test_an_incomplete_claude_registry_read_is_reported_with_the_broadcast(self):
+        (self.sessions / "broken.json").write_text("{not json")
+        rc, result, err = self.post()
+        self.assertEqual(rc, 0, err)
+        gaps = result["discovery_incomplete"]
+        self.assertEqual(len(gaps), 1)
+        self.assertTrue(gaps[0].startswith("Claude registry: "), gaps)
+        self.assertEqual(self.send_entries("general")[0]["data"]["discovery_incomplete"], gaps)
+        self.wall[0] += 61
+        rc, out, err = self.cli("send", "--to", "#general", "--message", "@all again")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("note: discovery incomplete: Claude registry: ", out)
+        self.assertIn("Claude registry: ", json.dumps(self.general_members()["discovery_incomplete"]))
+
+    def test_an_unreadable_codex_state_is_reported_with_the_broadcast(self):
+        empty = self.root / "empty-codex"
+        empty.mkdir()
+        os.environ["CODEX_SQLITE_HOME"] = str(empty)
+        self.addCleanup(os.environ.pop, "CODEX_SQLITE_HOME", None)
+        rc, result, err = self.post()
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(len(result["discovery_incomplete"]), 1)
+        self.assertTrue(result["discovery_incomplete"][0].startswith("Codex: "), result)
+
+    def test_a_complete_discovery_reports_no_gap(self):
+        rc, result, err = self.post()
+        self.assertEqual(rc, 0, err)
+        self.assertNotIn("discovery_incomplete", result)
+        self.assertNotIn("discovery_incomplete", self.send_entries("general")[0]["data"])
+        self.assertNotIn("discovery_incomplete", self.general_members())
+
+
 class AllowanceTests(GeneralBase):
     def test_a_refused_journal_restores_the_allowance(self):
         with mock.patch.object(sp_journal, "record_message", side_effect=sp_journal.JournalFull("journal full")):

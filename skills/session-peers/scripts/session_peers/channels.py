@@ -560,16 +560,17 @@ def _hours_value():
 
 
 def general_members():
-    """``(members, opencode_coverage)`` of derived #general.
+    """``(members, opencode_coverage, discovery_gaps)`` of derived #general.
 
     Members are what `peers.py list` shows: live or unverified Claude sessions
     (a Codex shim counts as ``codex:``), Codex threads with ``live`` true or
     unknown, and OpenCode top-level sessions updated within
     SESSION_PEERS_OPENCODE_RECENT_HOURS, minus sessions that left. The
-    coverage dict states what the OpenCode part covered, or that it failed.
+    coverage dict states what the OpenCode part covered, or that it failed;
+    ``discovery_gaps`` names each Claude or Codex read that was incomplete.
     """
-    discovered, coverage = _discover_general()
-    return _without_left(discovered), coverage
+    discovered, coverage, gaps = _discover_general()
+    return _without_left(discovered), coverage, gaps
 
 
 def _without_left(discovered):
@@ -579,8 +580,13 @@ def _without_left(discovered):
 
 
 def _discover_general():
-    """``(discovered, opencode_coverage)``: the `peers.py list` sessions, leave markers not applied."""
-    members = []
+    """``(discovered, opencode_coverage, discovery_gaps)``: the `peers.py list` sessions, leave markers not applied.
+
+    Discovery stays best effort (one bad registry file does not empty #general),
+    but every incomplete Claude or Codex read is named in ``discovery_gaps`` so a
+    post and its ACK tally never silently omit a runtime.
+    """
+    members, gaps = [], []
 
     def add(typed):
         try:
@@ -590,11 +596,16 @@ def _discover_general():
         if typed not in members:
             members.append(typed)
 
+    _records, claude_error = sp_claude.read_claude_records_checked()
+    if claude_error is not None:
+        gaps.append("Claude registry: %s" % _reason(claude_error))
     for record in sp_claude.read_claude_records():
         if sp_claude.record_liveness(record) in ("live", "unverified"):
             kind = "codex" if record.get("entrypoint") == "codex" else "cc"
             add("%s:%s" % (kind, record.get("sessionId")))
-    threads, _schema_ok = sp_codex.codex_threads()
+    threads, schema_ok = sp_codex.codex_threads()
+    if not schema_ok:
+        gaps.append("Codex: the thread state could not be read, so Codex threads were not enumerated")
     threads = threads + sp_codex.threads_in_other_homes(t["id"] for t in threads)
     for thread in threads:
         if thread.get("live") is True or thread.get("live") is None:
@@ -607,7 +618,7 @@ def _discover_general():
         for session in sessions:
             add("oc:%s" % session["id"])
         coverage = {"scope": "top-level sessions updated within the window", "hours": _hours_value()}
-    return members, coverage
+    return members, coverage, gaps
 
 
 def coverage_line(coverage):
@@ -616,6 +627,11 @@ def coverage_line(coverage):
         return sp_journal._human("note: OpenCode was not enumerated: %s" % coverage.get("error"))
     return "OpenCode coverage: top-level sessions updated within the last %s h (as peers.py list)" % (
         coverage.get("hours"),)
+
+
+def gaps_lines(gaps):
+    """One escaped note per incomplete Claude or Codex discovery read."""
+    return [sp_journal._human("note: discovery incomplete: %s" % gap) for gap in gaps or ()]
 
 
 def gc_left_markers(dry_run=False, verbose=True):
@@ -947,16 +963,19 @@ def _cmd_list(args, me):
 
 
 def _cmd_general_members(args):
-    members, coverage = general_members()
+    members, coverage, gaps = general_members()
     cache = {}
     rows = [{"member": m, "owner": False, "liveness": member_liveness(m, cache)} for m in members]
     if args.json:
         print(json.dumps({"channel": sp_constants.CHANNEL_GENERAL, "display": sp_constants.CHANNEL_GENERAL,
-                          "derived": True, "members": rows, "opencode_coverage": coverage}))
+                          "derived": True, "members": rows, "opencode_coverage": coverage,
+                          **({"discovery_incomplete": gaps} if gaps else {})}))
         return 0
     for row in rows:
         print("%s  %s" % (sp_journal._human(row["member"]), row["liveness"]))
     print(coverage_line(coverage))
+    for line in gaps_lines(gaps):
+        print(line)
     return 0
 
 
@@ -1318,7 +1337,7 @@ def require_target(value):
 
 
 def _members_for(key, sender):
-    """``(members, opencode_coverage)`` a send by ``sender`` to ``key`` addresses.
+    """``(members, opencode_coverage, discovery_gaps)`` a send by ``sender`` to ``key`` addresses.
 
     A stored channel needs the sender among its members. Derived ``#general``
     has no member cap, but its sender must be a session the #general discovery
@@ -1328,7 +1347,7 @@ def _members_for(key, sender):
     process, since ``journal.caller()`` trusts the environment.
     """
     if key == sp_constants.CHANNEL_GENERAL:
-        discovered, coverage = _discover_general()
+        discovered, coverage, gaps = _discover_general()
         if sender not in discovered:
             if sender.startswith("oc:") and coverage.get("enumerated") is False:
                 raise ChannelError(
@@ -1338,7 +1357,7 @@ def _members_for(key, sender):
             raise ChannelError(
                 "%s is not a session peers.py list discovers; only discovered sessions can "
                 "post to #general" % sp_journal._human(sender))
-        return _without_left(discovered), coverage
+        return _without_left(discovered), coverage, gaps
     rec = read_channel(key)
     if rec is None:
         raise ChannelError("no channel named #%s; run `peers.py channel list`" % key)
@@ -1348,7 +1367,7 @@ def _members_for(key, sender):
             % (sp_journal._human(sender), key, key)
         )
     _check_roster_cap(rec)  # refused, never truncated
-    return list(rec["members"]), None
+    return list(rec["members"]), None, []
 
 
 def _reason(value):
@@ -1547,7 +1566,7 @@ def _send(args):
         sender = sp_journal.caller()
     except sp_journal.JournalError as exc:
         raise ChannelError(_reason(exc))
-    members, coverage = _members_for(key, sender)
+    members, coverage, gaps = _members_for(key, sender)
     body = args.message
     general = key == sp_constants.CHANNEL_GENERAL
     is_all = ALL_RE.match(body) is not None
@@ -1599,6 +1618,7 @@ def _send(args):
         "delivery": delivery, "recipients": list(snapshot),
         "excluded": [{"member": m, "reason": r} for m, r in excluded],
         "opencode_coverage": coverage,
+        **({"discovery_incomplete": gaps} if gaps else {}),
     }
     lock = None
     try:
@@ -1620,6 +1640,8 @@ def _send(args):
             payload["journal"] = {"message_id": mid, "recorded": True}
         if coverage is not None:
             payload["opencode_coverage"] = coverage
+        if gaps:
+            payload["discovery_incomplete"] = gaps
         if delivery == "none":
             if not delivers:
                 # Journaled for the resolvable members, delivered to none.
@@ -1699,6 +1721,8 @@ def _report(payload, rc, as_json, journaled, headline):
     print(headline)
     if payload.get("opencode_coverage") is not None:
         print(coverage_line(payload["opencode_coverage"]))
+    for line in gaps_lines(payload.get("discovery_incomplete")):
+        print(line)
     if journaled:
         print(sp_journal.pointer_text(payload["message_id"]))
     notes = payload.get("notes") or {}

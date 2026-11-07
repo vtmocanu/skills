@@ -246,6 +246,22 @@ class ChannelSendTests(ChannelSendBase):
         with contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(sp_routes.check(args, "send", "to"), 2)
 
+    def test_an_unverified_claude_sender_is_not_labelled_a_claude_session(self):
+        # Only an environment id, no live registry record: no Claude label, no reply route.
+        sid = new_uuid()
+        self.write_record(os.getpid(), "ghost", sid, str(self.socks / "ghost.sock"), procStart="")
+        self.me = self.as_cc(sid)
+        peer, peer_typed = self.peer_cc("bravo")
+        self.channel("ops", peer_typed)
+        rc, result, err = self.send()
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(result["outcomes"], {peer_typed: "transport accepted"})
+        content = wait_for(lambda: peer.of_type("user"))[0]["message"]["content"]
+        self.assertIn("[session-peers from peer of unverified runtime (%s)]" % sid, content)
+        self.assertNotIn("Claude Code session", content)
+        self.assertNotIn("ghost.sock", content)
+        self.assertNotIn("<cross-session-message", content)
+
     def test_pacing_spaces_claude_deliveries_and_headers_differ(self):
         self.sender_cc("alpha")
         listeners, typed = [], []
