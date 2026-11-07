@@ -917,3 +917,126 @@ test("nits: budget gap wording, acked rows with a transport error, #general coun
   const chipSr = elementsOf(lanes[1]).filter((n) => n.attributes.class === "sr").map((n) => n.textContent)
   assert.deepEqual(chipSr, ["(Working)", "(Idle)"])
 })
+
+// ---------------------------------------------------------------- second rework (#161 m4 review)
+
+test("All channels: entries for a channel still to come via Load more keep the view current; Load more stays beside a stale note", async () => {
+  const env = bootFixture({ "/api/all": { entries: [Object.assign(sendEntry(1, "from general"), { channel: "general" })], partial: true, omitted: 1, total: 2, shown: 1, next: "TOK", trimmed: 0 } })
+  await env.app.ready
+  await env.app.showAll()
+  const notes = env.document.byId.notes
+  env.routes["/api/changes"] = quiet("C1", { channels: { ops: { entries: [sendEntry(9, "new in ops")], gap: null } } })
+  await env.app.pollOnce()
+  assert.equal(env.document.byId.sub.textContent, "Showing 1 of 2 channels")
+  assert.ok(buttonNamed(notes, "Load more"), "Load more still reaches #ops")
+  assert.ok(!notes.textContent.includes("Reload All channels"), notes.textContent)
+  env.routes["/api/changes"] = quiet("C2", { channels: { fresh: { entries: [], gap: null, new: true } } })
+  await env.app.pollOnce()
+  assert.ok(buttonNamed(notes, "Reload All channels"))
+  assert.ok(buttonNamed(notes, "Load more"), "Load more stays alongside the stale note")
+})
+
+test("a failed gap reload drops the holed page and shows the error; a later poll reloads it with the gap note", async () => {
+  const env = bootFixture()
+  await env.app.ready
+  await env.app.selectChannel("ops")
+  const stream = env.document.byId.stream
+  env.routes["/api/channel/ops"] = { __status: 503 }
+  env.routes["/api/changes"] = quiet("C1", { channels: { ops: { entries: [], gap: { from: 2, to: 50, reason: "pruned" } } } })
+  await env.app.pollOnce()
+  assert.ok(stream.textContent.includes("This channel could not be loaded"), stream.textContent)
+  assert.ok(!stream.textContent.includes("first in ops"), "the page with the hole is not shown as current")
+  assert.equal(env.app.state.pages.ops, undefined)
+  env.routes["/api/channel/ops"] = pageFixture("ops", [sendEntry(51, "after the gap")])
+  env.routes["/api/changes"] = quiet("C2")
+  await env.app.pollOnce()
+  assert.ok(stream.textContent.includes("after the gap"))
+  assert.ok(env.document.byId.notes.textContent.includes("Older entries were pruned"))
+})
+
+test("a settled send gains no row for an outcome slot outside its recipients (as channels.delivery_rows)", async () => {
+  const STRANGER = "codex:00000000-0000-4000-8000-0000000000f9"
+  const env = bootFixture()
+  await env.app.ready
+  env.routes["/api/changes"] = quiet("C1", { updates: [{ channel: "general", message_id: "m1",
+    delivery: { state: "complete", recipients: [{ recipient: CODEX_B, state: "transport accepted" }, { recipient: STRANGER, state: "queued (thread paused)" }] } }] })
+  await env.app.pollOnce()
+  const d = plain(env.app.state.pages.general.entries[0].delivery)
+  assert.deepEqual(d.recipients, [row(CODEX_B, "transport accepted", { ack: "pending" })])
+  assert.ok(!env.document.byId.stream.textContent.includes("queued (thread paused)"))
+})
+
+test("seq-less placeholders buffered during a page load are not duplicated on replay; live ones are kept", async () => {
+  const big = () => ({ seq: null, kind: "oversized", oversized: true })
+  let release
+  const gate = new Promise((r) => { release = r })
+  const env = bootFixture({ "/api/channel/ops": async () => { await gate; return pageFixture("ops", [sendEntry(1, "one"), sendEntry(2, "two"), big()]) } })
+  await env.app.ready
+  const picked = env.app.selectChannel("ops")
+  await settle()
+  env.routes["/api/changes"] = quiet("C1", { channels: { ops: { entries: [sendEntry(2, "two"), big()], gap: null } } })
+  await env.app.pollOnce()
+  env.routes["/api/changes"] = quiet("C2", { channels: { ops: { entries: [big(), sendEntry(3, "three")], gap: null } } })
+  await env.app.pollOnce()
+  release()
+  await picked
+  const shape = () => env.app.state.pages.ops.entries.map((e) => (e.oversized ? "big" : e.seq))
+  assert.deepEqual(shape(), [1, 2, "big", "big", 3], "the page's placeholder is the first poll's; the second poll's is new")
+  env.routes["/api/changes"] = quiet("C3", { channels: { ops: { entries: [big()], gap: null } } })
+  await env.app.pollOnce()
+  env.routes["/api/changes"] = quiet("C4", { channels: { ops: { entries: [big()], gap: null } } })
+  await env.app.pollOnce()
+  assert.deepEqual(shape(), [1, 2, "big", "big", 3, "big", "big"], "a live poll continues the page")
+})
+
+test("All channels Load more keeps the batch just loaded even when it is older than the retained entries", async () => {
+  const late = Array.from({ length: 500 }, (_, i) => Object.assign(sendEntry(i + 1, "late " + i), { channel: "general", ts: "2026-11-07T13:00:00Z" }))
+  const env = bootFixture({ "/api/all": (url) => url.includes("next=") ?
+    { entries: [Object.assign(sendEntry(1, "early ops"), { channel: "ops", ts: "2026-11-07T09:00:00Z" })], partial: false, omitted: 0, total: 2, shown: 2, next: null, trimmed: 0 } :
+    { entries: late, partial: true, omitted: 1, total: 2, shown: 1, next: "TOK", trimmed: 0 } })
+  await env.app.ready
+  await env.app.showAll()
+  await env.app.loadAll("TOK")
+  const all = env.app.state.all
+  assert.equal(all.entries.length, 500)
+  assert.equal(all.entries[0].channel, "ops", "the loaded batch is kept, in time order")
+  assert.equal(all.trimmed, 1)
+  assert.ok(env.document.byId.stream.textContent.includes("early ops"))
+  assert.ok(env.document.byId.notes.textContent.includes("1 older entries of these channels are left out"))
+})
+
+test("an own __proto__ key in server data never changes a prototype or reaches the page", async () => {
+  const leak = '{"coverage":{"native_claude":true,"discovery_incomplete":["PROTO-LEAK"]},"verdict":{"verdict":"block","label":"LEAKED","text":"x"},"tally":{"acked":7,"total":9}}'
+  const state = stateFixture()
+  state.channels[1].coverage = JSON.parse('{"__proto__":' + leak.replace(/^\{"coverage":/, "").replace(/,"verdict".*$/, "") + "}")
+  const env = bootFixture({ "/api/state": state, "/api/channel/ops": pageFixture("ops", [sendEntry(1, "first in ops")], { coverage: {} }),
+    "/api/all": { entries: [Object.assign(sendEntry(1, "from general"), { channel: "general" })], partial: false, omitted: 0, total: 1, shown: 1, next: null, trimmed: 0 } })
+  await env.app.ready
+  await env.app.selectChannel("ops")
+  assert.ok(!env.document.byId.coverage.textContent.includes("PROTO-LEAK"), env.document.byId.coverage.textContent)
+  assert.ok(!env.document.byId.coverage.textContent.includes("Native Claude"), "nothing inherited from the __proto__ key")
+  await env.app.showAll()
+  const hostile = JSON.parse('{"seq":5,"ts":"2026-11-07T12:50:00Z","kind":"send","body":"plain post","sender":"' + CC_A + '","message_id":"m5","__proto__":' + leak + "}")
+  env.routes["/api/changes"] = quiet("C1", { channels: { general: { entries: [hostile], gap: null } } })
+  await env.app.pollOnce()
+  const text = env.document.byId.stream.textContent
+  assert.ok(text.includes("plain post"))
+  for (const bad of ["PROTO-LEAK", "LEAKED", "7 of 9"]) assert.ok(!text.includes(bad), bad)
+  const copy = env.app.state.all.entries.find((e) => e.seq === 5)
+  assert.equal(copy.channel, "general")
+  assert.equal(copy.coverage, undefined)
+  assert.equal(vm.runInContext("({}).coverage === undefined && ({}).verdict === undefined", env.context), true, "Object.prototype untouched")
+})
+
+test("discovery.truncated adds a rail note that some session states were not checked", async () => {
+  const state = stateFixture()
+  state.discovery.truncated = true
+  const env = bootFixture({ "/api/state": state })
+  await env.app.ready
+  const rail = () => env.document.byId.railnotes.textContent
+  assert.ok(rail().includes("Some session states were not checked (discovery stopped early)."), rail())
+  env.routes["/api/state"] = stateFixture()
+  env.routes["/api/changes"] = quiet("C1", { channels: { fresh: { entries: [], gap: null, new: true } } })
+  await env.app.pollOnce()
+  assert.ok(!rail().includes("not checked"), "gone once a pass completes")
+})

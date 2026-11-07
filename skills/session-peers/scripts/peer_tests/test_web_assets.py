@@ -181,6 +181,9 @@ class WebAssetTests(unittest.TestCase):
         # A channel named "constructor" must not hit Object.prototype: no {} table keyed by data.
         self.assertNotRegex(self.js, r"\b(?:names|members|rows|sessions|pages|pendingNotes|covered|focusables|loading|pageErrors)\s*[:=]\s*\{\s*\}")
         self.assertIn("Object.create(null)", self.js)
+        # Copies go into a prototype-free table: an own "__proto__" key from JSON.parse would
+        # otherwise hit the __proto__ setter of a {} target and swap the copy's prototype.
+        self.assertNotRegex(self.js, r"Object\.assign\(\s*\{")
 
     # -- app.css ------------------------------------------------------------
 

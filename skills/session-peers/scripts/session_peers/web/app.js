@@ -141,7 +141,9 @@
   // ------------------------------------------------------------------------
 
   // Every table keyed by server data (channel keys, typed ids) has no prototype: a channel named
-  // "constructor" or "__proto__" is a plain key, never an inherited member.
+  // "constructor" or "__proto__" is a plain key, never an inherited member. Copies of server
+  // objects go into one too (Object.assign(table(), ...)): an own "__proto__" key from JSON.parse
+  // then stays a plain property instead of reaching the __proto__ setter and swapping the prototype.
   function table() { return Object.create(null); }
 
   function own(obj, key) {
@@ -458,7 +460,7 @@
     var marked = false;
     (entries || []).forEach(function (entry) {
       var mark = !marked && Array.isArray(opts.focusSet) && opts.focusSet.indexOf(entry) >= 0;
-      var node = renderEntry(entry, mark ? Object.assign({}, opts, { focusTarget: true }) : opts);
+      var node = renderEntry(entry, mark ? Object.assign(table(), opts, { focusTarget: true }) : opts);
       if (!node) return;
       if (mark) {
         marked = true;
@@ -475,7 +477,7 @@
   }
 
   function renderChannelPage(page, opts) {
-    opts = Object.assign({ channelKey: page && page.channel }, opts || {});
+    opts = Object.assign(table(), { channelKey: page && page.channel }, opts || {});
     var out = [];
     if (!page) return out;
     if (page.next !== null && page.next !== undefined) {
@@ -747,19 +749,49 @@
   }
 
   // Entries after the page's newest seq go on the end (a seq at or below it is already there).
-  function appendToPage(page, entries) {
+  // A live poll continues the page, so its seq-less entries (oversized placeholders) are new.
+  // replay: entries buffered while the page loaded, some of which the page may already hold.
+  // A seq-less one is placed by the numbered entry before it in the buffer (or, with none, the one
+  // after it): inside what the page holds it is skipped; right after the page's newest seq it is
+  // the k-th placeholder there, new only past the k the page already ends with.
+  function appendToPage(page, entries, replay) {
     var changed = false;
     var last = lastSeq(page.entries);
-    entries.forEach(function (e) {
+    var base = last;
+    var tail = 0;
+    for (var t = page.entries.length - 1; t >= 0 && page.entries[t] && typeof page.entries[t].seq !== "number"; t--) tail += 1;
+    var anchor = null;
+    var nth = 0;
+    entries.forEach(function (e, i) {
       if (!e || typeof e !== "object") return;
-      if (last === null || typeof e.seq !== "number" || e.seq > last) {
-        page.entries.push(e);
-        if (typeof e.seq === "number") last = e.seq;
-        changed = true;
+      if (typeof e.seq === "number") {
+        anchor = e.seq;
+        if (last === null || e.seq > last) {
+          page.entries.push(e);
+          last = e.seq;
+          changed = true;
+        }
+        return;
       }
+      if (replay && !seqlessIsNew(entries, i, anchor, base, function () { nth += 1; return nth > tail; })) return;
+      page.entries.push(e);
+      changed = true;
     });
     if (changed) capPage(page);
     return changed;
+  }
+
+  function seqlessIsNew(entries, i, anchor, base, countTail) {
+    if (base === null) return anchor !== null || countTail();
+    var at = anchor;
+    if (at === null) {
+      for (var j = i + 1; j < entries.length && at === null; j++) if (entries[j] && typeof entries[j].seq === "number") at = entries[j].seq;
+      if (at !== null && at <= base) return false;
+      at = base;
+    }
+    if (at < base) return false;
+    if (at === base) return countTail();
+    return true;
   }
 
   // One latest-page load per channel at a time. While it is in flight, live entries and updates for
@@ -791,7 +823,7 @@
       if (S.loading[key] === buf) delete S.loading[key];
       delete S.pageErrors[key];
       S.pages[key] = page;
-      appendToPage(page, buf.entries);
+      appendToPage(page, buf.entries, true);
       buf.updates.forEach(function (u) { applyUpdate(u, key); });
       capPage(page);
       return page;
@@ -875,6 +907,16 @@
       var entries = (Array.isArray(data.entries) ? data.entries : []).filter(function (e) { return e && typeof e === "object"; });
       if (!next || !S.all) S.all = newAll();
       var all = S.all;
+      if (next) {
+        // The batch just loaded stays whole: make room by trimming the oldest retained entries.
+        var keep = Math.max(0, ALL_CAP - entries.length);
+        var drop = all.entries.length - keep;
+        if (drop > 0) {
+          all.entries.sort(function (a, b) { return stamp(a.ts) - stamp(b.ts); });
+          all.entries = all.entries.slice(drop);
+          all.trimmed += drop;
+        }
+      }
       all.entries = all.entries.concat(entries);
       all.entries.sort(function (a, b) { return stamp(a.ts) - stamp(b.ts); });
       entries.forEach(function (e) {
@@ -941,11 +983,13 @@
           if (typeof last === "number" && e.seq <= last) return;
           all.last[key] = e.seq;
         }
-        all.entries.push(Object.assign({}, e, { channel: key }));
+        all.entries.push(Object.assign(table(), e, { channel: key }));
         changed = true;
       });
       capAll(all);
-    } else if (all && markAllStale("New entries arrived in " + chanText(key) + ", which this view may not include.")) {
+    } else if (all && !all.next && markAllStale("New entries arrived in " + chanText(key) + ", which this view may not include.")) {
+      // While Load more (all.next) remains, an uncovered channel may still come in a later batch,
+      // which the server reads fresh: the view is not stale for it yet.
       changed = true;
     }
     return changed;
@@ -978,7 +1022,8 @@
   // A send's settled delivery, merged as channels.delivery_rows builds it: a recipient the update
   // names takes its outcome; one it does not name takes the send's state, or "unknown" when the
   // state is "complete" (no recorded outcome). A refused row keeps its refusal, an acked row stays
-  // acked, and the journaled ACK field is left as it is.
+  // acked, and the journaled ACK field is left as it is. Only the send's own recipients have rows:
+  // an outcome slot for anyone else adds none (delivery_rows lists data.recipients only).
   function mergeDelivery(d, ud) {
     var settled = typeof ud.state === "string" && ud.state ? ud.state : null;
     if (settled) d.state = settled;
@@ -991,9 +1036,6 @@
       if (!row || refusedState(row.state) || row.state === "acked" || row.ack === "acked") return;
       if (row.recipient in named) row.state = named[row.recipient];
       else if (settled) row.state = settled === "complete" ? "unknown" : settled;
-    });
-    Object.keys(named).forEach(function (recipient) {
-      if (!findRow(d, recipient)) rows.push({ recipient: recipient, state: named[recipient] });
     });
   }
 
@@ -1052,7 +1094,15 @@
     var waits = reloads.map(function (pair) {
       var key = pair[0], text = gapNote(pair[1]);
       if (S.pages[key] || S.loading[key] || key === S.selected) {
-        return loadLatest(key, text).then(function () { changed = true; }, function () {});
+        return loadLatest(key, text).then(function () { changed = true; }, function () {
+          // The reload failed: the old page has a hole, so drop it rather than show it as current.
+          // The selected channel shows the error and recoverSelected loads it after a later poll;
+          // another channel loads when picked. The gap note waits for that load.
+          delete S.pages[key];
+          S.pageErrors[key] = true;
+          S.pendingNotes[key] = text;
+          changed = true;
+        });
       }
       S.pendingNotes[key] = text;
       return Promise.resolve();
@@ -1247,6 +1297,7 @@
     if (st.partial) out.push(note("Some channel data lay beyond the per-request read budget and shows as unverified."));
     if (st.discovery && st.discovery.stale) out.push(note("Session discovery is stale."));
     if (st.discovery && st.discovery.pending) out.push(note("Session discovery is refreshing."));
+    if (st.discovery && st.discovery.truncated === true) out.push(note("Some session states were not checked (discovery stopped early).", "warn"));
     if (S.journalGap) out.push(note("Some ACK changes could not be read; ACK state may lag until the next reload."));
     fill($("railnotes"), out);
   }
@@ -1308,7 +1359,7 @@
         (all.notes || []).forEach(function (t) { notes.push(note(t, "warn")); });
         if (all.trimmed) notes.push(note(all.trimmed + " older entries of these channels are left out (at most " + PAGE_LIMIT + " per batch, 25 per channel, " + ALL_CAP + " in this view)."));
         if (all.partial && !all.next) notes.push(note("Partial: some reads were cut short by the per-request budget."));
-        if (all.next && !all.stale) notes.push(el("div", { class: "note row" }, "Showing " + str(all.shown) + " of " + str(all.total) + " channels; " + str(all.omitted) + " more not loaded.",
+        if (all.next) notes.push(el("div", { class: "note row" }, "Showing " + str(all.shown) + " of " + str(all.total) + " channels; " + str(all.omitted) + " more not loaded.",
           moreButton("Load more", function () { loadAll(S.all.next); }, "more:all")));
         body = renderEntries(all.entries, { channel: true, focusSet: opts.focusSet, onFocusTarget: setTarget });
         if (!body.length) body = [el("div", { class: "empty" }, "No entries in the channels shown.")];
@@ -1342,14 +1393,14 @@
       title = chanText(key);
       var count = row && Array.isArray(row.members) ? row.members.length : 0;
       sub = key === "general" ? count + " sessions, everyone" : count + " member" + (count === 1 ? "" : "s");
-      var covRow = row ? { coverage: Object.assign({}, row.coverage || {}) } : { coverage: {} };
+      var covRow = row ? { coverage: Object.assign(table(), row.coverage && typeof row.coverage === "object" ? row.coverage : {}) } : { coverage: table() };
       if (page && page.coverage && typeof page.coverage.native_claude === "boolean") covRow.coverage.native_claude = page.coverage.native_claude;
       cover = renderCoverage("channel", covRow);
       notes = renderPageNotes(page);
       if (page) {
         body = renderChannelPage(page, { onOlder: function () { loadOlder(key); }, focusSet: opts.focusSet, onFocusTarget: setTarget });
       } else if (S.pageErrors[key] && !S.loading[key]) {
-        body = [el("div", { class: "empty", role: "alert" }, "This channel could not be loaded: the server did not answer. It loads again once the connection is back.")];
+        body = [el("div", { class: "empty", role: "alert" }, "This channel could not be loaded: the server did not answer. It is tried again with the next update.")];
       } else {
         body = [el("div", { class: "empty" }, "Loading…")];
       }
