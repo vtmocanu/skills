@@ -1,6 +1,6 @@
 ---
 name: session-peers
-description: 'Messages between Claude Code sessions, Codex CLI threads and OpenCode V2 sessions on one machine, including correlated request/reply without stale queued turns, blocking (ask) or nonblocking (dispatch then await). Registers Codex as a Claude peer. Binds a named buddy peer for review and brainstorming. Runs channels for more than two sessions, with #general and @all broadcasts. Use when sending cross-session messages or handoffs, requesting peer review, dispatching correlated work without blocking, waiting on a peer, listing live sessions, diagnosing a stuck or dead peer, posting to a channel, or recording, fetching or acknowledging a critical message (verdict, co-sign, handover). Triggers include "message codex", "message opencode", "ask claude", "@codex", "session peers", "peer review", "buddy: @name", "ask your buddy", "your buddy is", a bare "buddy", "create a channel", "post to the channel", "#general", "@all", "leave the channels", "did they ack", "fetch the verdict", "record a critical message".'
+description: 'Messages between Claude Code sessions, Codex CLI threads and OpenCode V2 sessions on one machine, including correlated ask/dispatch request/reply. Registers Codex as a Claude peer. Binds a named buddy peer for review and brainstorming. Runs channels for more than two sessions, with #general and @all broadcasts. Serves a read-only web dashboard of channels. Use when sending cross-session messages or handoffs, requesting peer review, dispatching correlated work, waiting on a peer, listing live sessions, diagnosing a stuck or dead peer, posting to a channel, or recording, fetching or acknowledging a critical message (verdict, co-sign, handover). Triggers include "message codex", "message opencode", "ask claude", "@codex", "session peers", "peers dashboard", "channel dashboard", "peer review", "buddy: @name", "ask your buddy", "your buddy is", a bare "buddy", "create a channel", "post to the channel", "#general", "@all", "leave the channels", "did they ack", "fetch the verdict", "record a critical message".'
 ---
 
 # session-peers
@@ -108,12 +108,10 @@ channel, using `@all`, leaving or handing over, or relying on delivery state.
 
 ## Web dashboard
 
-`peers.py web [--port N]` serves a local, read-only browser view of channels:
-members and their state, history, per-recipient delivery outcomes, verdicts and
-ACK state. It prints `http://127.0.0.1:<port>/#token=<t>` to open; the token is
-per start. It never sends, ACKs or changes anything, listens on loopback only,
-and bounds every read. It does not show native Claude-to-Claude messages unless
-their sender recorded them, and a `transport accepted` row is not an ACK.
+`peers.py web [--port N]` serves a local, read-only browser view of channels. It
+prints `http://127.0.0.1:<port>/#token=<t>` to open; the token is new on every
+start. It never sends, ACKs or changes anything. A `transport accepted` row is
+not an ACK.
 
 Read [references/web.md](references/web.md) before relying on what the
 dashboard shows or its limits.

@@ -333,6 +333,18 @@ class WebdataParityTests(WebdataBase):
         self.assertEqual((row["ack"], row["transport_error"]), ("pending", "socket closed"))
         self.assertNotIn("transport_error", self.web_send_view()["recipients"][1])
 
+    def test_an_early_stop_with_every_wanted_ack_found_is_not_journal_partial(self):
+        # Older journal traffic before the message: the reader stops once the wanted record is in,
+        # so the journal start stays unread, but no ACK this page needs is missing.
+        for i in range(4):
+            sp_journal.record_message(self.me, ["codex:" + self.tid], "older %d %s" % (i, "x" * 30000))
+        rc, _result, err = self.send("--record")
+        self.assertEqual(rc, 0, err)
+        page = webdata.channel_page("ops")
+        send = [e for e in page["entries"] if e["kind"] == "send"][0]
+        self.assertFalse(page["journal_partial"])
+        self.assertEqual({r["ack"] for r in send["delivery"]["recipients"]}, {"pending"})
+
     def test_acks_beyond_the_journal_budget_read_unverified_and_partial(self):
         rc, result, err = self.send("--record")
         self.assertEqual(rc, 0, err)

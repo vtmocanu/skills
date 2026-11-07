@@ -20,24 +20,25 @@ http://127.0.0.1:<port>/#token=<token>
 Open that exact URL in a browser on the same machine. Remote access is not
 supported: the server listens on `127.0.0.1` only.
 
-| Guard | Behaviour |
-| --- | --- |
-| Token | New on every start. It travels in the URL fragment (never sent to the server or logged), the page keeps it in memory only and clears it from the address bar, and sends it as `X-Peers-Token`. The static shell (`/`, `/app.css`, `/app.js`) loads without it; every `/api/*` route needs it (403 otherwise). A reload or a copied link without the fragment cannot read data. |
-| Host | Must be exactly `127.0.0.1:<port>` or `localhost:<port>` (403 otherwise), as a DNS-rebinding guard. |
-| Method | GET only (405); a request body is refused (400). |
-| Connections | At most 16 at once; extra connections are closed unanswered. The request line and headers must arrive within 2 s, and every connection is cut after 10 s. |
-| Headers | Every response carries a `Content-Security-Policy` (`default-src 'none'`, scripts and styles from `'self'` only, no framing, no forms), `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `Cache-Control: no-store` and same-origin resource/opener policies. Errors have an empty `{}` body. No request is logged. |
+- The server listens on loopback only and accepts GET only; it is read-only.
+- The token is new on every start and travels in the URL fragment (never sent
+  to the server or logged); the page keeps it in memory and sends it as
+  `X-Peers-Token`.
+- A reload or a copied link without the fragment cannot read data (403).
 
-The token and the loopback bind limit access to one OS user's processes on this
-machine; they are not a defence against a hostile process of the same user.
+The token and the loopback bind limit access to one OS user's processes; they
+are not a defence against a hostile process of the same user. Connection,
+header and memory details are in the
+[runtime package README](../scripts/session_peers/README.md#dashboard-server).
 
 ## What the page shows
 
 - **Channels rail.** `#general` first, then stored channels. Each lists its
   members with runtime icon and name and a state: working, idle, unverified or
-  gone. A handover chain and a `missing ACKs` (or `ACKs unverified`) badge
-  cover the latest 25 entries of the channel; `unverified` appears when the
-  read budget ran out before the ACK state could be established.
+  gone. A handover chain (buddy channels) and a `missing ACKs` (or `ACKs
+  unverified`) badge cover the latest 25 entries of the channel; `unverified`
+  appears when the read budget ran out before the ACK state could be
+  established.
 - **Conversation.** Entries oldest first. A verdict message shows a band
   (`APPROVE`, `REVISE: N`, `BLOCK`) with its pinned SHA. A send lists one row
   per recipient with the [channels](channels.md#outcomes) outcome
@@ -55,23 +56,26 @@ machine; they are not a defence against a hostile process of the same user.
   is not known).
 - **Coverage banner.** Native Claude-to-Claude messages (`SendMessage`) are not
   in this view unless their sender recorded them; the banner says so for a
-  channel with a Claude Code member. On `#general` it also states what the
-  post's OpenCode coverage was and any discovery gaps recorded with it.
+  channel with a Claude Code member. On `#general` the banner also shows the
+  current discovery's OpenCode coverage and discovery gaps; each `#general`
+  post shows its own recorded `opencode_coverage` and `discovery_incomplete`
+  under that post.
 - **All channels.** Newest entries of many channels merged by time, read in
   batches. It shows "Showing N of M channels" with `Load more`, and an
   "Out of date" note when a new channel or a gap means the loaded set no longer
-  covers every channel.
+  covers every channel. It also appears for channels that arrive while the view
+  is loading and after a cursor reset.
 - **Search.** Case-insensitive substring search (1-256 characters) of body,
   actor and member text in each channel's newest 200 entries, in batches with
   `Load more`.
-- **Live.** The page polls every 2 s, remembers a light or dark theme in
-  `localStorage` (its only stored value; the default follows the system), and
-  has a phone layout.
+- **Live.** The page polls every 2 s (backing off after failures), remembers a
+  light or dark theme in `localStorage` (its only stored value; the default
+  follows the system), and has a phone layout.
 
 `transport accepted` never means the model read the message; only an ACK
 (`inbox acks <id>`) does. A correlated `ask`/`dispatch` request and its
 settlement are journaled but are not channel history entries, so the page does
-not show them. The static assets live in `scripts/session_peers/web/`.
+not show them.
 
 ## Limits and scope
 
@@ -84,7 +88,7 @@ Everything is bounded; a request that hits a bound says so in the page
 | Per channel | 1 MiB read from the end of its history. A request never returns nothing for want of bytes alone: one complete maximum-size entry can raise one channel's read up to the entry line cap while the request budget holds it. |
 | History page | At most 200 entries (`limit`, `before`). |
 | All channels / search batch | 32 channels per batch, newest 25 entries each (search: 200), All channels merged to the newest 200. |
-| Journal | Read from its end within the remaining request budget. When it cannot reach the start, the page notes that ACK state was read from the newest part of the journal only, and older ACKs show as `unverified`. The 2 s poll reads at most 2 MiB of it. |
+| Journal | Read from its end within the remaining request budget. When the read could not reach some message's record, the page notes that ACK state was read from the newest part of the journal only, and those ACKs show as `unverified`. An early stop that found every wanted ACK adds no note. The 2 s poll reads at most 2 MiB of it. |
 | Poll cursor | Opaque, at most 48 KiB. Only `#general` and the first 256 stored channels are tracked; others show "not live-tracked; reload the page to see them". |
 
 - An entry too large to read whole shows "Entry too large to display". History
@@ -100,20 +104,6 @@ Everything is bounded; a request that hits a bound says so in the page
   state SQLite opened read-only (opening a WAL database read-only may touch its
   `-wal`/`-shm` sidecars). It does not create the session-peers state
   directories, rewrite a topic log, or take a store or journal lock.
-- Crash visibility covers process crashes only, not power loss. Memory worst
-  case is about 16 connections times 8 MiB.
 
-## Identifier hygiene
-
-Peer-written names and addresses are shown with control, bidirectional and
-invisible characters escaped as `\uXXXX` (`\UXXXXXXXX` beyond the BMP). Message
-bodies keep newlines, tabs and emoji sequences, but hidden characters are
-escaped: tag characters outside the three RGI subdivision flags (England,
-Scotland, Wales), and joiners or variation selectors that do not sit between or
-after the characters they belong to.
-
-## Third-party icons
-
-The Codex and Claude marks are inlined from third-party icon sets (the
-OpenCode glyph is drawn for this project); see
-[THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md).
+Peer-written names, addresses and message bodies are shown with control,
+bidirectional and hidden characters escaped (`\uXXXX`).

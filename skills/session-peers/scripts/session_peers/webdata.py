@@ -837,7 +837,11 @@ def read_journal_context(budget, want):
     except Exception:  # an unreadable journal only makes ACK state unverified
         return JournalContext(available=False)
     budget.charge(result.get("bytes") or 0)
-    return JournalContext(result.get("context") or {}, True, result.get("journal_prefix") == "unread")
+    context = result.get("context") or {}
+    # Partial only when a wanted message was not reached: an early stop once every wanted
+    # record is in leaves the journal start unread but loses no ACK this page needs.
+    unreached = any(isinstance(c, dict) and c.get("state") == "unreached" for c in context.values())
+    return JournalContext(context, True, result.get("journal_prefix") == "unread" and unreached)
 
 
 # --------------------------------------------------------------------------
