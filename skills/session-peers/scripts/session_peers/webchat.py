@@ -104,7 +104,7 @@ class BrowserState:
       outbound ``{lseq, dir: "out", message_id, to: [typed], text, ack_requested, at}``
     Status rows, one per accepted send, by message id:
       ``{mid, kind: "direct"|"channel", to, text (channel only), ack_requested, state, reason, note,
-      journaled, delivering, recipients: {typed: {outcome, ack, transport_error?, peer_status?}}, at, seq}``
+      journaled, delivering, recipients: {typed: {outcome, ack, unverified?, transport_error?, update_failed?, peer_status?}}, at, seq}``
     ``seq`` rises on every change, so a reader asks for the rows changed since a seq.
     """
 
@@ -328,7 +328,8 @@ class BrowserState:
         ``unverified`` flag (the journal could not say) and only on a slot whose ``ack`` is ``pending``,
         with or without a transport error, never on ``acked``, ``not requested`` or ``expired``. The
         flag never replaces ``ack``; any definite fact for the slot clears it (``acked``, ``expired``,
-        ``pending`` read from a journal that was reached, or a transport error). An unknown message
+        ``pending`` read from a journal that was reached, or a transport error), and so does
+        ``merge_recipients`` setting ``not requested``. An unknown message
         or recipient is ignored."""
         with self._lock:
             row = self._sends.get(mid) if isinstance(mid, str) else None
