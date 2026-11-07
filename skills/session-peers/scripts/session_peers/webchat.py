@@ -64,7 +64,7 @@ ACK_NOT_REQUESTED = "not requested"
 ACK_ACKED = "acked"
 ACK_UNVERIFIED = "unverified"
 ACK_EXPIRED = "expired"
-_ACK_SOFT = (ACK_PENDING, ACK_UNVERIFIED, ACK_EXPIRED)
+_ACK_SOFT = (ACK_PENDING, ACK_EXPIRED)
 
 
 def scrub_environment():
@@ -294,6 +294,7 @@ class BrowserState:
                 ack = new["ack"]
                 if ack == ACK_NOT_REQUESTED and slot["ack"] not in (ACK_NOT_REQUESTED, ACK_ACKED):
                     slot["ack"] = ack
+                    slot.pop("unverified", None)
                     changed = True
             if changed:
                 self._touch_locked(row)
@@ -323,9 +324,12 @@ class BrowserState:
 
         ``recipient`` None means every recipient of the row. ``acked`` always lands, even on a slot
         that was ``not requested``; ``pending`` and ``expired`` replace only a still-open state
-        (``pending``, ``unverified`` or ``expired``); ``unverified`` (the journal tail's guess) lands only
-        on a ``pending`` slot, with or without a transport error, never over ``acked``, ``not requested``
-        or ``expired``. An unknown message or recipient is ignored."""
+        (``pending`` or ``expired``). ``ack="unverified"`` is not an ACK value: it sets the slot's
+        ``unverified`` flag (the journal could not say) and only on a slot whose ``ack`` is ``pending``,
+        with or without a transport error, never on ``acked``, ``not requested`` or ``expired``. The
+        flag never replaces ``ack``; any definite fact for the slot clears it (``acked``, ``expired``,
+        ``pending`` read from a journal that was reached, or a transport error). An unknown message
+        or recipient is ignored."""
         with self._lock:
             row = self._sends.get(mid) if isinstance(mid, str) else None
             if row is None:
@@ -336,19 +340,23 @@ class BrowserState:
                 slot = row["recipients"].get(name) if isinstance(name, str) else None
                 if slot is None:
                     continue
-                if ack is not None and ack != slot["ack"]:
-                    if ack == ACK_UNVERIFIED:
-                        # Only a guess: it never covers an ACK state that already holds a fact.
-                        land = slot["ack"] == ACK_PENDING
-                    else:
-                        land = ack == ACK_ACKED or (slot["ack"] in _ACK_SOFT and ack in _ACK_SOFT)
-                    if land:
+                if ack == ACK_UNVERIFIED:
+                    # Only a guess: it marks a still-pending slot and never covers a fact.
+                    if slot["ack"] == ACK_PENDING and not slot.get("unverified"):
+                        slot["unverified"] = True
+                        changed = True
+                elif ack is not None:
+                    if ack != slot["ack"] and (ack == ACK_ACKED or (slot["ack"] in _ACK_SOFT and ack in _ACK_SOFT)):
                         slot["ack"] = ack
+                        changed = True
+                    if slot["ack"] == ack and slot.pop("unverified", None):
                         changed = True
                 if transport_error is not None:
                     detail = _bounded(transport_error)
                     if slot.get("transport_error") != detail:
                         slot["transport_error"] = detail
+                        changed = True
+                    if slot.pop("unverified", None):
                         changed = True
             if changed:
                 self._touch_locked(row)

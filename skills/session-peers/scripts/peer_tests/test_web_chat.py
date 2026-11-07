@@ -1001,10 +1001,12 @@ class ChatHydrationTests(ChatFeedBase):
         cursor = self.start_cursor()
         with mock.patch.object(sp_journal, "read_since", broken):
             rows = {r["mid"]: r for r in self.changes(cursor)["browser"]["sends"]}
-        self.assertEqual(rows[mid2]["recipients"][cc2]["ack"], "unverified")
-        # A later hydration with a readable journal resolves it (unverified is not sticky).
+        self.assertEqual(rows[mid2]["recipients"][cc2]["ack"], "pending")
+        self.assertTrue(rows[mid2]["recipients"][cc2]["unverified"])
+        # A later hydration with a readable journal resolves it (the flag is cleared).
         rows = {r["mid"]: r for r in self.first_page()["browser"]["sends"]}
         self.assertEqual(rows[mid2]["recipients"][cc2]["ack"], "pending")
+        self.assertNotIn("unverified", rows[mid2]["recipients"][cc2])
 
     def test_hydration_covers_only_journaled_sends(self):
         queued = new_uuid()
@@ -1062,7 +1064,8 @@ class ChatHydrationTests(ChatFeedBase):
         with mock.patch.object(sp_journal, "read_since", no_hydration), \
                 mock.patch.object(webdata, "_after_first_page_hydration", ack_in_the_window):
             first = self.changes(cursor)
-        self.assertEqual(self.state.row(mid)["recipients"][cc]["ack"] in ("acked", "unverified"), True)
+        slot = self.state.row(mid)["recipients"][cc]
+        self.assertTrue(slot["ack"] == "acked" or (slot["ack"] == "pending" and slot["unverified"]))
         second = self.changes(first["cursor"])
         self.assertIn({"message_id": mid, "recipient": cc, "ack": "acked", "state": "acked"}, second["updates"])
         self.assertEqual(self.state.row(mid)["recipients"][cc]["ack"], "acked")
@@ -1482,8 +1485,9 @@ class ChatReworkTests(ChatFeedBase):
             self.assertIn("first reply", [e["text"] for e in one["browser"]["entries"]])
             self.assertTrue(one["partial"])
             [shown] = [r for r in one["browser"]["sends"] if r["mid"] == mid]
-            self.assertEqual(shown["recipients"][cc]["ack"], "unverified")  # this response only
-            self.assertEqual(self.state.row(mid)["recipients"][cc]["ack"], "pending")
+            self.assertEqual(shown["recipients"][cc]["ack"], "pending")
+            self.assertTrue(shown["recipients"][cc]["unverified"])
+            self.assertTrue(self.state.row(mid)["recipients"][cc]["unverified"])
             b_one = self.b_of(one)  # the cursor carries a position, so the next poll is not a first page
             self.inbound("second reply")
             two = self.changes(one["cursor"])
@@ -1509,20 +1513,22 @@ class ChatReworkTests(ChatFeedBase):
         self.assertEqual(self.state.row(mid)["recipients"][cc]["ack"], "acked")
         for page in (first, second, third):
             for row in page["browser"]["sends"]:
-                self.assertNotEqual(row["recipients"][cc]["ack"], "unverified")
+                self.assertNotIn("unverified", row["recipients"][cc])
 
     def test_an_unverified_tail_update_lands_on_a_pending_slot_even_with_a_transport_error_and_on_nothing_else(self):
         mid, cc, _listener = self.direct_send()
         self.state.apply_journal(mid, cc, transport_error="no route")
         self.state.apply_journal(mid, cc, ack="unverified")
-        self.assertEqual(self.state.row(mid)["recipients"][cc]["ack"], "unverified")
+        self.assertEqual(self.state.row(mid)["recipients"][cc]["ack"], "pending")
+        self.assertTrue(self.state.row(mid)["recipients"][cc]["unverified"])
         self.assertEqual(self.state.row(mid)["recipients"][cc]["transport_error"], "no route")
-        # Never over an ACK, a not-requested slot or an expired one.
+        # Never on an ACK, a not-requested slot or an expired one.
         for fact in ("acked", "expired", "not requested"):
             with self.subTest(fact=fact):
                 self.state.update(mid, recipients={cc: {"outcome": None, "ack": fact}})
                 self.state.apply_journal(mid, cc, ack="unverified")
                 self.assertEqual(self.state.row(mid)["recipients"][cc]["ack"], fact)
+                self.assertNotIn("unverified", self.state.row(mid)["recipients"][cc])
 
     def test_a_large_feed_does_not_leave_a_verifiable_ack_unverified(self):
         mid, cc, _listener = self.direct_send()
@@ -1538,26 +1544,90 @@ class ChatReworkTests(ChatFeedBase):
         self.assertEqual(shown["recipients"][cc]["ack"], "acked")
         self.assertEqual(self.state.row(mid)["recipients"][cc]["ack"], "acked")
 
-    def test_a_hydration_that_cannot_reach_the_ack_is_unverified_for_that_response_only(self):
-        mid, cc, _listener = self.direct_send()
-        sp_journal.ack(mid, cc)
-        real = sp_journal.read_since
-
+    @staticmethod
+    def unreached_read(real):
         def unreached(cursor_arg, budget, want=None, **kw):
             result = real(cursor_arg, budget, want=want, **kw)
             if not want:
                 return result
             return dict(result, complete=False, journal_prefix="unread",
                         context={m: {"state": "unreached"} for m in want})
+        return unreached
 
+    def slot(self, mid, cc):
+        return self.state.row(mid)["recipients"][cc]
+
+    def test_a_hydration_that_cannot_reach_the_ack_flags_the_pending_slot_until_a_fact_lands(self):
+        mid, cc, _listener = self.direct_send()
+        sp_journal.ack(mid, cc)
         cursor = self.start_cursor()
-        with mock.patch.object(sp_journal, "read_since", unreached):
+        with mock.patch.object(sp_journal, "read_since", self.unreached_read(sp_journal.read_since)):
             [shown] = [r for r in self.changes(cursor)["browser"]["sends"] if r["mid"] == mid]
-        self.assertEqual(shown["recipients"][cc]["ack"], "unverified")
-        self.assertEqual(self.state.row(mid)["recipients"][cc]["ack"], "pending")
+        self.assertEqual(shown["recipients"][cc]["ack"], "pending")  # ack keeps definite facts only
+        self.assertTrue(shown["recipients"][cc]["unverified"])
+        self.assertTrue(self.slot(mid, cc)["unverified"])  # stored in the shared row
         [again] = [r for r in self.first_page()["browser"]["sends"] if r["mid"] == mid]
         self.assertEqual(again["recipients"][cc]["ack"], "acked")
-        self.assertEqual(self.state.row(mid)["recipients"][cc]["ack"], "acked")
+        self.assertNotIn("unverified", again["recipients"][cc])
+        self.assertNotIn("unverified", self.slot(mid, cc))
+
+    def test_a_row_deferred_by_a_full_first_page_keeps_its_unverified_flag_and_a_reload_clears_it(self):
+        mid, cc, _listener = self.direct_send(text="h" * 1500)
+        sp_journal.ack(mid, cc)
+        for n in range(600):
+            self.inbound("m%d" % n)
+        cursor = self.start_cursor()
+        with mock.patch.object(sp_journal, "read_since", self.unreached_read(sp_journal.read_since)):
+            first = webdata.changes(cursor, budget=webdata.Budget(48 * 1024), browser=self.state)
+            self.assertTrue(first["browser"]["entries"])
+            self.assertEqual(first["browser"]["sends"], [])  # the entries filled the page
+            self.assertTrue(first["partial"])
+            second = webdata.changes(first["cursor"], browser=self.state)
+        [row] = [r for r in second["browser"]["sends"] if r["mid"] == mid]
+        self.assertEqual(row["recipients"][cc]["ack"], "pending")
+        self.assertTrue(row["recipients"][cc]["unverified"])
+        [reloaded] = [r for r in self.first_page()["browser"]["sends"] if r["mid"] == mid]
+        self.assertEqual(reloaded["recipients"][cc]["ack"], "acked")
+        self.assertNotIn("unverified", reloaded["recipients"][cc])
+
+    def test_an_unverified_row_re_sent_after_an_unrelated_change_keeps_the_flag_until_a_fact_lands(self):
+        mid, cc, _listener = self.direct_send()
+        cursor = self.start_cursor()
+        with mock.patch.object(sp_journal, "read_since", self.unreached_read(sp_journal.read_since)):
+            first = self.changes(cursor)
+        self.assertTrue(self.slot(mid, cc)["unverified"])
+        position = self.b_of(first)
+        self.state.on_status({"orig_msg_id": mid, "status": "received", "detail": "ok"}, cc)
+        later = self.changes(first["cursor"])
+        [row] = [r for r in later["browser"]["sends"] if r["mid"] == mid]
+        self.assertGreater(self.b_of(later)[2], position[2])
+        self.assertEqual(row["recipients"][cc]["peer_status"]["status"], "received")
+        self.assertTrue(row["recipients"][cc]["unverified"])
+        self.assertEqual(row["recipients"][cc]["ack"], "pending")
+        sp_journal.ack(mid, cc)
+        tail = self.changes(later["cursor"])
+        self.assertIn({"message_id": mid, "recipient": cc, "ack": "acked", "state": "acked"}, tail["updates"])
+        [acked] = [r for r in tail["browser"]["sends"] if r["mid"] == mid]
+        self.assertEqual(acked["recipients"][cc]["ack"], "acked")
+        self.assertNotIn("unverified", acked["recipients"][cc])
+
+    def test_a_slot_with_a_transport_error_is_flagged_by_an_unreached_hydration_and_an_unattributable_tail_event(self):
+        mid, cc, _listener = self.direct_send()
+        self.state.apply_journal(mid, cc, transport_error="no route")
+        cursor = self.start_cursor()
+        with mock.patch.object(sp_journal, "read_since", self.unreached_read(sp_journal.read_since)):
+            self.changes(cursor)
+        self.assertTrue(self.slot(mid, cc)["unverified"])
+        self.assertEqual(self.slot(mid, cc)["ack"], "pending")
+        self.assertEqual(self.slot(mid, cc)["transport_error"], "no route")
+        # A later hydration that reaches the message and finds it still pending clears the flag.
+        self.first_page()
+        self.assertNotIn("unverified", self.slot(mid, cc))
+        # The tail's unattributable event flags it again; a new transport error clears it.
+        webdata._apply_browser_updates(self.state, [{"message_id": mid, "ack": "unverified"}])
+        self.assertTrue(self.slot(mid, cc)["unverified"])
+        self.state.apply_journal(mid, cc, transport_error="refused")
+        self.assertNotIn("unverified", self.slot(mid, cc))
 
     def test_a_first_page_serves_the_newest_entries_that_fit_contiguously(self):
         self.inbound("older")
