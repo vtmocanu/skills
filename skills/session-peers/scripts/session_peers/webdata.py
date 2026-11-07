@@ -5,9 +5,10 @@ the existing stores. Nothing here holds state between requests or writes
 anything: history is read through a lock-free, bounded snapshot reader that
 never calls ``channels.read_history``, ``topics.topic_tail`` or
 ``topics._topic_paths`` (they lock, create directories and may rewrite the log).
-The locks touched are the non-blocking per-send flock probe (``channels._probe_send_lock``) and, on the
-Codex reply-budget path, ``storage.thread_home``'s ``_pidfile_is_held`` (a LOCK_SH|LOCK_NB flock on the
-thread's pidfile, released with LOCK_UN at once); both are released immediately.
+The only lock touched is the non-blocking per-send flock probe (``channels._probe_send_lock``), released
+immediately. ``storage.thread_home`` (its ``_pidfile_is_held`` pidfile probe and its scan of every Claude
+shim record) is never called here: the caller supplies each Codex thread's home (``discovery["homes"]``,
+``member_details(..., home=...)``), and a thread without one has an unknown reply budget.
 
 One request owns one ``Budget`` (REQUEST_BUDGET bytes). Every topic read, the
 meta read, the outcome recheck and the journal read charge it, and each topic is
@@ -21,6 +22,7 @@ from __future__ import annotations
 import base64
 import binascii
 import errno
+import functools
 import hashlib
 import json
 import math
@@ -31,7 +33,7 @@ import time
 import types
 import unicodedata
 from . import budgets as sp_budgets, channels as sp_channels, constants as sp_constants
-from . import journal as sp_journal, runtime as sp_runtime, storage as sp_storage, topics as sp_topics
+from . import journal as sp_journal, runtime as sp_runtime, topics as sp_topics
 
 REQUEST_BUDGET = 8 * 1024 * 1024
 TOPIC_BUDGET = 1024 * 1024
@@ -71,35 +73,63 @@ class WebDataError(Exception):
 # Identifier hygiene
 # --------------------------------------------------------------------------
 
-def _format_class():
-    """Regex class text for every format (Cf) character plus the invisible ones Unicode files elsewhere."""
-    marks = {0x00AD, 0x180E, 0xFEFF}
-    marks.update(range(0xE0000, 0xE0080))
-    for code in list(range(0x20000)) + list(range(0xE0000, 0xE1000)):
-        if unicodedata.category(chr(code)) == "Cf":
-            marks.add(code)
-    return "".join("\\U%08x" % code for code in sorted(marks))
+# Characters shown escaped in identifiers: Cf (format) plus the Default_Ignorable_Code_Point
+# characters Unicode files elsewhere, as (low, high) code point ranges.
+_INVISIBLE_RANGES = (
+    (0x00AD, 0x00AD), (0x034F, 0x034F), (0x115F, 0x1160), (0x17B4, 0x17B5), (0x180B, 0x180F),
+    (0x2800, 0x2800), (0x3164, 0x3164), (0xFE00, 0xFE0F), (0xFEFF, 0xFEFF), (0xFFA0, 0xFFA0),
+    (0x1BCA0, 0x1BCA3), (0xE0000, 0xE0FFF),
+)
+_BIDI_CODES = frozenset(
+    list(range(0x202A, 0x202F)) + list(range(0x2066, 0x206A)) + [0x200E, 0x200F, 0x061C, 0x2028, 0x2029])
+# A message body keeps these (emoji joiners, variation selectors, subdivision-flag tag characters).
+_BODY_KEEP = frozenset([0x200C, 0x200D, 0xFE0E, 0xFE0F] + list(range(0xE0020, 0xE0080)))
+_INVISIBLE_RE = re.compile(
+    "[" + "".join("\\U%08x-\\U%08x" % pair for pair in _INVISIBLE_RANGES) + "]")
+_RUN_RE = re.compile("[^\u0020-\u007e]+")
 
 
-_FORMAT_CLASS = _format_class()
-_BIDI_CLASS = "\u202a-\u202e\u2066-\u2069\u200e\u200f\u061c\u2028\u2029"
-_ESCAPE_RE = re.compile("[\u0000-\u001f\u007f-\u009f" + _BIDI_CLASS + _FORMAT_CLASS + "]")
-_BODY_ESCAPE_RE = re.compile("[\u0000-\u0008\u000b-\u001f\u007f-\u009f" + _BIDI_CLASS + _FORMAT_CLASS + "]")
+@functools.lru_cache(maxsize=8192)
+def _hidden(code):
+    """True for a Cf character or one of the listed invisible ones."""
+    if any(low <= code <= high for low, high in _INVISIBLE_RANGES):
+        return True
+    return unicodedata.category(chr(code)) == "Cf"
 
 
-def _escape_match(match):
-    code = ord(match.group(0))
-    return "\\u%04x" % code if code <= 0xFFFF else "\\U%08x" % code
+def _escape_char(ch, body):
+    code = ord(ch)
+    if code <= 0x1F or 0x7F <= code <= 0x9F or code in _BIDI_CODES:
+        if body and code in (0x09, 0x0A):
+            return ch
+        return "\\u%04x" % code
+    if _hidden(code) and not (body and code in _BODY_KEEP):
+        return "\\u%04x" % code if code <= 0xFFFF else "\\U%08x" % code
+    return ch
+
+
+def _escape_run(match, body):
+    run = match.group(0)
+    if run.isprintable() and not _INVISIBLE_RE.search(run):
+        return run
+    return "".join(_escape_char(ch, body) for ch in run)
+
+
+def _escape(value, body):
+    text = value if isinstance(value, str) else str(value)
+    return _RUN_RE.sub(lambda m: _escape_run(m, body), text)
 
 
 def escape_text(value):
-    """``value`` as a string with control, bidi, line-separator and invisible format characters shown as ``\\uXXXX``."""
-    return _ESCAPE_RE.sub(_escape_match, value if isinstance(value, str) else str(value))
+    """``value`` as a string with control, bidi, line-separator and invisible format characters shown as
+    ``\\uXXXX`` (``\\UXXXXXXXX`` for characters beyond the BMP)."""
+    return _escape(value, False)
 
 
 def escape_body(value):
-    """Like ``escape_text`` but a message body keeps its newlines and tabs."""
-    return _BODY_ESCAPE_RE.sub(_escape_match, value if isinstance(value, str) else str(value))
+    """Like ``escape_text`` but a message body keeps its newlines and tabs and its emoji joiners,
+    variation selectors and subdivision-flag tag characters."""
+    return _escape(value, True)
 
 
 _BODY_KEYS = ("body", "text")
@@ -108,16 +138,23 @@ _BODY_KEYS = ("body", "text")
 CLEAN_DEPTH = 32
 
 
-def _clean(value, key=None, depth=0):
-    """``value`` with every string escaped; containers nested deeper than CLEAN_DEPTH become a placeholder."""
+# Subtrees whose keys and values are peer-written data: they are escaped as identifiers, never as bodies.
+_PLAIN_KEYS = frozenset(["outcomes", "coverage"])
+
+
+def _clean(value, key=None, depth=0, plain=False):
+    """``value`` with every string escaped; containers nested deeper than CLEAN_DEPTH become a placeholder.
+
+    A string under a key named ``body`` or ``text`` is escaped as a message body, except inside an
+    ``outcomes`` or ``coverage`` subtree, where such a key is only peer-written data."""
     if isinstance(value, (dict, list, tuple)) and depth >= CLEAN_DEPTH:
         return "[nested too deeply]"
     if isinstance(value, dict):
-        return {escape_text(k): _clean(v, k, depth + 1) for k, v in value.items()}
+        return {escape_text(k): _clean(v, k, depth + 1, plain or k in _PLAIN_KEYS) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
-        return [_clean(v, key, depth + 1) for v in value]
+        return [_clean(v, key, depth + 1, plain) for v in value]
     if isinstance(value, str):
-        return escape_body(value) if key in _BODY_KEYS else escape_text(value)
+        return escape_body(value) if key in _BODY_KEYS and not plain else escape_text(value)
     return value
 
 
@@ -127,25 +164,27 @@ def _ident(value):
 
 
 def _stamp(value):
-    """Epoch seconds of a history ``ts`` (an ISO string or a number), 0.0 when unusable.
+    """Retention time of a history ``ts``: ``(runtime.parse_time(ts) or 0.0)`` as ``topics._topic_state`` reads it.
 
-    Numbers are read as ``topics._topic_state`` reads them (``runtime.parse_time``), so
-    retention matches the CLI; anything else, and values too large or malformed to
-    convert, read as time zero."""
-    if isinstance(value, bool) or not isinstance(value, (str, int, float)):
-        return 0.0
+    A value too large or malformed to convert, and NaN (never ``>= cutoff``), read as 0.0. An
+    infinite time stays infinite: +inf never expires, -inf does, as in the CLI."""
     try:
         seconds = sp_runtime.parse_time(value)
     except (OverflowError, ValueError, TypeError):
         return 0.0
-    if seconds is None or not math.isfinite(seconds):
+    if seconds is None or seconds != seconds:
         return 0.0
     return seconds
 
 
+_TS_INT_MAX = 2 ** 63
+
+
 def _ts_view(value):
-    """The ``ts`` shown for an entry: a string, a finite float, else None."""
+    """The ``ts`` shown for an entry: a string, a finite float, an int of sane size, else None."""
     if isinstance(value, str) or (isinstance(value, float) and math.isfinite(value)):
+        return value
+    if isinstance(value, int) and not isinstance(value, bool) and abs(value) < _TS_INT_MAX:
         return value
     return None
 
@@ -216,11 +255,13 @@ def _read_meta(meta_path, budget):
     try:
         if st.st_size > META_MAX or st.st_size > budget.remaining():
             return None
-        data = os.read(fd, META_MAX + 1)
+        data = os.pread(fd, st.st_size, 0)
     except OSError:
         return None
     finally:
         os.close(fd)
+    if len(data) > budget.remaining():
+        return None
     budget.charge(len(data))
     try:
         meta = json.loads(data.decode("utf-8", "replace"))
@@ -245,11 +286,13 @@ def _read_record(key, budget):
     try:
         if st.st_size > sp_channels.RECORD_MAX_BYTES or st.st_size > budget.remaining():
             return None
-        data = os.pread(fd, sp_channels.RECORD_MAX_BYTES + 1, 0)
+        data = os.pread(fd, st.st_size, 0)
     except OSError:
         return None
     finally:
         os.close(fd)
+    if len(data) > budget.remaining():
+        return None
     budget.charge(len(data))
     try:
         rec = json.loads(data.decode("utf-8", "replace"))
@@ -1034,7 +1077,9 @@ def channel_page(key, before=None, limit=PAGE_MAX, budget=None, members=None, no
     "journal_partial", "bytes"}``. ``next`` is the ``before`` cursor of the next older
     page, or None. ``partial`` is true when the byte budget left something out or a
     send could not be verified. ``members`` supplies #general's members (derived
-    elsewhere); a stored channel's come from its membership record."""
+    elsewhere); a stored channel's come from its membership record. ``info`` of a stored channel
+    whose record does not read (or did not fit the budget) is ``{"key", "unreadable": true}`` and the
+    page is ``partial``; a roster over CHANNEL_MAX_MEMBERS is cut with ``info["omitted_members"]``."""
     _check_key(key)
     limit = _int_arg(limit, "limit", 1, PAGE_MAX)
     if before is not None:
@@ -1050,8 +1095,19 @@ def channel_page(key, before=None, limit=PAGE_MAX, budget=None, members=None, no
     if members is None and record is not None:
         members = record["members"]
     info = {"key": key}
+    if members is not None:
+        members = list(members)
+        omitted = max(0, len(members) - sp_constants.CHANNEL_MAX_MEMBERS)
+        members = members[:sp_constants.CHANNEL_MAX_MEMBERS]
+        if omitted:
+            info["omitted_members"] = omitted
+            partial = True
     if record is not None:
-        info.update(display=record["display"], kind=record["kind"], owner=record["owner"], members=list(record["members"]))
+        info.update(display=record["display"], kind=record["kind"], owner=record["owner"],
+                    members=list(record["members"][:sp_constants.CHANNEL_MAX_MEMBERS]))
+    elif not general:  # listed but its record does not read, or the budget skipped it
+        info["unreadable"] = True
+        partial = True
     coverage = channel_coverage(members) if members is not None else {"native_claude": None}
     return _clean({
         "channel": key, "info": info, "entries": views, "next": snapshot.next_before,
@@ -1096,11 +1152,10 @@ def _read_shim_state(path, budget):
     return (state if isinstance(state, dict) else None), False
 
 
-def _reply_budget(tid, now, budget):
+def _reply_budget(tid, home, now, budget):
     """``(reply budget dict or None, skipped)``; see ``codex_reply_budget``."""
-    if not isinstance(tid, str) or not sp_constants.UUID_RE.fullmatch(tid):
+    if not isinstance(tid, str) or not sp_constants.UUID_RE.fullmatch(tid) or not isinstance(home, str) or not home:
         return None, False
-    home = sp_storage.thread_home(tid)
     base = os.path.join(home, "session-peers")
     state, skipped = _read_shim_state(os.path.join(base, "%s.json" % tid), budget)
     if state is None:
@@ -1137,15 +1192,17 @@ def _reply_budget(tid, now, budget):
     }, False
 
 
-def codex_reply_budget(tid, now=None, budget=None):
+def codex_reply_budget(tid, home, now=None, budget=None):
     """The reply budget toward a Codex thread's current requester, as last saved by its shim, or None.
 
-    Reads ``<home>/session-peers/<tid>.json`` of the home the shim runs under and its
+    ``home`` is the CODEX_HOME the thread's shim runs under, supplied by the caller (finding it
+    probes locks and scans shim records, which a request never does). Reads
+    ``<home>/session-peers/<tid>.json`` and its
     pending-marker files by path; nothing is created, and the shim's own state is only
     replayed in memory. The state file is charged to ``budget`` (a fresh request budget when
     None); one that does not fit reads as None. Any malformed state reads as None."""
     try:
-        return _reply_budget(tid, now, budget if budget is not None else Budget())[0]
+        return _reply_budget(tid, home, now, budget if budget is not None else Budget())[0]
     except Exception:  # the file is peer-writable: whatever it holds, the view still works
         return None
 
@@ -1158,12 +1215,13 @@ def _member_state(liveness, activity):
     return activity if activity in ("working", "idle") else "unverified"
 
 
-def member_details(typed, liveness, activity=None, now=None, budget=None):
-    """The details panel data for one member; liveness and activity come from the caller (discovery is elsewhere).
+def member_details(typed, liveness, activity=None, now=None, budget=None, home=None):
+    """The details panel data for one member; liveness, activity and a Codex member's home come from the caller.
 
     ``state`` is ``gone`` when liveness says so, else ``working`` or ``idle`` from
-    ``activity``, else ``unverified``. A Codex member's shim state file is charged to ``budget``;
-    one that does not fit leaves ``reply_budget`` None and sets ``partial``."""
+    ``activity``, else ``unverified``. A Codex member's shim state file (under ``home``) is charged to ``budget``;
+    one that does not fit leaves ``reply_budget`` None and sets ``partial``. Without a ``home``
+    the budget is unknown: ``reply_budget`` None and ``budget_unknown`` true."""
     typed = typed if isinstance(typed, str) else str(typed)
     kind, _sep, ident = typed.partition(":")
     out = {
@@ -1173,10 +1231,14 @@ def member_details(typed, liveness, activity=None, now=None, budget=None):
     }
     if kind == "codex":
         budget = budget if budget is not None else Budget()
-        try:
-            out["reply_budget"], skipped = _reply_budget(ident, now, budget)
-        except Exception:  # the file is peer-writable: whatever it holds, the view still works
+        if not isinstance(home, str) or not home:
             out["reply_budget"], skipped = None, False
+            out["budget_unknown"] = True
+        else:
+            try:
+                out["reply_budget"], skipped = _reply_budget(ident, home, now, budget)
+            except Exception:  # the file is peer-writable: whatever it holds, the view still works
+                out["reply_budget"], skipped = None, False
         if skipped:
             out["partial"] = True
     return _clean(out)
@@ -1516,7 +1578,9 @@ def changes(cursor_text, budget=None, now=None):
             continue
         cseq, cfp = old[key]
         snap = snaps.get(key)
-        if snap is None and positions.get(key) == old[key] and _digest(_stat_text(key)) == cfp:
+        stat_now = _stat_text(key)
+        if (snap is None and positions.get(key) == old[key] and _digest(stat_now) == cfp
+                and not stat_now.startswith("error:")):
             # Nothing was written after the cursor, and the lock was free before this look: no
             # outcome exists, so the lock alone decides, without reading the topic.
             state, outcomes, uncovered = sp_channels.send_state_from(False, probe, False), {}, False
@@ -1774,7 +1838,8 @@ def state_view(discovery, budget=None, now=None):
 
     ``discovery`` is supplied by the caller: ``general`` = ``(members, opencode_coverage, gaps)`` from
     ``channels.general_members()``, ``liveness`` {typed: live|gone|unverified}, ``activity`` {typed:
-    working|idle|unknown}, ``stale`` and ``pending`` flags, and optionally ``names`` {typed: name}.
+    working|idle|unknown}, ``stale`` and ``pending`` flags, and optionally ``names`` {typed: name} and
+    ``homes`` {Codex thread id: CODEX_HOME} (a Codex member without an entry has an unknown reply budget).
     No history entries are returned. Each channel's ``alert`` comes from its latest ALERT_WINDOW
     entries (``missing_acks`` when an ``@all`` send there lacks ACKs, ``unverified`` when that could
     not be established, e.g. the budget ran out); older entries are not examined. ``handover_chain``
@@ -1786,6 +1851,7 @@ def state_view(discovery, budget=None, now=None):
     liveness = discovery.get("liveness") or {}
     activity = discovery.get("activity") or {}
     names = discovery.get("names") or {}
+    homes = discovery.get("homes") or {}
     tracked, untracked = _tracked_keys()
     # The journal baseline comes before any ACK is read for the page: an ACK written after this
     # point is past the cursor's position and arrives with the first ``changes`` poll.
@@ -1860,7 +1926,8 @@ def state_view(discovery, budget=None, now=None):
                     continue
                 seen_members.add(member["typed"])
                 details = member_details(
-                    member["typed"], liveness.get(member["typed"]), activity.get(member["typed"]), now, budget)
+                    member["typed"], liveness.get(member["typed"]), activity.get(member["typed"]), now, budget,
+                    home=homes.get(member["typed"].partition(":")[2]))
                 partial = partial or bool(details.get("partial"))
                 sessions.append(details)
     pending = pending[::-1]

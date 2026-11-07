@@ -1761,7 +1761,8 @@ def _probe_send_lock(message_id):
     """``held``, ``free``, ``absent`` or ``error`` for a send's lock file.
 
     Acquiring the lock means its sender is gone, whatever its pid became; no
-    pid is read. The probe never keeps the lock.
+    pid is read. The probe never keeps the lock. A symlink or a file that is not
+    a regular file reads ``error``, as does any other failure to open or lock it.
     """
     flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0)
     try:

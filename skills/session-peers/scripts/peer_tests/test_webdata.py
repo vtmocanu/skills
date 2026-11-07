@@ -12,6 +12,7 @@ import subprocess
 import sys
 import threading
 import time
+import types
 import unicodedata
 import unittest
 from unittest import mock
@@ -19,7 +20,7 @@ from unittest import mock
 from peer_tests.support import *  # noqa: F401,F403
 from peer_tests.test_channel_send import ChannelSendBase, HOLDER
 from peer_tests.test_opencode import OC_B
-from session_peers import channels as sp_channels, journal as sp_journal, topics as sp_topics, webdata
+from session_peers import channels as sp_channels, journal as sp_journal, storage as sp_storage, topics as sp_topics, webdata
 
 MIB = 1024 * 1024
 
@@ -854,7 +855,7 @@ class WebdataMemberTests(WebdataBase):
     def test_codex_reply_budget_from_the_shim_state_file(self):
         tid, sid = new_uuid(), new_uuid()
         self.shim_state(tid, budgets={sid: 2}, budget_sender_sid=sid, budget_last_at=sp_runtime.now_iso())
-        budget = webdata.member_details("codex:" + tid, "live", "idle")["reply_budget"]
+        budget = webdata.member_details("codex:" + tid, "live", "idle", home=str(self.codex_dir))["reply_budget"]
         self.assertEqual(
             (budget["requester"], budget["used"], budget["cap"], budget["remaining"], budget["expired"], budget["pending"]),
             (sid, 2, sp_constants.REPLY_BUDGET, sp_constants.REPLY_BUDGET - 2, False, False))
@@ -863,12 +864,12 @@ class WebdataMemberTests(WebdataBase):
     def test_an_expired_sequence_counts_nothing_and_an_allowance_raises_the_cap(self):
         tid, sid = new_uuid(), new_uuid()
         self.shim_state(tid, budgets={sid: 3}, budget_sender_sid=sid, budget_last_at="2001-01-01T00:00:00Z")
-        budget = webdata.member_details("codex:" + tid, "live", None)["reply_budget"]
+        budget = webdata.member_details("codex:" + tid, "live", None, home=str(self.codex_dir))["reply_budget"]
         self.assertEqual((budget["used"], budget["expired"], budget["remaining"]), (0, True, sp_constants.REPLY_BUDGET))
         self.shim_state(
             tid, budgets={sid: 1}, budget_sender_sid=sid, budget_last_at=sp_runtime.now_iso(),
             allowance={"sid": sid, "total": 9, "at": sp_runtime.now_iso(), "bound": True})
-        budget = webdata.member_details("codex:" + tid, "live", None)["reply_budget"]
+        budget = webdata.member_details("codex:" + tid, "live", None, home=str(self.codex_dir))["reply_budget"]
         self.assertEqual((budget["used"], budget["cap"], budget["remaining"]), (1, 9, 8))
 
     def test_pending_marker_files_are_reported_by_path(self):
@@ -876,25 +877,25 @@ class WebdataMemberTests(WebdataBase):
         self.shim_state(tid, budgets={sid: 1}, budget_sender_sid=sid, budget_last_at=sp_runtime.now_iso())
         marker = pathlib.Path(self.codex_dir) / "session-peers" / (tid + ".budget-reset")
         marker.write_text("")
-        budget = webdata.member_details("codex:" + tid, "live", None)["reply_budget"]
+        budget = webdata.member_details("codex:" + tid, "live", None, home=str(self.codex_dir))["reply_budget"]
         self.assertTrue(budget["pending"])
         self.assertEqual(budget["pending_kinds"], ["reset"])
         self.assertTrue(marker.exists())
 
     def test_no_requester_missing_or_hostile_state(self):
         tid = new_uuid()
-        self.assertIsNone(webdata.member_details("codex:" + tid, "live", None)["reply_budget"])
+        self.assertIsNone(webdata.member_details("codex:" + tid, "live", None, home=str(self.codex_dir))["reply_budget"])
         self.shim_state(tid, budgets={})
-        self.assertEqual(webdata.member_details("codex:" + tid, "live", None)["reply_budget"]["requester"], None)
+        self.assertEqual(webdata.member_details("codex:" + tid, "live", None, home=str(self.codex_dir))["reply_budget"]["requester"], None)
         self.shim_state(tid, budgets="oops", budget_sender_sid="s", budget_last_at=5)
-        self.assertIsNone(webdata.member_details("codex:" + tid, "live", None)["reply_budget"])
+        self.assertIsNone(webdata.member_details("codex:" + tid, "live", None, home=str(self.codex_dir))["reply_budget"])
         self.assertIsNone(webdata.member_details("codex:../../etc/passwd", "live", None)["reply_budget"])
         target = pathlib.Path(self.root) / "elsewhere.json"
         target.write_text(json.dumps({"budget_sender_sid": "x"}))
         link = pathlib.Path(self.codex_dir) / "session-peers" / (tid + ".json")
         link.unlink()
         link.symlink_to(target)
-        self.assertIsNone(webdata.member_details("codex:" + tid, "live", None)["reply_budget"])
+        self.assertIsNone(webdata.member_details("codex:" + tid, "live", None, home=str(self.codex_dir))["reply_budget"])
 
 
 class WebdataNoMutationTests(WebdataBase):
@@ -923,7 +924,7 @@ class WebdataNoMutationTests(WebdataBase):
             lambda: webdata.channel_page("outside"),
             lambda: webdata.channel_page("outside", before=300, limit=5),
             lambda: webdata.HistorySnapshot("outside", webdata.Budget()).read(since=3),
-            lambda: webdata.member_details("codex:" + crash_tid, "live", "idle"),
+            lambda: webdata.member_details("codex:" + crash_tid, "live", "idle", home=str(self.codex_dir)),
             lambda: webdata.member_details("cc:" + new_uuid(), "gone", None),
             lambda: webdata.read_journal_context(webdata.Budget(), ["x", mid]),
         ]
@@ -957,6 +958,7 @@ class WebdataNoMutationTests(WebdataBase):
             self.assertEqual(len(webdata.channel_page("plain")["entries"]), 1)
 
 
+BODY_KEEP = {0x200C, 0x200D, 0xFE0E, 0xFE0F} | set(range(0xE0020, 0xE0080))
 SEARCH_NOW = 1772359200.0 + 600
 EMPTY = {"general": ([], None, []), "liveness": {}, "activity": {}, "stale": False, "pending": False}
 IDENT = {"kind": "cc", "name": None, "uuid": "s1"}
@@ -1677,7 +1679,8 @@ class WebdataStateViewReworkTests(WebdataBase):
         view = run_bounded(self, lambda: webdata.state_view(EMPTY), unblock=fifo)
         self.assertEqual([r for r in view["channels"] if r["key"] == "evil"][0]["unreadable"], True)
         page = run_bounded(self, lambda: webdata.channel_page("evil"), unblock=fifo)
-        self.assertEqual(page["info"], {"key": "evil"})
+        self.assertEqual(page["info"], {"key": "evil", "unreadable": True})
+        self.assertTrue(page["partial"])
 
     def test_a_record_is_validated_like_read_channel_and_charged(self):
         path = write_record("tidy", ["cc:" + new_uuid(), 5, "cc:not a member", "cc:" + "A" * 8 + "-0000-0000-0000-" + "c" * 12])
@@ -1721,7 +1724,7 @@ class WebdataStateViewReworkTests(WebdataBase):
         tids = [new_uuid() for _ in range(12)]
         for tid in tids:
             self.shim_state(tid, budgets={}, pad="x" * (MIB - 200))
-        discovery = dict(EMPTY, general=(["codex:" + t for t in tids], None, []))
+        discovery = dict(EMPTY, general=(["codex:" + t for t in tids], None, []), homes={t: str(self.codex_dir) for t in tids})
         budget = webdata.Budget()
         with ReadMeter() as meter:
             view = webdata.state_view(discovery, budget=budget)
@@ -1746,28 +1749,29 @@ class WebdataStateViewReworkTests(WebdataBase):
         for name, state in cases.items():
             tids[name] = new_uuid()
             self.shim_state(tids[name], **state)
-        discovery = dict(EMPTY, general=(["codex:" + t for t in tids.values()], None, []))
+        discovery = dict(EMPTY, general=(["codex:" + t for t in tids.values()], None, []), homes={t: str(self.codex_dir) for t in tids.values()})
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
             for tid in tids.values():
-                webdata.codex_reply_budget(tid)
+                webdata.codex_reply_budget(tid, str(self.codex_dir))
             view = webdata.state_view(discovery)
         self.assertEqual(err.getvalue(), "")
         self.assertEqual(len([s for s in view["sessions"] if s["member"] in {"codex:" + t for t in tids.values()}]), 3)
-        self.assertIsNone(webdata.codex_reply_budget(tids["string count"]))
-        self.assertIsNone(webdata.codex_reply_budget(tids["huge time"]))
-        self.assertEqual(webdata.codex_reply_budget(tids["newline sid"])["cap"], sp_constants.REPLY_BUDGET)
+        self.assertIsNone(webdata.codex_reply_budget(tids["string count"], str(self.codex_dir)))
+        self.assertIsNone(webdata.codex_reply_budget(tids["huge time"], str(self.codex_dir)))
+        self.assertEqual(webdata.codex_reply_budget(tids["newline sid"], str(self.codex_dir))["cap"], sp_constants.REPLY_BUDGET)
 
     def test_a_dropped_state_file_that_does_not_fit_the_budget_reads_none_and_partial(self):
         tid = new_uuid()
         self.shim_state(tid, budgets={}, pad="x" * 5000)
-        details = webdata.member_details("codex:" + tid, "live", None, budget=webdata.Budget(100))
+        details = webdata.member_details("codex:" + tid, "live", None, budget=webdata.Budget(100), home=str(self.codex_dir))
         self.assertEqual((details["reply_budget"], details["partial"]), (None, True))
-        self.assertEqual(webdata.member_details("codex:" + tid, "live", None, budget=webdata.Budget())["reply_budget"]["requester"], None)
+        self.assertEqual(webdata.member_details("codex:" + tid, "live", None, budget=webdata.Budget(), home=str(self.codex_dir))["reply_budget"]["requester"], None)
 
     def test_the_module_names_every_lock_it_can_touch(self):
-        self.assertIn("_pidfile_is_held", webdata.__doc__)
         self.assertIn("_probe_send_lock", webdata.__doc__)
+        self.assertIn("never called here", webdata.__doc__)
+        self.assertNotIn("LOCK_SH", webdata.__doc__)
 
 
 class WebdataHostileHistoryTests(WebdataBase):
@@ -1840,11 +1844,18 @@ class WebdataHostileHistoryTests(WebdataBase):
         self.assertEqual(entries[3]["text"], "free\ntext")
 
     def test_only_a_string_or_a_finite_number_is_a_time(self):
-        # An int epoch counts, as runtime.parse_time (and so topic retention) reads it.
+        # Retention reads a time as runtime.parse_time does, as topics._topic_state: an int epoch counts,
+        # +inf never expires, -inf and NaN do.
         self.assertEqual(webdata._stamp(1700000000), 1700000000.0)
-        for value in (True, 10 ** 400, "1e999", "nan", float("inf"), float("nan"), None, [1], "junk"):
+        for value in (10 ** 400, "nan", float("nan"), None, [1], {"a": 1}, "junk"):
             self.assertEqual(webdata._stamp(value), 0.0, repr(value)[:20])
-            self.assertEqual(webdata._ts_view(value) if not isinstance(value, str) else None, None)
+        for value in ("inf", "1e400", "Infinity", float("inf"), "1e999"):
+            self.assertEqual(webdata._stamp(value), float("inf"), repr(value))
+        for value in ("-inf", float("-inf")):
+            self.assertEqual(webdata._stamp(value), float("-inf"), repr(value))
+        for value in (True, 10 ** 400, float("inf"), float("nan"), None, [1]):
+            self.assertIsNone(webdata._ts_view(value))
+        self.assertEqual(webdata._ts_view(1700000000), 1700000000)
         self.assertEqual(webdata._stamp("2026-03-01T10:00:00.000Z"), 1772359200.0)
         self.assertEqual(webdata._stamp(1.5), 1.5)
 
@@ -1855,13 +1866,16 @@ class WebdataHostileHistoryTests(WebdataBase):
         for ch in marks:
             for fn in (webdata.escape_text, webdata.escape_body):
                 out = fn("a%sb" % ch)
+                if fn is webdata.escape_body and ord(ch) in BODY_KEEP:
+                    self.assertEqual(out, "a%sb" % ch, hex(ord(ch)))
+                    continue
                 self.assertNotIn(ch, out, hex(ord(ch)))
                 self.assertTrue(out.startswith("a\\u") or out.startswith("a\\U"), hex(ord(ch)))
         self.assertEqual(webdata.escape_text("a‍b\U000e0041"), "a\\u200db\\U000e0041")
         key = self.new_channel("cf")
-        write_topic(key, [encode(make_entry(key, 1, "channel.send", send_data("hid​den \U000e0041", sender="cc:a⁠b")))])
+        write_topic(key, [encode(make_entry(key, 1, "channel.send", send_data("hid​den \U000e0001", sender="cc:a⁠b")))])
         text = json.dumps(webdata.channel_page(key), ensure_ascii=False)
-        for ch in "​\U000e0041⁠":
+        for ch in "​\U000e0001⁠":
             self.assertNotIn(ch, text)
 
     def test_a_12_mib_line_never_makes_the_reader_read_past_the_line_limit(self):
@@ -2216,6 +2230,260 @@ class WebdataSurvivorTests(WebdataBase):
         self.evil_channel()
         discovery = dict(EMPTY, general=(["cc:" + BAD], {"state": BAD}, [BAD]), names={"cc:" + BAD: BAD})
         self.assert_clean(webdata.state_view(discovery))
+
+
+def nested_list(levels, leaf="x"):
+    value = leaf
+    for _ in range(levels):
+        value = [value]
+    return value
+
+
+class WebdataSecondReworkTests(WebdataBase):
+    """Regressions for the second review of the web read model."""
+
+    def setUp(self):
+        super().setUp()
+        os.makedirs(sp_channels.channels_root(), exist_ok=True)
+
+    def fifo_in(self, directory, name):
+        os.makedirs(directory, exist_ok=True)
+        path = os.path.join(directory, name)
+        os.mkfifo(path)
+        return path
+
+    # -- the Codex home comes from the caller ---------------------------------
+
+    def test_a_fifo_among_the_claude_session_records_never_blocks_a_codex_member(self):
+        fifo = self.fifo_in(sp_storage.claude_sessions_dir(), "x.json")
+        tid = new_uuid()
+        with mock.patch.object(sp_storage, "thread_home", side_effect=AssertionError("thread_home")):
+            details = run_bounded(self, lambda: webdata.member_details("codex:" + tid, "live", "idle"), unblock=fifo, timeout=5)
+            discovery = dict(EMPTY, general=(["codex:" + tid], None, []))
+            view = run_bounded(self, lambda: webdata.state_view(discovery), unblock=fifo, timeout=5)
+        self.assertEqual((details["reply_budget"], details["budget_unknown"]), (None, True))
+        session = [s for s in view["sessions"] if s["member"] == "codex:" + tid][0]
+        self.assertEqual((session["reply_budget"], session["budget_unknown"]), (None, True))
+
+    def test_a_home_in_discovery_gives_the_reply_budget_and_no_flag(self):
+        tid, sid = new_uuid(), new_uuid()
+        path = pathlib.Path(self.codex_dir) / "session-peers" / (tid + ".json")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"budgets": {sid: 1}, "budget_sender_sid": sid, "budget_last_at": sp_runtime.now_iso()}))
+        discovery = dict(EMPTY, general=(["codex:" + tid, "codex:" + new_uuid()], None, []), homes={tid: str(self.codex_dir)})
+        sessions = {s["member"]: s for s in webdata.state_view(discovery)["sessions"]}
+        known = sessions["codex:" + tid]
+        self.assertEqual(known["reply_budget"]["used"], 1)
+        self.assertNotIn("budget_unknown", known)
+        other = [s for m, s in sessions.items() if m != "codex:" + tid][0]
+        self.assertEqual((other["reply_budget"], other["budget_unknown"]), (None, True))
+
+    # -- retention parity for infinite times ------------------------------------
+
+    def test_an_infinite_ts_is_retained_as_the_cli_retains_it(self):
+        key = "inf"
+        sp_channels.create_channel(key, self.me, [])
+        lines = [encode(make_entry(key, 1, "channel.created", {}))]
+        for i, value in enumerate(["inf", "1e400", "Infinity", "-inf", "nan"]):
+            lines.append(encode(make_entry(key, i + 2, "channel.note", text="t%d" % i, ts=value)))
+        write_topic(key, lines, next_seq=len(lines) + 1)
+        web = [e["seq"] for e in webdata.channel_page(key)["entries"]]
+        cli = [e["seq"] for e in self.tail_json(key, "--limit", "1000")["entries"]]
+        self.assertEqual(web, cli)
+        self.assertEqual(web, [1, 2, 3, 4])
+
+    # -- the readers never read past what they charged ---------------------------
+
+    def understate(self, size):
+        real = webdata._open_regular
+
+        def fake(path):
+            fd, st = real(path)
+            if fd is None:
+                return fd, st
+            return fd, types.SimpleNamespace(st_size=size, st_mode=st.st_mode, st_ino=st.st_ino, st_mtime_ns=st.st_mtime_ns)
+
+        return mock.patch.object(webdata, "_open_regular", fake)
+
+    def test_a_record_larger_than_its_reported_size_is_not_read_past_the_budget(self):
+        path = write_record("grow", ["cc:" + new_uuid()])
+        pathlib.Path(path).write_text(pathlib.Path(path).read_text() + " " * 20000)
+        budget = webdata.Budget(1000)
+        with self.understate(10), ReadMeter() as meter:
+            self.assertIsNone(webdata._read_record("grow", budget))
+        self.assertLessEqual(budget.used, budget.total)
+        self.assertLessEqual(meter.total(), 10)
+
+    def test_a_meta_file_larger_than_its_reported_size_is_not_read_past_the_budget(self):
+        key = self.new_channel("mgrow")
+        pad = json.dumps({"topic": "x", "next_seq": 7}) + " " * 20000
+        meta_path(key).write_text(pad)
+        budget = webdata.Budget(1000)
+        with self.understate(10), ReadMeter() as meter:
+            self.assertIsNone(webdata._read_meta(str(meta_path(key)), budget))
+        self.assertLessEqual(budget.used, budget.total)
+        self.assertLessEqual(meter.total(), 10)
+
+    # -- escaping ------------------------------------------------------------------
+
+    def test_a_nested_key_named_text_or_body_is_escaped_as_an_identifier(self):
+        key = self.new_channel("oc")
+        write_topic(key, [encode(make_entry(key, 1, sp_channels.EVENT_OUTCOME, {
+            "message_id": new_uuid(), "outcomes": {"text": "ok\nFORGED", "body": "a\tb"}}))])
+        outcomes = webdata.channel_page(key)["entries"][0]["outcomes"]
+        self.assertEqual(outcomes, {"text": "ok\\u000aFORGED", "body": "a\\u0009b"})
+        cleaned = webdata._clean({"body": "a\nb", "verdict": {"text": "c\nd"}, "outcomes": {"text": "e\nf"}})
+        self.assertEqual(cleaned, {"body": "a\nb", "verdict": {"text": "c\nd"}, "outcomes": {"text": "e\\u000af"}})
+
+    def test_default_ignorable_characters_are_escaped_in_identifiers(self):
+        codes = [0x034F, 0x115F, 0x1160, 0x17B4, 0x17B5, 0x3164, 0xFFA0, 0x2800, 0x1BCA0, 0x1BCA3, 0xE0000, 0xE0FFF, 0xE0100]
+        codes += list(range(0x180B, 0x1810)) + list(range(0xFE00, 0xFE10))
+        for code in codes:
+            ch = chr(code)
+            shown = webdata.escape_text("a%sb" % ch)
+            self.assertNotIn(ch, shown, hex(code))
+            self.assertTrue(shown.startswith("a\\u") or shown.startswith("a\\U"), hex(code))
+        self.assertEqual(webdata.escape_text("a\u2800b"), "a\\u2800b")
+        self.assertEqual(webdata.membership_text("joined", {"member": "cc:a\u3164b"}), "cc:a\\u3164b joined")
+
+    def test_emoji_joiners_and_flag_tags_survive_in_a_body_but_bidi_does_not(self):
+        family = "\U0001f468\u200d\U0001f469\u200d\U0001f467"
+        flag = "\U0001f3f4" + "".join(chr(c) for c in (0xE0067, 0xE0062, 0xE0065, 0xE006E, 0xE0067, 0xE007F))
+        heart = "\u2764\ufe0f \u2764\ufe0e"
+        key = self.new_channel("emoji")
+        body = "%s %s %s \u202eevil\u2066 \u2028 \x85 \u200e" % (family, flag, heart)
+        write_topic(key, [encode(make_entry(key, 1, "channel.send", send_data(body)))])
+        shown = webdata.channel_page(key)["entries"][0]["body"]
+        self.assertEqual(shown, "%s %s %s \\u202eevil\\u2066 \\u2028 \\u0085 \\u200e" % (family, flag, heart))
+        for ch in ("\u200d", "\ufe0f", "\U000e007f"):
+            self.assertEqual(webdata.escape_text(ch), "\\u%04x" % ord(ch) if ord(ch) <= 0xFFFF else "\\U%08x" % ord(ch))
+        self.assertEqual(webdata.escape_body("\U000e0001\u200b"), "\\U000e0001\\u200b")
+
+    # -- channel page ----------------------------------------------------------------
+
+    def test_a_channel_page_says_when_the_record_does_not_read(self):
+        path = write_record("broken", ["cc:" + new_uuid()])
+        pathlib.Path(path).write_text("{")
+        page = webdata.channel_page("broken")
+        self.assertEqual(page["info"], {"key": "broken", "unreadable": True})
+        self.assertTrue(page["partial"])
+        path = write_record("tight", ["cc:" + new_uuid()])
+        page = webdata.channel_page("tight", budget=webdata.Budget(os.path.getsize(path) - 1))
+        self.assertEqual(page["info"], {"key": "tight", "unreadable": True})
+        self.assertTrue(page["partial"])
+        self.assertNotIn("unreadable", webdata.channel_page("tight")["info"])
+        self.assertFalse(webdata.channel_page("tight")["partial"])
+
+    def test_a_channel_page_cuts_a_large_roster_as_the_state_view_does(self):
+        members = ["cc:" + new_uuid() for _ in range(200)]
+        write_record("crowded", members)
+        page = webdata.channel_page("crowded")
+        self.assertEqual(len(page["info"]["members"]), sp_constants.CHANNEL_MAX_MEMBERS)
+        self.assertEqual(page["info"]["omitted_members"], 200 - sp_constants.CHANNEL_MAX_MEMBERS)
+        self.assertTrue(page["partial"])
+        page = webdata.channel_page("general", members=members)
+        self.assertEqual(page["info"]["omitted_members"], 200 - sp_constants.CHANNEL_MAX_MEMBERS)
+        self.assertTrue(page["partial"])
+
+    def test_an_integer_ts_is_shown_as_the_integer(self):
+        key = self.new_channel("ints")
+        now = int(time.time())
+        lines = [encode(make_entry(key, 1, "channel.note", text="int", ts=now)),
+                 encode(make_entry(key, 2, "channel.note", text="float", ts=now + 0.5)),
+                 json.dumps(dict(make_entry(key, 3, "channel.note", text="bool"), ts=True)) + "\n"]
+        write_topic(key, lines)
+        got = {e["text"]: e["ts"] for e in webdata.channel_page(key)["entries"] if e["text"] in ("int", "float")}
+        self.assertEqual(got, {"int": now, "float": now + 0.5})
+        self.assertIsInstance(got["int"], int)
+
+    # -- the unchanged-channel shortcut ------------------------------------------------
+
+    def test_an_unreadable_stat_never_takes_the_unchanged_channel_shortcut(self):
+        holder_mid = None
+        self.channel("qa", "codex:" + self.one_thread()[0])
+        with mock.patch.object(sp_channels, "_failpoint", lambda name: (_ for _ in ()).throw(RuntimeError("killed"))
+                               if name == "send_after_history" else None):
+            with self.assertRaises(RuntimeError):
+                self.cli("send", "--to", "#qa", "--message", "crash", "--record")
+        holder_mid = [e for e in self.history("qa") if e["kind"] == "channel.send"][-1]["data"]["message_id"]
+        holder = subprocess.Popen([sys.executable, "-c", HOLDER, sp_channels.send_lock_path(holder_mid)],
+                                  stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        self._children.append(holder)
+        self.assertEqual(holder.stdout.readline().strip(), "ready")
+        with mock.patch.object(webdata, "_stat_text", return_value="error:13"):
+            cursor = webdata.state_view(EMPTY)["cursor"]
+        self.assertEqual(len(webdata.decode_cursor(cursor)["u"]), 1)
+        holder.stdin.close()
+        holder.wait(timeout=10)
+        real_open = webdata._open_regular
+
+        def deny_logs(path):
+            if str(path).endswith(".jsonl"):
+                raise PermissionError(13, "denied", path)
+            return real_open(path)
+
+        with mock.patch.object(webdata, "_stat_text", return_value="error:13"), \
+                mock.patch.object(webdata, "_open_regular", deny_logs):
+            got = webdata.changes(cursor)
+        self.assertEqual([u["delivery"]["state"] for u in got["updates"]], ["unverified"])
+        self.assertTrue(got["partial"])
+        self.assertEqual(len(webdata.decode_cursor(got["cursor"])["u"]), 1)
+
+    # -- survivors ---------------------------------------------------------------------
+
+    def test_an_outcome_value_nested_deeply_does_not_overflow_the_stack(self):
+        key = self.new_channel("dout")
+        mid = new_uuid()
+        deep = "[" * 50000 + "]" * 50000
+        outcome = ('{"data": {"message_id": "%s", "outcomes": {"codex:x": %s}}, "from_kind": "cc", "from_name": null, '
+                   '"from_sid": "s1", "kind": "channel.outcome", "seq": 3, "topic": "%s", "ts": "%s"}\n') % (
+                       mid, deep, sp_channels.topic_name(key), sp_runtime.now_iso())
+        write_topic(key, [encode(make_entry(key, 1, "channel.created", {})),
+                          encode(make_entry(key, 2, "channel.send", send_data("x", mid, delivery="fanout", recipients=["codex:x"]))),
+                          outcome], next_seq=4)
+        try:
+            json.loads(deep)
+            parses = True
+        except RecursionError:
+            parses = False
+        page = webdata.channel_page(key)
+        sends = [e for e in page["entries"] if e["kind"] == "send"]
+        if parses:
+            self.assertEqual(sends[0]["delivery"]["state"], "complete")
+        self.assertEqual(len(sends), 1)
+        webdata.all_channels()
+        webdata.state_view(EMPTY)
+
+    def test_a_journal_baseline_that_cannot_be_read_makes_the_view_partial(self):
+        self.assertFalse(webdata.state_view(EMPTY)["partial"])
+        with mock.patch.object(sp_journal, "read_since", side_effect=OSError("boom")):
+            self.assertTrue(webdata.state_view(EMPTY)["partial"])
+
+    def test_duplicate_record_members_are_one_roster_row(self):
+        member = "cc:" + new_uuid()
+        write_record("dupm", [member, member, member])
+        row = [r for r in webdata.state_view(EMPTY)["channels"] if r["key"] == "dupm"][0]
+        self.assertEqual([m["typed"] for m in row["members"]], [member])
+        self.assertEqual(sp_channels.read_channel("dupm")["members"], [member])
+
+    def test_the_session_cap_is_512_and_the_clean_depth_is_32(self):
+        self.assertEqual(webdata.SESSIONS_MAX, 512)
+        self.assertEqual(webdata.CLEAN_DEPTH, 32)
+        self.assertEqual(webdata._clean(nested_list(32)), nested_list(32))
+        cut = webdata._clean(nested_list(33))
+        self.assertEqual(cut, nested_list(32, "[nested too deeply]"))
+
+    def test_the_opener_never_blocks_on_a_fifo(self):
+        fifo = self.fifo_in(self.root, "plant.fifo")
+
+        def attempt():
+            try:
+                webdata._open_regular(fifo)
+            except OSError as exc:
+                return exc
+            return None
+
+        self.assertIsInstance(run_bounded(self, attempt, unblock=fifo, timeout=5), OSError)
 
 
 if __name__ == "__main__":
