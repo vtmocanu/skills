@@ -84,12 +84,15 @@ User-facing behaviour is in `references/web.md`; the server's own guards are:
 - At most 16 connections at once; extra connections are closed unanswered. The
   request line and headers must arrive within 2 s and every connection's socket
   is cut after 10 s; its slot is held until the handler returns, which the read
-  budget bounds. Memory worst case is about 16 connections times the 8 MiB request
-  read budget.
+  budget bounds. The 8 MiB request budget bounds the file bytes each request
+  reads, not decoded objects or response buffers, so it is a read budget, not a
+  memory ceiling.
 - Every response carries a `Content-Security-Policy` (`default-src 'none'`,
   scripts and styles from `'self'` only, no framing, no forms),
   `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`,
   `Cache-Control: no-store` and same-origin resource/opener policies. Errors
   have an empty `{}` body. No request is logged.
-- The token and the loopback bind limit access to one OS user's processes; they
-  are not a defence against a hostile process of the same user.
+- The loopback bind keeps the server off the network, but any local user or
+  process can reach the port; the per-start token alone guards `/api/*`, so
+  anyone who obtains it can read the API. Neither defends against a hostile
+  process of the same user.

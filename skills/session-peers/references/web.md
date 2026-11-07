@@ -26,9 +26,11 @@ supported: the server listens on `127.0.0.1` only.
   `X-Peers-Token`.
 - A reload or a copied link without the fragment cannot read data (403).
 
-The token and the loopback bind limit access to one OS user's processes; they
-are not a defence against a hostile process of the same user. Connection,
-header and memory details are in the
+The loopback bind keeps the server off the network, but any local user or
+process on the machine can reach the port; the per-start token is what guards
+`/api/*`, so anyone who obtains it (for example from the printed URL or the
+browser history) can read the API. Neither defends against a hostile process of
+the same user. Connection, header and read-budget details are in the
 [runtime package README](../scripts/session_peers/README.md#dashboard-server).
 
 ## What the page shows
