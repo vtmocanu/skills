@@ -213,6 +213,12 @@ sender.
   `handed over to` appended. The display name of a buddy channel the caller led
   is renamed to the successor. Nothing else moves: no budgets, no buddy
   bindings, no reply allowance, no approvals.
+- An unreadable channel record anywhere in the store (corrupt, oversized or
+  with wrong fields) makes `leave` and `handover` report `could not read
+  #<key>` and exit 1, even if the caller is not in that channel. The other
+  channels are still processed and the `#general` marker is still written.
+  To recover, fix or delete `~/.codex/session-peers/channels/<key>.json` by
+  hand; no command removes a record.
 - `gc` removes a leave marker only once its session is verified gone (never by
   age), prunes channel history, unheld send locks (a crashed sender's leftover)
   and receipts older than 14 days. `gc --dry-run` lists markers and receipts

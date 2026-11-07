@@ -233,6 +233,7 @@ class HandoverTests(LifecycleBase):
         self.assertNotIn("handed_over_at", sp_channels.read_channel(BUDDY_CHANNEL))
         self.assertEqual(self.handover()[0], 0)
         self.assertRegex(sp_channels.read_channel(BUDDY_CHANNEL)["handed_over_at"], r"^\d{4}-\d\d-\d\dT")
+
     def test_a_member_who_is_not_the_owner_keeps_the_channel_display(self):
         owner = "cc:" + new_uuid()
         sp_channels.create_channel(

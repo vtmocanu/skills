@@ -1377,16 +1377,18 @@ def _check_size(key, mid, sender, members, body, journaled):
     # build_tag and build_origin cut a field by characters while the Codex and
     # Claude caps also count UTF-8 bytes, so each is measured with a one-byte
     # filler (the character cap binds) and a four-byte one (the byte cap binds).
+    # Only the session name can carry non-ASCII; the id fields stay ASCII.
+    ident = "i" * sp_constants.MAX_TAG_FIELD_CHARS
     for char in ("n", "\U0001F600"):
-        field = char * sp_constants.MAX_TAG_FIELD_CHARS
+        name = char * sp_constants.MAX_TAG_FIELD_CHARS
         tag_origin = "\n".join([
-            sp_protocol.build_tag(field, field, "/" + "p" * 107, field),
-            sp_protocol.build_origin("opencode", field, field),
+            sp_protocol.build_tag(name, ident, "/" + "p" * 107, ident),
+            sp_protocol.build_origin("opencode", name, ident),
         ])
         framing = "\n".join([tag_origin, sp_protocol.reply_route_hint("oc:" + "s" * 40, "m" * 36)])
         try:
             sp_claude.check_wrapped_size(
-                sp_protocol.build_wrapper(framing + "\n" + longest, "/" + "s" * 107, field, field)
+                sp_protocol.build_wrapper(framing + "\n" + longest, "/" + "s" * 107, ident, name)
             )
         except ValueError as exc:
             raise ChannelError("%s; nothing was journaled or sent" % exc, 1)

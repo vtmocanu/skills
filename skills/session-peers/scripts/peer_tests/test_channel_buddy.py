@@ -408,6 +408,21 @@ class BuddyChannelHandoverTests(BuddyChannelBase):
             pathlib.Path(log).write_text("")
         self.assertEqual(sp_channels.find_buddy_channel(self.lead), older)
 
+    def test_a_non_string_handover_stamp_reads_as_never_handed_over(self):
+        good = "buddy-" + "aaaaaaaaaaaa"
+        bad = "buddy-" + "bbbbbbbbbbbb"
+        for key in (good, bad):
+            sp_channels.create_channel(key, self.lead, [], kind="buddy", display="buddy", reserved_ok=True)
+        for key, stamp in ((good, "2026-01-01T00:00:00Z"), (bad, 5)):
+            rec = sp_channels.read_channel(key)
+            rec["handed_over_at"] = stamp
+            sp_channels._write_record(rec)
+        rc, _out, err = self.bset(self.x)
+        self.assertEqual(rc, 0, err)
+        self.assertNotIn("Traceback", err)
+        self.assertIn(self.x, self.members(good))
+        self.assertNotIn(self.x, self.members(bad))
+
     def test_a_channel_created_for_a_lead_that_never_got_a_handover_is_not_reused_by_another(self):
         sp_channels.create_channel(
             "buddy-cccccccccccc", "cc:" + new_uuid(), [], kind="buddy", display="buddy", reserved_ok=True)
