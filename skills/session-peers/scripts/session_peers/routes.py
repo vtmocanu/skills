@@ -78,16 +78,15 @@ def sender_kind(args):
     "unknown" is an OpenCode id beside a Claude or Codex one: delivery refuses it.
     """
     web = getattr(args, "web_sender", None)
-    if isinstance(web, dict) and web.get("sid"):
+    if web is not None:
         # The chat server sends for the browser peer; its own environment (a
-        # scrubbed copy of whatever launched it) says nothing about the sender.
-        # Only a sid `messaging._web_sender` would accept counts.
+        # scrubbed copy of whatever launched it) says nothing about the sender,
+        # so a malformed browser sender is refused, never attributed to it.
         try:
             sid = sp_identity.parse_address("web:%s" % web["sid"])["uuid"]
-        except ValueError:
-            sid = None
-        if sid:
-            return Sender("web", sid)
+        except (ValueError, TypeError, KeyError):
+            raise _Refusal(2, "error: malformed browser sender; nothing was sent")
+        return Sender("web", sid)
     claude = _claude_indicator()
     explicit = getattr(args, "from_thread", None)
     raw = explicit or os.environ.get("CODEX_THREAD_ID") or os.environ.get("CODEX_SESSION_ID")

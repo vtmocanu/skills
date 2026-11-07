@@ -578,10 +578,13 @@ class WebSenderDeliveryTests(WebRoutingBase):
             sp_messaging._web_sender(argparse.Namespace(web_sender={"sid": "nope"}))
         self.assertIsNone(sp_messaging._web_sender(argparse.Namespace()))
 
-    def test_sender_kind_does_not_class_a_malformed_sid_as_a_web_sender(self):  # routes.sender_kind
-        for bad in ("nope", UPPER_WEB, WEB + "\n", 7):
-            args = argparse.Namespace(web_sender={"sid": bad, "name": "browser-peer", "socket": None})
-            self.assertEqual(sp_routes.sender_kind(args), sp_routes.Sender("shell", None), repr(bad))
+    def test_sender_kind_refuses_a_malformed_web_sender(self):  # routes.sender_kind
+        os.environ["CLAUDE_CODE_SESSION_ID"] = new_uuid()  # never the fallback for a browser send
+        for bad in ({"sid": "nope"}, {"sid": UPPER_WEB}, {"sid": WEB + "\n"}, {"sid": 7}, {"sid": ""}, {}, "x"):
+            args = argparse.Namespace(web_sender=bad)
+            with self.assertRaises(sp_routes._Refusal, msg=repr(bad)) as caught:
+                sp_routes.sender_kind(args)
+            self.assertEqual(caught.exception.code, 2)
 
     def test_the_environment_thread_id_is_ignored_for_a_browser_sender(self):  # identity._thread_from_args
         os.environ["CODEX_THREAD_ID"] = new_uuid()
