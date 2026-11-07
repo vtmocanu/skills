@@ -704,7 +704,7 @@ class ChatGateTests(ChatBase):
         self.tick(0.5)
         self.assert_refused(self.post("#ops", tick=False), 429)
         self.assertEqual(len(self.state.rows()), 1)  # nothing was queued either
-        self.assertEqual(self.chat.gate.held, 0)  # the idle worker finished the first job
+        wait_until(lambda: self.chat.gate.held == 0, "the idle worker to finish the first job")
         # The refusal at +0.5 did not move the window: +1.0 from the accepted send is open again.
         self.tick(0.5)
         self.assertEqual(self.post("#ops", tick=False).status, 202)

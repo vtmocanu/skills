@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import subprocess
+import sys
 import threading
 from unittest import mock
 
@@ -157,6 +159,17 @@ class ConfirmFlowTests(ConfirmBase):
         self.assertEqual(self.chat.gate.nonces_outstanding, 0)
         self.assert_no_all_traffic()
 
+    def test_a_truncated_discovery_is_409_and_a_stale_one_is_flagged(self):
+        real = self.server.discovery.get
+        with mock.patch.object(self.server.discovery, "get", lambda wait=None: dict(real(wait), truncated=True)):
+            self.assert_refused(self.preview(), 409)
+        self.assertEqual(self.chat.gate.nonces_outstanding, 0)
+        self.assert_no_all_traffic()
+        with mock.patch.object(self.server.discovery, "get", lambda wait=None: dict(real(wait), stale=True)):
+            body = self.preview().json()
+        self.assertIs(body["stale"], True)
+        self.assertEqual(body["recipients"], self.members)
+
 
 class ConfirmBindingTests(ConfirmBase):
     def test_a_mismatch_is_409_and_leaves_the_nonce_usable(self):
@@ -203,6 +216,21 @@ class ConfirmBindingTests(ConfirmBase):
         self.assertEqual(resp.json()["expires_in"], webchat.NONCE_TTL)
         self.clock[0] += webchat.NONCE_TTL - 1
         self.assertEqual(self.confirm(resp.json()["confirm"]).status, 202)
+
+    def test_a_nonce_expires_at_exactly_the_ttl(self):
+        nonce = self.nonce()
+        self.clock[0] += webchat.NONCE_TTL
+        self.assert_refused(self.confirm(nonce), 409)
+        self.assert_no_all_traffic()
+
+    def test_a_build_failure_keeps_the_nonce_and_restores_the_charge(self):
+        nonce = self.nonce()
+        with mock.patch.object(self.chat.worker, "submit", side_effect=RuntimeError("boom")):
+            self.confirm(nonce)  # the response is not the point: nothing was accepted
+        self.assertEqual(self.chat.gate.nonces_outstanding, 1)
+        self.assertEqual(self.chat.gate.held, 0)
+        self.assertEqual(self.state.rows(), [])
+        self.assertEqual(self.confirm(nonce).status, 202)  # no charge was left: still inside the minimum gap
 
     def test_an_expired_nonce_is_409_and_sends_nothing(self):
         nonce = self.nonce()
@@ -298,6 +326,20 @@ class ConfirmLimitTests(ConfirmBase):
         row = self.wait_row(mid)
         self.assertEqual(row["state"], "pending")
 
+    def test_a_429_confirm_does_not_use_up_a_rate_slot(self):
+        with mock.patch.object(webchat, "RATE_PER_MINUTE", 2):
+            nonce = self.nonce()
+            self.accepted("#ops", "heads up", tick=False)  # charge 1 of 2
+            self.assert_refused(self.confirm(nonce), 429)  # inside the minimum gap; must charge nothing
+            self.assertEqual(self.confirm(nonce, tick=True).status, 202)  # charge 2 of 2
+
+    def test_a_binding_mismatch_while_rate_limited_is_409_not_429(self):
+        nonce = self.nonce()
+        self.accepted("#ops", "heads up", tick=False)
+        self.assert_refused(self.confirm(nonce, text="@all freeze main now"), 409)
+        self.assert_refused(self.confirm(nonce), 429)
+        self.assertEqual(self.chat.gate.nonces_outstanding, 1)
+
     def test_a_full_queue_is_429_keeps_the_nonce_and_a_later_confirm_succeeds(self):
         nonce = self.nonce()
         self.block_worker()
@@ -342,6 +384,21 @@ class ConfirmWorkerTests(ConfirmBase):
         nonce = self.nonce()
         self.peer_cc("claude-late")
         self.assert_changed(self.confirmed(nonce))
+
+    def test_a_live_member_the_journal_cannot_resolve_is_a_recorded_refusal_not_a_change(self):
+        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+        self._children.append(proc)
+        sid = new_uuid()
+        self.write_record(proc.pid, "noproc", sid, str(self.socks / "u.sock"), procStart=None)
+        unresolved = "cc:" + sid
+        body = self.preview().json()
+        self.assertIn(unresolved, body["recipients"])
+        row = self.wait_row(self.confirmed(body["confirm"]))
+        self.assertEqual((row["state"], row["journaled"]), ("pending", True))
+        self.assertTrue(row["recipients"][unresolved]["outcome"].startswith("refused: "), row)
+        self.assertEqual(row["recipients"][unresolved]["ack"], "not requested")
+        [record] = self.journal_entries()
+        self.assertEqual(sorted(record["to"]), self.members)
 
     def test_a_worker_failure_consumes_the_nonce_and_keeps_the_charge(self):
         nonce = self.nonce()

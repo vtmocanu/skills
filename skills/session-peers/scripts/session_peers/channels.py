@@ -1613,7 +1613,7 @@ def _prepare_send(key, sender, body, mid, record, authorised=False, pointer=None
     return types.SimpleNamespace(
         key=key, sender=sender, body=body, mid=mid, coverage=coverage, gaps=gaps, general=general,
         is_all=is_all, journaled=journaled, pointer=pointer, delivers=delivers, snapshot=snapshot,
-        gone=gone, deliver=deliver, excluded=excluded)
+        gone=gone, live=list(live), deliver=deliver, excluded=excluded)
 
 
 def _record_journal(plan):
@@ -1841,7 +1841,8 @@ def send_as_web(key, web_sender, body, ack, mid, deliver_guard=None, expected_re
     delivered to, so a caller that sees an exception escape afterwards knows the
     message was recorded and can show its recipients during the fan-out. ``#general`` is refused
     unless ``expected_recipients`` (typed ids the caller previewed) is given and
-    ``body`` is an ``@all``; the live deliverable set must then equal it.
+    ``body`` is an ``@all``; the live members (before the journal preflight, whose
+    exclusions are recorded outcomes) must then equal it.
 
     Payload: ``state`` (``sent``, ``not sent`` or ``not sent (journaled)``),
     ``reason`` (None when sent), ``message_id``, ``outcomes`` ({recipient:
@@ -1876,7 +1877,7 @@ def send_as_web(key, web_sender, body, ack, mid, deliver_guard=None, expected_re
             plan = _prepare_send(key, sender, body, mid, True, authorised=True, pointer=ask)
             payload["recipients"] = list(plan.snapshot)
             payload["excluded"] = [{"member": m, "reason": r} for m, r in plan.excluded]
-            if expected_recipients is not None and sorted(plan.deliver) != sorted(expected_recipients):
+            if expected_recipients is not None and sorted(plan.live) != sorted(expected_recipients):
                 return refuse("recipients changed, preview again")
             _record_journal(plan)
         except (ChannelError, sp_journal.JournalError, ValueError, KeyError, TypeError, OSError) as exc:

@@ -589,7 +589,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self._send_json(202, {"message_id": mid, "state": "queued"})
         # Preview: the cached discovery only, no resolution; nothing is accepted, charged or queued.
         found = self.server.discovery.get()
-        if found.get("pending"):
+        if found.get("pending") or found.get("truncated"):  # an incomplete pass would preview members as unverified
             raise _Refused(409)
         typed = chat.state.typed
         liveness = found.get("liveness") or {}
@@ -605,10 +605,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             raise _Refused(409)
         recipients.sort()
         nonce = chat.preview_all(text, recipients)
-        self._send_json(200, {
+        reply = {
             "confirm": nonce, "expires_in": sp_webchat.NONCE_TTL, "recipients": recipients,
             "excluded": sorted(excluded, key=lambda x: x["member"]),
-        })
+        }
+        if found.get("stale"):
+            reply["stale"] = True
+        self._send_json(200, reply)
 
     def _check_origin(self):
         origin = self._single("Origin")
@@ -688,7 +691,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             raise _Refused(400)
         if "confirm" in obj:
             # A nonce belongs to an `@all` to #general and to nothing else.
-            if (type(confirm) is not str or not 1 <= len(confirm) <= CONFIRM_MAX or to != "#general"
+            if (type(confirm) is not str or not 1 <= len(confirm) <= CONFIRM_MAX or to != "#" + sp_constants.CHANNEL_GENERAL
                     or sp_channels.ALL_RE.match(text) is None):
                 raise _Refused(400)
         try:
