@@ -1,13 +1,18 @@
 """Web dashboard read model: parity with the CLI views, bounded reads, hygiene and no mutation."""
 
 import base64
+import contextlib
 import hashlib
+import io
 import json
 import os
 import pathlib
 import stat
 import subprocess
 import sys
+import threading
+import time
+import unicodedata
 import unittest
 from unittest import mock
 
@@ -1210,7 +1215,7 @@ class WebdataInProgressTests(WebdataBase):
 
         def probe(message_id):
             calls.append(message_id)
-            if len(calls) == 2:
+            if len(calls) == 1:
                 outcome = make_entry(
                     "ops", 4, sp_channels.EVENT_OUTCOME,
                     {"message_id": message_id, "outcomes": {"codex:" + self.tid: "queued (thread paused)"}})
@@ -1572,6 +1577,645 @@ class WebdataStateViewTests(WebdataBase):
         self.assertEqual(row["kind"], "buddy")
         self.assertEqual(row["handover_chain"], [{"member": self.me, "to": "codex:" + self.tid, "seq": 2}])
         self.assertEqual([c for c in webdata.state_view(EMPTY)["channels"] if c["key"] == "ops"][0]["handover_chain"], [])
+
+
+# --------------------------------------------------------------------------
+# Rework of milestone 2: each test fails without its fix.
+# --------------------------------------------------------------------------
+
+BAD = "\x1b\x07‮⁦\x9b"
+
+
+def iso(ts):
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts))
+
+
+def deep_list(depth):
+    return "[" * depth + "]" * depth
+
+
+def run_bounded(case, fn, unblock=None, timeout=10):
+    """The result of ``fn()`` run in a thread; fails the test (instead of hanging it) when it blocks."""
+    box = {}
+
+    def target():
+        try:
+            box["value"] = fn()
+        except BaseException as exc:  # reported on the test thread
+            box["error"] = exc
+
+    thread = threading.Thread(target=target, daemon=True)
+    thread.start()
+    thread.join(timeout)
+    if thread.is_alive():
+        if unblock is not None:  # a writer end frees a blocked FIFO open
+            fd = os.open(unblock, os.O_WRONLY | os.O_NONBLOCK)
+            os.close(fd)
+        case.fail("the call blocked on a FIFO")
+    if "error" in box:
+        raise box["error"]
+    return box["value"]
+
+
+def write_record(key, members, owner="cc:" + "a" * 8 + "-0000-0000-0000-" + "b" * 12):
+    path = os.path.join(sp_channels.channels_root(), key + ".json")
+    with open(path, "w") as fh:
+        json.dump({"key": key, "display": key, "kind": "group", "owner": owner, "members": members}, fh)
+    return path
+
+
+class WebdataStateViewReworkTests(WebdataBase):
+    def setUp(self):
+        super().setUp()
+        self.tid, _rollout = self.one_thread()
+        self.channel("two", "codex:" + self.tid, "oc:" + OC_B)
+
+    def shim_state(self, tid, **state):
+        path = pathlib.Path(self.codex_dir) / "session-peers" / (tid + ".json")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(state))
+        return path
+
+    def test_an_ack_written_after_the_journal_baseline_arrives_with_the_first_poll(self):
+        rc, result, err = self.send("--record", name="two", message="@all freeze")
+        self.assertEqual(rc, 0, err)
+        real = webdata.read_journal_context
+
+        def context_then_ack(budget, want):
+            out = real(budget, want)
+            sp_journal.ack(result["message_id"], "codex:" + self.tid)
+            return out
+
+        with mock.patch.object(webdata, "read_journal_context", context_then_ack):
+            view = webdata.state_view(EMPTY)
+        got = webdata.changes(view["cursor"])
+        self.assertEqual(
+            [(u["message_id"], u["recipient"], u["ack"]) for u in got["updates"]],
+            [(result["message_id"], "codex:" + self.tid, "acked")])
+
+    def test_the_baseline_anchor_is_dropped_for_an_oversized_or_regressed_journal_read(self):
+        anchor = "ab" * 8
+        base = {"next": 5, "fingerprint": "fp", "next_anchor": anchor, "bytes": 0}
+        for extra, kept in (({}, anchor), ({"oversized": 1}, None), ({"window_regression": True}, None)):
+            with self.subTest(extra=extra), mock.patch.object(sp_journal, "read_since", return_value=dict(base, **extra)):
+                j = webdata.decode_cursor(webdata.state_view(EMPTY)["cursor"])["j"]
+            self.assertEqual((j[0], j[2]), (5, kept))
+
+    def test_a_listed_channel_whose_record_does_not_read_is_shown_unreadable(self):
+        bad = stub_channels(1)[0]
+        view = webdata.state_view(EMPTY)
+        rows = {row["key"]: row for row in view["channels"]}
+        self.assertEqual((rows[bad]["unreadable"], sorted(rows[bad])), (True, ["alert", "key", "unreadable"]))
+        self.assertNotIn("unreadable", rows["two"])
+        self.assertTrue(view["partial"])
+        self.assertIn(bad, positions_of(view["cursor"]))
+
+    def test_a_fifo_record_never_blocks_a_view(self):
+        os.makedirs(sp_channels.channels_root(), exist_ok=True)
+        fifo = os.path.join(sp_channels.channels_root(), "evil.json")
+        os.mkfifo(fifo)
+        view = run_bounded(self, lambda: webdata.state_view(EMPTY), unblock=fifo)
+        self.assertEqual([r for r in view["channels"] if r["key"] == "evil"][0]["unreadable"], True)
+        page = run_bounded(self, lambda: webdata.channel_page("evil"), unblock=fifo)
+        self.assertEqual(page["info"], {"key": "evil"})
+
+    def test_a_record_is_validated_like_read_channel_and_charged(self):
+        path = write_record("tidy", ["cc:" + new_uuid(), 5, "cc:not a member", "cc:" + "A" * 8 + "-0000-0000-0000-" + "c" * 12])
+        budget = webdata.Budget()
+        record = webdata._read_record("tidy", budget)
+        self.assertEqual(record, sp_channels.read_channel("tidy"))
+        self.assertEqual(budget.used, os.path.getsize(path))
+        for body in ('{"key": "other"}', "[]", json.dumps({"key": "tidy", "members": [], "display": 1, "kind": "k", "owner": "o"}),
+                     "{" * 5000):
+            pathlib.Path(path).write_text(body)
+            self.assertIsNone(webdata._read_record("tidy", webdata.Budget()), body[:40])
+            with contextlib.redirect_stderr(io.StringIO()):  # read_channel logs the unreadable file
+                self.assertIsNone(sp_channels.read_channel("tidy"))
+        pathlib.Path(path).write_text("x" * (sp_channels.RECORD_MAX_BYTES + 1))
+        self.assertIsNone(webdata._read_record("tidy", webdata.Budget()))
+        write_record("tidy", ["cc:" + new_uuid()])
+        self.assertIsNone(webdata._read_record("tidy", webdata.Budget(10)))
+
+    def test_a_large_roster_is_cut_at_the_member_limit_and_says_so(self):
+        members = ["cc:" + new_uuid() for _ in range(200)]
+        path = write_record("crowd", members)
+        budget = webdata.Budget()
+        view = webdata.state_view(EMPTY, budget=budget)
+        row = [r for r in view["channels"] if r["key"] == "crowd"][0]
+        self.assertEqual(len(row["members"]), sp_constants.CHANNEL_MAX_MEMBERS)
+        self.assertEqual(row["omitted_members"], 200 - sp_constants.CHANNEL_MAX_MEMBERS)
+        self.assertTrue(view["partial"])
+        self.assertGreaterEqual(budget.used, os.path.getsize(path))
+        discovery = dict(EMPTY, general=(members, None, []))
+        general = webdata.state_view(discovery)["channels"][0]
+        self.assertEqual((len(general["members"]), general["omitted_members"]), (64, 136))
+
+    def test_sessions_are_capped_at_512(self):
+        for i in range(9):
+            write_record("grp%d" % i, ["cc:" + new_uuid() for _ in range(64)])
+        view = webdata.state_view(EMPTY)
+        self.assertEqual(len(view["sessions"]), webdata.SESSIONS_MAX)
+        self.assertTrue(view["partial"])
+
+    def test_shim_state_reads_are_charged_to_the_request(self):
+        tids = [new_uuid() for _ in range(12)]
+        for tid in tids:
+            self.shim_state(tid, budgets={}, pad="x" * (MIB - 200))
+        discovery = dict(EMPTY, general=(["codex:" + t for t in tids], None, []))
+        budget = webdata.Budget()
+        with ReadMeter() as meter:
+            view = webdata.state_view(discovery, budget=budget)
+        self.assertLessEqual(meter.total(), webdata.REQUEST_BUDGET)
+        self.assertEqual(budget.used, meter.total())
+        self.assertTrue(view["partial"])
+        budgets = [s["reply_budget"] for s in view["sessions"] if s["member"].startswith("codex:")]
+        self.assertTrue(any(b is None for b in budgets) and any(b is not None for b in budgets))
+        skipped = [s for s in view["sessions"] if s.get("partial")]
+        self.assertTrue(skipped and all(s["reply_budget"] is None for s in skipped))
+
+    def test_a_malformed_shim_state_never_breaks_the_view_or_writes_to_stderr(self):
+        now = sp_runtime.now_iso()
+        sid = new_uuid()
+        cases = {
+            "string count": dict(budgets={"s": "x"}, budget_sender_sid="s", budget_last_at=now),
+            "huge time": dict(budgets={"s": 1}, budget_sender_sid="s", budget_last_at=10 ** 400),
+            "newline sid": dict(budgets={sid: 1}, budget_sender_sid=sid, budget_last_at="2001-01-01T00:00:00Z",
+                                allowance={"sid": "a\nb", "total": 5, "at": "2001-01-01T00:00:00Z", "bound": True}),
+        }
+        tids = {}
+        for name, state in cases.items():
+            tids[name] = new_uuid()
+            self.shim_state(tids[name], **state)
+        discovery = dict(EMPTY, general=(["codex:" + t for t in tids.values()], None, []))
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            for tid in tids.values():
+                webdata.codex_reply_budget(tid)
+            view = webdata.state_view(discovery)
+        self.assertEqual(err.getvalue(), "")
+        self.assertEqual(len([s for s in view["sessions"] if s["member"] in {"codex:" + t for t in tids.values()}]), 3)
+        self.assertIsNone(webdata.codex_reply_budget(tids["string count"]))
+        self.assertIsNone(webdata.codex_reply_budget(tids["huge time"]))
+        self.assertEqual(webdata.codex_reply_budget(tids["newline sid"])["cap"], sp_constants.REPLY_BUDGET)
+
+    def test_a_dropped_state_file_that_does_not_fit_the_budget_reads_none_and_partial(self):
+        tid = new_uuid()
+        self.shim_state(tid, budgets={}, pad="x" * 5000)
+        details = webdata.member_details("codex:" + tid, "live", None, budget=webdata.Budget(100))
+        self.assertEqual((details["reply_budget"], details["partial"]), (None, True))
+        self.assertEqual(webdata.member_details("codex:" + tid, "live", None, budget=webdata.Budget())["reply_budget"]["requester"], None)
+
+    def test_the_module_names_every_lock_it_can_touch(self):
+        self.assertIn("_pidfile_is_held", webdata.__doc__)
+        self.assertIn("_probe_send_lock", webdata.__doc__)
+
+
+class WebdataHostileHistoryTests(WebdataBase):
+    def test_a_ts_too_large_for_a_float_is_harmless_in_every_view(self):
+        cursor = webdata.state_view(EMPTY)["cursor"]
+        lines = [encode(make_entry("general", 1, "channel.note", text="needle ok")),
+                 encode(make_entry("general", 2, "channel.note", text="needle huge", ts=10 ** 400)),
+                 encode(make_entry("general", 3, "channel.note", text="needle float", ts=1e300))]
+        write_topic("general", lines)
+        # The unusable time reads as time zero, so retention treats that entry as expired; the rest stay.
+        self.assertEqual([e["seq"] for e in webdata.channel_page("general")["entries"]], [1, 3])
+        self.assertEqual(len(webdata.all_channels()["entries"]), 2)
+        self.assertEqual(len(webdata.search("needle")["matches"]), 2)
+        webdata.state_view(EMPTY)
+        self.assertEqual([e["seq"] for e in webdata.changes(cursor)["channels"]["general"]["entries"]], [1, 3])
+
+    def test_deeply_nested_identifiers_never_break_a_view(self):
+        key = self.new_channel("nest")
+        deep = deep_list(2000)
+        lines = [
+            encode(make_entry(key, 1, "channel.joined", {"member": "@@"})),
+            encode(make_entry(key, 2, "channel.handover", {"member": "@@", "to": "@@"})),
+            encode(make_entry(key, 3, "channel.send", send_data("needle", "@@", sender="@@", delivery="fanout",
+                                                                recipients=["cc:z"], excluded=[{"member": "@@", "reason": "@@"}]))),
+            encode(make_entry(key, 4, sp_channels.EVENT_OUTCOME, {"message_id": "@@", "outcomes": {"cc:z": "@@"}})),
+            encode(make_entry(key, 5, "channel.note", {"deep": "@@"}, sid="@@")),
+        ]
+        write_topic(key, [line.replace('"@@"', deep) for line in lines])
+        page = webdata.channel_page(key)
+        self.assertEqual([e["seq"] for e in page["entries"]], [1, 2, 3, 4, 5])
+        self.assertIsNone(page["entries"][0]["member"])
+        webdata.all_channels()
+        self.assertEqual(len(webdata.search("needle", scope=key)["matches"]), 1)
+        webdata.state_view(EMPTY)
+        webdata.changes(webdata.encode_cursor({"v": 1, "c": [[key, 0, "A" * 11]], "j": [0, "A" * 11, None], "u": []}))
+
+    def test_a_deep_buddy_handover_is_flat_in_the_chain(self):
+        key = "buddy-" + "b2" * 6
+        sp_channels.create_channel(key, self.me, [], kind="buddy", display="buddy", reserved_ok=True)
+        line = encode(make_entry(key, 2, "channel.handover", {"member": "@@", "to": "@@"}))
+        with open(str(log_path(key)), "ab") as fh:
+            fh.write(line.replace('"@@"', deep_list(2000)).encode("utf-8"))
+        row = [c for c in webdata.state_view(EMPTY)["channels"] if c["key"] == key][0]
+        self.assertEqual(row["handover_chain"], [{"member": None, "to": None, "seq": 2}])
+
+    def test_clean_bounds_its_depth(self):
+        value = json.loads(deep_list(500))
+        out = webdata._clean({"a": value})
+        depth, node = 0, out["a"]
+        while isinstance(node, list) and node:
+            node, depth = node[0], depth + 1
+        self.assertEqual(node, "[nested too deeply]")
+        self.assertLess(depth, webdata.CLEAN_DEPTH)
+
+    def test_identifier_newlines_and_tabs_are_escaped_in_composed_text(self):
+        key = self.new_channel("nl")
+        write_topic(key, [
+            encode(make_entry(key, 1, "channel.joined", {"member": "cc:a\nb\tc"}, sid="s\nx")),
+            encode(make_entry(key, 2, "channel.handover", {"member": "cc:a\nb", "to": "cc:c\td"})),
+            encode(make_entry(key, 3, sp_channels.EVENT_OUTCOME, {"message_id": "m\nid", "outcomes": {"cc:z\n": "ok"}})),
+            encode(make_entry(key, 4, "channel.note", text="free\ntext")),
+        ])
+        entries = webdata.channel_page(key)["entries"]
+        self.assertEqual(entries[0]["member"], "cc:a\\u000ab\\u0009c")
+        self.assertEqual(entries[0]["actor"], "cc:s\\u000ax")
+        self.assertEqual(entries[0]["text"], "cc:a\\u000ab\\u0009c joined")
+        self.assertEqual(entries[1]["text"], "cc:a\\u000ab handed over to cc:c\\u0009d")
+        self.assertEqual(entries[2]["text"], "outcomes of message m\\u000aid for 1 recipients")
+        self.assertEqual(list(entries[2]["outcomes"]), ["cc:z\\u000a"])
+        self.assertEqual(entries[3]["text"], "free\ntext")
+
+    def test_only_a_string_or_a_finite_number_is_a_time(self):
+        # An int epoch counts, as runtime.parse_time (and so topic retention) reads it.
+        self.assertEqual(webdata._stamp(1700000000), 1700000000.0)
+        for value in (True, 10 ** 400, "1e999", "nan", float("inf"), float("nan"), None, [1], "junk"):
+            self.assertEqual(webdata._stamp(value), 0.0, repr(value)[:20])
+            self.assertEqual(webdata._ts_view(value) if not isinstance(value, str) else None, None)
+        self.assertEqual(webdata._stamp("2026-03-01T10:00:00.000Z"), 1772359200.0)
+        self.assertEqual(webdata._stamp(1.5), 1.5)
+
+    def test_invisible_format_characters_are_escaped(self):
+        marks = [chr(c) for c in range(0x10000) if unicodedata.category(chr(c)) == "Cf"]
+        marks += ["­", "᠎", "﻿", "\U000e0001", "\U000e0041", "\U000e007f"]
+        self.assertGreater(len(marks), 30)
+        for ch in marks:
+            for fn in (webdata.escape_text, webdata.escape_body):
+                out = fn("a%sb" % ch)
+                self.assertNotIn(ch, out, hex(ord(ch)))
+                self.assertTrue(out.startswith("a\\u") or out.startswith("a\\U"), hex(ord(ch)))
+        self.assertEqual(webdata.escape_text("a‍b\U000e0041"), "a\\u200db\\U000e0041")
+        key = self.new_channel("cf")
+        write_topic(key, [encode(make_entry(key, 1, "channel.send", send_data("hid​den \U000e0041", sender="cc:a⁠b")))])
+        text = json.dumps(webdata.channel_page(key), ensure_ascii=False)
+        for ch in "​\U000e0041⁠":
+            self.assertNotIn(ch, text)
+
+    def test_a_12_mib_line_never_makes_the_reader_read_past_the_line_limit(self):
+        huge = encode(make_entry("general", 2, "channel.note", text="h" * (12 * MIB)))
+        torn = huge.rstrip("\n")
+        small = encode(make_entry("general", 1, "channel.note", text="small"))
+        for name, lines in (("a complete line", [small, huge]), ("a torn tail", [small, torn])):
+            write_topic("general", lines)
+            with self.subTest(name), ReadMeter() as meter:
+                page = webdata.channel_page("general")
+            self.assertLessEqual(max(meter.topic_bytes().values()), webdata.TOPIC_BUDGET + webdata.ENTRY_LINE_MAX)
+            self.assertLessEqual(page["bytes"], webdata.REQUEST_BUDGET)
+            self.assertTrue(page["partial"])
+
+
+class WebdataPendingSendTests(WebdataBase):
+    def setUp(self):
+        super().setUp()
+        self.tid, _rollout = self.one_thread()
+        self.channel("qa", "codex:" + self.tid)
+        self.holders, self.mids = [], []
+
+    @staticmethod
+    def hook(name):
+        if name == "send_after_history":
+            raise RuntimeError("killed")
+
+    def crash_send(self, count):
+        for n in range(count):
+            with mock.patch.object(sp_channels, "_failpoint", self.hook):
+                with self.assertRaises(RuntimeError):
+                    self.cli("send", "--to", "#qa", "--message", "crash %d" % n, "--record")
+            mid = [e for e in self.history("qa") if e["kind"] == "channel.send"][-1]["data"]["message_id"]
+            holder = subprocess.Popen([sys.executable, "-c", HOLDER, sp_channels.send_lock_path(mid)],
+                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+            self._children.append(holder)
+            self.assertEqual(holder.stdout.readline().strip(), "ready")
+            self.holders.append(holder)
+            self.mids.append(mid)
+
+    def release(self):
+        for holder in self.holders:
+            holder.stdin.close()
+            holder.wait(timeout=10)
+
+    def note(self, size):
+        sp_topics.topic_post(sp_channels.topic_name("qa"), IDENT, kind="channel.note", text="q" * size,
+                             base=sp_channels.history_dir())
+
+    def test_pending_sends_of_an_unchanged_channel_resolve_without_rereading_its_topic(self):
+        self.crash_send(3)
+        self.note(2 * MIB)
+        cursor = webdata.state_view(EMPTY)["cursor"]
+        self.assertEqual(len(webdata.decode_cursor(cursor)["u"]), 3)
+        self.release()
+        with ReadMeter() as meter:
+            got = webdata.changes(cursor)
+        self.assertLessEqual(max(meter.topic_bytes().values(), default=0), webdata.TOPIC_BUDGET)
+        self.assertEqual(sorted(u["delivery"]["state"] for u in got["updates"]), ["unknown"] * 3)
+        self.assertFalse(got["partial"])
+        self.assertEqual(webdata.decode_cursor(got["cursor"])["u"], [])
+        with ReadMeter() as meter:
+            again = webdata.changes(got["cursor"])
+        self.assertEqual(meter.topic_bytes(), {})
+        self.assertEqual((again["updates"], again["cursor"]), ([], got["cursor"]))
+
+    def test_a_pending_send_behind_a_large_newest_entry_is_covered_by_the_since_read(self):
+        self.crash_send(1)
+        cursor = webdata.state_view(EMPTY)["cursor"]
+        self.release()
+        self.note(2 * MIB + 5000)  # appended after the cursor: the newest entry alone exceeds the topic cap
+        got = webdata.changes(cursor)
+        self.assertEqual([u["delivery"]["state"] for u in got["updates"]], ["unknown"])
+        self.assertFalse(got["partial"])
+        self.assertEqual(webdata.decode_cursor(got["cursor"])["u"], [])
+        self.assertEqual([e["kind"] for e in got["channels"]["qa"]["entries"]], ["other"])
+
+    def test_state_view_remembers_the_sends_in_progress(self):
+        self.crash_send(2)
+        view = webdata.state_view(EMPTY)
+        pending = webdata.decode_cursor(view["cursor"])["u"]
+        self.assertEqual(sorted(item[2] for item in pending), sorted(m.replace("-", "") for m in self.mids))
+        keys = [key for key, _seq, _fp in webdata.decode_cursor(view["cursor"])["c"]]
+        self.assertEqual({keys[item[0]] for item in pending}, {"qa"})
+        self.release()
+
+    def test_a_probe_on_a_fifo_lock_reads_error_without_blocking(self):
+        self.crash_send(1)
+        mid = self.mids[0]
+        first = webdata.changes(webdata.state_view(EMPTY)["cursor"])
+        self.release()
+        lock = sp_channels.send_lock_path(mid)
+        os.unlink(lock)
+        os.mkfifo(lock)
+        self.assertEqual(run_bounded(self, lambda: sp_channels._probe_send_lock(mid), unblock=lock), "error")
+        got = run_bounded(self, lambda: webdata.changes(first["cursor"]), unblock=lock)
+        self.assertEqual(got["updates"][0]["delivery"]["state"], "unverified")
+        self.assertEqual(len(webdata.decode_cursor(got["cursor"])["u"]), 1)
+
+    def test_a_symlinked_lock_is_an_error_and_a_regular_one_still_probes(self):
+        self.crash_send(1)
+        mid = self.mids[0]
+        self.release()
+        lock = sp_channels.send_lock_path(mid)
+        self.assertEqual(sp_channels._probe_send_lock(mid), "free")
+        os.rename(lock, lock + ".real")
+        os.symlink(lock + ".real", lock)
+        self.assertEqual(sp_channels._probe_send_lock(mid), "error")
+
+    def test_pending_sends_of_a_channel_skipped_for_budget_stay_in_the_cursor(self):
+        self.crash_send(1)
+        cursor = webdata.changes(webdata.state_view(EMPTY)["cursor"])["cursor"]
+        before = webdata.decode_cursor(cursor)["u"]
+        self.assertEqual(len(before), 1)
+        self.note(10)
+        got = webdata.changes(cursor, budget=webdata.Budget(0))
+        self.assertTrue(got["partial"])
+        self.assertEqual(webdata.decode_cursor(got["cursor"])["u"], before)
+        self.release()
+
+    def test_recheck_bytes_are_charged_to_the_request(self):
+        self.crash_send(1)
+        self.release()
+        mid = self.mids[0]
+        calls = []
+
+        def probe(message_id):
+            calls.append(message_id)
+            if len(calls) == 1:
+                with open(str(log_path("qa")), "ab") as fh:
+                    fh.write(encode(make_entry("qa", 9, "channel.note", text="r" * 5000)).encode("utf-8"))
+            return "free"
+
+        budget = webdata.Budget()
+        with mock.patch.object(sp_channels, "_probe_send_lock", probe), ReadMeter() as meter:
+            page = webdata.channel_page("qa", budget=budget)
+        self.assertGreaterEqual(len(calls), 1)
+        self.assertEqual(budget.used, meter.total())
+        self.assertGreater(meter.bytes[str(log_path("qa"))], os.path.getsize(str(log_path("qa"))) - 5300)
+        self.assertEqual(page["bytes"], budget.used)
+        self.assertTrue(mid)
+
+
+class WebdataTokenAndCursorReworkTests(WebdataBase):
+    def test_a_channel_created_during_a_request_makes_its_token_stale_instead_of_hiding_it(self):
+        stub_channels(40)
+        real = webdata._read_batch
+
+        def batch_then_create(*args, **kwargs):
+            out = real(*args, **kwargs)
+            stub_channels(1, prefix="zz")
+            return out
+
+        for call in (lambda tok: webdata.all_channels(next_token=tok), lambda tok: webdata.search("x", next_token=tok)):
+            for path in os.listdir(sp_channels.channels_root()):
+                if path.startswith("zz"):
+                    os.unlink(os.path.join(sp_channels.channels_root(), path))
+            with mock.patch.object(webdata, "_read_batch", batch_then_create):
+                page = call(None)
+            self.assertTrue(page["next"])
+            with self.assertRaises(webdata.WebDataError) as ctx:
+                call(page["next"])
+            self.assertEqual(ctx.exception.status, 409)
+
+    def test_cursor_and_token_fields_are_matched_whole_and_the_version_is_the_integer_one(self):
+        good = {"v": 1, "c": [["general", 1, "A" * 11], ["ops", 2, "B" * 11]], "j": [3, "C" * 11, "0" * 16],
+                "u": [[1, 2, "e" * 32]]}
+        variants = [
+            dict(good, v=1.0),
+            dict(good, c=[["general", 1, "A" * 11 + "\n"], ["ops", 2, "B" * 11]]),
+            dict(good, j=[3, "C" * 11 + "\n", None]),
+            dict(good, j=[3, "C" * 11, "0" * 16 + "\n"]),
+            dict(good, u=[[1, 2, "e" * 32 + "\n"]]),
+        ]
+        for obj in variants:
+            with self.subTest(obj=repr(obj)[:70]), self.assertRaises(webdata.WebDataError) as ctx:
+                webdata.decode_cursor(webdata._b64(json.dumps(obj)), keys={"ops"})
+            self.assertEqual(ctx.exception.status, 400)
+        text = webdata.encode_cursor(good)
+        with self.assertRaises(webdata.WebDataError):
+            webdata.decode_cursor(text + "\n", keys={"ops"})
+        self.assertEqual(webdata.decode_cursor(text, keys={"ops"}), good)
+        with self.assertRaises(webdata.WebDataError) as ctx:
+            webdata.all_channels(next_token=webdata._b64('{"v":1.0,"h":"x","r":[]}'))
+        self.assertEqual(ctx.exception.status, 400)
+
+
+class WebdataSurvivorTests(WebdataBase):
+    """One distinguishing test per mutation of the first implementation that no test caught."""
+
+    def setUp(self):
+        super().setUp()
+        self.tid, _rollout = self.one_thread()
+
+    def holding(self, mid):
+        lock = sp_channels.send_lock_path(mid)
+        holder = subprocess.Popen([sys.executable, "-c", HOLDER, lock], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        self._children.append(holder)
+        self.assertEqual(holder.stdout.readline().strip(), "ready")
+        return holder
+
+    def test_an_outcome_already_in_history_wins_over_a_held_lock(self):
+        self.channel("ops", "codex:" + self.tid)
+        rc, res, err = self.send()
+        self.assertEqual(rc, 0, err)
+        open(sp_channels.send_lock_path(res["message_id"]), "a").close()  # the sender's lock, held past its outcome
+        holder = self.holding(res["message_id"])
+        web = self.web_send_view()
+        cli = self.view_of()
+        holder.stdin.close()
+        holder.wait(timeout=10)
+        self.assertEqual(cli["state"], "complete")
+        self.assertEqual(web, cli)
+
+    def test_the_first_of_two_outcomes_counts(self):
+        key = self.new_channel("dup")
+        mid = new_uuid()
+        write_topic(key, [
+            encode(make_entry(key, 1, "channel.send", send_data("x", mid, delivery="fanout", recipients=["codex:x"]))),
+            encode(make_entry(key, 2, sp_channels.EVENT_OUTCOME, {"message_id": mid, "outcomes": {"codex:x": "first"}})),
+            encode(make_entry(key, 3, sp_channels.EVENT_OUTCOME, {"message_id": mid, "outcomes": {"codex:x": "second"}}))])
+        web = self.web_send_view(key)
+        self.assertEqual(web["recipients"][0]["state"], "first")
+        self.assertEqual(web, self.view_of(key))
+
+    def test_an_expired_entry_among_fresh_ones_is_not_counted_against_max_entries(self):
+        key = self.new_channel("skew")
+        now = time.time()
+        old, fresh = iso(now - 400 * 86400), iso(now)
+        write_topic(key, [encode(make_entry(key, 1, "channel.note", text="a", ts=fresh)),
+                          encode(make_entry(key, 2, "channel.note", text="b-expired", ts=old)),
+                          encode(make_entry(key, 3, "channel.note", text="c", ts=fresh)),
+                          encode(make_entry(key, 4, "channel.note", text="d", ts=fresh))])
+        os.environ["SESSION_PEERS_TOPIC_MAX_ENTRIES"] = "3"
+        try:
+            web = [e["seq"] for e in webdata.channel_page(key)["entries"]]
+            cli = [e["seq"] for e in self.tail_json(key, "--limit", "1000")["entries"]]
+        finally:
+            del os.environ["SESSION_PEERS_TOPIC_MAX_ENTRIES"]
+        self.assertEqual(cli, [1, 3, 4])
+        self.assertEqual(web, cli)
+
+    def test_a_replaced_log_at_least_as_large_as_the_read_one_is_still_rechecked(self):
+        key = self.new_channel("rep")
+        mid = new_uuid()
+        recips = ["codex:%032x" % 0]
+        send = encode(make_entry(key, 2, "channel.send", send_data("x", mid, delivery="fanout", recipients=recips)))
+        created = encode(make_entry(key, 1, "channel.created", {}))
+        write_topic(key, [created, send], next_seq=3)
+        path = log_path(key)
+        outcome = encode(make_entry(key, 3, sp_channels.EVENT_OUTCOME,
+                                    {"message_id": mid, "outcomes": {r: "transport accepted " + "z" * 400 for r in recips}}))
+
+        def replace_then_free(message_id):
+            tmp = path.with_name(path.name + ".new")
+            tmp.write_bytes((send + outcome).encode("utf-8"))  # pruned: seq 1 dropped, the outcome appended
+            os.replace(str(tmp), str(path))
+            return "free"
+
+        self.assertGreater(len(send + outcome), len(created + send))
+        with mock.patch.object(sp_channels, "_probe_send_lock", replace_then_free):
+            view = self.web_send_view(key)
+        self.assertEqual(view["state"], "complete")
+
+    def huge_journal(self):
+        sp_journal.record_message(self.me, ["codex:" + self.tid], "\x01" * 400000)
+
+    def test_the_tail_read_is_strict(self):
+        self.channel("ops", "codex:" + self.tid)
+        cursor = webdata.state_view(EMPTY)["cursor"]
+        self.huge_journal()
+        with ReadMeter() as meter:
+            webdata.changes(cursor, budget=webdata.Budget(300 * 1024))
+        self.assertLessEqual(meter.total(), 300 * 1024)
+
+    def test_the_context_read_is_strict(self):
+        self.channel("ops", "codex:" + self.tid)
+        self.send("--record")
+        self.huge_journal()
+        with ReadMeter() as meter:
+            webdata.channel_page("ops", budget=webdata.Budget(300 * 1024))
+        self.assertLessEqual(meter.total(), 300 * 1024)
+
+    def test_the_baseline_read_is_strict(self):
+        self.channel("ops", "codex:" + self.tid)
+        self.huge_journal()
+        with ReadMeter() as meter:
+            webdata.state_view(EMPTY, budget=webdata.Budget(300 * 1024))
+        self.assertLessEqual(meter.total(), 300 * 1024)
+
+    def alert_after(self, notes):
+        self.channel("two", "codex:" + self.tid, "oc:" + OC_B)
+        rc, _res, err = self.send("--record", name="two", message="@all freeze")
+        self.assertEqual(rc, 0, err)
+        for i in range(notes):
+            sp_topics.topic_post(sp_channels.topic_name("two"), IDENT, kind="channel.note", text="n%d" % i,
+                                 base=sp_channels.history_dir())
+        return {r["key"]: r["alert"] for r in webdata.state_view(EMPTY)["channels"]}["two"]
+
+    def test_the_alert_window_includes_exactly_the_25th_newest_entry(self):
+        self.assertEqual(self.alert_after(23), "missing_acks")  # send and outcome, then 23 notes: the send is 25th
+
+    def test_the_alert_window_excludes_the_26th_newest_entry(self):
+        self.assertIsNone(self.alert_after(24))
+
+    def test_a_latest_page_the_budget_cut_short_is_unverified_never_clean(self):
+        key = self.new_channel("fat")
+        for _ in range(3):
+            sp_topics.topic_post(sp_channels.topic_name(key), IDENT, kind="channel.note", text="f" * (700 * 1024),
+                                 base=sp_channels.history_dir())
+        snap = webdata.HistorySnapshot(key, webdata.Budget()).read(limit=webdata.ALERT_WINDOW)
+        self.assertTrue(snap.partial)
+        view = webdata.state_view(EMPTY)
+        self.assertEqual({r["key"]: r["alert"] for r in view["channels"]}[key], "unverified")
+
+    def evil_channel(self):
+        key = self.new_channel("ev")
+        cursor = webdata.state_view(EMPTY)["cursor"]
+        write_topic(key, [encode(make_entry(key, 1, "channel.created", {})),
+                          encode(make_entry(key, 2, "channel.send", send_data("needle " + BAD, sender="cc:" + BAD),
+                                            sid="s" + BAD))])
+        return key, cursor
+
+    def assert_clean(self, obj):
+        text = json.dumps(obj, ensure_ascii=False)
+        for ch in BAD:
+            self.assertNotIn(ch, text)
+
+    def test_outcome_recipient_keys_are_escaped(self):
+        key = self.new_channel("ok")
+        write_topic(key, [encode(make_entry(key, 1, sp_channels.EVENT_OUTCOME,
+                                            {"message_id": new_uuid(), "outcomes": {"cc:" + BAD: "x"}}))])
+        self.assert_clean(webdata.channel_page(key))
+
+    def test_changes_is_hygienic(self):
+        key, cursor = self.evil_channel()
+        got = webdata.changes(cursor)
+        self.assertTrue(got["channels"][key]["entries"])
+        self.assert_clean(got)
+
+    def test_all_channels_is_hygienic(self):
+        self.evil_channel()
+        self.assert_clean(webdata.all_channels())
+
+    def test_search_is_hygienic(self):
+        self.evil_channel()
+        got = webdata.search("needle")
+        self.assertTrue(got["matches"])
+        self.assert_clean(got)
+
+    def test_state_view_is_hygienic(self):
+        self.evil_channel()
+        discovery = dict(EMPTY, general=(["cc:" + BAD], {"state": BAD}, [BAD]), names={"cc:" + BAD: BAD})
+        self.assert_clean(webdata.state_view(discovery))
 
 
 if __name__ == "__main__":

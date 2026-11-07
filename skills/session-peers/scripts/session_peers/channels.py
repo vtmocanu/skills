@@ -23,6 +23,7 @@ import json
 import math
 import os
 import re
+import stat
 import sys
 import time
 import uuid as uuidlib
@@ -1762,13 +1763,16 @@ def _probe_send_lock(message_id):
     Acquiring the lock means its sender is gone, whatever its pid became; no
     pid is read. The probe never keeps the lock.
     """
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0)
     try:
-        fd = os.open(send_lock_path(message_id), os.O_RDONLY)
+        fd = os.open(send_lock_path(message_id), flags)
     except FileNotFoundError:
         return "absent"
     except (OSError, ValueError):
         return "error"
     try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return "error"
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:

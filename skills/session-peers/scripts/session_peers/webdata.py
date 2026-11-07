@@ -5,7 +5,9 @@ the existing stores. Nothing here holds state between requests or writes
 anything: history is read through a lock-free, bounded snapshot reader that
 never calls ``channels.read_history``, ``topics.topic_tail`` or
 ``topics._topic_paths`` (they lock, create directories and may rewrite the log).
-The only lock touched is the per-send non-blocking flock probe, released at once.
+The locks touched are the non-blocking per-send flock probe (``channels._probe_send_lock``) and, on the
+Codex reply-budget path, ``storage.thread_home``'s ``_pidfile_is_held`` (a LOCK_SH|LOCK_NB flock on the
+thread's pidfile, released with LOCK_UN at once); both are released immediately.
 
 One request owns one ``Budget`` (REQUEST_BUDGET bytes). Every topic read, the
 meta read, the outcome recheck and the journal read charge it, and each topic is
@@ -21,11 +23,13 @@ import binascii
 import errno
 import hashlib
 import json
+import math
 import os
 import re
 import stat
 import time
 import types
+import unicodedata
 from . import budgets as sp_budgets, channels as sp_channels, constants as sp_constants
 from . import journal as sp_journal, runtime as sp_runtime, storage as sp_storage, topics as sp_topics
 
@@ -45,6 +49,7 @@ SEQ_LIMIT = 2 ** 53
 JOURNAL_TAIL_BUDGET = 2 * 1024 * 1024
 BASELINE_BUDGET = 256 * 1024
 BATCH_CHANNELS = 32
+SESSIONS_MAX = 512
 BATCH_ENTRIES = 25
 ALERT_WINDOW = 25
 SEARCH_MATCHES_MAX = PAGE_MAX
@@ -66,20 +71,29 @@ class WebDataError(Exception):
 # Identifier hygiene
 # --------------------------------------------------------------------------
 
-_ESCAPE_RE = re.compile(
-    "[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069\u200e\u200f\u061c\u2028\u2029]"
-)
-_BODY_ESCAPE_RE = re.compile(
-    "[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069\u200e\u200f\u061c\u2028\u2029]"
-)
+def _format_class():
+    """Regex class text for every format (Cf) character plus the invisible ones Unicode files elsewhere."""
+    marks = {0x00AD, 0x180E, 0xFEFF}
+    marks.update(range(0xE0000, 0xE0080))
+    for code in list(range(0x20000)) + list(range(0xE0000, 0xE1000)):
+        if unicodedata.category(chr(code)) == "Cf":
+            marks.add(code)
+    return "".join("\\U%08x" % code for code in sorted(marks))
+
+
+_FORMAT_CLASS = _format_class()
+_BIDI_CLASS = "\u202a-\u202e\u2066-\u2069\u200e\u200f\u061c\u2028\u2029"
+_ESCAPE_RE = re.compile("[\u0000-\u001f\u007f-\u009f" + _BIDI_CLASS + _FORMAT_CLASS + "]")
+_BODY_ESCAPE_RE = re.compile("[\u0000-\u0008\u000b-\u001f\u007f-\u009f" + _BIDI_CLASS + _FORMAT_CLASS + "]")
 
 
 def _escape_match(match):
-    return "\\u%04x" % ord(match.group(0))
+    code = ord(match.group(0))
+    return "\\u%04x" % code if code <= 0xFFFF else "\\U%08x" % code
 
 
 def escape_text(value):
-    """``value`` as a string with control, bidi and line-separator characters shown as ``\\uXXXX``."""
+    """``value`` as a string with control, bidi, line-separator and invisible format characters shown as ``\\uXXXX``."""
     return _ESCAPE_RE.sub(_escape_match, value if isinstance(value, str) else str(value))
 
 
@@ -91,14 +105,49 @@ def escape_body(value):
 _BODY_KEYS = ("body", "text")
 
 
-def _clean(value, key=None):
+CLEAN_DEPTH = 32
+
+
+def _clean(value, key=None, depth=0):
+    """``value`` with every string escaped; containers nested deeper than CLEAN_DEPTH become a placeholder."""
+    if isinstance(value, (dict, list, tuple)) and depth >= CLEAN_DEPTH:
+        return "[nested too deeply]"
     if isinstance(value, dict):
-        return {escape_text(k): _clean(v, k) for k, v in value.items()}
+        return {escape_text(k): _clean(v, k, depth + 1) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
-        return [_clean(v, key) for v in value]
+        return [_clean(v, key, depth + 1) for v in value]
     if isinstance(value, str):
         return escape_body(value) if key in _BODY_KEYS else escape_text(value)
     return value
+
+
+def _ident(value):
+    """A peer-written identifier field as a string, else None (never a nested structure)."""
+    return value if isinstance(value, str) else None
+
+
+def _stamp(value):
+    """Epoch seconds of a history ``ts`` (an ISO string or a number), 0.0 when unusable.
+
+    Numbers are read as ``topics._topic_state`` reads them (``runtime.parse_time``), so
+    retention matches the CLI; anything else, and values too large or malformed to
+    convert, read as time zero."""
+    if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+        return 0.0
+    try:
+        seconds = sp_runtime.parse_time(value)
+    except (OverflowError, ValueError, TypeError):
+        return 0.0
+    if seconds is None or not math.isfinite(seconds):
+        return 0.0
+    return seconds
+
+
+def _ts_view(value):
+    """The ``ts`` shown for an entry: a string, a finite float, else None."""
+    if isinstance(value, str) or (isinstance(value, float) and math.isfinite(value)):
+        return value
+    return None
 
 
 # --------------------------------------------------------------------------
@@ -178,6 +227,49 @@ def _read_meta(meta_path, budget):
     except (ValueError, RecursionError):
         return None
     return meta if isinstance(meta, dict) else None
+
+
+def _read_record(key, budget):
+    """The membership record of stored channel ``key`` as ``channels.read_channel`` validates it, else None.
+
+    Own reader (``read_channel`` opens the file with a plain ``open``, which a planted FIFO
+    would block): no-follow, non-blocking, regular files only, at most
+    ``channels.RECORD_MAX_BYTES``, and the bytes read are charged to ``budget``. A file that
+    does not fit the remaining budget reads as None."""
+    try:
+        fd, st = _open_regular(os.path.join(sp_channels.channels_root(), key + ".json"))
+    except OSError:
+        return None
+    if fd is None:
+        return None
+    try:
+        if st.st_size > sp_channels.RECORD_MAX_BYTES or st.st_size > budget.remaining():
+            return None
+        data = os.pread(fd, sp_channels.RECORD_MAX_BYTES + 1, 0)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    budget.charge(len(data))
+    try:
+        rec = json.loads(data.decode("utf-8", "replace"))
+    except (ValueError, RecursionError):
+        return None
+    if not isinstance(rec, dict) or rec.get("key") != key or not isinstance(rec.get("members"), list):
+        return None
+    if not all(isinstance(rec.get(f), str) for f in ("display", "kind", "owner")):
+        return None
+    members = []
+    for member in rec["members"]:
+        if not isinstance(member, str):
+            continue
+        try:
+            member = sp_journal._norm(member)
+        except ValueError:
+            continue
+        if member not in members:
+            members.append(member)
+    return dict(rec, members=members)
 
 
 class _BackReader:
@@ -263,13 +355,18 @@ class _BackReader:
             if self.read >= self.cap:
                 if self.extended or not need:
                     return ("stop", "cap")
+                # The first entry is read whole when the request budget can hold it. The read
+                # goes at most ENTRY_LINE_MAX bytes past ``cap``, so a line (or a torn tail) that
+                # is longer than that is never read to its start.
+                room = self.cap + ENTRY_LINE_MAX - self.read
+                if room <= 0:
+                    return ("stop", "cap")
                 self.extending = True
-                # The first entry is read whole when the request budget can hold it.
                 need = ENTRY_LINE_MAX - (self.part_len if self.seen_end else self.torn)
                 remaining = self.budget.remaining()
                 if remaining <= 0 or remaining < need:
                     return ("stop", "budget")
-                step = min(step, remaining)
+                step = min(step, remaining, room)
             else:
                 step = min(step, self.cap - self.read)
             chunk = os.pread(self.fd, step, self.pos - step)
@@ -304,7 +401,7 @@ def _first_outcome(entries, message_id, after_seq):
         seq = entry.get("seq")
         data = entry.get("data")
         if (isinstance(seq, int) and seq > after_seq and entry.get("kind") == sp_channels.EVENT_OUTCOME
-                and isinstance(data, dict) and data.get("message_id") == message_id):
+                and isinstance(data, dict) and _ident(data.get("message_id")) == message_id):
             return entry
     return None
 
@@ -406,7 +503,7 @@ class HistorySnapshot:
         reached_start = False
         anchor = False
         while True:
-            kind, payload = reader.next_line(need=since is None and qualifying == 0)
+            kind, payload = reader.next_line(need=(qualifying == 0) if since is None else not newest_first)
             if kind == "end":
                 reached_start = True
                 break
@@ -427,7 +524,7 @@ class HistorySnapshot:
                 item, size = decoded
                 if self.last_seq is None:
                     self.last_seq = item["seq"]
-                if (sp_runtime.parse_time(item.get("ts")) or 0.0) < cutoff:
+                if _stamp(item.get("ts")) < cutoff:
                     continue
             retained += 1
             if retained > max_entries:
@@ -664,6 +761,21 @@ def _probe(message_id):
         return "error"
 
 
+def _text_of(value):
+    try:
+        return str(value)
+    except RecursionError:  # a value nested too deeply to print
+        return ""
+
+
+def _outcomes_of(entry):
+    """``channels._outcomes_of`` that survives a value nested too deeply to print."""
+    outcomes = (entry.get("data") or {}).get("outcomes")
+    if not isinstance(outcomes, dict):
+        return {}
+    return {_text_of(k): _text_of(v) for k, v in outcomes.items()}
+
+
 def send_state(snapshot, entry):
     """``(state, outcomes, partial)`` of one ``channel.send`` entry with the rules of ``channels.delivery_view``.
 
@@ -675,10 +787,10 @@ def send_state(snapshot, entry):
     seq = entry.get("seq")
     if not isinstance(seq, int):
         return sp_channels.STATE_UNVERIFIED, {}, False
-    mid = data.get("message_id")
+    mid = _ident(data.get("message_id"))
     kind, found = snapshot.find_outcome(mid, seq)
     if kind == "found":
-        return "complete", sp_channels._outcomes_of(found), False
+        return "complete", _outcomes_of(found), False
     if kind == "uncovered":
         return sp_channels.STATE_UNVERIFIED, {}, True
     probe = _probe(mid)
@@ -689,7 +801,7 @@ def send_state(snapshot, entry):
         return sp_channels.STATE_UNVERIFIED, {}, True
     again = _first_outcome(snapshot.extra, mid, seq)
     state = sp_channels.send_state_from(False, probe, again is not None)
-    return state, (sp_channels._outcomes_of(again) if again is not None else {}), False
+    return state, (_outcomes_of(again) if again is not None else {}), False
 
 
 def resolve_send(snapshot, entry, journal_ctx=None):
@@ -703,16 +815,27 @@ def resolve_send(snapshot, entry, journal_ctx=None):
     return _delivery(entry, state, outcomes, partial, journal_ctx)
 
 
+def _rows_data(data):
+    """``data`` with the fields ``channels.delivery_rows`` reads reduced to strings and flat lists."""
+    excluded = data.get("excluded")
+    return dict(
+        data,
+        recipients=[r for r in data.get("recipients") or () if isinstance(r, str)]
+        if isinstance(data.get("recipients"), list) else [],
+        excluded=[{"member": _ident(x.get("member")), "reason": _text_of(x.get("reason"))}
+                  for x in excluded if isinstance(x, dict)] if isinstance(excluded, list) else [])
+
+
 def _delivery(entry, state, outcomes, partial, journal_ctx):
     data = entry.get("data") if isinstance(entry.get("data"), dict) else {}
     acks, errors = None, {}
     if data.get("journaled"):
         if journal_ctx is not None:
-            acks, errors, ack_partial = journal_ctx.acks_for(data.get("message_id"))
+            acks, errors, ack_partial = journal_ctx.acks_for(_ident(data.get("message_id")))
             partial = partial or ack_partial
         else:
             partial = True
-    rows = sp_channels.delivery_rows(data, state, outcomes, acks)
+    rows = sp_channels.delivery_rows(_rows_data(data), state, outcomes, acks)
     for row in rows:
         detail = errors.get(row["recipient"])
         if detail is not None:
@@ -751,9 +874,10 @@ def entry_kind(raw_kind):
 
 
 def membership_text(kind, data):
-    """The one line shown for a membership entry; the caller escapes it."""
+    """The one line shown for a membership entry, its identifiers escaped."""
     data = data if isinstance(data, dict) else {}
-    member = data.get("member")
+    member = escape_text(_ident(data.get("member")))
+    target = escape_text(_ident(data.get("to")))
     if kind == "channel.created" or kind == "created":
         return "created"
     if kind in ("channel.joined", "joined"):
@@ -763,7 +887,7 @@ def membership_text(kind, data):
     if kind in ("channel.removed", "removed"):
         return "%s removed" % member
     if kind in ("channel.handover", "handover"):
-        return "%s handed over to %s" % (member, data.get("to"))
+        return "%s handed over to %s" % (member, target)
     return ""
 
 
@@ -804,8 +928,8 @@ def channel_coverage(members):
 
 
 def _actor(entry):
-    sid = entry.get("from_sid")
-    return "%s:%s" % (entry.get("from_kind"), sid) if sid else "anonymous"
+    sid = _ident(entry.get("from_sid"))
+    return "%s:%s" % (_ident(entry.get("from_kind")), sid) if sid else "anonymous"
 
 
 def _other_text(entry, data):
@@ -815,7 +939,7 @@ def _other_text(entry, data):
         return entry["text"]
     try:
         return json.dumps(data, sort_keys=True)[:2048]
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, RecursionError):
         return ""
 
 
@@ -826,14 +950,14 @@ def entry_view(entry, delivery=None, general=False):
     data = entry.get("data") if isinstance(entry.get("data"), dict) else {}
     raw = entry.get("kind") if isinstance(entry.get("kind"), str) else ""
     kind = entry_kind(raw)
-    out = {"seq": entry.get("seq"), "ts": entry.get("ts"), "kind": kind, "event": raw, "actor": _actor(entry)}
+    out = {"seq": entry.get("seq"), "ts": _ts_view(entry.get("ts")), "kind": kind, "event": raw, "actor": _actor(entry)}
     if kind in _MEMBERSHIP:
         out["text"] = membership_text(kind, data)
         if "member" in data:
-            out["member"] = data.get("member")
+            out["member"] = _ident(data.get("member"))
     elif kind == "send":
         body = data.get("body") if isinstance(data.get("body"), str) else ""
-        out.update(body=body, sender=data.get("sender"), message_id=data.get("message_id"),
+        out.update(body=body, sender=_ident(data.get("sender")), message_id=_ident(data.get("message_id")),
                    journaled=bool(data.get("journaled")), verdict=detect_verdict(body))
         if delivery is not None:
             out["delivery"] = delivery
@@ -847,8 +971,9 @@ def entry_view(entry, delivery=None, general=False):
             }
     elif kind == "outcome":
         outcomes = data.get("outcomes") if isinstance(data.get("outcomes"), dict) else {}
-        out.update(message_id=data.get("message_id"), outcomes={str(k): str(v) for k, v in outcomes.items()},
-                   text="outcomes of message %s for %d recipients" % (data.get("message_id"), len(outcomes)))
+        mid = _ident(data.get("message_id"))
+        out.update(message_id=mid, outcomes={escape_text(_text_of(k)): _text_of(v) for k, v in outcomes.items()},
+                   text="outcomes of message %s for %d recipients" % (escape_text(mid), len(outcomes)))
     else:
         out["text"] = _other_text(entry, data)
     return out
@@ -921,7 +1046,7 @@ def channel_page(key, before=None, limit=PAGE_MAX, budget=None, members=None, no
     built, journal_ctx = _build_views([(snapshot, snapshot.page, general)], budget)
     views, view_partial = built[0]
     partial = partial or view_partial
-    record = None if general else sp_channels.read_channel(key)
+    record = None if general else _read_record(key, budget)
     if members is None and record is not None:
         members = record["members"]
     info = {"key": key}
@@ -942,55 +1067,66 @@ def channel_page(key, before=None, limit=PAGE_MAX, budget=None, members=None, no
 _RUNTIMES = {"cc": "Claude Code", "codex": "Codex", "oc": "OpenCode"}
 
 
-def _read_shim_state(path):
+def _read_shim_state(path, budget):
+    """``(state dict or None, skipped)`` of a shim state file; ``skipped`` when it did not fit ``budget``.
+
+    The file's size is charged to ``budget`` before it is read; one that is over SHIM_STATE_MAX
+    reads as absent, one that does not fit the remaining budget is skipped unread."""
     try:
         fd, st = _open_regular(path)
     except OSError:
-        return None
+        return None, False
     if fd is None:
-        return None
+        return None, False
     try:
         if st.st_size > SHIM_STATE_MAX:
-            return None
+            return None, False
+        if st.st_size > budget.remaining():
+            return None, True
         data = os.pread(fd, st.st_size, 0)
     except OSError:
-        return None
+        return None, False
     finally:
         os.close(fd)
+    budget.charge(len(data))
     try:
         state = json.loads(data.decode("utf-8", "replace"))
     except (ValueError, RecursionError):
-        return None
-    return state if isinstance(state, dict) else None
+        return None, False
+    return (state if isinstance(state, dict) else None), False
 
 
-def codex_reply_budget(tid, now=None):
-    """The reply budget toward a Codex thread's current requester, as last saved by its shim, or None.
-
-    Reads ``<home>/session-peers/<tid>.json`` of the home the shim runs under and its
-    pending-marker files by path; nothing is created, and the shim's own state is only
-    replayed in memory."""
+def _reply_budget(tid, now, budget):
+    """``(reply budget dict or None, skipped)``; see ``codex_reply_budget``."""
     if not isinstance(tid, str) or not sp_constants.UUID_RE.fullmatch(tid):
-        return None
+        return None, False
     home = sp_storage.thread_home(tid)
     base = os.path.join(home, "session-peers")
-    state = _read_shim_state(os.path.join(base, "%s.json" % tid))
+    state, skipped = _read_shim_state(os.path.join(base, "%s.json" % tid), budget)
     if state is None:
-        return None
+        return None, skipped
     sid = state.get("budget_sender_sid")
     if not isinstance(sid, str) or not sid:
-        return {"requester": None, "label": BUDGET_LABEL}
+        return {"requester": None, "label": BUDGET_LABEL}, False
     owner = types.SimpleNamespace(thread_id=tid)
-    try:
-        meter = sp_budgets.ReplyBudget(owner, state, records=None, socket_valid=None, deliver_frame=None)
-        meter.configure_window()
-    except (TypeError, ValueError, AttributeError, KeyError):
-        return None
-    expired = meter._sequence_expired(now if now is not None else time.time())
+    meter = sp_budgets.ReplyBudget(owner, state, records=None, socket_valid=None, deliver_frame=None)
+    # The window and the grant check of ``ReplyBudget.configure_window``, without its stderr log
+    # line (it names the peer-written sid).
+    window = sp_runtime._float_env("SESSION_PEERS_REPLY_BUDGET_WINDOW", sp_constants.REPLY_BUDGET_WINDOW_DEFAULT)
+    meter.reply_budget_window = window if window > 0 else sp_constants.REPLY_BUDGET_WINDOW_DEFAULT
+    clock = now if now is not None else time.time()
+    if meter.allowance and not (
+            meter._allowance_waiting(clock)
+            or (meter.allowance.get("bound", True) and meter.budget_last_at is not None
+                and not meter._sequence_expired(clock))):
+        meter.allowance = None
+    expired = meter._sequence_expired(clock)
     if expired:
         meter.budgets = {}
     used = 0 if expired else meter.budgets.get(sid, 0)
     cap = meter.cap_for(sid)
+    if isinstance(used, bool) or not isinstance(used, int) or isinstance(cap, bool) or not isinstance(cap, int):
+        return None, False
     pending = [
         name for name, suffix in (("reset", "budget-reset"), ("allow", "budget-allow"), ("binding", "budget-binding"))
         if os.path.lexists(os.path.join(base, "%s.%s" % (tid, suffix)))
@@ -998,7 +1134,20 @@ def codex_reply_budget(tid, now=None):
     return {
         "requester": sid, "used": used, "cap": cap, "remaining": max(0, cap - used),
         "expired": expired, "pending": bool(pending), "pending_kinds": pending, "label": BUDGET_LABEL,
-    }
+    }, False
+
+
+def codex_reply_budget(tid, now=None, budget=None):
+    """The reply budget toward a Codex thread's current requester, as last saved by its shim, or None.
+
+    Reads ``<home>/session-peers/<tid>.json`` of the home the shim runs under and its
+    pending-marker files by path; nothing is created, and the shim's own state is only
+    replayed in memory. The state file is charged to ``budget`` (a fresh request budget when
+    None); one that does not fit reads as None. Any malformed state reads as None."""
+    try:
+        return _reply_budget(tid, now, budget if budget is not None else Budget())[0]
+    except Exception:  # the file is peer-writable: whatever it holds, the view still works
+        return None
 
 
 def _member_state(liveness, activity):
@@ -1009,11 +1158,12 @@ def _member_state(liveness, activity):
     return activity if activity in ("working", "idle") else "unverified"
 
 
-def member_details(typed, liveness, activity=None, now=None):
+def member_details(typed, liveness, activity=None, now=None, budget=None):
     """The details panel data for one member; liveness and activity come from the caller (discovery is elsewhere).
 
     ``state`` is ``gone`` when liveness says so, else ``working`` or ``idle`` from
-    ``activity``, else ``unverified``."""
+    ``activity``, else ``unverified``. A Codex member's shim state file is charged to ``budget``;
+    one that does not fit leaves ``reply_budget`` None and sets ``partial``."""
     typed = typed if isinstance(typed, str) else str(typed)
     kind, _sep, ident = typed.partition(":")
     out = {
@@ -1022,7 +1172,13 @@ def member_details(typed, liveness, activity=None, now=None):
         "state": _member_state(liveness, activity),
     }
     if kind == "codex":
-        out["reply_budget"] = codex_reply_budget(ident, now)
+        budget = budget if budget is not None else Budget()
+        try:
+            out["reply_budget"], skipped = _reply_budget(ident, now, budget)
+        except Exception:  # the file is peer-writable: whatever it holds, the view still works
+            out["reply_budget"], skipped = None, False
+        if skipped:
+            out["partial"] = True
     return _clean(out)
 
 
@@ -1049,7 +1205,7 @@ def _b64(text):
 
 
 def _unb64(text):
-    if not isinstance(text, str) or not text or not _B64_RE.match(text):
+    if not isinstance(text, str) or not text or not _B64_RE.fullmatch(text):
         raise ValueError("not base64url")
     return base64.urlsafe_b64decode(text + "=" * (-len(text) % 4)).decode("utf-8")
 
@@ -1067,7 +1223,7 @@ def encode_cursor(obj):
 
 
 def _validate_cursor(obj, keys):
-    if not isinstance(obj, dict) or set(obj) != _CURSOR_FIELDS or obj["v"] != 1 or isinstance(obj["v"], bool):
+    if not isinstance(obj, dict) or set(obj) != _CURSOR_FIELDS or type(obj["v"]) is not int or obj["v"] != 1:
         raise ValueError("shape")
     c, j, u = obj["c"], obj["j"], obj["u"]
     if not isinstance(c, list) or len(c) > CURSOR_KEYS_MAX + 1 or not isinstance(u, list) or len(u) > CURSOR_UPDATES_MAX:
@@ -1081,7 +1237,7 @@ def _validate_cursor(obj, keys):
         key, seq, fp = item
         if not isinstance(key, str) or not sp_constants.CHANNEL_NAME_RE.fullmatch(key):
             raise ValueError("channel key")
-        if not _is_seq(seq) or not isinstance(fp, str) or not _FP_RE.match(fp):
+        if not _is_seq(seq) or not isinstance(fp, str) or not _FP_RE.fullmatch(fp):
             raise ValueError("channel position")
         rank = (key != GENERAL, key)
         if previous is not None and rank <= previous:
@@ -1092,9 +1248,9 @@ def _validate_cursor(obj, keys):
             kept.append([key, seq, fp])
     if sum(1 for item in c if item[0] != GENERAL) > CURSOR_KEYS_MAX:
         raise ValueError("too many channels")
-    if not isinstance(j, list) or len(j) != 3 or not _is_seq(j[0]) or not isinstance(j[1], str) or not _FP_RE.match(j[1]):
+    if not isinstance(j, list) or len(j) != 3 or not _is_seq(j[0]) or not isinstance(j[1], str) or not _FP_RE.fullmatch(j[1]):
         raise ValueError("journal position")
-    if j[2] is not None and not (isinstance(j[2], str) and _ANCHOR_RE.match(j[2])):
+    if j[2] is not None and not (isinstance(j[2], str) and _ANCHOR_RE.fullmatch(j[2])):
         raise ValueError("journal anchor")
     pending = []
     for item in u:
@@ -1103,7 +1259,7 @@ def _validate_cursor(obj, keys):
         ci, seq, mid = item
         if isinstance(ci, bool) or not isinstance(ci, int) or not 0 <= ci < len(c):
             raise ValueError("update channel")
-        if not _is_seq(seq) or not isinstance(mid, str) or not _MID_HEX_RE.match(mid):
+        if not _is_seq(seq) or not isinstance(mid, str) or not _MID_HEX_RE.fullmatch(mid):
             raise ValueError("update send")
         if ci in remap:
             pending.append([remap[ci], seq, mid])
@@ -1197,7 +1353,7 @@ def _journal_digest(fingerprint):
 
 def _journal_position(res):
     anchor = res.get("next_anchor")
-    if not (isinstance(anchor, str) and _ANCHOR_RE.match(anchor)):
+    if not (isinstance(anchor, str) and _ANCHOR_RE.fullmatch(anchor)):
         anchor = None
     return [_clamp(res.get("next") or 0), _journal_digest(res.get("fingerprint")), anchor]
 
@@ -1328,19 +1484,19 @@ def changes(cursor_text, budget=None, now=None):
         for entry, view in zip(entries, views):
             data = entry.get("data") if isinstance(entry.get("data"), dict) else {}
             if entry.get("kind") == sp_channels.EVENT_SEND:
-                sent.setdefault(key, set()).add(data.get("message_id"))
-                hexed = _mid_hex(data.get("message_id"))
-                if hexed and view.get("delivery", {}).get("state") == sp_channels.STATE_IN_PROGRESS:
-                    new_u.append((key, entry["seq"], data.get("message_id")))
+                mid = _ident(data.get("message_id"))
+                sent.setdefault(key, set()).add(mid)
+                if _mid_hex(mid) and view.get("delivery", {}).get("state") == sp_channels.STATE_IN_PROGRESS:
+                    new_u.append((key, entry["seq"], mid))
             elif entry.get("kind") == sp_channels.EVENT_OUTCOME:
-                outcome_mids.setdefault(key, {}).setdefault(data.get("message_id"), entry)
+                outcome_mids.setdefault(key, {}).setdefault(_ident(data.get("message_id")), entry)
         out[key]["entries"] = views
     done = set()
     for key, by_mid in outcome_mids.items():
         for mid, entry in by_mid.items():
             if mid not in sent.get(key, ()):
                 done.add((key, mid))
-                updates.append(_change_update(key, mid, "complete", sp_channels._outcomes_of(entry)))
+                updates.append(_change_update(key, mid, "complete", _outcomes_of(entry)))
     survivors = []
     for key, send_seq, mid in old_u:
         if key not in positions and key not in skipped:
@@ -1350,22 +1506,30 @@ def changes(cursor_text, budget=None, now=None):
             continue
         if (key, mid) in done:
             continue
-        if _probe(mid) == "held":
+        probe = _probe(mid)
+        if probe == "held":
             survivors.append((key, send_seq, mid))
             continue
         if budget.remaining() <= 0:
             partial = True
             survivors.append((key, send_seq, mid))
             continue
-        cseq = old[key][0]
-        snap = snaps.get(key) or HistorySnapshot(key, budget, now=now).read(since=cseq)
-        state, outcomes, uncovered = send_state(snap, {"seq": cseq, "data": {"message_id": mid}})
+        cseq, cfp = old[key]
+        snap = snaps.get(key)
+        if snap is None and positions.get(key) == old[key] and _digest(_stat_text(key)) == cfp:
+            # Nothing was written after the cursor, and the lock was free before this look: no
+            # outcome exists, so the lock alone decides, without reading the topic.
+            state, outcomes, uncovered = sp_channels.send_state_from(False, probe, False), {}, False
+        else:
+            if snap is None:
+                snap = snaps[key] = HistorySnapshot(key, budget, now=now).read(since=cseq)
+            state, outcomes, uncovered = send_state(snap, {"seq": cseq, "data": {"message_id": mid}})
         if state == sp_channels.STATE_IN_PROGRESS:
             survivors.append((key, send_seq, mid))
             continue
         if state == sp_channels.STATE_UNVERIFIED:
             survivors.append((key, send_seq, mid))
-            partial = partial or uncovered or snap.unavailable is not None
+            partial = partial or uncovered or (snap is not None and snap.unavailable is not None)
         updates.append(_change_update(key, mid, state, outcomes))
     order = [key for key in tracked if key in positions]
     index = {key: i for i, key in enumerate(order)}
@@ -1407,16 +1571,19 @@ def _activity_order(keys, budget):
 
 
 def _plan(next_token, budget):
-    """``(remaining keys in order, total)``: a fresh activity order, or the rest of a ``next`` token's."""
+    """``(remaining keys in order, total, base)``: a fresh activity order, or the rest of a ``next`` token's.
+
+    ``base`` is the sorted channel list this request works from; ``_next_token`` names it, so a
+    channel created mid-request is never hidden by the token the request mints."""
     base = _all_keys()
     fingerprint = _digest("\n".join(base))
     if next_token is None:
-        return _activity_order(base, budget), len(base)
+        return _activity_order(base, budget), len(base), base
     try:
         if len(next_token) > TOKEN_MAX:
             raise ValueError("token size")
         token = json.loads(_unb64(next_token))
-        if not isinstance(token, dict) or set(token) != {"v", "h", "r"} or token["v"] != 1:
+        if not isinstance(token, dict) or set(token) != {"v", "h", "r"} or type(token["v"]) is not int or token["v"] != 1:
             raise ValueError("token shape")
         picks = token["r"]
         if (not isinstance(picks, list) or len(picks) > len(base) or len(set(picks)) != len(picks)
@@ -1428,13 +1595,12 @@ def _plan(next_token, budget):
         raise
     except (ValueError, RecursionError, TypeError, OverflowError, binascii.Error, UnicodeError, KeyError):
         raise WebDataError("malformed token", 400)
-    return [base[i] for i in picks], len(base)
+    return [base[i] for i in picks], len(base), base
 
 
-def _next_token(rest):
+def _next_token(rest, base):
     if not rest:
         return None
-    base = _all_keys()
     index = {key: i for i, key in enumerate(base)}
     return _b64(json.dumps(
         {"v": 1, "h": _digest("\n".join(base)), "r": [index[k] for k in rest if k in index]}, separators=(",", ":")))
@@ -1454,7 +1620,7 @@ def _read_batch(remaining, budget, now, limit):
 
 
 def _sort_stamp(view):
-    return (sp_runtime.parse_time(view.get("ts")) or 0.0, view.get("channel", ""), view.get("seq") or 0)
+    return (_stamp(view.get("ts")), view.get("channel", ""), view.get("seq") or 0)
 
 
 def all_channels(next_token=None, budget=None, now=None):
@@ -1468,7 +1634,7 @@ def all_channels(next_token=None, budget=None, now=None):
     continues with the omitted channels (WebDataError 409 when the channel list changed
     meanwhile). Never presents a subset as all channels."""
     budget = budget if budget is not None else Budget()
-    remaining, total = _plan(next_token, budget)
+    remaining, total, base = _plan(next_token, budget)
     batch = _read_batch(remaining, budget, now, BATCH_ENTRIES)
     built, _ctx = _build_views([(snap, snap.page, key == GENERAL) for key, snap in batch], budget)
     partial, merged = False, []
@@ -1482,7 +1648,7 @@ def all_channels(next_token=None, budget=None, now=None):
     rest = remaining[len(batch):]
     return _clean({
         "entries": merged[trimmed:], "partial": partial or bool(rest), "omitted": len(rest),
-        "total": total, "shown": total - len(rest), "next": _next_token(rest), "trimmed": trimmed,
+        "total": total, "shown": total - len(rest), "next": _next_token(rest, base), "trimmed": trimmed,
     })
 
 
@@ -1504,12 +1670,12 @@ def search(q, scope="all", next_token=None, budget=None, now=None):
         raise WebDataError("q must be 1 to %d characters" % QUERY_MAX)
     budget = budget if budget is not None else Budget()
     if scope == "all":
-        remaining, total = _plan(next_token, budget)
+        remaining, total, base = _plan(next_token, budget)
     else:
         _check_key(scope)
         if next_token is not None:
             raise WebDataError("a single channel search has no next token")
-        remaining, total = [scope], 1
+        remaining, total, base = [scope], 1, None
     needle = q.casefold()
     batch = _read_batch(remaining, budget, now, PAGE_MAX)
     partial, matches = False, []
@@ -1528,7 +1694,7 @@ def search(q, scope="all", next_token=None, budget=None, now=None):
     return _clean({
         "matches": matches[:SEARCH_MATCHES_MAX], "partial": partial or cut or bool(rest),
         "searched_channels": total - len(rest), "total_channels": total,
-        "next": _next_token(rest) if scope == "all" else None, "window": PAGE_MAX,
+        "next": _next_token(rest, base) if scope == "all" else None, "window": PAGE_MAX,
     })
 
 
@@ -1578,8 +1744,29 @@ def _handover_chain(snap):
     for entry in snap.page:
         if entry.get("kind") == sp_channels.EVENT_HANDOVER and isinstance(entry.get("data"), dict):
             data = entry["data"]
-            chain.append({"member": data.get("member"), "to": data.get("to"), "seq": entry.get("seq")})
+            chain.append({"member": _ident(data.get("member")), "to": _ident(data.get("to")), "seq": entry.get("seq")})
     return chain
+
+
+def _journal_baseline(budget):
+    """``(position, partial)``: the journal position a fresh cursor starts at (strict read, charged to ``budget``).
+
+    A journal that cannot be read, or no budget for it, starts the cursor where the first poll reads
+    it whole, with no anchor. The anchor is dropped as well when the read met an oversized line or
+    could not reach the file start's neighbour (``oversized``, ``window_regression``)."""
+    jpos = [0, _digest("unread"), None]
+    allowance = min(budget.remaining(), BASELINE_BUDGET)
+    if allowance <= 0:
+        return jpos, True
+    try:
+        res = sp_journal.read_since(None, allowance, strict=True)
+        budget.charge(res.get("bytes") or 0)
+        jpos = _journal_position(res)
+        if res.get("oversized") or res.get("window_regression"):
+            jpos[2] = None
+    except Exception:  # an unreadable journal starts the cursor where the first poll reads it whole
+        return [0, _digest("unread"), None], True
+    return jpos, False
 
 
 def state_view(discovery, budget=None, now=None):
@@ -1600,7 +1787,10 @@ def state_view(discovery, budget=None, now=None):
     activity = discovery.get("activity") or {}
     names = discovery.get("names") or {}
     tracked, untracked = _tracked_keys()
-    records = {key: sp_channels.read_channel(key) for key in tracked if key != GENERAL}
+    # The journal baseline comes before any ACK is read for the page: an ACK written after this
+    # point is past the cursor's position and arrives with the first ``changes`` poll.
+    jpos, jpartial = _journal_baseline(budget)
+    records = {key: _read_record(key, budget) for key in tracked if key != GENERAL}
     positions = [(key,) + _stat_position(key, budget) for key in tracked]
     reads = {}
     for key in tracked:
@@ -1618,7 +1808,7 @@ def state_view(discovery, budget=None, now=None):
                 want.append(data.get("message_id"))
         states[key] = found
     journal_ctx = read_journal_context(budget, want)
-    partial = untracked > 0 or len(reads) < len(tracked)
+    partial = untracked > 0 or len(reads) < len(tracked) or jpartial
     rows, pending = [], []
     index = {key: i for i, key in enumerate(tracked)}
     for key in tracked:
@@ -1627,9 +1817,9 @@ def state_view(discovery, budget=None, now=None):
             roster = [m for m in members if isinstance(m, str)]
         else:
             record = records[key]
-            if record is None:
-                continue
-            roster = list(record["members"])
+            roster = list(record["members"]) if record is not None else []
+        omitted = max(0, len(roster) - sp_constants.CHANNEL_MAX_MEMBERS)
+        roster = roster[:sp_constants.CHANNEL_MAX_MEMBERS]
         snap = reads.get(key)
         alert, chain = "unverified", []
         if snap is not None:
@@ -1642,40 +1832,40 @@ def state_view(discovery, budget=None, now=None):
                     if state == sp_channels.STATE_IN_PROGRESS and _mid_hex(mid):
                         pending.append([index[key], _clamp(entry["seq"]), _mid_hex(mid)])
             alert = _alert(snap, deliveries)
-            chain = _handover_chain(snap) if record["kind"] == "buddy" else []
+            chain = _handover_chain(snap) if record is not None and record["kind"] == "buddy" else []
         else:
             partial = True
+        if record is None:  # listed but its record does not read: shown as such, never dropped
+            rows.append({"key": key, "unreadable": True, "alert": alert})
+            partial = True
+            continue
         cover = channel_coverage(roster)
         if key == GENERAL:
-            cover.update(opencode=coverage, discovery_incomplete=[g if isinstance(g, str) else str(g) for g in gaps or ()])
-        rows.append({
+            cover.update(opencode=coverage, discovery_incomplete=[g if isinstance(g, str) else _text_of(g) for g in gaps or ()])
+        row = {
             "key": key, "name": key, "display": record["display"], "kind": record["kind"], "owner": record["owner"],
             "members": _members_of(roster, liveness, activity, names), "handover_chain": chain,
             "alert": alert, "coverage": cover,
-        })
+        }
+        if omitted:
+            row["omitted_members"] = omitted
+            partial = True
+        rows.append(row)
     seen_members, sessions = set(), []
     for row in rows:
-        for member in row["members"]:
+        for member in row.get("members", ()):
             if member["typed"] not in seen_members:
+                if len(sessions) >= SESSIONS_MAX:
+                    partial = True
+                    continue
                 seen_members.add(member["typed"])
-                sessions.append(member_details(
-                    member["typed"], liveness.get(member["typed"]), activity.get(member["typed"]), now))
+                details = member_details(
+                    member["typed"], liveness.get(member["typed"]), activity.get(member["typed"]), now, budget)
+                partial = partial or bool(details.get("partial"))
+                sessions.append(details)
     pending = pending[::-1]
     if len(pending) > CURSOR_UPDATES_MAX:
         pending, partial = pending[:CURSOR_UPDATES_MAX], True
-    jpos = [0, _digest("unread"), None]
-    allowance = min(budget.remaining(), BASELINE_BUDGET)
-    if allowance > 0:
-        try:
-            res = sp_journal.read_since(None, allowance, strict=True)
-            budget.charge(res.get("bytes") or 0)
-            jpos = _journal_position(res)
-            if res.get("oversized") or res.get("window_regression"):
-                jpos[2] = None
-        except Exception:  # an unreadable journal starts the cursor where the first poll reads it whole
-            partial = True
-    else:
-        partial = True
     cursor = encode_cursor({
         "v": 1, "c": [[key, seq, fp] for key, seq, fp in positions], "j": jpos, "u": pending})
     result = {
