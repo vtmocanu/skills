@@ -201,14 +201,16 @@ def run_discovery(requester=None):
                     members.append(typed)
         cache, liveness, activity, names, homes = {}, {}, {}, {}, {}
         deadline, subprocess_left, truncated = time.monotonic() + DISCOVERY_PASS_BUDGET, SUBPROCESS_MEMBERS_PER_PASS, False
-        checked = set()
+        checked, unchecked = set(), []
         for typed in members:
             if time.monotonic() >= deadline:
                 liveness[typed], truncated = "unverified", True
+                unchecked.append(typed)
                 continue
             if not typed.startswith("cc:"):
                 if subprocess_left <= 0:
                     liveness[typed], truncated = "unverified", True
+                    unchecked.append(typed)
                     continue
                 subprocess_left -= 1
             checked.add(typed)
@@ -236,7 +238,8 @@ def run_discovery(requester=None):
         elif oc_members:
             truncated = True
         found = {"general": general, "liveness": liveness, "activity": activity, "names": names,
-                 "homes": homes, "stale": False, "pending": False, "truncated": truncated}
+                 "homes": homes, "stale": False, "pending": False, "truncated": truncated,
+                 "unchecked": unchecked}
         if requester is not None:
             replies = {}
             for typed in members:
@@ -589,14 +592,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self._send_json(202, {"message_id": mid, "state": "queued"})
         # Preview: the cached discovery only, no resolution; nothing is accepted, charged or queued.
         found = self.server.discovery.get()
-        if found.get("pending") or found.get("truncated"):  # an incomplete pass would preview members as unverified
+        if found.get("pending"):
             raise _Refused(409)
         typed = chat.state.typed
         liveness = found.get("liveness") or {}
+        unchecked = set(found.get("unchecked") or ())
         recipients, excluded = [], []
         for member in dict.fromkeys(found["general"][0]):
             if member == typed:
                 continue
+            # Only an incomplete check of #general itself refuses; `truncated` may concern other channels.
+            if member in unchecked or member not in liveness:
+                raise _Refused(409)
             if liveness.get(member) == "gone":
                 excluded.append({"member": member, "reason": "gone"})
             else:

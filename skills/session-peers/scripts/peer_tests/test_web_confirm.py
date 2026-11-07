@@ -159,16 +159,36 @@ class ConfirmFlowTests(ConfirmBase):
         self.assertEqual(self.chat.gate.nonces_outstanding, 0)
         self.assert_no_all_traffic()
 
-    def test_a_truncated_discovery_is_409_and_a_stale_one_is_flagged(self):
+    def test_a_truncated_discovery_that_checked_every_general_member_previews_and_a_stale_one_is_flagged(self):
+        # Changed from "truncated is 409": truncated alone no longer refuses, since it can concern other channels.
         real = self.server.discovery.get
         with mock.patch.object(self.server.discovery, "get", lambda wait=None: dict(real(wait), truncated=True)):
-            self.assert_refused(self.preview(), 409)
-        self.assertEqual(self.chat.gate.nonces_outstanding, 0)
-        self.assert_no_all_traffic()
+            self.assertEqual(self.preview().status, 200)
         with mock.patch.object(self.server.discovery, "get", lambda wait=None: dict(real(wait), stale=True)):
             body = self.preview().json()
         self.assertIs(body["stale"], True)
         self.assertEqual(body["recipients"], self.members)
+
+    def test_a_general_member_left_unchecked_is_409(self):
+        real = self.server.discovery.get
+        found = lambda wait=None: dict(real(wait), unchecked=[self.c2])
+        with mock.patch.object(self.server.discovery, "get", found):
+            self.assert_refused(self.preview(), 409)
+        self.assertEqual(self.chat.gate.nonces_outstanding, 0)
+        self.assert_no_all_traffic()
+
+    def test_a_general_member_with_no_liveness_entry_is_409(self):
+        real = self.server.discovery.get
+
+        def found(wait=None):
+            got = dict(real(wait))
+            got["liveness"] = {k: v for k, v in got["liveness"].items() if k != self.c2}
+            return got
+
+        with mock.patch.object(self.server.discovery, "get", found):
+            self.assert_refused(self.preview(), 409)
+        self.assertEqual(self.chat.gate.nonces_outstanding, 0)
+        self.assert_no_all_traffic()
 
 
 class ConfirmBindingTests(ConfirmBase):

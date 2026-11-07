@@ -685,7 +685,7 @@ class SendWorker:
             self.state.update(mid, state=STATE_PENDING, journaled=True, delivering=True, recipients=seeded)
 
         # `expected_recipients` is set only by a confirmed `@all` to #general (the nonce's recipients);
-        # `send_as_web` then refuses when the live deliverable set differs. A stored channel's post
+        # `send_as_web` then compares the live members to it before the journal preflight. A stored channel's post
         # addresses its roster and passes None. An exception escaping after the journal write reaches
         # `_run`, which reads the row's `journaled`.
         payload = sp_channels.send_as_web(

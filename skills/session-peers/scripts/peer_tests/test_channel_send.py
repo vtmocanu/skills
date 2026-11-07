@@ -1272,7 +1272,7 @@ class BrowserPostTests(BrowserPostHelpers, ChannelSendBase):
         self.assertFalse(list(pathlib.Path(sp_channels.sends_dir()).glob("*.lock")))
         self.nothing_delivered()
 
-    def test_expected_recipients_must_equal_the_live_deliverable_set(self):
+    def test_expected_recipients_must_equal_the_live_members(self):
         result = self.post(expected_recipients=["codex:" + new_uuid()])
         self.assertEqual((result["state"], result["reason"]), ("not sent", "recipients changed, preview again"))
         self.assertEqual(self.post(expected_recipients=[])["reason"], "recipients changed, preview again")
