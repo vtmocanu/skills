@@ -144,6 +144,17 @@ class GeneralBroadcastTests(GeneralBase):
         self.assertFalse(self.stamp_path().exists())
         self.assertEqual({r["state"] for r in self.acks(mid)["recipients"]}, {"pending"})
 
+    def test_record_on_a_plain_post_with_a_refused_member_exits_1(self):
+        self.set_oc(get_error_tag="Boom")
+        rc, result, err = self.post("note for the record", "--record")
+        self.assertEqual(rc, 1, err)
+        self.assertEqual(result["status"], "partial")
+        self.assertEqual(result["outcomes"]["codex:" + self.tid], "recorded")
+        self.assertTrue(result["outcomes"]["oc:" + OC_B].startswith("refused: "), result)
+        self.assertEqual(result["notes"], {"oc:" + OC_B: "ACK not requested (unverified)"})
+        self.assertEqual(self.journal_entries()[0]["to"], ["codex:" + self.tid])
+        self.nothing_delivered()
+
     def test_record_on_a_plain_post_with_nobody_resolvable_is_refused(self):
         self.clear_holders()
         self.set_oc(get_error_tag="Boom")

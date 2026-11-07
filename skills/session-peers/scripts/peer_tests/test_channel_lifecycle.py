@@ -97,6 +97,46 @@ class LeaveTests(LifecycleBase):
         self.assertEqual(rc, 0, err)
         self.assertNotIn(self.lead, self.members("aaa"))
 
+    def corrupt(self, name, mode="json"):
+        path = sp_channels._record_path(name)
+        if mode == "json":
+            pathlib.Path(path).write_text("{not json")
+            return
+        rec = json.loads(pathlib.Path(path).read_text())
+        rec["owner"] = 5
+        pathlib.Path(path).write_text(json.dumps(rec))
+
+    def test_an_unreadable_record_fails_the_leave_but_the_rest_is_left(self):
+        self.channel("aaa", self.x)
+        self.channel("bbb", self.x)
+        self.channel("ccc", self.x)
+        self.corrupt("aaa")
+        self.corrupt("ccc", "owner")
+        rc, out, err = self.cli("leave")
+        self.assertEqual(rc, 1)
+        self.assertIn("could not read #aaa", err)
+        self.assertIn("could not read #ccc", err)
+        self.assertIn("left #bbb", out)
+        self.assertNotIn(self.lead, self.members("bbb"))
+        # The #general leave marker is still written.
+        self.assertEqual(len(list(pathlib.Path(sp_channels.left_dir()).glob("*.json"))), 1)
+
+    def test_a_store_that_cannot_be_listed_fails_the_leave(self):
+        self.channel("aaa", self.x)
+        real = os.listdir
+
+        def deny(path="."):
+            if path == sp_channels.channels_root():
+                raise PermissionError(13, "denied")
+            return real(path)
+
+        with mock.patch.object(os, "listdir", deny):
+            rc, _out, err = self.cli("leave")
+        self.assertEqual(rc, 1)
+        self.assertIn("cannot be listed", err)
+        self.assertIn(self.lead, self.members("aaa"))
+        self.assertEqual(len(list(pathlib.Path(sp_channels.left_dir()).glob("*.json"))), 1)
+
     def test_leave_needs_an_identifiable_caller(self):
         os.environ.pop("CLAUDE_CODE_SESSION_ID")
         rc, _out, err = self.cli("leave")
@@ -162,6 +202,37 @@ class HandoverTests(LifecycleBase):
         self.assertEqual(rc, 0, err)
         self.assertEqual(len(self.history("ops")), count)
 
+    def test_an_unreadable_record_fails_the_handover_but_the_rest_moves(self):
+        self.channel("zzz", self.x)
+        pathlib.Path(sp_channels._record_path("zzz")).write_text("{not json")
+        self.grant()
+        rc, out, err = self.handover()
+        self.assertEqual(rc, 1)
+        self.assertIn("could not read #zzz", err)
+        for name in ("ops", BUDDY_CHANNEL):
+            self.assertEqual(sp_channels.read_channel(name)["owner"], self.successor)
+
+    def test_a_store_that_cannot_be_listed_fails_the_handover(self):
+        self.grant()
+        real = os.listdir
+
+        def deny(path="."):
+            if path == sp_channels.channels_root():
+                raise PermissionError(13, "denied")
+            return real(path)
+
+        with mock.patch.object(os, "listdir", deny):
+            rc, out, err = self.handover()
+        self.assertEqual(rc, 1)
+        self.assertIn("cannot be listed", err)
+        self.assertNotIn("no stored channels", out)
+        self.assertEqual(sp_channels.read_channel("ops")["owner"], self.lead)
+
+    def test_handover_stamps_the_record_with_when_ownership_moved(self):
+        self.grant()
+        self.assertNotIn("handed_over_at", sp_channels.read_channel(BUDDY_CHANNEL))
+        self.assertEqual(self.handover()[0], 0)
+        self.assertRegex(sp_channels.read_channel(BUDDY_CHANNEL)["handed_over_at"], r"^\d{4}-\d\d-\d\dT")
     def test_a_member_who_is_not_the_owner_keeps_the_channel_display(self):
         owner = "cc:" + new_uuid()
         sp_channels.create_channel(

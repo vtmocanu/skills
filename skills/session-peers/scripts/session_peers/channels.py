@@ -206,19 +206,54 @@ def read_channel(key):
             continue
         if member not in members:
             members.append(member)
-    return dict(rec, members=members)
+    rec = dict(rec, members=members)
+    if not isinstance(rec.get("handed_over_at"), str):
+        rec.pop("handed_over_at", None)  # optional; a non-string reads as never handed over
+    return rec
 
 
-def list_keys():
+def _keys_strict():
+    """The stored keys; ``[]`` when the store does not exist yet, OSError when it cannot be listed."""
     try:
         names = sorted(os.listdir(channels_root()))
-    except OSError:
+    except FileNotFoundError:
         return []
     keys = []
     for name in names:
         if name.endswith(".json") and sp_constants.CHANNEL_NAME_RE.fullmatch(name[:-5]):
             keys.append(name[:-5])
     return keys
+
+
+def list_keys():
+    try:
+        return _keys_strict()
+    except OSError:
+        return []
+
+
+def _lifecycle_records(verb):
+    """``([(key, record_or_None)], ok)`` for leave and handover.
+
+    A key whose file exists but does not read (invalid, oversized or with a
+    non-string field) pairs with None and is reported, since the caller's
+    membership in it cannot be told. A store that cannot be listed gives
+    ``([], False)``.
+    """
+    ok = True
+    try:
+        keys = _keys_strict()
+    except OSError as exc:
+        _err("could not %s: the channel store cannot be listed: %s" % (verb, _reason(exc)))
+        return [], False
+    pairs = []
+    for key in keys:
+        rec = read_channel(key)
+        if rec is None:
+            _err("could not read #%s (its record is unreadable or invalid); it was skipped" % key)
+            ok = False
+        pairs.append((key, rec))
+    return pairs, ok
 
 
 def list_channels():
@@ -359,7 +394,8 @@ def prune_all():
         return
     with _flock(os.path.join(channels_root(), STORE_LOCK)):
         _clean_tmp()
-    for key in list_keys():
+    # #general has no stored record but does have derived history.
+    for key in list_keys() + [sp_constants.CHANNEL_GENERAL]:
         try:
             sp_topics.topic_prune(topic_name(key), history_dir())
         except (OSError, sp_topics.TopicError) as exc:
@@ -1031,15 +1067,16 @@ def cmd_leave(args):
     """`peers.py leave`: leave every stored channel the caller is in, then #general.
 
     Each channel is handled on its own (membership write, then ``channel.left``);
-    a failure is reported and the rest still run, with exit 1 at the end. A
-    session that already left everywhere does nothing and exits 0. Ownership is kept.
+    a failure (including a record that cannot be read or a store that cannot be
+    listed) is reported and the rest still run, with exit 1 at the end. The
+    #general leave marker is written regardless. A session that already left everywhere does nothing and exits 0. Ownership is kept.
     """
     me = _caller_or_none()
     if me is None:
         return 2
-    failed = False
-    for key in list_keys():
-        rec = read_channel(key)
+    pairs, listed = _lifecycle_records("leave")
+    failed = not listed
+    for key, rec in pairs:
         if rec is None or me not in rec["members"]:
             continue
         try:
@@ -1092,6 +1129,7 @@ def _handover_mutator(me, target, label):
             rec["members"].append(target)
         if rec["owner"] == me:
             rec["owner"] = target
+            rec["handed_over_at"] = sp_runtime.now_iso()  # survives history retention
             if rec["kind"] == "buddy":
                 # The display names the lead, so only the lead's handover renames it.
                 rec["display"] = "buddy \u00b7 %s" % label
@@ -1120,8 +1158,9 @@ def find_buddy_channel(owner):
     """The key of the buddy channel ``owner`` (a typed id) manages, or None.
 
     Rule: (1) the channel at ``buddy_channel_key(owner)`` when ``owner`` owns it;
-    else (2) among ``kind == "buddy"`` channels ``owner`` owns, the one whose latest
-    ``channel.handover`` to ``owner`` is newest, ties and channels never handed
+    else (2) among ``kind == "buddy"`` channels ``owner`` owns, the one most recently
+    handed over to ``owner`` (the record's ``handed_over_at``, else the latest
+    ``channel.handover`` in retained history), ties and channels never handed
     over ordered by ``created_at`` and then key.
     """
     own = read_channel(buddy_channel_key(owner))
@@ -1131,7 +1170,8 @@ def find_buddy_channel(owner):
     for rec in list_channels():
         if rec["kind"] != "buddy" or rec["owner"] != owner:
             continue
-        rank = (_latest_handover_to(rec["key"], owner), str(rec.get("created_at", "")), rec["key"])
+        handed = rec.get("handed_over_at") or _latest_handover_to(rec["key"], owner)
+        rank = (handed, str(rec.get("created_at", "")), rec["key"])
         if best_rank is None or rank > best_rank:
             best, best_rank = rec["key"], rank
     return best
@@ -1217,10 +1257,10 @@ def cmd_handover(args):
              % (target, target, target))
         return 2
     label = _successor_label(target)
-    failed = False
+    pairs, listed = _lifecycle_records("hand over")
+    failed = not listed
     moved = 0
-    for key in list_keys():
-        rec = read_channel(key)
+    for key, rec in pairs:
         if rec is None or (me not in rec["members"] and rec["owner"] != me):
             continue
         try:
@@ -1334,25 +1374,29 @@ def _check_size(key, mid, sender, members, body, journaled):
     if not members:
         return
     longest = max((_delivery_text(key, mid, sender, m, body, journaled) for m in members), key=len)
-    field = "n" * sp_constants.MAX_TAG_FIELD_CHARS
-    tag_origin = "\n".join([
-        sp_protocol.build_tag(field, field, "/" + "p" * 107, field),
-        sp_protocol.build_origin("opencode", field, field),
-    ])
-    framing = "\n".join([tag_origin, sp_protocol.reply_route_hint("oc:" + "s" * 40, "m" * 36)])
-    try:
-        sp_claude.check_wrapped_size(
-            sp_protocol.build_wrapper(framing + "\n" + longest, "/" + "s" * 107, field, field)
-        )
-    except ValueError as exc:
-        raise ChannelError("%s; nothing was journaled or sent" % exc, 1)
-    if any(m.startswith("codex:") for m in members):
-        # The Codex transport queues "tag\norigin\nmessage" and checks that text
-        # ahead of journaling, so the preflight must measure the same framing.
+    # build_tag and build_origin cut a field by characters while the Codex and
+    # Claude caps also count UTF-8 bytes, so each is measured with a one-byte
+    # filler (the character cap binds) and a four-byte one (the byte cap binds).
+    for char in ("n", "\U0001F600"):
+        field = char * sp_constants.MAX_TAG_FIELD_CHARS
+        tag_origin = "\n".join([
+            sp_protocol.build_tag(field, field, "/" + "p" * 107, field),
+            sp_protocol.build_origin("opencode", field, field),
+        ])
+        framing = "\n".join([tag_origin, sp_protocol.reply_route_hint("oc:" + "s" * 40, "m" * 36)])
         try:
-            sp_codex.check_queue_text(tag_origin + "\n" + longest)
-        except sp_codex.QueueError as exc:
+            sp_claude.check_wrapped_size(
+                sp_protocol.build_wrapper(framing + "\n" + longest, "/" + "s" * 107, field, field)
+            )
+        except ValueError as exc:
             raise ChannelError("%s; nothing was journaled or sent" % exc, 1)
+        if any(m.startswith("codex:") for m in members):
+            # The Codex transport queues "tag\norigin\nmessage" and checks that text
+            # ahead of journaling, so the preflight must measure the same framing.
+            try:
+                sp_codex.check_queue_text(tag_origin + "\n" + longest)
+            except sp_codex.QueueError as exc:
+                raise ChannelError("%s; nothing was journaled or sent" % exc, 1)
 
 
 def _journal_preflight(members):
@@ -1579,7 +1623,9 @@ def _send(args):
                 for member, reason in excluded:
                     payload["outcomes"][member] = OUTCOME_REFUSED + reason
                     payload.setdefault("notes", {})[member] = ACK_NOT_REQUESTED
-            return _report(payload, 0, as_json, journaled, "recorded in #%s (nothing delivered)" % key
+                if excluded:
+                    payload["status"] = "partial"  # as _fan_out reports a mixed result
+            return _report(payload, 1 if excluded else 0, as_json, journaled, "recorded in #%s (nothing delivered)" % key
                            if not delivers else "recorded in #%s (no other members)" % key)
         return _fan_out(args, lock, payload, as_json, (key, sender, mid, body, journaled),
                         (snapshot, gone, deliver, excluded))

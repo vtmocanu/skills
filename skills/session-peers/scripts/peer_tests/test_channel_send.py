@@ -1010,6 +1010,23 @@ class ChannelRecordTrustTests(ChannelSendBase):
         self.assertEqual(self.send_entries(), [])
         self.nothing_delivered()
 
+    def test_multibyte_sender_metadata_counts_by_bytes_in_the_codex_framing(self):
+        # A 256-emoji session name is 1 KiB per use in the tag and again in the origin line.
+        self.sender_rec["name"] = "\U0001F600" * sp_constants.MAX_TAG_FIELD_CHARS
+        self.write_record(
+            os.getpid(), self.sender_rec["name"], self.me.partition(":")[2], self.sender_rec["messagingSocketPath"])
+        tid, _rollout = self.one_thread()
+        self.channel("ops", "codex:" + tid)
+        header = sp_channels._delivery_text("ops", new_uuid(), self.me, "codex:" + tid, "", True)
+        # Fits an all-ASCII worst case (about 1.5 KB of framing), not the real emoji framing (over 2 KB).
+        body = "x" * (sp_runtime.argv_text_budget() - sp_runtime.utf8_len(header) - 1700)
+        rc, _out, err = self.cli("send", "--to", "#ops", "--message", body, "--record")
+        self.assertEqual(rc, 1, err)
+        self.assertIn("nothing was journaled or sent", err)
+        self.assertEqual(self.journal_entries(), [])
+        self.assertEqual(self.send_entries(), [])
+        self.nothing_delivered()
+
     def test_a_body_over_the_codex_argv_budget_with_record_journals_nothing(self):
         tid, _rollout = self.one_thread()
         self.channel("ops", "codex:" + tid)

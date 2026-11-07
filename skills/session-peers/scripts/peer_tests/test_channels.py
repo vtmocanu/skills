@@ -337,6 +337,15 @@ class ChannelHistoryTests(ChannelBase):
         self.assertEqual(self.cli("gc")[0], 0)
         self.assertEqual(log.read_text(), "")
 
+    def test_gc_prunes_the_derived_general_history_too(self):
+        self.ok("create", "ops")  # gc prunes only once the store exists
+        sp_channels.append_history("general", "channel.send", self.me, {"body": "hello"})
+        log, _meta, _lock = sp_topics._topic_paths(sp_channels.topic_name("general"), sp_channels.history_dir())
+        old = {"seq": 1, "ts": "2020-01-01T00:00:00.000Z", "topic": "channel:general", "kind": "channel.send"}
+        pathlib.Path(log).write_text(json.dumps(old) + "\n")
+        self.assertEqual(self.cli("gc")[0], 0)
+        self.assertEqual(pathlib.Path(log).read_text(), "")
+
     def test_stale_cursor_reports_a_gap_in_json_and_human_output(self):
         os.environ["SESSION_PEERS_TOPIC_MAX_ENTRIES"] = "2"
         self.ok("create", "ops")
@@ -420,6 +429,16 @@ class ChannelHistoryTests(ChannelBase):
             entries = json.loads(out)["entries"]
             self.assertEqual([e["kind"] for e in entries], ["channel.created", "channel.joined"])
             self.assertEqual([e["seq"] for e in entries], [1, 2])
+        # Each identity posts a distinct body; both homes read both (delivery itself may be refused).
+        bodies = {"cc:" + sid_a: "from-claude-home-a", "codex:" + tid_b: "from-codex-home-b"}
+        for home, env, who in ((home_a, env_a, "cc:" + sid_a), (home_b, env_b, "codex:" + tid_b)):
+            rc, _out, err = self.run_peers(home, env, "send", "--to", "#ops", "--message", bodies[who])
+            self.assertIn(rc, (0, 1), err)
+        for home, env, who in ((home_a, env_a, "cc:" + sid_a), (home_b, env_b, "codex:" + tid_b)):
+            rc, out, err = self.run_peers(home, env, "channel", "tail", "ops", "--json")
+            self.assertEqual(rc, 0, err)
+            sent = [e["data"]["body"] for e in json.loads(out)["entries"] if e["kind"] == "channel.send"]
+            self.assertEqual(sorted(sent), sorted(bodies.values()))
         # Ordinary topics stay scoped to each CODEX_HOME.
         for home, env, who in ((home_a, env_a, "cc:" + sid_a), (home_b, env_b, "codex:" + tid_b)):
             rc, _out, err = self.run_peers(home, env, "topic", "post", "t", "--message", who, "--as", who)

@@ -148,7 +148,8 @@ kind of peer (such as a browser peer) is excluded by construction.
   delivered.
 - `--record` journals it for the members the journal can address (at most 64;
   more is refused before anything is journaled) and delivers nothing; each
-  shows outcome `recorded`.
+  shows outcome `recorded`. A member it cannot address shows `refused` (D1),
+  and the post then exits 1 with status `partial`.
 - The sender must itself be a discovered session; a session that has left may
   still post. If OpenCode discovery failed the refusal says so for `oc:`
   senders.

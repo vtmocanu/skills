@@ -386,6 +386,28 @@ class BuddyChannelHandoverTests(BuddyChannelBase):
         self.assertIn(self.x, self.members(older))
         self.assertNotIn(self.x, self.members(newer))
 
+    def test_the_most_recent_handover_wins_after_history_retention_pruned_its_entries(self):
+        older = "buddy-" + "aaaaaaaaaaaa"
+        newer = "buddy-" + "bbbbbbbbbbbb"
+        for key in (older, newer):
+            sp_channels.create_channel(key, "cc:" + new_uuid(), [], kind="buddy", display="buddy", reserved_ok=True)
+        # Hand over through the real mutator, newer first, so handed_over_at ranks older above newer.
+        ticks = iter(range(0, 500))
+        stamp = lambda: time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(1_780_000_000 + next(ticks)))  # noqa: E731
+        with mock.patch.object(sp_runtime, "now_iso", stamp):
+            owners = {}
+            for key in (newer, older):
+                owners[key] = sp_channels.read_channel(key)["owner"]
+                sp_channels.change_membership(
+                    key, sp_channels._handover_mutator(owners[key], self.lead, "lead"), owners[key])
+        self.assertGreater(
+            sp_channels.read_channel(older)["handed_over_at"], sp_channels.read_channel(newer)["handed_over_at"])
+        # Retention removes every history entry.
+        for key in (older, newer):
+            log, _meta, _lock = sp_topics._topic_paths(sp_channels.topic_name(key), sp_channels.history_dir())
+            pathlib.Path(log).write_text("")
+        self.assertEqual(sp_channels.find_buddy_channel(self.lead), older)
+
     def test_a_channel_created_for_a_lead_that_never_got_a_handover_is_not_reused_by_another(self):
         sp_channels.create_channel(
             "buddy-cccccccccccc", "cc:" + new_uuid(), [], kind="buddy", display="buddy", reserved_ok=True)
