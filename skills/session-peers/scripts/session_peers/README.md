@@ -116,20 +116,35 @@ checks in order, and each refusal has an empty `{}` body:
 6. The body is read before the connection deadline, less 0.5 s (408 on a short
    read or a timeout).
 7. Strict JSON (400): no duplicate keys, a numeral of at most 32 characters,
-   exactly `{to, text, ack}`, `text` a non-empty string of at most
-   `MAX_TEXT_CHARS` that encodes as UTF-8, `ack` a bool, `to` one `#` channel
-   key or 1-64 distinct typed addresses with no `web:`.
-8. `#general` or text matching `channels.ALL_RE` (403): refused in this release.
+   exactly `{to, text, ack}` or, for a confirm, `{to, text, ack, confirm}`,
+   `text` a non-empty string of at most `MAX_TEXT_CHARS` that encodes as UTF-8,
+   `ack` a bool, `to` one `#` channel key or 1-64 distinct typed addresses with
+   no `web:`; `confirm` a string of 1 to `CONFIRM_MAX` (128) characters, only
+   with `to` `#general` and an `@all` text.
+8. A plain `#general` post, or text matching `channels.ALL_RE` to any route but
+   `#general` (403). An `@all` to `#general` goes to `_post_all` after the 503
+   check (step 9): no `confirm` is a preview, a `confirm` is a confirm.
 9. Chat has started (503).
 10. `SendGate`, under one lock: the rate limits (1 per second, 30 per rolling
     minute) and the queue capacity (`SEND_QUEUE_MAX = 8`, queued plus running).
     A hit is 429 with nothing charged or accepted.
+    A preview (200, nothing accepted or charged) reads the cached discovery and
+    is 409 when discovery is pending, a `#general` member is unchecked or has
+    no liveness entry, no recipient remains or more than
+    `channels.ALL_MAX_RECIPIENTS` (64) do. A confirm calls
+    `SendGate.confirm`, which under the same lock checks the nonce binding
+    (route, browser peer, recipient set, text hash, ACK, `NONCE_TTL` = 60 s;
+    409 when unknown, expired, used or mismatched, a mismatch leaving it
+    usable), then the limits (429, nonce kept, nothing charged), then consumes
+    it and charges. Nonces are memory only, `NONCE_MAX` = 32, oldest evicted.
 11. Mint the `message_id`, create the `queued` row, enqueue, and reply
     `202 {"message_id", "state": "queued"}`.
 
 The 202 means accepted in volatile memory only. The handler never resolves
 recipients or writes the journal or history; one `SendWorker` thread does that
-in FIFO order, under `web._DISCOVERY_LOCK` for resolution, commit and each
+in FIFO order (a confirmed `@all` passes `expected_recipients` to
+`channels.send_as_web`, which refuses with `recipients changed, preview again`
+when the live set differs), under `web._DISCOVERY_LOCK` for resolution, commit and each
 member delivery (never across a pacing sleep). Nothing is retried, a worker
 failure keeps the rate charge, and queued sends are lost on restart. The Browser
 feed (`BrowserState`) is bounded at `FEED_MAX_ENTRIES = 1000` entries and

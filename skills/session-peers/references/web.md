@@ -165,8 +165,66 @@ release you can address:
   distinct typed addresses): a direct send to each, resolved by the worker.
   A `web:` address is refused.
 
-`#general` and any text matching the `@all` pattern are refused with 403:
-nothing is posted to everyone from the page in this release.
+`@all` in `#general` is the one broadcast the page can send, and only after a
+preview and a confirmation, see [`@all` in #general](#all-in-general). A plain
+`#general` post and an `@all` to any other route (a stored channel or picked
+members) are refused with 403.
+
+### `@all` in #general
+
+A post to `#general` whose text matches the `@all` pattern (`^@all(\s|$)`, see
+[channels](channels.md#all)) takes two requests: a preview, then a confirm. The
+page shows the preview in a confirm dialog listing the recipients and the
+excluded members; nothing is sent until the person confirms. Both requests are
+`POST /api/send` with the usual checks. ACK is always requested for an `@all`:
+the request's `ack` is accepted but ignored.
+
+- **Preview.** `{"to": "#general", "text": "@all ...", "ack": true}` returns
+  `200 {"confirm", "expires_in": 60, "recipients", "excluded"}`: a single-use
+  confirm nonce, its 60-second expiry, the sorted typed ids that would receive
+  the post, and the `#general` members left out as `gone` (each as
+  `{"member", "reason": "gone"}`). The recipients come from the cached
+  discovery: the `#general` members minus the browser peer and minus the members
+  marked gone. A preview accepts, charges, queues and delivers nothing.
+- **409 for a preview.** Discovery is pending; a `#general` member was left
+  unchecked or has no liveness entry (a budget or per-channel clip: retry);
+  no recipient remains; or more than 64 remain. An incomplete check of other
+  channels alone does not refuse.
+- **`stale`.** The preview adds `"stale": true` when the discovery result it
+  used is stale (the key is absent otherwise), so the page can say so.
+- **Confirm.** The same body plus `"confirm": "<nonce>"` (exactly these four
+  keys; the nonce is a string of 1-128 characters and only valid with
+  `#general` and an `@all` text, else 400). The nonce is bound to the route, the
+  browser peer, the exact recipient set, a hash of the message text, ACK
+  (always requested) and the expiry. It is checked and consumed atomically, so
+  it works once.
+- **Confirm refusals.** 409 for a nonce that is unknown, expired (an expired one
+  is dropped), already used or bound to different text. A text mismatch leaves
+  the nonce usable.
+- **429.** The rate limit or a full queue: the nonce stays usable and nothing is
+  charged; confirm again with the same body.
+- **202 queued.** `202 {"message_id", "state": "queued"}` consumes the nonce
+  and charges the send, as for any accepted send. The worker then sends to
+  exactly the previewed set. If the live deliverable members differ from it, the
+  row reads `not sent: recipients changed, preview again` and the person
+  previews again. A live member the journal cannot record becomes a recorded
+  `refused: <reason>` outcome with ACK not requested, not a "recipients
+  changed" failure. A worker failure still spends the attempt and the charge.
+- **Rate limit.** At most one `@all` per sender per 60 seconds, through the
+  existing per-sender allowance ([channels](channels.md#all)); a second one in
+  that window reads `not sent: at most one @all per sender every 60 seconds ...`.
+  A restart gives the browser peer a new identity, and so a fresh allowance.
+- **Still refused.** A plain `#general` post and an `@all` to a stored channel
+  or to picked members stay 403.
+- **Restart.** Nonces are kept in server memory only (at most 32, the oldest
+  evicted), so a restart invalidates every outstanding one: preview again.
+
+**How `@all` works.** The post goes to the members discovery found for
+`#general`. A member that is gone is excluded at preview time and shows as
+`skipped: gone`; a member that refuses shows its `refused: <reason>`; an idle
+OpenCode session is not woken (`not woken (OpenCode idle)`); and discovery gaps
+are shown under the post. Each shows as its recorded outcome, and nothing
+outside the previewed set is sent to.
 
 ### The 202 queued contract
 
@@ -205,13 +263,14 @@ A 429 accepts and charges nothing. Every refusal has an empty `{}` body:
 | Code | Refused because |
 | --- | --- |
 | 400 | Bad JSON or fields (duplicate keys, extra fields, a numeral over 32 characters, text that is not valid UTF-8 such as a lone surrogate, a `web:` recipient), any `Transfer-Encoding`, a query string on `/api/send`, or a missing, repeated, non-numeric or zero `Content-Length`. |
-| 403 | Host, token or `Origin` rejected (`Origin` must be `http://` plus the Host), or `#general` / `@all`. |
+| 403 | Host, token or `Origin` rejected (`Origin` must be `http://` plus the Host), a plain `#general` post, or an `@all` to any route but `#general`. |
 | 404 | A GET to an unknown path, or a malformed request target. |
 | 405 | A POST to a path other than `/api/send`, a method other than GET or POST, or any POST when `--chat` is off. |
+| 409 | Only for `@all` in `#general`. A preview: discovery pending, a `#general` member unchecked or without a liveness entry, no recipients, or more than 64. A confirm: the nonce is unknown, expired, used or bound to different text. |
 | 408 | The body was short or arrived too slowly. |
 | 413 | `Content-Length` over 1 MiB. |
 | 415 | `Content-Type` is not a single `application/json` (charset utf-8 allowed). |
-| 429 | Rate limit hit or queue full. |
+| 429 | Rate limit hit or queue full (on a confirm the nonce stays usable). |
 | 503 | Chat has not finished starting. |
 
 ### Ask for ACK

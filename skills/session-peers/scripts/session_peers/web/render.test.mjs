@@ -1344,19 +1344,39 @@ test("chat: the composer, chat badge and Browser lane appear with state.chat; th
   assert.ok(t.document.byId.legend.textContent.includes("Browser"))
 })
 
-test("chat: in #general the composer is shown disabled with a reason", async () => {
+test("chat: in #general the composer takes @all only: plain text shows the reason and is never sent", async () => {
   const t = chatBoot()
   await t.app.ready
   assert.equal(t.app.state.selected, "general")
   assert.ok(composer(t).childNodes.length > 0)
-  assert.equal(textareaOf(t).disabled, true)
-  assert.equal(sendButton(t).disabled, true)
-  assert.equal(pickBoxes(t).length, 0)
-  assert.ok(composer(t).textContent.includes("Sending to #general is not available yet"), composer(t).textContent)
+  assert.equal(textareaOf(t).disabled, false, "editable: @all posts are open")
+  assert.equal(textareaOf(t).placeholder, "Start with @all to reach every #general member")
+  assert.equal(sendButton(t).disabled, true, "nothing typed yet")
+  assert.equal(pickBoxes(t).length, 0, "no picker: the target is #general")
+  assert.ok(elementsOf(composer(t)).some((n) => n.attributes.class === "who chanpick fixed" && n.textContent.startsWith("#general")))
+  assert.equal(ackBox(t).checked, true, "@all always asks for ACK")
+  assert.equal(ackBox(t).disabled, true)
   typeText(t, "hi everyone")
   assert.equal(sendButton(t).disabled, true)
+  assert.equal(sendButton(t).textContent, "Send")
+  assert.equal(reasonNode(t).textContent, "In #general you can only post @all, which asks for a confirmation")
   assert.equal(await t.app.submitCompose(), false)
+  textareaOf(t).dispatch("keydown", { key: "Enter", ctrlKey: true })
+  await settle()
   assert.equal(t.sends.length, 0)
+  // @all text: the live warning, Send previews the recipients.
+  typeText(t, "@all freeze main")
+  const warn = elementsOf(composer(t)).find((n) => n.attributes.class === "allwarn")
+  assert.ok(warn, "the mock's .allwarn")
+  assert.equal(warn.textContent, "@all reaches every #general member after you confirm the recipient list")
+  assert.ok(reasonNode(t).classList.contains("is-all"))
+  assert.equal(sendButton(t).disabled, false)
+  assert.equal(sendButton(t).textContent, "Preview recipients")
+  // Leaving #general gives the reader's own ACK choice back.
+  await t.app.selectChannel("ops")
+  assert.equal(ackBox(t).checked, false)
+  assert.equal(ackBox(t).disabled, false)
+  assert.ok(!reasonNode(t).classList.contains("is-all"))
 })
 
 test("chat: the picker lists the channel's members and a post-to-channel option, never the browser peer", async () => {
@@ -1644,7 +1664,7 @@ test("chat: a direct send queued from a channel is followed in Browser; the lane
 
 // ---------------------------------------------------------------- chat mode: U5 review follow-ups
 
-const ALL_WARN = "@all is not available yet: it needs a confirmation step that a later release adds"
+const ALL_WARN = "@all only works in #general: open #general to post it to every member"
 const reasonNode = (t) => elementsOf(composer(t)).find((n) => n.attributes.class === "creason")
 
 async function readyToSend(t, text = "please rebase") {
@@ -1682,8 +1702,13 @@ test("chat: the composer's reason is linked by aria-describedby while it is bloc
   const t = chatBoot()
   await t.app.ready
   assert.equal(reasonNode(t).id, "creason")
-  assert.equal(textareaOf(t).getAttribute("aria-describedby"), "creason", "#general")
+  assert.equal(textareaOf(t).getAttribute("aria-describedby"), null, "#general with nothing typed")
+  typeText(t, "plain text")
+  assert.equal(textareaOf(t).getAttribute("aria-describedby"), "creason", "#general, plain text")
   assert.equal(sendButton(t).getAttribute("aria-describedby"), "creason")
+  typeText(t, "@all now")
+  assert.equal(textareaOf(t).getAttribute("aria-describedby"), "creason", "#general, the @all warning")
+  typeText(t, "")
   await t.app.selectChannel("ops")
   assert.equal(textareaOf(t).getAttribute("aria-describedby"), null)
   assert.equal(sendButton(t).getAttribute("aria-describedby"), null)
@@ -1699,11 +1724,11 @@ test("chat: the composer's reason is linked by aria-describedby while it is bloc
   assert.ok(reasonNode(t).textContent.startsWith("Sending has stopped"))
 })
 
-test("chat: @all text shows the M1 note (.allwarn), disables Send and is never sent; a 403 names #general and @all", async () => {
+test("chat: @all text outside #general shows the note (.allnote), disables Send and is never sent; a 403 names #general and @all", async () => {
   const t = chatBoot()
   await readyToSend(t, "@all freeze merges")
-  const warn = elementsOf(composer(t)).find((n) => n.attributes.class === "allwarn")
-  assert.ok(warn, "an .allwarn note")
+  const warn = elementsOf(composer(t)).find((n) => n.attributes.class === "allnote")
+  assert.ok(warn, "an .allnote note")
   assert.equal(warn.textContent, ALL_WARN)
   assert.equal(warn.parentNode, reasonNode(t), "inside the linked reason line")
   assert.equal(sendButton(t).disabled, true)
@@ -1719,7 +1744,7 @@ test("chat: @all text shows the M1 note (.allwarn), disables Send and is never s
   for (const text of ["freeze merges", "@allison please", " @all is mid-text"]) {
     typeText(t, text)
     assert.equal(sendButton(t).disabled, false, JSON.stringify(text))
-    assert.ok(!elementsOf(composer(t)).some((n) => n.attributes.class === "allwarn"), text)
+    assert.ok(!elementsOf(composer(t)).some((n) => n.attributes.class === "allnote"), text)
   }
   assert.equal(t.app.sendErrorText(403), "Refused by the server (token, origin, #general or @all) (403)")
 })
@@ -1806,3 +1831,306 @@ test("chat: in Browser a new reply is announced politely; the rebuilt streams ca
   assert.equal(t.document.getElementById("announce").textContent, "Reply from cx: rebased, ready for review")
   assert.equal(t.document.byId.stream.getAttribute("aria-live"), null)
 })
+
+// ---------------------------------------------------------------- chat mode: @all to #general (#162 M2)
+
+const NONCE = "n".repeat(43)
+const dialogHost = (t) => t.document.byId.dialoghost
+const dialogOf = (t) => (dialogHost(t) ? elementsOf(dialogHost(t)).find((n) => n.attributes.role === "dialog") : null) || null
+const dialogButton = (t, label) => elementsOf(dialogHost(t)).find((n) => n.tagName === "button" && n.textContent === label)
+const okButton = (t) => elementsOf(dialogHost(t)).find((n) => n.tagName === "button" && (n.attributes.class || "").includes("dlgok"))
+const dialogMsg = (t) => elementsOf(dialogHost(t)).find((n) => (n.attributes.class || "").startsWith("dlgmsg"))
+const previewBody = (extra = {}) => Object.assign({ confirm: NONCE, expires_in: 60, recipients: [CC_A, CODEX_B], excluded: [{ member: OC_C, reason: "gone" }] }, extra)
+
+// /api/send previews a body without `confirm` and answers a confirm from confirm(body, n).
+function allBoot({ preview = () => ({ status: 200, body: previewBody() }), confirm = () => ({ status: 202, body: { message_id: MID1, state: "queued" } }), state } = {}) {
+  let n = 0
+  return chatBoot({ state, send: (init) => { const body = JSON.parse(init.body); return "confirm" in body ? confirm(body, ++n) : preview(body) } })
+}
+
+async function previewed(t, text = "@all freeze main") {
+  await t.app.ready
+  typeText(t, text)
+  sendButton(t).dispatch("click")
+  await settle()
+}
+
+function setNow(t, ms) { vm.runInContext("Date.now = function () { return " + Number(ms) + " }", t.context) }
+// Runs the dialog's one-second countdown timers (polling uses 2 s and more).
+function tickDialog(t) {
+  const due = t.timers.filter((x) => x.ms === 1000)
+  const rest = t.timers.filter((x) => x.ms !== 1000)
+  t.timers.splice(0, t.timers.length, ...rest)
+  due.forEach((x) => x.fn())
+}
+
+test("chat @all: a preview 200 opens an in-page dialog with names, typed ids, excluded members, the stale note and a countdown", async () => {
+  const state = chatState()
+  state.sessions[2].name = "cx-review"
+  const t = allBoot({ state, preview: () => ({ status: 200, body: previewBody({ stale: true }) }) })
+  await previewed(t)
+  assert.equal(t.sends.length, 1)
+  assert.deepEqual(t.sends[0].body, { to: "#general", text: "@all freeze main", ack: true }, "the preview: no nonce, ACK always")
+  const dlg = dialogOf(t)
+  assert.ok(dlg, "a role=dialog element")
+  assert.equal(dlg.tagName, "div")
+  assert.equal(dlg.attributes["aria-modal"], "true")
+  assert.equal(dlg.attributes["aria-labelledby"], "dlgtitle")
+  assert.equal(dlg.attributes["aria-describedby"], "dlgdesc dlgmsg")
+  const ids = elementsOf(dlg).map((n) => n.id).filter(Boolean)
+  for (const id of ["dlgtitle", "dlgdesc", "dlgmsg"]) assert.ok(ids.includes(id), id)
+  const text = dlg.textContent
+  for (const want of ["Post @all to #general?", "these 2 sessions", "freeze main", "Recipients (2)", "landish8", CC_A, "cx-review", CODEX_B,
+    "Not included (1)", OC_C, "gone, not sent to", "Discovery may be stale", "Expires in 60 s"]) {
+    assert.ok(text.includes(want), want + " in " + text)
+  }
+  assert.equal(elementsOf(dlg).find((n) => n.attributes["aria-label"] === "Recipients").childNodes.length, 2)
+  assert.equal(okButton(t).textContent, "Send to 2")
+  assert.equal(okButton(t).disabled, false)
+  assert.equal(t.document.activeElement, dialogButton(t, "Cancel"), "focus moves into the dialog, on the safe choice")
+  assert.equal(t.document.byId.app.inert, true, "the page behind is inert")
+  assert.equal(sendButton(t).disabled, true, "no second preview while the dialog is open")
+  assert.equal(await t.app.submitCompose(), false)
+  assert.equal(t.sends.length, 1)
+  // Without stale the note is absent.
+  const u = allBoot()
+  await previewed(u)
+  assert.ok(!dialogOf(u).textContent.includes("stale"))
+})
+
+test("chat @all: Confirm sends the nonce with the same text; a 202 closes the dialog, shows the queued row and clears the text", async () => {
+  const t = allBoot()
+  await previewed(t)
+  okButton(t).dispatch("click")
+  await settle()
+  assert.equal(t.sends.length, 2)
+  assert.deepEqual(t.sends[1].body, { to: "#general", text: "@all freeze main", ack: true, confirm: NONCE })
+  assert.equal(dialogOf(t), null, "closed")
+  assert.equal(t.document.byId.app.inert, false)
+  assert.equal(textareaOf(t).value, "")
+  assert.equal(t.document.activeElement, textareaOf(t), "focus returns to the textarea")
+  assert.match(statusLine(t).textContent, /^Accepted \d\d:\d\d — status in #general$/)
+  const stream = t.document.byId.stream.textContent
+  assert.ok(stream.includes("freeze main") && stream.includes("Queued (not yet recorded)"), stream)
+  assert.equal(t.app.state.browser.sends[MID1].to, "#general")
+  assert.equal(t.app.state.browser.sends[MID1].ack_requested, true)
+})
+
+test("chat @all: a 429 on confirm keeps the dialog open and the nonce, and Confirm again reuses it", async () => {
+  const t = allBoot({ confirm: (_b, n) => (n === 1 ? { status: 429 } : { status: 202, body: { message_id: MID2, state: "queued" } }) })
+  await previewed(t)
+  okButton(t).dispatch("click")
+  await settle()
+  assert.ok(dialogOf(t), "still open")
+  assert.equal(dialogMsg(t).textContent, "Rate limited, try again")
+  assert.equal(dialogMsg(t).attributes.role, "status")
+  assert.equal(okButton(t).disabled, false, "Confirm stays available")
+  assert.equal(t.document.activeElement, okButton(t))
+  assert.equal(textareaOf(t).value, "@all freeze main")
+  okButton(t).dispatch("click")
+  await settle()
+  assert.equal(t.sends.length, 3)
+  assert.equal(t.sends[2].body.confirm, NONCE, "the same nonce")
+  assert.equal(t.sends[1].body.confirm, NONCE)
+  assert.equal(dialogOf(t), null)
+  assert.ok(t.app.state.browser.sends[MID2])
+  // No answer at all keeps it open too (a used nonce is refused, so a retry never sends twice).
+  const u = allBoot({ confirm: () => { throw new TypeError("Failed to fetch") } })
+  await previewed(u)
+  okButton(u).dispatch("click")
+  await settle()
+  assert.ok(dialogOf(u))
+  assert.ok(dialogMsg(u).textContent.startsWith("No response from the server"))
+})
+
+test("chat @all: a 409 on confirm (expired or used) closes the dialog with the message and keeps the text", async () => {
+  const t = allBoot({ confirm: () => ({ status: 409 }) })
+  await previewed(t)
+  okButton(t).dispatch("click")
+  await settle()
+  assert.equal(dialogOf(t), null)
+  assert.equal(statusLine(t).textContent, "The preview expired or was used; preview again")
+  assert.ok(statusLine(t).classList.contains("bad"))
+  assert.equal(textareaOf(t).value, "@all freeze main")
+  assert.equal(t.document.activeElement, textareaOf(t))
+  assert.equal(sendButton(t).disabled, false, "Preview recipients again")
+  assert.equal(Object.keys(t.app.state.browser.sends).length, 0)
+  // Another refusal closes it with the usual message.
+  const u = allBoot({ confirm: () => ({ status: 403 }) })
+  await previewed(u)
+  okButton(u).dispatch("click")
+  await settle()
+  assert.equal(dialogOf(u), null)
+  assert.ok(statusLine(u).textContent.includes("(403)"))
+})
+
+test("chat @all: a preview 409, 429 or 403 says why and opens no dialog", async () => {
+  for (const [status, want] of [[409, "Couldn't list the recipients yet (discovery pending or incomplete, or none or too many). Try again in a moment."],
+    [429, "Too fast or queue full — try again (429)"], [403, "(403)"]]) {
+    const t = allBoot({ preview: () => ({ status }) })
+    await previewed(t)
+    assert.equal(dialogOf(t), null, String(status))
+    assert.ok(statusLine(t).textContent.includes(want), status + ": " + statusLine(t).textContent)
+    assert.equal(textareaOf(t).value, "@all freeze main")
+    assert.equal(sendButton(t).textContent, "Preview recipients")
+  }
+  // A 200 whose body cannot be used opens nothing either.
+  const t = allBoot({ preview: () => ({ status: 200, body: { confirm: NONCE, expires_in: 60, recipients: [] } }) })
+  await previewed(t)
+  assert.equal(dialogOf(t), null)
+  assert.ok(statusLine(t).textContent.includes("could not be read"))
+  const { app } = load()
+  for (const bad of [null, {}, previewBody({ confirm: "" }), previewBody({ confirm: "x".repeat(129) }), previewBody({ expires_in: 0 }),
+    previewBody({ expires_in: "60" }), previewBody({ recipients: "cc:x" })]) {
+    assert.equal(app.readPreview(bad), null, JSON.stringify(bad))
+  }
+  assert.equal(app.readPreview(previewBody({ excluded: [null, { member: 5 }, { member: OC_C, reason: "gone" }] })).excluded.length, 1)
+})
+
+test("chat @all: reaching the expiry disables Confirm and offers Preview again", async () => {
+  const t = allBoot({ preview: (b) => ({ status: 200, body: previewBody({ confirm: "nonce-" + b.text.length + "-" + t.sends.length }) }) })
+  const base = Date.parse("2026-11-07T12:00:00Z")
+  setNow(t, base)
+  await previewed(t)
+  assert.ok(dialogOf(t).textContent.includes("Expires in 60 s"))
+  setNow(t, base + 15400)
+  tickDialog(t)
+  assert.ok(dialogOf(t).textContent.includes("Expires in 45 s"), dialogOf(t).textContent)
+  okButton(t).focus()
+  setNow(t, base + 60000)
+  tickDialog(t)
+  assert.equal(okButton(t).disabled, true, "Confirm disabled at the expiry")
+  assert.ok(dialogOf(t).textContent.includes("Expired"))
+  assert.equal(dialogMsg(t).textContent, "This preview expired. Preview again for a fresh recipient list.")
+  const again = dialogButton(t, "Preview again")
+  assert.ok(again, "Preview again offered")
+  assert.equal(t.document.activeElement, again, "focus leaves the disabled Confirm")
+  okButton(t).dispatch("click")
+  await settle()
+  assert.equal(t.sends.length, 1, "an expired preview is never confirmed")
+  assert.equal(t.timers.filter((x) => x.ms === 1000).length, 0, "the countdown stops")
+  again.dispatch("click")
+  await settle()
+  assert.equal(t.sends.length, 2)
+  assert.ok(!("confirm" in t.sends[1].body), "a fresh preview")
+  assert.ok(dialogOf(t), "a new dialog")
+  assert.equal(okButton(t).disabled, false)
+})
+
+test("chat @all: Confirm is guarded against a double submit; Esc and Cancel wait while it is in flight", async () => {
+  const t = allBoot({ confirm: () => new Promise(() => {}) })
+  await previewed(t)
+  okButton(t).focus()
+  okButton(t).dispatch("click")
+  okButton(t).dispatch("click")
+  await settle()
+  okButton(t).dispatch("click")
+  await settle()
+  assert.equal(t.sends.filter((s) => "confirm" in s.body).length, 1)
+  assert.equal(okButton(t).textContent, "Sending…")
+  assert.equal(okButton(t).disabled, true)
+  assert.equal(dialogButton(t, "Cancel").disabled, true)
+  assert.equal(t.document.activeElement, dialogOf(t), "focus stays in the dialog while its buttons are disabled")
+  dialogOf(t).dispatch("keydown", { key: "Escape" })
+  assert.ok(dialogOf(t), "Esc does not drop an in-flight confirm")
+})
+
+test("chat @all: Esc cancels and returns focus to the textarea; Tab stays inside the dialog", async () => {
+  const t = allBoot()
+  await previewed(t)
+  const cancel = dialogButton(t, "Cancel")
+  const ok = okButton(t)
+  ok.focus()
+  dialogOf(t).dispatch("keydown", { key: "Tab" })
+  assert.equal(t.document.activeElement, cancel, "Tab from the last button wraps to the first")
+  dialogOf(t).dispatch("keydown", { key: "Tab", shiftKey: true })
+  assert.equal(t.document.activeElement, ok, "Shift+Tab from the first wraps to the last")
+  dialogOf(t).dispatch("keydown", { key: "Escape" })
+  assert.equal(dialogOf(t), null)
+  assert.equal(t.document.activeElement, textareaOf(t))
+  assert.equal(t.document.byId.app.inert, false)
+  assert.equal(textareaOf(t).value, "@all freeze main", "the text stays")
+  assert.equal(t.sends.length, 1, "nothing confirmed")
+  await previewed(t)
+  dialogButton(t, "Cancel").dispatch("click")
+  assert.equal(dialogOf(t), null)
+  assert.equal(t.sends.filter((s) => "confirm" in s.body).length, 0)
+})
+
+test("chat @all: a hostile recipient name and message render only as text in the dialog", async () => {
+  const state = chatState()
+  state.sessions[2].name = EVIL
+  const t = allBoot({ state })
+  await previewed(t, "@all " + EVIL)
+  const dlg = dialogOf(t)
+  const text = dlg.textContent
+  assert.ok(text.includes(EVIL), "the name, as text")
+  assert.ok(text.split(EVIL).length - 1 >= 2, "and the message, as text")
+  for (const node of elementsOf(dialogHost(t))) {
+    assert.notEqual(node.tagName, "img")
+    for (const name of Object.keys(node.attributes)) assert.ok(!/^on/i.test(name) && !["src", "href", "style"].includes(name), name)
+  }
+  assert.deepEqual(t.document.htmlWrites, [])
+})
+
+test("chat @all: #general's details hold the corrected 'How @all works' card", async () => {
+  const t = chatBoot()
+  await t.app.ready
+  const info = textOf(t.document.byId.info)
+  assert.ok(info.includes("How @all works"))
+  for (const want of ["The post goes to the #general members discovery found.",
+    "Gone or refused members, idle OpenCode sessions (not woken) and discovery gaps show as their recorded outcomes.",
+    "If membership changes between your preview and the send, nothing is sent and you are asked to preview again."]) {
+    assert.ok(info.includes(want), want)
+  }
+  assert.ok(!/every (live )?session gets/i.test(info) && !info.includes("queues one turn in every"), "not the mock's too-strong wording")
+  await t.app.selectChannel("ops")
+  assert.ok(!textOf(t.document.byId.info).includes("How @all works"), "only in #general")
+  // Read-only: the card stays, without the preview step this page cannot take.
+  const { app } = load()
+  app.setState(stateFixture())
+  const ro = textOf(app.renderDetails(app.state.rows.general))
+  assert.ok(ro.includes("How @all works") && ro.includes("discovery found"))
+  assert.ok(!ro.includes("preview"))
+})
+
+test("chat @all: the browser's @all shows a live ACK tally on its row and on its #general history entry", async () => {
+  const t = allBoot()
+  await previewed(t)
+  okButton(t).dispatch("click")
+  await settle()
+  const stream = () => t.document.byId.stream
+  t.routes["/api/changes"] = browserChanges("C1", {
+    sends: [sendRow(MID1, { kind: "channel", to: "#general", channel: "general", text: "@all freeze main", state: "pending", journaled: true, delivering: true, seq: 4,
+      recipients: { [CC_A]: { outcome: "transport accepted", ack: "acked" }, [CODEX_B]: { outcome: "transport accepted", ack: "pending" },
+        [OC_C]: { outcome: "refused: gone", ack: "not requested" } } })],
+  })
+  await t.app.pollOnce()
+  const row = stream().textContent
+  assert.ok(row.includes("1 of 2 ACK'd"), row)
+  const chips = elementsOf(stream()).filter((n) => n.parentNode && n.parentNode.attributes && n.parentNode.attributes.class === "tally")
+  assert.deepEqual(chips.map((c) => [c.textContent, c.attributes.class]), [["landish8", "yes"], [nameOfShort(CODEX_B), "no"]], "refused stays out")
+  // A repeat of the row changes nothing; the ACK arriving moves the tally.
+  t.routes["/api/changes"] = browserChanges("C2", {
+    sends: [sendRow(MID1, { kind: "channel", to: "#general", channel: "general", text: "@all freeze main", state: "pending", journaled: true, delivering: false, seq: 5,
+      recipients: { [CC_A]: { outcome: "transport accepted", ack: "acked" }, [CODEX_B]: { outcome: "transport accepted", ack: "acked" },
+        [OC_C]: { outcome: "refused: gone", ack: "not requested" } } })],
+  })
+  await t.app.pollOnce()
+  assert.ok(stream().textContent.includes("2 of 2 ACK'd"))
+  // The history entry replaces the row and carries its own tally.
+  const posted = sendEntry(2, "@all freeze main", { message_id: MID1, sender: WEB, actor: WEB, ts: new Date((T0 + 5) * 1000).toISOString(),
+    delivery: { state: "complete", recipients: [row2(CC_A, "acked", "acked"), row2(CODEX_B, "transport accepted", "pending"), row2(OC_C, "refused: gone", "not requested")] } })
+  t.routes["/api/changes"] = quiet("C3", { channels: { general: { entries: [posted], gap: null } } })
+  await t.app.pollOnce()
+  const after = stream().textContent
+  assert.equal(after.split("freeze main").length - 1, 1, "the row gave way to the entry")
+  assert.ok(after.includes("1 of 2 acknowledged"), after)
+  assert.ok(after.includes("browser-7c0e"), "sent by the browser peer")
+  t.routes["/api/changes"] = quiet("C4", { updates: [{ message_id: MID1, recipient: CODEX_B, ack: "acked" }] })
+  await t.app.pollOnce()
+  assert.ok(stream().textContent.includes("2 of 2 acknowledged"))
+})
+
+function row2(recipient, state, ack) { return { recipient, state, ack } }
+function nameOfShort(typed) { const at = typed.indexOf(":"); const id = typed.slice(at + 1); return typed.slice(0, at + 1) + id.slice(0, 4) + "…" + id.slice(-4) }

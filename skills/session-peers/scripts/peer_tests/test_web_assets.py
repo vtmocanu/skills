@@ -143,6 +143,21 @@ class WebAssetTests(unittest.TestCase):
             "class", "role", "title", "type", "tabindex", "checked", "disabled", "placeholder", "rows", "maxlength"}))
         self.assertEqual(len(attr_names), len(set(attr_names)))
 
+    def test_the_all_confirmation_is_an_in_page_dialog(self):
+        # #162 M2: the @all recipient list is confirmed in a dialog built by el() (a div with
+        # role="dialog" and aria-modal, both inside the existing allowlist), never a native prompt
+        # that can show only a count and cannot list the recipients.
+        self.assertIsNone(re.search(r"\b(?:confirm|alert|prompt)\s*\(", self.js), "native dialog")
+        self.assertNotRegex(self.js, r"\bshowModal\b|\"dialog\"\s*,\s*\{|createElement\(\s*\"dialog\"")
+        self.assertIn('role: "dialog", "aria-modal": "true"', self.js)
+        # Its host sits outside #app, so the page behind can be made inert while it is open.
+        shell = _Shell()
+        shell.feed(self.html)
+        ids = [dict(attrs).get("id") for _tag, attrs in shell.tags]
+        self.assertIn("dialoghost", ids)
+        self.assertGreater(ids.index("dialoghost"), ids.index("mobtabs"))
+        self.assertRegex(self.html, r'</div>\n<div id="dialoghost"></div>\n<script')
+
     def test_timers_take_functions_never_strings(self):
         calls = list(re.finditer(r"\bset(?:Timeout|Interval)\s*\(\s*", self.js))
         self.assertTrue(calls, "the page polls with setTimeout")

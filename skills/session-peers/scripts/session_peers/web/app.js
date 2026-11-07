@@ -38,9 +38,22 @@
   var SEND_TO_MAX = 64;
   var TEXT_MAX = 1048576;
   var MID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-  // The composer's reason line (aria-describedby target) and the M1 @all note shown in it.
+  // The composer's reason line (aria-describedby target) and the @all notes shown in it. Only an
+  // @all to #general is open (preview, then confirm, M2); the server refuses a plain #general post
+  // and an @all anywhere else with 403.
   var REASON_ID = "creason";
-  var ALL_WARN = "@all is not available yet: it needs a confirmation step that a later release adds";
+  var ALL_WARN = "@all only works in #general: open #general to post it to every member";
+  var ALL_GENERAL = " reaches every #general member after you confirm the recipient list";
+  var GENERAL_ONLY_ALL = "In #general you can only post @all, which asks for a confirmation";
+  var PREVIEW_409 = "Couldn't list the recipients yet (discovery pending or incomplete, or none or too many). Try again in a moment.";
+  var CONFIRM_409 = "The preview expired or was used; preview again";
+  var CONFIRM_429 = "Rate limited, try again";
+  var CONFIRM_NONE = "No response from the server. Try again: a preview that was already used is refused, so nothing is sent twice.";
+  var CONFIRM_EXPIRED = "This preview expired. Preview again for a fresh recipient list.";
+  // The confirm dialog: its host (index.html, outside #app so #app can be made inert) and ids.
+  var DIALOG_HOST = "dialoghost";
+  var NONCE_MAX = 128;
+  var EXPIRES_MAX = 600;
   // The Browser feed held in memory: at most the server's own log cap, and as many status rows.
   var FEED_CAP = 1000;
   var ROWS_CAP = 1000;
@@ -684,6 +697,24 @@
       el("div", { class: "acts" }, copyButton(address)));
   }
 
+  // #general's "How @all works" card (the mock's, corrected for #162 M2): it promises only what is
+  // recorded, never that every session gets a turn. The preview step exists only in chat mode.
+  var ALL_CARD = [
+    "The post goes to the #general members discovery found.",
+    "Gone or refused members, idle OpenCode sessions (not woken) and discovery gaps show as their recorded outcomes.",
+    "Every recipient is asked for an ACK; the tally shows who has not answered."
+  ];
+  var ALL_CARD_CHAT = [
+    "Send first lists the recipients; nothing is sent until you confirm that list.",
+    "If membership changes between your preview and the send, nothing is sent and you are asked to preview again."
+  ];
+
+  function renderAllCard() {
+    var lines = ALL_CARD.concat(S.chat ? ALL_CARD_CHAT : []);
+    return el("div", { class: "card small allcard" }, el("b", null, "How @all works"),
+      el("ul", { class: "gates" }, lines.map(function (line) { return el("li", null, line); })));
+  }
+
   function renderDetails(row) {
     if (!row) return [el("h2", null, "Details"), el("p", { class: "muted" }, "No channel selected.")];
     var members = Array.isArray(row.members) ? row.members : [];
@@ -695,6 +726,7 @@
           var working = mine.filter(function (m) { return m.state === "working"; }).length;
           return [el("dt", null, hicon(rt), " " + RT_LABEL[rt]), el("dd", null, mine.length + " live, " + working + " working")];
         }))));
+      out.push(renderAllCard());
     }
     if (row.unreadable) out.push(note("Membership record unreadable.", "warn"));
     members.forEach(function (m) { out.push(renderMemberCard(m, row)); });
@@ -723,7 +755,10 @@
   }
 
   function newCompose() {
-    return { targets: table(), channel: false, busy: false, msg: null, msgTone: null, sig: null, ctxKey: null, reasonKey: null, nodes: null, boxes: [] };
+    // confirm: the open @all confirm dialog (see openConfirm); ackForced/ackSaved: #general forces
+    // "Ask for ACK" on and gives the reader's own choice back on leaving it.
+    return { targets: table(), channel: false, busy: false, msg: null, msgTone: null, sig: null, ctxKey: null, reasonKey: null, nodes: null, boxes: [],
+      confirm: null, ackForced: false, ackSaved: false };
   }
 
   function plainTable(value) {
@@ -810,6 +845,20 @@
       bits.push(el("span", { class: "ackline" + (t.acked < t.total ? " short" : "") }, t.acked + " of " + t.total + " ACK'd"));
     }
     var order = row.state === "queued" ? [] : rowOrder(row);
+    // An @all post (this page's #general broadcast) also shows its tally as named chips, like an
+    // @all entry in the channel history: who has ACKed and who has not, live from the row.
+    if (row.state === "pending" && row.ack_requested && row.kind === "channel" && ALL_RE.test(str(row.text))) {
+      var counted = order.filter(function (typed) {
+        var slot = slots[typed];
+        return slot && typeof slot === "object" && (slot.ack === "acked" || (slot.ack !== "not requested" && !refusedState(slot.outcome)));
+      });
+      if (counted.length) {
+        bits.push(el("div", { class: "tally" }, counted.map(function (typed) {
+          var acked = slots[typed].ack === "acked";
+          return el("span", { class: acked ? "yes" : "no", title: typed + ": " + browserAckText(slots[typed]) }, nameOf(typed));
+        })));
+      }
+    }
     if (order.length) {
       bits.push(el("ul", { class: "drows", "aria-label": "Status per recipient" }, order.map(function (typed) {
         var slot = slots[typed];
@@ -1108,7 +1157,8 @@
 
   // -- composer ------------------------------------------------------------
 
-  // M1: the server refuses #general and any @all text with 403 (the page blocks both before sending).
+  // The server refuses a plain #general post and an @all outside #general with 403 (the page blocks
+  // both before sending); an @all to #general goes through the preview and confirm round-trip.
   var SEND_ERRORS = { 400: "The server could not accept this message", 403: "Refused by the server (token, origin, #general or @all)", 408: "The message reached the server too slowly",
     413: "Message too large", 415: "Refused: wrong content type", 429: "Too fast or queue full — try again", 503: "Chat is not running on the server" };
 
@@ -1117,11 +1167,13 @@
     return (own(SEND_ERRORS, status) || "Not sent") + " (" + status + ")";
   }
 
-  // POST /api/send. Resolves { status, data? }; status 0 is no response at all.
+  // POST /api/send. Resolves { status, data? }; status 0 is no response at all. A 202 (queued) and a
+  // 200 (an @all preview: the recipient list and its confirm nonce) carry a body.
   function postSend(payload) {
     return request(SEND_PATH, payload).then(function (res) {
-      if (res.status !== 202) return { status: res.status };
-      return res.json().then(function (data) { return { status: 202, data: data }; }, function () { return { status: 202, data: null }; });
+      var status = res.status;
+      if (status !== 202 && status !== 200) return { status: status };
+      return res.json().then(function (data) { return { status: status, data: data }; }, function () { return { status: status, data: null }; });
     }, function () { return { status: 0 }; });
   }
 
@@ -1134,7 +1186,6 @@
 
   function blockedReason(ctx) {
     if (S.stopped) return "Sending has stopped: the server refused the token. Reopen the URL peers.py web printed.";
-    if (ctx.kind === "general") return "Sending to #general is not available yet. Pick a channel, or Browser to message sessions directly.";
     if (ctx.kind === "none") return "Open a channel or Browser to send.";
     return null;
   }
@@ -1161,6 +1212,8 @@
 
   function composeTo(ctx) {
     var C = S.compose;
+    // #general takes no picks: an @all post there addresses every member (after a confirmation).
+    if (ctx.kind === "general") return "#general";
     if (ctx.kind === "channel" && C.channel) return "#" + ctx.key;
     if (ctx.kind !== "channel" && ctx.kind !== "browser") return null;
     var list = C.boxes.filter(function (b) { return !b.gone && C.targets[b.typed]; }).map(function (b) { return b.typed; });
@@ -1172,6 +1225,7 @@
     var text = el("textarea", { rows: "2", maxlength: String(TEXT_MAX), placeholder: "Ask, steer or brief a session", "aria-label": "Message", "data-focus": "compose:text" });
     var send = el("button", { class: "send", type: "button", title: "Send (Ctrl+Enter or ⌘+Enter)", "data-focus": "compose:send" }, "Send");
     var ack = el("input", { type: "checkbox", "data-focus": "compose:ack" });
+    var ackLabel = el("label", null, ack, "Ask for ACK");
     var status = el("div", { class: "cstatus", role: "status" });
     var reason = el("div", { class: "creason" });
     reason.id = REASON_ID;
@@ -1180,7 +1234,7 @@
       reason,
       el("div", { class: "box" }, text, send),
       el("div", { class: "opts" },
-        el("label", null, ack, "Ask for ACK"),
+        ackLabel,
         el("span", { class: "authority" }, "Arrives as peer input, not user approval"),
         el("span", { class: "hint" }, "Ctrl/⌘+Enter sends")),
       status);
@@ -1196,13 +1250,18 @@
       }
     });
     on(send, "click", function () { submitCompose(); });
-    return { root: box, targets: targets, text: text, send: send, ack: ack, status: status, reason: reason };
+    return { root: box, targets: targets, text: text, send: send, ack: ack, ackLabel: ackLabel, status: status, reason: reason };
   }
 
   function pickerNodes(ctx, cands) {
     var C = S.compose;
     var out = [];
     C.boxes = [];
+    if (ctx.kind === "general") {
+      out.push(el("span", { class: "who chanpick fixed", title: "An @all post reaches every #general member after you confirm the recipient list" },
+        el("span", { class: "nm" }, chanText("general")), el("span", { class: "muted" }, "everyone, after you confirm")));
+      return out;
+    }
     if (ctx.kind === "channel") {
       var chanBox = el("input", { type: "checkbox", checked: C.channel, "data-focus": "pick:#" });
       S.focusables["pick:#"] = chanBox;
@@ -1260,25 +1319,45 @@
     var n = C.nodes;
     var ctx = composeContext();
     var blocked = blockedReason(ctx);
-    // M1 form of the @all gate: the text stays editable, Send waits until it no longer starts with @all.
-    var allText = !blocked && ALL_RE.test(str(n.text.value));
+    var value = str(n.text.value);
+    // The @all gate: in #general only @all text can be sent (it previews the recipients first);
+    // anywhere else @all text waits, editable, until it no longer starts with @all.
+    var general = !blocked && ctx.kind === "general";
+    var allText = !blocked && ALL_RE.test(value);
+    var plainGeneral = general && !allText && !!value.trim();
     n.text.disabled = !!blocked;
-    n.ack.disabled = !!blocked;
+    var placeholder = general ? "Start with @all to reach every #general member" : "Ask, steer or brief a session";
+    if (n.text.placeholder !== placeholder) n.text.placeholder = placeholder;
+    // An @all always asks for ACKs: in #general the box shows that, checked and fixed.
+    if (general) {
+      if (!C.ackForced) { C.ackSaved = !!n.ack.checked; C.ackForced = true; }
+      n.ack.checked = true;
+      n.ack.disabled = true;
+      n.ackLabel.title = "@all always asks every recipient for an ACK";
+    } else {
+      if (C.ackForced) { n.ack.checked = C.ackSaved; C.ackForced = false; }
+      n.ack.disabled = !!blocked;
+      n.ackLabel.title = "";
+    }
     if (n.root.classList) {
       if (blocked) n.root.classList.add("is-blocked"); else n.root.classList.remove("is-blocked");
     }
-    var reasonKey = blocked || (allText ? ALL_WARN : "");
+    var reasonKey = blocked ? "b|" + blocked : general && allText ? "all-general" : plainGeneral ? "plain-general" : allText ? "all-elsewhere" : "";
     if (C.reasonKey !== reasonKey) {
       C.reasonKey = reasonKey;
-      fill(n.reason, blocked || (allText ? el("span", { class: "allwarn" }, ALL_WARN) : null));
+      fill(n.reason, blocked || (general && allText ? el("span", { class: "allwarn" }, el("b", null, "@all"), ALL_GENERAL)
+        : plainGeneral ? GENERAL_ONLY_ALL : allText ? el("span", { class: "allnote" }, ALL_WARN) : null));
+      if (n.reason.classList) {
+        if (reasonKey === "all-general") n.reason.classList.add("is-all"); else n.reason.classList.remove("is-all");
+      }
     }
     describedBy(n.text, reasonKey ? REASON_ID : null);
     describedBy(n.send, reasonKey ? REASON_ID : null);
     C.boxes.forEach(function (b) { b.box.disabled = b.gone || !!blocked || (ctx.kind === "channel" && C.channel); });
     var to = blocked ? null : composeTo(ctx);
     var tooMany = Array.isArray(to) && to.length > SEND_TO_MAX;
-    n.send.disabled = !!blocked || allText || C.busy || to === null || tooMany || !str(n.text.value).trim();
-    var label = C.busy ? "Sending…" : "Send";
+    n.send.disabled = !!blocked || (general ? !allText : allText) || C.busy || !!C.confirm || to === null || tooMany || !value.trim();
+    var label = C.busy ? (general ? "Previewing…" : "Sending…") : general && allText ? "Preview recipients" : "Send";
     if (n.send.textContent !== label) n.send.textContent = label;
     var msg = tooMany ? "At most " + SEND_TO_MAX + " recipients per send." : C.msg;
     var msgTone = tooMany ? "bad" : C.msgTone;
@@ -1309,11 +1388,13 @@
 
   function submitCompose() {
     var C = S.compose;
-    if (!S.chat || !C || !C.nodes || C.busy) return Promise.resolve(false);
+    if (!S.chat || !C || !C.nodes || C.busy || C.confirm) return Promise.resolve(false);
     var ctx = composeContext();
     var text = str(C.nodes.text.value);
     var to = blockedReason(ctx) ? null : composeTo(ctx);
-    if (to === null || !text.trim() || ALL_RE.test(text) || (Array.isArray(to) && to.length > SEND_TO_MAX)) return Promise.resolve(false);
+    if (to === null || !text.trim() || (Array.isArray(to) && to.length > SEND_TO_MAX)) return Promise.resolve(false);
+    if (ctx.kind === "general") return ALL_RE.test(text) ? previewAll(text) : Promise.resolve(false);
+    if (ALL_RE.test(text)) return Promise.resolve(false);
     var ack = !!C.nodes.ack.checked;
     C.busy = true;
     C.msg = null;
@@ -1342,6 +1423,224 @@
         if (!active || active === document.body || active === C.nodes.send || active === C.nodes.text) C.nodes.text.focus();
       }
       return result.status === 202;
+    });
+  }
+
+  // -- @all to #general: preview, confirm dialog, confirm --------------------
+  //
+  // Send in #general POSTs the @all text without a nonce: a 200 lists the recipients and carries a
+  // single-use nonce bound to that exact set and text. The page shows the list in its own dialog
+  // (never a native browser prompt), and Confirm POSTs the same text with the nonce. The dialog is
+  // modal: #app is made inert, Tab stays inside, Esc cancels, and focus returns to the textarea.
+
+  // The preview body, checked field by field; null when it cannot be used.
+  function readPreview(data) {
+    if (!data || typeof data !== "object") return null;
+    var nonce = data.confirm;
+    if (typeof nonce !== "string" || !nonce || nonce.length > NONCE_MAX) return null;
+    var recipients = (Array.isArray(data.recipients) ? data.recipients : []).filter(function (t) { return typeof t === "string" && t; });
+    if (!recipients.length) return null;
+    var excluded = (Array.isArray(data.excluded) ? data.excluded : []).filter(function (x) {
+      return x && typeof x === "object" && typeof x.member === "string" && x.member;
+    }).map(function (x) { return { member: x.member, reason: str(x.reason) }; });
+    var expires = typeof data.expires_in === "number" && isFinite(data.expires_in) && data.expires_in > 0 ? Math.min(data.expires_in, EXPIRES_MAX) : 0;
+    if (!expires) return null;
+    return { nonce: nonce, recipients: recipients, excluded: excluded, stale: data.stale === true, expires: expires };
+  }
+
+  function previewAll(text) {
+    var C = S.compose;
+    C.busy = true;
+    C.msg = null;
+    C.msgTone = null;
+    updateComposerState();
+    // The expiry counts from before the request left: the server's clock started no earlier.
+    var sentAt = Date.now();
+    return postSend({ to: "#general", text: text, ack: true }).then(function (result) {
+      C.busy = false;
+      var preview = result.status === 200 ? readPreview(result.data) : null;
+      if (preview) {
+        openConfirm(text, preview, sentAt);
+        updateComposerState();
+        return true;
+      }
+      C.msg = result.status === 200 ? "The server's recipient list could not be read; nothing was sent"
+        : result.status === 409 ? PREVIEW_409 : sendErrorText(result.status);
+      C.msgTone = "bad";
+      updateComposerState();
+      return false;
+    });
+  }
+
+  function excludedText(reason) {
+    return reason === "gone" ? "gone, not sent to" : reason ? reason : "left out";
+  }
+
+  function personItem(typed, extra) {
+    var rt = rtOf(typed);
+    return el("li", { class: "who " + rt, title: nameOf(typed) + " (" + typed + ")" },
+      hicon(rt), el("span", { class: "nm" }, nameOf(typed)), el("span", { class: "mono tid" }, typed),
+      extra ? el("span", { class: "why" }, extra) : null);
+  }
+
+  function buildConfirm(cf) {
+    var n = cf.recipients.length;
+    var title = el("h2", null, "Post @all to #general?");
+    title.id = "dlgtitle";
+    var desc = el("p", { class: "dlgdesc" }, "It goes to " + (n === 1 ? "this session" : "these " + n + " sessions") +
+      " as peer input from this browser, and each is asked for an ACK. If #general's members change before it is sent, nothing is sent.");
+    desc.id = "dlgdesc";
+    var msg = el("div", { class: "dlgmsg", role: "status" });
+    msg.id = "dlgmsg";
+    var clockNode = el("span", { class: "countdown" });
+    var cancel = el("button", { type: "button", class: "dlgcancel" }, "Cancel");
+    var confirmBtn = el("button", { type: "button", class: "send dlgok" }, "Send to " + n);
+    var acts = el("div", { class: "dlgacts" }, cancel, confirmBtn);
+    var shown = cf.text.length > 600 ? cf.text.slice(0, 599) + "…" : cf.text;
+    var panel = el("div", { class: "dialog", role: "dialog", "aria-modal": "true", "aria-labelledby": "dlgtitle", "aria-describedby": "dlgdesc dlgmsg", tabindex: "-1" },
+      title, desc,
+      el("div", { class: "dlgquote" }, el("p", { class: "text" }, bodyNodes(shown))),
+      cf.stale ? el("div", { class: "note warn", role: "note" }, "Discovery may be stale: this list comes from the last completed check.") : null,
+      el("div", { class: "dlgsec" }, el("b", null, "Recipients (" + n + ")"),
+        el("ul", { class: "dlglist", "aria-label": "Recipients" }, cf.recipients.map(function (t) { return personItem(t); }))),
+      cf.excluded.length ? el("div", { class: "dlgsec" }, el("b", null, "Not included (" + cf.excluded.length + ")"),
+        el("ul", { class: "dlglist excl", "aria-label": "Not included" }, cf.excluded.map(function (x) { return personItem(x.member, excludedText(x.reason)); }))) : null,
+      el("div", { class: "dlgfoot" }, clockNode, msg),
+      acts);
+    on(cancel, "click", function () { if (!cf.busy) closeConfirm(null, null); });
+    on(confirmBtn, "click", function () { confirmAll(cf); });
+    on(panel, "keydown", function (event) { confirmKey(cf, event); });
+    return { root: el("div", { class: "scrim" }, panel), panel: panel, cancel: cancel, confirm: confirmBtn, acts: acts, msg: msg, clock: clockNode, again: null };
+  }
+
+  function openConfirm(text, preview, sentAt) {
+    var C = S.compose;
+    var cf = { nonce: preview.nonce, text: text, recipients: preview.recipients, excluded: preview.excluded, stale: preview.stale,
+      deadline: sentAt + preview.expires * 1000, busy: false, expired: false, nodes: null };
+    C.confirm = cf;
+    cf.nodes = buildConfirm(cf);
+    fill($(DIALOG_HOST), cf.nodes.root);
+    var app = $("app");
+    if (app) app.inert = true;
+    tickConfirm(cf);
+    updateConfirm(cf);
+    cf.nodes.cancel.focus();
+  }
+
+  // The countdown, from the clock (a background tab's timers are throttled, so never counted ticks).
+  function tickConfirm(cf) {
+    if (S.compose.confirm !== cf || cf.expired) return;
+    var left = Math.ceil((cf.deadline - Date.now()) / 1000);
+    if (left <= 0) {
+      expireConfirm(cf);
+      return;
+    }
+    fill(cf.nodes.clock, "Expires in " + left + " s");
+    if (typeof root.setTimeout === "function") root.setTimeout(function () { tickConfirm(cf); }, 1000);
+  }
+
+  function expireConfirm(cf) {
+    cf.expired = true;
+    fill(cf.nodes.clock, "Expired");
+    setConfirmMsg(cf, CONFIRM_EXPIRED);
+    if (!cf.nodes.again) {
+      cf.nodes.again = on(el("button", { type: "button", class: "send dlgagain" }, "Preview again"), "click", function () {
+        if (cf.busy) return;
+        closeConfirm(null, null);
+        submitCompose();
+      });
+      append(cf.nodes.acts, cf.nodes.again);
+    }
+    var focusWasOk = document.activeElement === cf.nodes.confirm;
+    updateConfirm(cf);
+    if (focusWasOk && !cf.busy) cf.nodes.again.focus();
+  }
+
+  function setConfirmMsg(cf, text) {
+    fill(cf.nodes.msg, text);
+    if (cf.nodes.msg.classList) {
+      if (text) cf.nodes.msg.classList.add("bad"); else cf.nodes.msg.classList.remove("bad");
+    }
+  }
+
+  function updateConfirm(cf) {
+    var n = cf.nodes;
+    n.confirm.disabled = cf.busy || cf.expired;
+    n.cancel.disabled = cf.busy;
+    if (n.again) n.again.disabled = cf.busy;
+    var label = cf.busy ? "Sending…" : "Send to " + cf.recipients.length;
+    if (n.confirm.textContent !== label) n.confirm.textContent = label;
+  }
+
+  // Esc cancels (not while Confirm is in flight); Tab and Shift+Tab cycle inside the dialog.
+  function confirmKey(cf, event) {
+    if (event.key === "Escape" || event.key === "Esc") {
+      if (event.preventDefault) event.preventDefault();
+      if (!cf.busy) closeConfirm(null, null);
+      return;
+    }
+    if (event.key !== "Tab") return;
+    var n = cf.nodes;
+    var stops = [n.cancel, n.again, n.confirm].filter(function (b) { return b && !b.disabled; });
+    if (!stops.length) {
+      if (event.preventDefault) event.preventDefault();
+      n.panel.focus();
+      return;
+    }
+    var at = stops.indexOf(document.activeElement);
+    var next = event.shiftKey ? (at <= 0 ? stops[stops.length - 1] : null) : (at < 0 || at === stops.length - 1 ? stops[0] : null);
+    if (next) {
+      if (event.preventDefault) event.preventDefault();
+      next.focus();
+    }
+  }
+
+  // Close the dialog (dropping its nonce); msg/tone go to the composer's status line.
+  function closeConfirm(msg, msgTone) {
+    var C = S.compose;
+    if (!C || !C.confirm) return;
+    C.confirm.nonce = null;
+    C.confirm = null;
+    fill($(DIALOG_HOST), null);
+    var app = $("app");
+    if (app) app.inert = false;
+    C.msg = msg;
+    C.msgTone = msgTone;
+    updateComposerState();
+    if (C.nodes && C.nodes.text.focus) C.nodes.text.focus();
+  }
+
+  function confirmAll(cf) {
+    var C = S.compose;
+    if (C.confirm !== cf || cf.busy || cf.expired || !cf.nonce) return Promise.resolve(false);
+    cf.busy = true;
+    setConfirmMsg(cf, null);
+    // The buttons disable while it is in flight: keep focus in the dialog, not on <body>.
+    if (document.activeElement === cf.nodes.confirm || document.activeElement === cf.nodes.cancel) cf.nodes.panel.focus();
+    updateConfirm(cf);
+    return postSend({ to: "#general", text: cf.text, ack: true, confirm: cf.nonce }).then(function (result) {
+      cf.busy = false;
+      if (C.confirm !== cf) return false;
+      var status = result.status;
+      if (status === 202) {
+        var data = result.data && typeof result.data === "object" ? result.data : {};
+        var mid = typeof data.message_id === "string" && MID_RE.test(data.message_id) ? data.message_id : null;
+        if (mid) addLocalSend(mid, "#general", cf.text, true);
+        if (C.nodes.text.value === cf.text) C.nodes.text.value = "";
+        closeConfirm("Accepted " + clock(Date.now() / 1000) + " — status in #general", "ok");
+        renderLanes();
+        renderMain({ toBottom: true });
+        return true;
+      }
+      if (status === 429 || status === 0) {
+        // The nonce stays usable (the server charged nothing, or never answered): Confirm again.
+        setConfirmMsg(cf, status === 429 ? CONFIRM_429 : CONFIRM_NONE);
+        updateConfirm(cf);
+        if (!cf.expired && document.activeElement !== cf.nodes.confirm) cf.nodes.confirm.focus();
+        return false;
+      }
+      closeConfirm(status === 409 ? CONFIRM_409 : sendErrorText(status), "bad");
+      return false;
     });
   }
 
@@ -2341,7 +2640,8 @@
     loadAll: loadAll, runSearch: runSearch, tallyOf: tallyOf, copyable: copyable, gapNote: gapNote, start: start,
     toggleTheme: toggleTheme, THEME_KEY: THEME_KEY,
     applyBrowser: applyBrowser, renderSendStatus: renderSendStatus, renderBrowserEntry: renderBrowserEntry, renderComposer: renderComposer,
-    submitCompose: submitCompose, postSend: postSend, sendErrorText: sendErrorText, showBrowser: showBrowser, rowTally: rowTally
+    submitCompose: submitCompose, postSend: postSend, sendErrorText: sendErrorText, showBrowser: showBrowser, rowTally: rowTally,
+    readPreview: readPreview
   };
   // A read-only view of the model for tests and debugging: everything but the token.
   Object.defineProperty(root.PeersApp, "state", {

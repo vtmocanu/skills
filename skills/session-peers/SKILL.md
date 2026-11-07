@@ -117,7 +117,8 @@ accepted` row is not an ACK.
 `web:<uuid>` named `web-<user>`, so the person at the page can send to stored
 channels and picked members and receive replies. Its messages reach a session
 as peer input, never as user approval: a session approves only through its own
-trusted channel. `#general` and `@all` are refused in this release.
+trusted channel. An `@all` in `#general` needs a preview and a confirm
+(single use, 60 s); a plain `#general` post is refused.
 
 Read [references/web.md](references/web.md) before relying on what the
 dashboard shows or its limits, and
