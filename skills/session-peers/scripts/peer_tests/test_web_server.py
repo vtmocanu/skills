@@ -635,6 +635,24 @@ class DeadlineTests(WebBase):
         self.assertLess(cut, 2.5)
         wait_until(lambda: self.server._slots._value == 16, "the slot to come back")
 
+    def test_a_header_deadline_never_dispatches_the_truncated_request(self):
+        dispatched = []
+        with mock.patch.object(web, "HEADER_DEADLINE", 0.5), \
+                mock.patch.object(web.Handler, "_dispatch", lambda handler: dispatched.append(handler.path)):
+            sock = socket.create_connection(("127.0.0.1", self.port), timeout=10)
+            try:
+                sock.sendall(b"GET /app.js HTTP/1.1\r\nHost: 127.0.0.1:%d\r\n" % self.port)
+                self.assertTrue(select.select([sock], [], [], 5)[0], "the connection was not closed")
+                try:
+                    data = sock.recv(65536)
+                except ConnectionResetError:
+                    data = b""
+            finally:
+                sock.close()
+            wait_until(lambda: self.server._slots._value == 16, "the slot to come back")
+        self.assertEqual(data, b"")
+        self.assertEqual(dispatched, [])
+
     def test_sixteen_header_stallers_do_not_block_a_real_request_for_long(self):
         with mock.patch.object(web, "HEADER_DEADLINE", 0.5):
             stalled = []
@@ -854,7 +872,7 @@ class DiscoveryWorkerTests(WebBase):
 
     # -- bounded fan-out ---------------------------------------------------
 
-    def many_codex_channels(self, channels=8, per=63):
+    def many_codex_channels(self, channels=9, per=63):
         members = []
         for index in range(channels):
             roster = ["codex:%s" % new_uuid() for _ in range(per)]
@@ -862,8 +880,9 @@ class DiscoveryWorkerTests(WebBase):
             self.channel("big%d" % index, *roster)
         return members
 
-    def test_a_pass_over_512_codex_members_is_quiet_bounded_and_capped(self):
+    def test_a_pass_over_567_codex_members_checks_64_stays_quiet_within_budget_and_caps_at_512(self):
         members = self.many_codex_channels()
+        self.assertGreaterEqual(len(members), 512)
         calls = []
         real = sp_channels.member_liveness
 
@@ -872,22 +891,23 @@ class DiscoveryWorkerTests(WebBase):
             return real(typed, cache)
 
         stderr = io.StringIO()
-        started = time.monotonic()
-        with contextlib.redirect_stderr(stderr), mock.patch.object(sp_channels, "member_liveness", counting):
+        with mock.patch.object(web, "DISCOVERY_PASS_BUDGET", 3.0), contextlib.redirect_stderr(stderr), \
+                mock.patch.object(sp_channels, "member_liveness", counting):
+            started = time.monotonic()
             result = web.run_discovery()
-        took = time.monotonic() - started
+            took = time.monotonic() - started
         self.assertEqual(stderr.getvalue(), "")
-        self.assertLess(took, web.DISCOVERY_PASS_BUDGET)
-        codex_calls = [m for m in calls if m.startswith("codex:")]
+        self.assertLess(took, 3.0)
+        # the fixture's own channels may add a few non-codex members, so count every subprocess member
         self.assertEqual(len([m for m in calls if not m.startswith("cc:")]), web.SUBPROCESS_MEMBERS_PER_PASS)
         self.assertTrue(result["truncated"])
-        self.assertLessEqual(set(members) & set(result["liveness"]), set(members))
-        self.assertGreater(len(set(members) & set(result["liveness"])), web.SUBPROCESS_MEMBERS_PER_PASS)
-        self.assertEqual({v for k, v in result["liveness"].items() if k.startswith("codex:") and k not in codex_calls},
-                         {"unverified"})
+        self.assertEqual(len(result["liveness"]), web.MEMBERS_TOTAL)
+        unchecked = {k: v for k, v in result["liveness"].items() if k not in set(calls)}
+        self.assertEqual(len(unchecked), web.MEMBERS_TOTAL - len(calls))
+        self.assertEqual(set(unchecked.values()), {"unverified"})
 
-    def test_a_pass_shares_one_cache_across_members(self):
-        self.channel("ops", "oc:" + OC_B, "oc:ses_zzzzzzzzzzzzZZZZZZZZZZZZZZ")
+    def test_a_pass_shares_one_cache_across_cc_and_oc_members(self):
+        self.channel("ops", "cc:" + new_uuid(), "oc:" + OC_B, "oc:ses_zzzzzzzzzzzzZZZZZZZZZZZZZZ")
         caches = []
 
         def liveness(typed, cache=None):
@@ -896,8 +916,60 @@ class DiscoveryWorkerTests(WebBase):
 
         with mock.patch.object(sp_channels, "member_liveness", liveness):
             web.run_discovery()
-        self.assertGreaterEqual(len(caches), 2)
+        self.assertGreaterEqual(len(caches), 3)
         self.assertTrue(all(c is caches[0] and c is not None for c in caches))
+
+    def test_thread_home_is_looked_up_only_for_codex_members_that_were_checked(self):
+        ids = ["codex:%s" % new_uuid() for _ in range(5)]
+        homes = []
+
+        def liveness(typed, cache=None):
+            time.sleep(0.2)
+            return "unverified"
+
+        def thread_home(ident):
+            homes.append(ident)
+            return None
+
+        with mock.patch.object(sp_channels, "general_members", return_value=(ids, {}, [])), \
+                mock.patch.object(sp_channels, "member_liveness", liveness), \
+                mock.patch.object(sp_storage, "thread_home", thread_home), \
+                mock.patch.object(web, "DISCOVERY_PASS_BUDGET", 0.1):
+            result = web.run_discovery()
+        self.assertEqual(homes, [ids[0].partition(":")[2]])
+        self.assertTrue(result["truncated"])
+        with mock.patch.object(sp_channels, "general_members", return_value=(ids, {}, [])), \
+                mock.patch.object(sp_channels, "member_liveness", return_value="unverified"), \
+                mock.patch.object(sp_storage, "thread_home", thread_home), \
+                mock.patch.object(web, "SUBPROCESS_MEMBERS_PER_PASS", 2):
+            homes.clear()
+            web.run_discovery()
+        self.assertEqual(homes, [i.partition(":")[2] for i in ids[:2]])
+
+    def test_opencode_is_not_queried_after_the_pass_deadline_or_for_unchecked_members(self):
+        oc = ["oc:" + OC_B]
+
+        def slow(typed, cache=None):
+            time.sleep(0.2)
+            return "live"
+
+        with mock.patch.object(sp_channels, "general_members", return_value=(oc, {}, [])), \
+                mock.patch.object(sp_channels, "member_liveness", slow), \
+                mock.patch.object(web, "_opencode_view", return_value=({}, {})) as view, \
+                mock.patch.object(web, "DISCOVERY_PASS_BUDGET", 0.1):
+            web.run_discovery()
+        view.assert_not_called()
+        with mock.patch.object(sp_channels, "general_members", return_value=(oc, {}, [])), \
+                mock.patch.object(sp_channels, "member_liveness", return_value="live"), \
+                mock.patch.object(web, "_opencode_view", return_value=({}, {})) as view, \
+                mock.patch.object(web, "SUBPROCESS_MEMBERS_PER_PASS", 0):
+            web.run_discovery()
+        view.assert_not_called()
+        with mock.patch.object(sp_channels, "general_members", return_value=(oc, {}, [])), \
+                mock.patch.object(sp_channels, "member_liveness", return_value="live"), \
+                mock.patch.object(web, "_opencode_view", return_value=({}, {})) as view:
+            web.run_discovery()
+        view.assert_called_once_with(oc)
 
     def test_members_not_reached_before_the_pass_deadline_are_unverified_and_the_answer_partial(self):
         self.ops_channel()
@@ -914,12 +986,15 @@ class DiscoveryWorkerTests(WebBase):
         self.assertEqual(len(reached), 2)  # one per pass: the deadline passed after the first member
         self.assertTrue(result["truncated"])
         self.assertIn("unverified", result["liveness"].values())
-        self.assertTrue(view["partial"])
+        self.assertEqual(view["discovery"], {"stale": False, "pending": False, "truncated": True})
+        self.assertFalse(view["partial"])  # top-level partial is only webdata's read budget
 
     def test_a_complete_pass_is_not_truncated(self):
         self.ops_channel()
         self.assertFalse(web.run_discovery()["truncated"])
-        self.assertFalse(self.ok("/api/state")["partial"])
+        view = self.ok("/api/state")
+        self.assertFalse(view["partial"])
+        self.assertNotIn("truncated", view["discovery"])
 
 
 class NoCreateTests(unittest.TestCase):

@@ -15,10 +15,12 @@ Discovery (who is live, working or idle) shells out and walks registries, so it 
 single-flight worker thread under a process-wide lock inside ``storage.no_create()`` (no state
 directory is created or chmod-ed by looking), and its result is cached for DISCOVERY_TTL seconds. A
 request waits for it at most DISCOVERY_WAIT seconds and then serves the last result marked
-``stale``, or an empty one marked ``pending``. A pass is bounded: DISCOVERY_PASS_BUDGET seconds in
-total and SUBPROCESS_MEMBERS_PER_PASS members that need a subprocess (Codex, OpenCode); members not
-reached are ``unverified`` and the result is marked ``truncated``. The pass runs with ``runtime.log``
-muted on its thread.
+``stale``, or an empty one marked ``pending``. A pass is bounded: it starts no new member checks
+after DISCOVERY_PASS_BUDGET seconds (a check already running, lsof up to 20 s or an OpenCode API call
+up to 30 s, can overrun it; requests never wait longer than DISCOVERY_WAIT) and checks at most
+SUBPROCESS_MEMBERS_PER_PASS members that need a subprocess (Codex, OpenCode); members not reached are
+``unverified`` and the result's ``discovery`` object carries ``truncated``. The pass runs with
+``runtime.log`` muted on its thread.
 
 Handler threads must never resolve CODEX_HOME: discovery's ``storage.codex_home_override`` mutates
 ``os.environ`` process-wide while a pass runs, so a handler reads only what discovery handed it
@@ -175,6 +177,7 @@ def run_discovery():
                     members.append(typed)
         cache, liveness, activity, names, homes = {}, {}, {}, {}, {}
         deadline, subprocess_left, truncated = time.monotonic() + DISCOVERY_PASS_BUDGET, SUBPROCESS_MEMBERS_PER_PASS, False
+        checked = set()
         for typed in members:
             if time.monotonic() >= deadline:
                 liveness[typed], truncated = "unverified", True
@@ -184,6 +187,7 @@ def run_discovery():
                     liveness[typed], truncated = "unverified", True
                     continue
                 subprocess_left -= 1
+            checked.add(typed)
             try:
                 liveness[typed] = sp_channels.member_liveness(typed, cache)
             except Exception:
@@ -195,13 +199,13 @@ def run_discovery():
                 activity[typed], name = _registry_view(typed, kind, ident, liveness[typed] == "live", by_sid)
                 if name:
                     names[typed] = name
-            if kind == "codex":
+            if kind == "codex" and typed in checked:
                 try:
                     homes[ident] = sp_storage.thread_home(ident)
                 except Exception:
                     pass
-        oc_members = [m for m in members if m.startswith("oc:")]
-        if oc_members:
+        oc_members = [m for m in members if m.startswith("oc:") and m in checked]
+        if oc_members and time.monotonic() < deadline:
             oc_activity, oc_names = _opencode_view(oc_members)
             activity.update(oc_activity)
             names.update(oc_names)
@@ -402,8 +406,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return False
         return True
 
+    def _cut_headers(self):
+        self._headers_cut = True
+        self._cut()
+
     def handle_one_request(self):
-        header_timer = threading.Timer(HEADER_DEADLINE, self._cut)
+        self._headers_cut = False
+        header_timer = threading.Timer(HEADER_DEADLINE, self._cut_headers)
         header_timer.daemon = True
         header_timer.start()
         try:
@@ -419,6 +428,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 parsed = self.parse_request()
             finally:
                 header_timer.cancel()
+            if self._headers_cut:  # the deadline truncated the headers: answer nothing
+                self.close_connection = True
+                return
             if not parsed:
                 return
             try:
@@ -531,7 +543,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             found = self.server.discovery.get()
             view = sp_webdata.state_view(found)
             if found.get("truncated"):
-                view["partial"] = True
+                view["discovery"]["truncated"] = True
             return self._send_json(200, view)
         if path.startswith("/api/channel/"):
             key = path[len("/api/channel/"):]
