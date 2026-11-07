@@ -209,6 +209,8 @@ def run_discovery():
             oc_activity, oc_names = _opencode_view(oc_members)
             activity.update(oc_activity)
             names.update(oc_names)
+        elif oc_members:
+            truncated = True
         return {"general": general, "liveness": liveness, "activity": activity, "names": names,
                 "homes": homes, "stale": False, "pending": False, "truncated": truncated}
 

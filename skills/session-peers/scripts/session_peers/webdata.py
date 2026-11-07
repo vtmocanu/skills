@@ -1741,7 +1741,8 @@ def all_channels(next_token=None, budget=None, now=None):
     Channels are ordered by recent activity (meta ``last_ts``, then last seq); a batch is at most
     BATCH_CHANNELS channels with at most BATCH_ENTRIES entries each, merged to the newest PAGE_MAX
     (``trimmed`` counts the older ones left out), oldest first. ``{"entries", "partial", "omitted",
-    "total", "shown", "next", "trimmed"}``: ``shown`` channels so far plus ``omitted`` still to come
+    "total", "shown", "next", "trimmed", "channels"}``: ``channels`` lists every channel key this batch
+    read, in order, including ones with no entries or whose entries were trimmed; ``shown`` channels so far plus ``omitted`` still to come
     equal ``total``; ``partial`` is true when any are omitted or any read was cut short; ``next``
     continues with the omitted channels (WebDataError 409 when the channel list changed
     meanwhile). Never presents a subset as all channels."""
@@ -1761,6 +1762,7 @@ def all_channels(next_token=None, budget=None, now=None):
     return _clean({
         "entries": merged[trimmed:], "partial": partial or bool(rest), "omitted": len(rest),
         "total": total, "shown": total - len(rest), "next": _next_token(rest, base), "trimmed": trimmed,
+        "channels": [key for key, _snap in batch],
     })
 
 

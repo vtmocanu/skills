@@ -881,7 +881,7 @@
   }
 
   function newAll() {
-    return { entries: [], covered: table(), last: table(), trimmed: 0, notes: [], stale: false, staleNotes: [] };
+    return { entries: [], covered: table(), read: table(), last: table(), trimmed: 0, notes: [], stale: false, staleNotes: [] };
   }
 
   function capAll(all) {
@@ -923,6 +923,9 @@
         if (typeof e.channel !== "string" || !e.channel) return;
         all.covered[e.channel] = true;
         if (typeof e.seq === "number" && !(all.last[e.channel] >= e.seq)) all.last[e.channel] = e.seq;
+      });
+      (Array.isArray(data.channels) ? data.channels : []).forEach(function (k) {
+        if (typeof k === "string" && k) all.read[k] = true;
       });
       all.shown = data.shown; all.total = data.total; all.omitted = data.omitted;
       all.next = data.next || null; all.partial = !!data.partial; all.trimmed += data.trimmed || 0;
@@ -987,9 +990,10 @@
         changed = true;
       });
       capAll(all);
-    } else if (all && !all.next && markAllStale("New entries arrived in " + chanText(key) + ", which this view may not include.")) {
-      // While Load more (all.next) remains, an uncovered channel may still come in a later batch,
-      // which the server reads fresh: the view is not stale for it yet.
+    } else if (all && (all.read[key] || !all.next) && markAllStale("New entries arrived in " + chanText(key) + ", which this view may not include.")) {
+      // A channel a batch read (all.read) but whose entries the view does not hold (none, or trimmed)
+      // will not come again: stale. While Load more (all.next) remains, a channel not yet read may
+      // still come in a later batch, which the server reads fresh: the view is not stale for it yet.
       changed = true;
     }
     return changed;
@@ -1400,7 +1404,7 @@
       if (page) {
         body = renderChannelPage(page, { onOlder: function () { loadOlder(key); }, focusSet: opts.focusSet, onFocusTarget: setTarget });
       } else if (S.pageErrors[key] && !S.loading[key]) {
-        body = [el("div", { class: "empty", role: "alert" }, "This channel could not be loaded: the server did not answer. It is tried again with the next update.")];
+        body = [el("div", { class: "empty", role: "alert" }, "This channel could not be loaded: the server did not answer. " + (S.stopped ? "Updates have stopped; reopen the URL peers.py web printed." : "It is tried again with the next update."))];
       } else {
         body = [el("div", { class: "empty" }, "Loading…")];
       }

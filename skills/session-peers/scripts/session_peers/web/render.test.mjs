@@ -1028,6 +1028,49 @@ test("an own __proto__ key in server data never changes a prototype or reaches t
   assert.equal(vm.runInContext("({}).coverage === undefined && ({}).verdict === undefined", env.context), true, "Object.prototype untouched")
 })
 
+const allBatch = (entries, extra) => Object.assign({ entries, partial: false, omitted: 0, total: 3, shown: 3, next: null, trimmed: 0, channels: [] }, extra)
+
+test("All channels: a channel a batch read but returned no entry for never gets 'Showing 3 of 3' without its live entry", async () => {
+  const first = allBatch([Object.assign(sendEntry(1, "from general"), { channel: "general" })], { partial: true, omitted: 1, total: 3, shown: 2, next: "TOK", channels: ["general", "quietch"] })
+  const last = allBatch([Object.assign(sendEntry(1, "from ops"), { channel: "ops" })], { channels: ["ops"] })
+  const env = bootFixture({ "/api/all": (url) => (url.includes("next=TOK") ? last : first) })
+  await env.app.ready
+  await env.app.showAll()
+  env.routes["/api/changes"] = quiet("C1", { channels: { quietch: { entries: [sendEntry(9, "live in quietch")], gap: null } } })
+  await env.app.pollOnce()
+  await env.app.loadAll("TOK")
+  const sub = env.document.byId.sub.textContent
+  const text = env.document.byId.stream.textContent + env.document.byId.notes.textContent
+  assert.ok(!sub.includes("Showing 3 of 3") || text.includes("live in quietch"), sub)
+  assert.ok(sub.startsWith("Out of date"), sub)
+  assert.ok(buttonNamed(env.document.byId.notes, "Reload All channels"))
+})
+
+test("All channels: an entry for a channel not yet read with Load more pending keeps the view current", async () => {
+  const env = bootFixture({ "/api/all": allBatch([Object.assign(sendEntry(1, "from general"), { channel: "general" })], { partial: true, omitted: 1, total: 3, shown: 2, next: "TOK", channels: ["general", "quietch"] }) })
+  await env.app.ready
+  await env.app.showAll()
+  env.routes["/api/changes"] = quiet("C1", { channels: { later: { entries: [sendEntry(9, "live in later")], gap: null } } })
+  await env.app.pollOnce()
+  assert.ok(!env.document.byId.sub.textContent.startsWith("Out of date"), env.document.byId.sub.textContent)
+  assert.ok(!env.document.byId.notes.textContent.includes("Reload All channels"))
+  assert.ok(buttonNamed(env.document.byId.notes, "Load more"))
+})
+
+test("a channel load error says updates stopped after the token was refused", async () => {
+  const env = bootFixture({ "/api/channel/ops": { __status: 502 } })
+  await env.app.ready
+  await env.app.selectChannel("ops")
+  assert.ok(env.document.byId.stream.textContent.includes("tried again with the next update"))
+  env.routes["/api/changes"] = { __status: 403 }
+  await env.app.pollOnce()
+  await env.app.selectChannel("ops")
+  const text = env.document.byId.stream.textContent
+  assert.ok(text.includes("This channel could not be loaded"), text)
+  assert.ok(!text.includes("tried again"), text)
+  assert.ok(text.includes("Updates have stopped"), text)
+})
+
 test("discovery.truncated adds a rail note that some session states were not checked", async () => {
   const state = stateFixture()
   state.discovery.truncated = true

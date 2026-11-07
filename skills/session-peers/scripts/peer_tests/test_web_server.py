@@ -971,6 +971,25 @@ class DiscoveryWorkerTests(WebBase):
             web.run_discovery()
         view.assert_called_once_with(oc)
 
+    def test_skipping_opencode_for_the_deadline_marks_the_pass_truncated(self):
+        oc = ["oc:" + OC_B]
+
+        def slow(typed, cache=None):
+            time.sleep(0.2)
+            return "live"
+
+        with mock.patch.object(sp_channels, "general_members", return_value=(oc, {}, [])), \
+                mock.patch.object(sp_channels, "member_liveness", slow), \
+                mock.patch.object(web, "_opencode_view", return_value=({}, {})) as view, \
+                mock.patch.object(web, "DISCOVERY_PASS_BUDGET", 0.1):
+            result = web.run_discovery()
+        view.assert_not_called()
+        self.assertTrue(result["truncated"])
+        with mock.patch.object(sp_channels, "general_members", return_value=(oc, {}, [])), \
+                mock.patch.object(sp_channels, "member_liveness", return_value="live"), \
+                mock.patch.object(web, "_opencode_view", return_value=({}, {})):
+            self.assertFalse(web.run_discovery()["truncated"])
+
     def test_members_not_reached_before_the_pass_deadline_are_unverified_and_the_answer_partial(self):
         self.ops_channel()
         reached = []

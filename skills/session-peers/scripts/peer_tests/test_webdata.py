@@ -1419,6 +1419,24 @@ class WebdataLargeRequestTests(WebdataBase):
         last = webdata.all_channels(next_token=page["next"], now=1767229200.0)
         self.assertEqual(last["shown"], 64)
 
+    def test_all_channels_names_every_channel_the_batch_read_even_without_entries_in_it(self):
+        key = self.keys[0]  # every other channel is empty
+        write_topic(key, [encode(make_entry(key, n, "channel.note", text="t", ts="2026-01-01T00:%02d:00.000Z" % n))
+                          for n in range(1, 4)])
+        page = webdata.all_channels(now=1767229200.0)
+        self.assertEqual(len(page["channels"]), page["shown"])
+        self.assertEqual(len(set(page["channels"])), len(page["channels"]))
+        tagged = {e["channel"] for e in page["entries"]}
+        self.assertTrue(tagged < set(page["channels"]), "trimmed channels are named although none of their entries came")
+        seen, token = [], None
+        while True:
+            got = webdata.all_channels(next_token=token, now=1767229200.0)
+            seen.extend(got["channels"])
+            token = got["next"]
+            if token is None:
+                break
+        self.assertEqual(sorted(seen), sorted(["general"] + self.keys))
+
     def test_a_token_for_a_changed_channel_list_is_refused(self):
         page = webdata.all_channels()
         stub_channels(1, prefix="zz")
