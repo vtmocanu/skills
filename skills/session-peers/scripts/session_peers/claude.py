@@ -279,7 +279,7 @@ def deliver_to_record(rec, frame):
     try:
         send_frame(sock_path, frame, auth_token=peer_token_for(rec))
     except OSError as exc:
-        sp_runtime.log("delivery to %s failed: %s" % (rec.get("name") or rec.get("pid"), exc))
+        sp_runtime.log("delivery to %r failed: %s" % (rec.get("name") or rec.get("pid"), exc))
         return False
     return True
 

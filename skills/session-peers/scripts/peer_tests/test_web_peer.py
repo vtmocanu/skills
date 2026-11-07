@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import errno
+import queue
 
 from peer_tests.support import *  # noqa: F401,F403
 from peer_tests.test_journal_cli import JournalCliBase
@@ -110,6 +111,7 @@ class WebPeerRecordTests(WebPeerBase):
         peer = self.start_peer()
         path = self.sessions / ("%d.json" % os.getpid())
         self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o644)
+        self.assertEqual(stat.S_IMODE(self.sessions.stat().st_mode), 0o700)
         rec = json.loads(path.read_text())
         self.assertEqual(rec["pid"], os.getpid())
         self.assertEqual(rec["sessionId"], peer.sid)
@@ -355,10 +357,66 @@ class WebPeerCleanupTests(WebPeerBase):
     def test_request_stop_takes_no_lock(self):
         peer = self.start_peer()
         with peer._mutex, peer.stop_event._cond:  # a handler firing inside stop() or wait()
-            peer.request_stop()
+            caller = threading.Thread(target=peer.request_stop, daemon=True)
+            caller.start()
+            caller.join(5)
+            hung = caller.is_alive()
+        self.assertFalse(hung, "request_stop blocked on a lock")
         self.assertTrue(peer.stop_requested)
         peer.stop()
         self.assertFalse(os.path.exists(peer.record_path))
+
+    def _stop_during_the_write(self, after_write):
+        peer = sp_webpeer.BrowserPeer()
+        real = sp_webpeer.sp_runtime.write_json_atomic
+
+        def write(*args, **kwargs):
+            def act():
+                t = threading.Thread(target=peer.stop)
+                t.start()
+                t.join(5)
+
+            if not after_write:
+                act()
+            real(*args, **kwargs)
+            if after_write:
+                peer.request_stop()
+
+        with mock.patch.object(sp_webpeer.sp_runtime, "write_json_atomic", write):
+            with self.assertRaises(sp_webpeer.WebPeerError):
+                peer.start()
+        peer.stop()
+        self.assertEqual(list(self.sessions.iterdir()), [])
+        self.assertFalse(os.path.exists(peer.socket_path))
+
+    def test_a_stop_on_another_thread_before_the_record_write_leaves_no_record(self):
+        self._stop_during_the_write(after_write=False)
+
+    def test_a_request_stop_during_the_record_write_leaves_no_record(self):
+        self._stop_during_the_write(after_write=True)
+
+    def test_stop_shuts_down_accepted_connections_and_never_calls_on_inbound_after(self):
+        peer = self.start_peer()
+        idle = self.client(peer, [], half_close=False)  # blocked in recv, default timeout is long
+        time.sleep(0.2)
+        peer.stop()
+        self.assertIs(idle.line(3), EOF)
+        self.assertFalse(peer._accept.is_alive())
+        self.assertFalse(peer._notifier.is_alive())
+
+    def test_a_stop_during_the_journal_write_closes_unacknowledged_and_skips_on_inbound(self):
+        peer = self.start_peer()
+        real = sp_journal.record_message
+
+        def record_then_stop(*args, **kwargs):
+            out = real(*args, **kwargs)
+            peer.request_stop()
+            return out
+
+        with mock.patch.object(sp_journal, "record_message", record_then_stop):
+            client = self.client(peer, [self.frame("late")])
+            self.assertIs(client.line(5), EOF)
+        self.assertEqual(self.inbound, [])
 
     def test_an_unsafe_socket_directory_is_a_web_peer_error(self):
         elsewhere = self.root / "elsewhere-socks"
@@ -557,6 +615,26 @@ class WebPeerControlTests(WebPeerBase):
         self.assertIsNone(by_id[anonymous["orig_msg_id"]])
         self.assertEqual(self.inbound, [])
 
+    def test_status_frames_reach_on_status_sanitised_in_a_new_dict(self):
+        peer = self.start_peer()
+        raw = {"type": "control", "action": "peer_message_status", "orig_msg_id": "bad\nid",
+               "status": "fa\x1b[31mil\ned" + "z" * 100, "detail": "d\x1b[2J\n" + "y" * 1000,
+               "extra": "x"}
+        self.client(peer, [raw])
+        self.assertTrue(wait_for(lambda: self.statuses))
+        got = self.statuses[0][0]
+        self.assertIsNot(got, raw)
+        self.assertNotIn("extra", got)
+        self.assertIsNone(got["orig_msg_id"])
+        self.assertTrue(re.fullmatch(r"[A-Za-z0-9._-]{1,32}", got["status"]), got["status"])
+        self.assertLessEqual(len(got["detail"]), 512)
+        self.assertTrue(got["detail"].isprintable())
+        odd = dict(raw, orig_msg_id=7, status=["x"], detail={"a": 1})
+        self.client(peer, [odd])
+        self.assertTrue(wait_for(lambda: len(self.statuses) == 2))
+        self.assertEqual(
+            [self.statuses[1][0][k] for k in ("orig_msg_id", "status", "detail")], [None, None, None])
+
 
 class WebPeerOrderingTests(WebPeerBase):
     def test_the_ack_waits_for_the_journal_write(self):
@@ -717,13 +795,76 @@ class WebPeerOrderingTests(WebPeerBase):
             self.send(peer, self.frame("again", listener.path))
         self.assertTrue(wait_for(lambda: len(listener.of_type("user")) == 2))
 
+    def fake_sender(self, n):
+        """A listener and record on its own pid, for calling `_refuse` directly."""
+        return self.add_listener(name="sender-%d" % n, session_id=new_uuid(), pid=os.getpid() + n)
+
+    def test_one_senders_success_does_not_reset_another_senders_notice(self):
+        peer = self.start_peer()
+        a, rec_a = self.fake_sender(1)
+        typed_a = "cc:" + rec_a["sessionId"]
+        exc = sp_journal.JournalFull("journal is full")
+        peer._refuse(mock.Mock(), None, typed_a, rec_a, exc)
+        self.assertTrue(wait_for(lambda: len(a.of_type("user")) == 1))
+        # Another sender's journaled message must not end A's episode.
+        self.assertEqual(self.send(peer, self.frame("b ok"))[0]["action"], "peer_inbox_ack")
+        peer._refuse(mock.Mock(), None, typed_a, rec_a, exc)
+        time.sleep(0.5)
+        self.assertEqual(len(a.of_type("user")), 1)
+
+    def test_a_success_from_the_same_sender_starts_a_new_episode(self):
+        peer = self.start_peer()
+        listener, rec = self.sender()
+        typed = "cc:" + rec["sessionId"]
+        peer._refuse(mock.Mock(), None, typed, rec, sp_journal.JournalFull("full"))
+        self.assertTrue(wait_for(lambda: len(listener.of_type("user")) == 1))
+        self.assertEqual(self.send(peer, self.frame("ok", listener.path))[0]["action"], "peer_inbox_ack")
+        self.assertNotIn(typed, peer._notified)
+
+    def test_the_notified_cap_evicts_one_entry_not_all(self):
+        peer = self.start_peer()
+        with mock.patch.object(sp_webpeer, "_NOTIFIED_MAX", 2):
+            for n in (1, 2, 3):
+                _listener, rec = self.fake_sender(n)
+                peer._refuse(mock.Mock(), None, "cc:x%d" % n, rec, sp_journal.JournalFull("full"))
+        self.assertEqual(list(peer._notified), ["cc:x2", "cc:x3"])
+
+    def test_a_dropped_notice_does_not_count_as_notified(self):
+        peer = self.start_peer()
+        _listener, rec = self.fake_sender(1)
+        exc = sp_journal.JournalFull("full")
+        full = queue.Queue(maxsize=1)
+        full.put_nowait(("filler", {}))
+        peer._notices = full
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            peer._refuse(mock.Mock(), None, "cc:x1", rec, exc)
+        self.assertIn("queue full", err.getvalue())
+        self.assertNotIn("cc:x1", peer._notified)
+        full.get_nowait()
+        peer._refuse(mock.Mock(), None, "cc:x1", rec, exc)
+        self.assertIn("cc:x1", peer._notified)
+
+    def test_a_delivery_failure_log_quotes_the_record_name(self):
+        rec = {"name": "evil\nforged line", "pid": 1, "messagingSocketPath": str(self.socks / "dead.sock")}
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertFalse(sp_claude.deliver_to_record(rec, {"type": "user"}))
+        logged = err.getvalue()
+        self.assertIn("delivery to", logged)
+        self.assertEqual(len([l for l in logged.splitlines() if l.strip()]), 1, logged)
+        self.assertIn("'evil\\nforged line'", logged)
+
     def test_the_client_cap_refuses_extra_connections(self):
         with mock.patch.object(sp_constants, "MAX_CONCURRENT_CLIENTS", 1):
             peer = self.start_peer()
         holder = self.client(peer, [], half_close=False)  # holds the only slot, sends nothing
         time.sleep(0.2)
-        extra = self.client(peer, [self.frame("over the cap")])
-        self.assertIs(extra.line(5), EOF)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            extra = self.client(peer, [self.frame("over the cap")])
+            self.assertIs(extra.line(5), EOF)
+        self.assertIn("1 already in flight", err.getvalue())
         self.assertEqual(self.inbound, [])
         holder.close()
         self.assertTrue(wait_for(lambda: self.send(peer, self.frame("after"))[:1] == [
