@@ -20,13 +20,13 @@
     <span class="live" id="live" role="status"></span>
     <div class="search" role="search">
       <svg width="15" height="15" viewBox="0 0 16 16" aria-hidden="true"><path d="M7 2a5 5 0 1 0 0 10A5 5 0 1 0 7 2" stroke="currentColor" fill="none" stroke-width="1.6"/><path d="m11 11 3.5 3.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
-      <input id="q" type="search" maxlength="256" autocomplete="off" spellcheck="false" placeholder="Search messages, sessions, SHAs (Enter)" aria-label="Search messages">
+      <input id="q" type="search" maxlength="256" autocomplete="off" spellcheck="false" placeholder="Search messages" aria-label="Search messages">
       <select id="scope" aria-label="Search scope">
         <option value="all">All channels</option>
         <option value="channel">This channel</option>
       </select>
     </div>
-    <button class="iconbtn" id="theme" type="button" aria-label="Toggle colour theme" title="Toggle theme"><svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.5a6.5 6.5 0 1 0 0 13z" fill="currentColor"/><path d="M8 1.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 1 0 0-13" stroke="currentColor" fill="none" stroke-width="1.4"/></svg></button>
+    <span class="themebox" id="themebox"></span>
   </header>
 
   <nav class="rail" aria-label="Channels">
@@ -38,7 +38,7 @@
 
   <main id="main">
     <div class="convhead">
-      <h1 id="title">Session peers</h1>
+      <h1 id="title" tabindex="-1">Session peers</h1>
       <span class="badge" id="sub"></span>
       <div class="tabs" role="tablist" aria-label="View" id="viewtabs"></div>
     </div>

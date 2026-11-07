@@ -19,6 +19,10 @@
   var BACKOFF_MAX_MS = 30000;
   var STATE_EVERY = 5;
   var PAGE_LIMIT = 200;
+  // Live appends stop growing memory: a channel page keeps its newest PAGE_CAP entries (more only
+  // when the reader loaded older ones), the All channels view its newest ALL_CAP.
+  var PAGE_CAP = 500;
+  var ALL_CAP = 500;
   var ALERT_WINDOW = 25;
   var JOURNAL_MIB = 8;
   var QUERY_MAX = 256;
@@ -136,11 +140,20 @@
   // Model state (module-local; nothing is persisted)
   // ------------------------------------------------------------------------
 
+  // Every table keyed by server data (channel keys, typed ids) has no prototype: a channel named
+  // "constructor" or "__proto__" is a plain key, never an inherited member.
+  function table() { return Object.create(null); }
+
+  function own(obj, key) {
+    return obj && Object.prototype.hasOwnProperty.call(obj, key) ? obj[key] : undefined;
+  }
+
   var S = {
-    token: null, state: null, names: {}, members: {}, sessions: {}, rows: {},
-    selected: "general", view: "conv", pages: {}, pendingNotes: {}, all: null, search: null,
-    cursor: null, polls: 0, failures: 0, polling: false, stopped: false, timer: null, needState: false,
-    live: { mode: "starting" }, untracked: 0, journalGap: false, pane: "main", focusables: {}
+    token: null, state: null, names: table(), members: table(), sessions: table(), rows: table(),
+    selected: "general", view: "conv", pages: table(), pendingNotes: table(), loading: table(), pageErrors: table(),
+    all: null, search: null, cursor: null, polls: 0, failures: 0, polling: false, stopped: false, timer: null,
+    needState: false, live: { mode: "starting" }, liveText: null, untracked: 0, journalGap: false, pane: "main",
+    focusables: table(), wired: false, waiting: false
   };
 
   var RT_LABEL = { claude: "Claude Code", codex: "Codex", oc: "OpenCode", unknown: "Unknown runtime" };
@@ -218,7 +231,7 @@
 
   function stateDot(state) {
     var cls = "dot" + (state === "working" ? " busy" : state === "unverified" ? " unv" : state === "gone" ? " gone" : "");
-    return el("i", { class: cls, title: STATE_LABEL[state] || "Unverified", "aria-hidden": "true" });
+    return el("i", { class: cls, title: own(STATE_LABEL, state) || "Unverified", "aria-hidden": "true" });
   }
 
   function chip(member) {
@@ -227,7 +240,7 @@
     var state = member.state || "unverified";
     return el("span", { class: "who " + rt + (state === "gone" ? " is-gone" : ""), title: str(typed) },
       hicon(rt), el("span", { class: "nm" }, nameOf(typed)), stateDot(state),
-      el("span", { class: "sr" }, ", " + (STATE_LABEL[state] || "Unverified")));
+      el("span", { class: "sr" }, "(" + (own(STATE_LABEL, state) || "Unverified") + ")"));
   }
 
   function nameRef(typed) {
@@ -312,7 +325,9 @@
       var bits = [el("i", { "aria-hidden": "true" }), nameRef(row.recipient), el("span", { class: "out" }, state)];
       if ("ack" in row && row.ack !== "acked") bits.push(el("span", { class: "ack" }, ackText(row.ack)));
       if (row.transport_error) bits.push(el("span", { class: "terr" }, "transport error: " + str(row.transport_error)));
-      return el("li", { class: "drow t-" + tone(row.transport_error ? "skipped: gone" : state) }, bits);
+      // A transport error marks a failure unless the recipient's ACK proves it was read anyway.
+      var failed = row.transport_error && state !== "acked" && row.ack !== "acked";
+      return el("li", { class: "drow t-" + (failed ? "bad" : tone(state)) }, bits);
     });
     return el("div", { class: "delivery" },
       el("span", { class: "dstate t-" + tone(delivery.state) }, "Delivery: " + str(delivery.state)),
@@ -354,7 +369,8 @@
   // ------------------------------------------------------------------------
 
   function sysline(kind, children, entry, opts) {
-    return el("div", { class: "sysline k-" + kind, "data-seq": entry && typeof entry.seq === "number" ? entry.seq : null },
+    return el("div", { class: "sysline k-" + kind, "data-seq": entry && typeof entry.seq === "number" ? entry.seq : null,
+      tabindex: opts && opts.focusTarget ? "-1" : null },
       children, opts && opts.channel && entry.channel ? el("span", { class: "where" }, " in " + chanText(entry.channel)) : null,
       entry && entry.ts !== undefined && entry.ts !== null ? el("span", { class: "at" }, clock(entry.ts)) : null);
   }
@@ -402,7 +418,7 @@
       });
       if (lines.length) body.push(el("ul", { class: "postcov" }, lines));
     }
-    return el("div", { class: "msg", "data-seq": typeof entry.seq === "number" ? entry.seq : null },
+    return el("div", { class: "msg", "data-seq": typeof entry.seq === "number" ? entry.seq : null, tabindex: opts.focusTarget ? "-1" : null },
       el("div", { class: "avatar " + rt, "aria-hidden": "true" }, iconSvg(rt)),
       el("div", { class: "msgmain" },
         el("div", { class: "meta" },
@@ -433,12 +449,21 @@
     return sysline("other", el("span", { class: "othertext" }, str(entry.text)), entry, opts);
   }
 
+  // opts.focusSet: entries just loaded; the first of them in page order becomes focusable
+  // (tabindex -1) and is handed to opts.onFocusTarget so focus can move to it.
   function renderEntries(entries, opts) {
+    opts = opts || {};
     var out = [];
     var lastDay = null;
+    var marked = false;
     (entries || []).forEach(function (entry) {
-      var node = renderEntry(entry, opts);
+      var mark = !marked && Array.isArray(opts.focusSet) && opts.focusSet.indexOf(entry) >= 0;
+      var node = renderEntry(entry, mark ? Object.assign({}, opts, { focusTarget: true }) : opts);
       if (!node) return;
+      if (mark) {
+        marked = true;
+        if (opts.onFocusTarget) opts.onFocusTarget(node);
+      }
       var key = entry && entry.ts !== undefined ? dayKey(entry.ts) : "";
       if (key && key !== lastDay) {
         out.push(el("div", { class: "day" }, dayLabel(entry.ts)));
@@ -454,7 +479,9 @@
     var out = [];
     if (!page) return out;
     if (page.next !== null && page.next !== undefined) {
-      out.push(on(el("button", { class: "older", type: "button" }, "Load older"), "click", function () {
+      var older = el("button", { class: "older", type: "button", "data-focus": "more:older" }, "Load older");
+      S.focusables["more:older"] = older;
+      out.push(on(older, "click", function () {
         if (opts.onOlder) opts.onOlder();
       }));
     } else {
@@ -480,7 +507,9 @@
     var reason = gap && typeof gap === "object" ? gap.reason : null;
     if (reason === "pruned") return "Older entries were pruned from this channel's history; showing its latest page.";
     if (reason === "regression") return "This channel's history went backwards (rewritten); showing its latest page.";
-    return "Too many new entries to stream (" + str(reason || "gap") + "); showing this channel's latest page.";
+    if (reason === "budget") return "Not all new entries could be read in this update (read budget) — reloaded the latest page.";
+    if (reason === "limit") return "Too many new entries to stream at once — reloaded the latest page.";
+    return "Some new entries could not be streamed (" + str(reason || "gap") + ") — reloaded the latest page.";
   }
 
   function renderCoverage(kind, row) {
@@ -534,7 +563,8 @@
       members.forEach(function (m) { var rt = rtOf(m.typed); if (rt in counts) counts[rt] += 1; });
       body = [el("div", { class: "lineage" }, "Every live session on this machine"),
         el("div", { class: "members" }, ["claude", "codex", "oc"].map(function (rt) {
-          return el("span", { class: "who " + rt, title: counts[rt] + " " + RT_LABEL[rt] }, hicon(rt), String(counts[rt]));
+          return el("span", { class: "who " + rt, title: counts[rt] + " " + RT_LABEL[rt] }, hicon(rt), String(counts[rt]),
+            el("span", { class: "sr" }, RT_LABEL[rt] + (counts[rt] === 1 ? " session" : " sessions")));
         }))];
     } else {
       var chain = chainText(row);
@@ -545,12 +575,20 @@
     var lane = el("div", { class: "lane", role: "button", tabindex: "0", "aria-current": current ? "true" : null, "data-focus": "lane:" + key },
       el("div", { class: "lanetop" }, el("span", { class: "lanename" }, chanLabel(key)), alertBadge(row.alert)), body);
     S.focusables["lane:" + key] = lane;
-    return onActivate(lane, function () { select(key); });
+    return onActivate(lane, function () { select(key, { fromRail: true }); });
   }
 
   function renderRail(state, selected, select) {
     var rows = state && Array.isArray(state.channels) ? state.channels : [];
     return rows.map(function (row) { return renderLane(row, row.key === selected, select || function () {}); });
+  }
+
+  // The shim saves its requester as a bare Claude session id (budget_sender_sid): name it through
+  // its typed form, falling back to the shortened typed id.
+  function requesterTyped(sid) {
+    var text = str(sid);
+    if (S.names[text] || text.indexOf(":") >= 0) return text;
+    return "cc:" + text;
   }
 
   function budgetNodes(details) {
@@ -568,7 +606,7 @@
     if (rb.expired) extra.push("window expired, nothing counted");
     if (rb.pending) extra.push("pending: " + (Array.isArray(rb.pending_kinds) ? rb.pending_kinds.join(", ") : "change"));
     return [el("dt", null, "Replies left"),
-      el("dd", null, left + " of " + cap + " toward ", nameRef(rb.requester),
+      el("dd", null, left + " of " + cap + " toward ", nameRef(requesterTyped(rb.requester)),
         el("div", { class: "meter w" + tenth + (cap > 0 && left / cap < 0.1 ? " low" : ""), role: "img", "aria-label": left + " of " + cap + " replies left" }, el("span")),
         el("small", { class: "muted" }, str(rb.label || "as last saved by the shim") + (extra.length ? "; " + extra.join("; ") : "")))];
   }
@@ -594,7 +632,7 @@
     var rt = rtOf(member.typed);
     var address = typeof details.address === "string" ? details.address : str(member.typed);
     var state = details.state || member.state || "unverified";
-    var kv = [el("dt", null, "State"), el("dd", null, STATE_LABEL[state] || "Unverified"),
+    var kv = [el("dt", null, "State"), el("dd", null, own(STATE_LABEL, state) || "Unverified"),
       el("dt", null, "Address"), el("dd", { class: "mono" }, address)];
     if (rt === "codex") kv = kv.concat(budgetNodes(details));
     return el("div", { class: "card" },
@@ -662,18 +700,20 @@
 
   function setState(data) {
     S.state = data && typeof data === "object" ? data : { channels: [], sessions: [] };
-    var names = {}, members = {}, rows = {}, sessions = {};
+    var names = table(), members = table(), rows = table(), sessions = table();
     (Array.isArray(S.state.channels) ? S.state.channels : []).forEach(function (row) {
-      rows[row.key] = row;
+      if (!row || typeof row !== "object") return;
+      rows[str(row.key)] = row;
       (Array.isArray(row.members) ? row.members : []).forEach(function (m) {
-        members[m.typed] = m;
-        if (typeof m.name === "string" && m.name) names[m.typed] = m.name;
+        if (!m || typeof m !== "object") return;
+        members[str(m.typed)] = m;
+        if (typeof m.name === "string" && m.name) names[str(m.typed)] = m.name;
       });
     });
-    (Array.isArray(S.state.sessions) ? S.state.sessions : []).forEach(function (s) { sessions[s.member] = s; });
+    (Array.isArray(S.state.sessions) ? S.state.sessions : []).forEach(function (s) { if (s && typeof s === "object") sessions[str(s.member)] = s; });
     S.names = names; S.members = members; S.rows = rows; S.sessions = sessions;
     if (typeof S.state.untracked === "number") S.untracked = S.state.untracked;
-    if (!rows[S.selected]) S.selected = rows.general ? "general" : (S.state.channels[0] ? S.state.channels[0].key : "general");
+    if (!rows[S.selected]) S.selected = rows.general ? "general" : (S.state.channels && S.state.channels[0] ? str(S.state.channels[0].key) : "general");
   }
 
   function refreshState() {
@@ -693,19 +733,72 @@
     return {
       channel: page.channel, info: page.info || {}, entries: Array.isArray(page.entries) ? page.entries.slice() : [],
       next: page.next === undefined ? null : page.next, partial: !!page.partial, journal_partial: !!page.journal_partial,
-      coverage: page.coverage || {}, gap: page.gap || null, notes: []
+      coverage: page.coverage || {}, gap: page.gap || null, notes: [], cap: PAGE_CAP
     };
   }
 
+  // Keep a page's newest page.cap entries; "Load older" (page.next) then reaches what was dropped.
+  function capPage(page) {
+    var drop = page.entries.length - page.cap;
+    if (drop <= 0) return;
+    page.entries = page.entries.slice(drop);
+    var first = firstSeq(page.entries);
+    if (first !== null) page.next = first;
+  }
+
+  // Entries after the page's newest seq go on the end (a seq at or below it is already there).
+  function appendToPage(page, entries) {
+    var changed = false;
+    var last = lastSeq(page.entries);
+    entries.forEach(function (e) {
+      if (!e || typeof e !== "object") return;
+      if (last === null || typeof e.seq !== "number" || e.seq > last) {
+        page.entries.push(e);
+        if (typeof e.seq === "number") last = e.seq;
+        changed = true;
+      }
+    });
+    if (changed) capPage(page);
+    return changed;
+  }
+
+  // One latest-page load per channel at a time. While it is in flight, live entries and updates for
+  // that channel are buffered in S.loading[key] and applied (deduplicated by seq) to the page it
+  // returns, so a poll that lands mid-load loses nothing. A second request while loading (a gap)
+  // fetches again once the first answer arrives.
   function loadLatest(key, extraNote) {
+    var buf = S.loading[key];
+    if (buf) {
+      if (extraNote) buf.notes.push(extraNote);
+      buf.again = true;
+      return buf.promise;
+    }
+    buf = { entries: [], updates: [], notes: extraNote ? [extraNote] : [], again: false, promise: null };
+    S.loading[key] = buf;
+    buf.promise = fetchLatest(key, buf);
+    return buf.promise;
+  }
+
+  function fetchLatest(key, buf) {
+    buf.again = false;
     return api(pageUrl(key)).then(function (data) {
+      if (buf.again) return fetchLatest(key, buf);
       var page = normalizePage(data);
       var pending = S.pendingNotes[key];
       if (pending) { page.notes.push(pending); delete S.pendingNotes[key]; }
-      if (extraNote) page.notes.push(extraNote);
+      buf.notes.forEach(function (text) { if (page.notes.indexOf(text) < 0) page.notes.push(text); });
       if (page.gap) page.notes.push("Part of this page could not be read within the request budget.");
+      if (S.loading[key] === buf) delete S.loading[key];
+      delete S.pageErrors[key];
       S.pages[key] = page;
+      appendToPage(page, buf.entries);
+      buf.updates.forEach(function (u) { applyUpdate(u, key); });
+      capPage(page);
       return page;
+    }, function (err) {
+      if (S.loading[key] === buf) delete S.loading[key];
+      if (!S.pages[key]) S.pageErrors[key] = true;
+      throw err;
     });
   }
 
@@ -715,56 +808,88 @@
     var stream = $("stream");
     var before = stream ? stream.scrollHeight - stream.scrollTop : 0;
     return api(pageUrl(key, page.next)).then(function (data) {
+      if (S.pages[key] !== page) return;  // the page was reloaded meanwhile
       var older = normalizePage(data);
       var first = firstSeq(page.entries);
-      var add = older.entries.filter(function (e) { return first === null || typeof e.seq !== "number" || e.seq < first; });
+      var add = older.entries.filter(function (e) { return e && (first === null || typeof e.seq !== "number" || e.seq < first); });
       page.entries = add.concat(page.entries);
+      page.cap = Math.max(page.cap, page.entries.length);  // what the reader asked for stays
       page.next = older.next;
       page.partial = page.partial || older.partial;
       page.journal_partial = page.journal_partial || older.journal_partial;
-      renderMain({ keepFromBottom: before });
+      renderMain({ keepFromBottom: before, focusMore: "more:older", focusSet: add });
     }, showError);
   }
 
   function firstSeq(entries) {
-    for (var i = 0; i < entries.length; i++) if (typeof entries[i].seq === "number") return entries[i].seq;
+    for (var i = 0; i < entries.length; i++) if (entries[i] && typeof entries[i].seq === "number") return entries[i].seq;
     return null;
   }
 
   function lastSeq(entries) {
-    for (var i = entries.length - 1; i >= 0; i--) if (typeof entries[i].seq === "number") return entries[i].seq;
+    for (var i = entries.length - 1; i >= 0; i--) if (entries[i] && typeof entries[i].seq === "number") return entries[i].seq;
     return null;
   }
 
-  function selectChannel(key) {
+  // opts.fromRail: picked in the channel list; on a narrow screen show the conversation and, on a
+  // phone (where the list disappears), move focus to its title.
+  function selectChannel(key, opts) {
     S.selected = key;
     S.view = "conv";
     S.search = null;
     var ready = S.pages[key] ? Promise.resolve() : loadLatest(key);
     renderChrome();
     renderMain({ toBottom: true });
-    if (isPhone()) setPane("main");
-    return ready.then(function () { renderMain({ toBottom: true }); }, showError);
+    if (isNarrow() && S.pane !== "main") setPane("main");
+    if (opts && opts.fromRail && isPhone()) focusId("title");
+    return ready.then(function () { if (S.view === "conv" && S.selected === key) renderMain({ toBottom: true }); }, function (err) {
+      if (S.view === "conv" && S.selected === key) renderMain({});
+      showError(err);
+    });
+  }
+
+  function newAll() {
+    return { entries: [], covered: table(), last: table(), trimmed: 0, notes: [], stale: false, staleNotes: [] };
+  }
+
+  function capAll(all) {
+    var drop = all.entries.length - ALL_CAP;
+    if (drop <= 0) return;
+    all.entries = all.entries.slice(drop);
+    all.trimmed += drop;
+  }
+
+  // The All channels view no longer covers every channel it claims (a new channel, a gap in a
+  // covered one, entries from a channel it may not hold): say so and offer a reload; opening the
+  // view again reloads it from the start.
+  function markAllStale(text) {
+    if (!S.all) return false;
+    S.all.stale = true;
+    if (S.all.staleNotes.indexOf(text) < 0) S.all.staleNotes.push(text);
+    return S.view === "all";
   }
 
   function loadAll(next) {
     var url = "/api/all" + (next ? "?next=" + encodeURIComponent(next) : "");
     return api(url).then(function (data) {
-      var entries = Array.isArray(data.entries) ? data.entries : [];
-      if (!next || !S.all) {
-        S.all = { entries: [], covered: {}, trimmed: 0, notes: [] };
-      }
+      var entries = (Array.isArray(data.entries) ? data.entries : []).filter(function (e) { return e && typeof e === "object"; });
+      if (!next || !S.all) S.all = newAll();
       var all = S.all;
       all.entries = all.entries.concat(entries);
       all.entries.sort(function (a, b) { return stamp(a.ts) - stamp(b.ts); });
-      entries.forEach(function (e) { if (e.channel) all.covered[e.channel] = true; });
+      entries.forEach(function (e) {
+        if (typeof e.channel !== "string" || !e.channel) return;
+        all.covered[e.channel] = true;
+        if (typeof e.seq === "number" && !(all.last[e.channel] >= e.seq)) all.last[e.channel] = e.seq;
+      });
       all.shown = data.shown; all.total = data.total; all.omitted = data.omitted;
       all.next = data.next || null; all.partial = !!data.partial; all.trimmed += data.trimmed || 0;
-      renderMain({ toBottom: !next });
+      capAll(all);
+      if (S.view === "all") renderMain(next ? { focusMore: "more:all", focusSet: entries } : { toBottom: true });
     }, function (err) {
       if (err && err.status === 409) {
         S.all = null;
-        return loadAll(null).then(function () { if (S.all) S.all.notes.push("The channel list changed; reloaded from the start."); renderMain({}); });
+        return loadAll(null).then(function () { if (S.all) S.all.notes.push("The channel list changed; reloaded from the start."); if (S.view === "all") renderMain({}); });
       }
       showError(err);
     });
@@ -773,6 +898,7 @@
   function showAll() {
     S.view = "all";
     S.search = null;
+    if (S.all && S.all.stale) S.all = null;
     renderChrome();
     renderMain({ toBottom: true });
     return S.all ? Promise.resolve() : loadAll(null);
@@ -781,14 +907,14 @@
   function runSearch(q, scope, next) {
     var url = "/api/search?q=" + encodeURIComponent(q) + "&scope=" + encodeURIComponent(scope) + (next ? "&next=" + encodeURIComponent(next) : "");
     return api(url).then(function (data) {
-      var matches = Array.isArray(data.matches) ? data.matches : [];
+      var matches = (Array.isArray(data.matches) ? data.matches : []).filter(function (m) { return m && typeof m === "object"; });
       if (!next || !S.search) S.search = { q: q, scope: scope, matches: [], notes: [] };
       S.search.matches = S.search.matches.concat(matches);
       S.search.searched = data.searched_channels; S.search.total = data.total_channels;
       S.search.next = data.next || null; S.search.partial = !!data.partial; S.search.window = data.window;
       S.view = "search";
       renderChrome();
-      renderMain({ toTop: !next });
+      renderMain(next ? { toTop: false, focusMore: "more:search", focusSet: matches } : { toTop: true });
     }, function (err) {
       if (err && err.status === 409) {
         S.search = { q: q, scope: scope, matches: [], notes: ["The channel list changed; search again."] };
@@ -801,30 +927,37 @@
   }
 
   function appendEntries(key, entries) {
-    var page = S.pages[key];
     var changed = false;
-    if (page) {
-      var last = lastSeq(page.entries);
+    var buf = S.loading[key];
+    if (buf) buf.entries = buf.entries.concat(entries);
+    var page = S.pages[key];
+    if (page && appendToPage(page, entries)) changed = true;
+    var all = S.all;
+    if (all && all.covered[key]) {
       entries.forEach(function (e) {
-        if (last === null || typeof e.seq !== "number" || e.seq > last) { page.entries.push(e); changed = true; }
+        if (!e || typeof e !== "object") return;
+        var last = all.last[key];
+        if (typeof e.seq === "number") {
+          if (typeof last === "number" && e.seq <= last) return;
+          all.last[key] = e.seq;
+        }
+        all.entries.push(Object.assign({}, e, { channel: key }));
+        changed = true;
       });
-    }
-    if (S.all && S.all.covered[key]) {
-      entries.forEach(function (e) {
-        var tagged = Object.assign({}, e, { channel: key });
-        S.all.entries.push(tagged);
-      });
+      capAll(all);
+    } else if (all && markAllStale("New entries arrived in " + chanText(key) + ", which this view may not include.")) {
       changed = true;
     }
     return changed;
   }
 
-  function eachSend(mid, channel, fn) {
+  function eachSend(mid, channel, fn, onlyKey) {
     var lists = [];
     Object.keys(S.pages).forEach(function (key) {
+      if (onlyKey !== undefined && key !== onlyKey) return;
       if (!channel || key === channel) lists.push(S.pages[key].entries);
     });
-    if (S.all) lists.push(S.all.entries.filter(function (e) { return !channel || e.channel === channel; }));
+    if (S.all && onlyKey === undefined) lists.push(S.all.entries.filter(function (e) { return !channel || e.channel === channel; }));
     lists.forEach(function (list) {
       list.forEach(function (e) {
         if (e && e.kind === "send" && e.message_id === mid && e.delivery && typeof e.delivery === "object") fn(e);
@@ -834,35 +967,59 @@
 
   function findRow(delivery, recipient) {
     var rows = Array.isArray(delivery.recipients) ? delivery.recipients : (delivery.recipients = []);
-    for (var i = 0; i < rows.length; i++) if (rows[i].recipient === recipient) return rows[i];
+    for (var i = 0; i < rows.length; i++) if (rows[i] && rows[i].recipient === recipient) return rows[i];
     return null;
   }
 
-  function applyUpdate(u) {
+  function refusedState(state) {
+    return str(state).indexOf("refused: ") === 0;
+  }
+
+  // A send's settled delivery, merged as channels.delivery_rows builds it: a recipient the update
+  // names takes its outcome; one it does not name takes the send's state, or "unknown" when the
+  // state is "complete" (no recorded outcome). A refused row keeps its refusal, an acked row stays
+  // acked, and the journaled ACK field is left as it is.
+  function mergeDelivery(d, ud) {
+    var settled = typeof ud.state === "string" && ud.state ? ud.state : null;
+    if (settled) d.state = settled;
+    var named = table();
+    (Array.isArray(ud.recipients) ? ud.recipients : []).forEach(function (r) {
+      if (r && typeof r.recipient === "string") named[r.recipient] = str(r.state);
+    });
+    var rows = Array.isArray(d.recipients) ? d.recipients : (d.recipients = []);
+    rows.forEach(function (row) {
+      if (!row || refusedState(row.state) || row.state === "acked" || row.ack === "acked") return;
+      if (row.recipient in named) row.state = named[row.recipient];
+      else if (settled) row.state = settled === "complete" ? "unknown" : settled;
+    });
+    Object.keys(named).forEach(function (recipient) {
+      if (!findRow(d, recipient)) rows.push({ recipient: recipient, state: named[recipient] });
+    });
+  }
+
+  // onlyKey: apply to that channel's page only (a buffered update replayed onto a fresh page).
+  function applyUpdate(u, onlyKey) {
     if (!u || typeof u !== "object" || typeof u.message_id !== "string") return false;
     var hit = false;
     eachSend(u.message_id, u.delivery ? u.channel : null, function (entry) {
       var d = entry.delivery;
       if (u.delivery && typeof u.delivery === "object") {
-        if (u.delivery.state) d.state = u.delivery.state;
-        (Array.isArray(u.delivery.recipients) ? u.delivery.recipients : []).forEach(function (row) {
-          var mine = findRow(d, row.recipient);
-          if (!mine) d.recipients.push({ recipient: row.recipient, state: row.state });
-          else if (mine.state !== "acked" && str(mine.state).indexOf("refused: ") !== 0) mine.state = row.state;
-        });
+        mergeDelivery(d, u.delivery);
       } else if (typeof u.recipient === "string") {
         var r = findRow(d, u.recipient);
-        if (r && str(r.state).indexOf("refused: ") !== 0) {
+        if (r && !refusedState(r.state)) {
           if (u.ack) { r.ack = u.ack; if (u.state) r.state = u.state; }
           if (u.transport_error) r.transport_error = u.transport_error;
         }
       } else if (u.ack) {
-        d.recipients.forEach(function (row) { if ("ack" in row && row.ack !== "acked" && str(row.state).indexOf("refused: ") !== 0) row.ack = u.ack; });
+        (Array.isArray(d.recipients) ? d.recipients : []).forEach(function (row) {
+          if (row && "ack" in row && row.ack !== "acked" && !refusedState(row.state)) row.ack = u.ack;
+        });
         d.partial = true;
       }
       if (entry.tally) entry.tally = tallyOf(d.recipients);
       hit = true;
-    });
+    }, onlyKey);
     return hit;
   }
 
@@ -872,20 +1029,30 @@
     var reloads = [];
     var chans = data.channels && typeof data.channels === "object" ? data.channels : {};
     Object.keys(chans).forEach(function (key) {
-      var c = chans[key] || {};
-      if (c.new) { S.needState = true; return; }
-      if (c.gap) { reloads.push([key, c.gap]); return; }
+      var c = chans[key] && typeof chans[key] === "object" ? chans[key] : {};
+      if (c.new) {
+        S.needState = true;
+        if (markAllStale("A new channel exists (" + chanText(key) + "); this view does not include it.")) changed = true;
+        return;
+      }
+      if (c.gap) {
+        reloads.push([key, c.gap]);
+        if (S.all && S.all.covered[key] && markAllStale(chanText(key) + " has entries this view could not stream; it may be incomplete.")) changed = true;
+        return;
+      }
       if (Array.isArray(c.entries) && c.entries.length && appendEntries(key, c.entries)) changed = true;
     });
-    (Array.isArray(data.updates) ? data.updates : []).forEach(function (u) { if (applyUpdate(u)) changed = true; });
+    var updates = Array.isArray(data.updates) ? data.updates : [];
+    updates.forEach(function (u) { if (applyUpdate(u)) changed = true; });
+    Object.keys(S.loading).forEach(function (key) { S.loading[key].updates = S.loading[key].updates.concat(updates); });
     if (typeof data.cursor === "string" && data.cursor) S.cursor = data.cursor;
     S.untracked = typeof data.untracked === "number" ? data.untracked : 0;
-    S.journalGap = !!data.journal_gap;
+    if (data.journal_gap) S.journalGap = true;  // sticky until a fresh state and page load
     S.live = { mode: "live", partial: !!data.partial };
     var waits = reloads.map(function (pair) {
       var key = pair[0], text = gapNote(pair[1]);
-      if (S.pages[key] || key === S.selected) {
-        return loadLatest(key, text).then(function () { changed = true; });
+      if (S.pages[key] || S.loading[key] || key === S.selected) {
+        return loadLatest(key, text).then(function () { changed = true; }, function () {});
       }
       S.pendingNotes[key] = text;
       return Promise.resolve();
@@ -898,22 +1065,43 @@
     });
   }
 
+  // A fresh start: state, cursor and the selected channel's latest page; drops what the old
+  // cursor implied (sticky journal gap, the All channels view).
+  function reloadFresh() {
+    return refreshState().then(function () { return loadLatest(S.selected); }).then(function () {
+      S.journalGap = false;
+      if (S.all) markAllStale("The live position was reset; reload All channels.");
+      renderRailNotes();
+      if (S.view === "conv") renderMain({ toBottom: true });
+    });
+  }
+
+  // After a poll succeeds, a selected channel whose page never arrived (the server was down when
+  // it was picked) is loaded again.
+  function recoverSelected() {
+    var key = S.selected;
+    if (S.view !== "conv" || S.pages[key] || S.loading[key]) return Promise.resolve();
+    return loadLatest(key).then(function () {
+      if (S.view === "conv" && S.selected === key) renderMain({ toBottom: true });
+    }, function () {});
+  }
+
   function pollOnce() {
     if (S.polling || S.stopped) return Promise.resolve(false);
     if (!S.cursor) {
       // The first state read failed: retry it (it supplies the cursor) before polling.
       S.polling = true;
-      return refreshState().then(function () { return loadLatest(S.selected); }).then(function () {
+      return reloadFresh().then(function () {
         S.failures = 0;
         S.live = { mode: "live" };
         renderLive();
-        renderMain({ toBottom: true });
         return true;
       }, function (err) {
         S.failures += 1;
         if (err && (err.status === 401 || err.status === 403)) S.stopped = true;
         S.live = S.stopped ? { mode: "stopped" } : { mode: "retry", delay: delay() };
         renderLive();
+        if (S.view === "conv") renderMain({});
         return false;
       }).then(function (result) { S.polling = false; return result; });
     }
@@ -927,6 +1115,8 @@
           return refreshState().then(function () { return changed; });
         }
         return changed;
+      }).then(function (changed) {
+        return recoverSelected().then(function () { return changed; });
       });
     }).catch(function (err) {
       S.failures += 1;
@@ -936,9 +1126,10 @@
       } else if (err && err.status === 400) {
         // The cursor no longer decodes: start again from a fresh state.
         S.cursor = null;
-        S.pages = {};
+        S.pages = table();
         S.live = { mode: "retry", delay: delay() };
-        return refreshState().then(function () { return loadLatest(S.selected); }).then(function () { renderMain({ toBottom: true }); }, function () {});
+        renderLive();
+        return reloadFresh().then(function () { return false; }, function () { return false; });
       } else {
         S.live = { mode: "retry", delay: delay() };
       }
@@ -968,6 +1159,16 @@
 
   function isPhone() {
     return !!(root.matchMedia && root.matchMedia("(max-width: 720px)").matches);
+  }
+
+  // Up to 1080 px the details panel is a pane behind the tab bar (app.css).
+  function isNarrow() {
+    return !!(root.matchMedia && root.matchMedia("(max-width: 1080px)").matches);
+  }
+
+  function focusId(id) {
+    var node = $(id);
+    if (node && node.focus) node.focus();
   }
 
   function setPane(pane) {
@@ -1057,11 +1258,15 @@
       : live.mode === "retry" ? "Reconnecting in " + Math.round((live.delay || POLL_MS) / 1000) + " s"
         : live.mode === "stopped" ? "Stopped: the token was refused. Reopen the URL peers.py web printed."
           : "Connecting";
+    // A status region announces each change: rewrite it only when its text or mode changes.
+    var key = str(live.mode) + "|" + text;
+    if (S.liveText === key && host && host.firstChild) return;
+    S.liveText = key;
     fill(host, [el("i", { class: "livedot m-" + str(live.mode), "aria-hidden": "true" }), text]);
   }
 
   function renderChrome() {
-    S.focusables = {};
+    S.focusables = table();
     withFocus(function () {
       fill($("lanes"), renderRail(S.state, S.view === "conv" ? S.selected : null, selectChannel));
     });
@@ -1074,8 +1279,10 @@
     fill($("info"), renderDetails(S.rows[S.selected]));
   }
 
-  function moreButton(label, handler) {
-    return on(el("button", { class: "older", type: "button" }, label), "click", handler);
+  function moreButton(label, handler, focusKey) {
+    var b = el("button", { class: "older", type: "button", "data-focus": focusKey || null }, label);
+    if (focusKey) S.focusables[focusKey] = b;
+    return on(b, "click", handler);
   }
 
   function renderMain(opts) {
@@ -1084,18 +1291,26 @@
     var stick = stream && typeof stream.scrollHeight === "number" ? stream.scrollHeight - stream.scrollTop - (stream.clientHeight || 0) < 48 : true;
     var prevTop = stream ? stream.scrollTop : 0;
     var title, sub, cover = null, notes = [], body = [];
+    var target = null;
+    function setTarget(node) { target = node; }
+    ["more:older", "more:all", "more:search", "more:reload-all"].forEach(function (k) { delete S.focusables[k]; });
     if (S.view === "all") {
       var all = S.all;
       title = "All channels";
-      sub = all ? "Showing " + str(all.shown) + " of " + str(all.total) + " channels" : "Loading…";
+      sub = !all ? "Loading…" : all.stale ? "Out of date: " + str(all.shown) + " channels loaded earlier"
+        : "Showing " + str(all.shown) + " of " + str(all.total) + " channels";
       cover = renderCoverage("all");
       if (all) {
+        if (all.stale) {
+          notes.push(el("div", { class: "note warn row", role: "note" }, el("span", null, all.staleNotes.join(" ")),
+            moreButton("Reload All channels", function () { S.all = null; showAll(); }, "more:reload-all")));
+        }
         (all.notes || []).forEach(function (t) { notes.push(note(t, "warn")); });
-        if (all.trimmed) notes.push(note(all.trimmed + " older entries of these channels are left out (at most " + PAGE_LIMIT + " per batch, 25 per channel)."));
+        if (all.trimmed) notes.push(note(all.trimmed + " older entries of these channels are left out (at most " + PAGE_LIMIT + " per batch, 25 per channel, " + ALL_CAP + " in this view)."));
         if (all.partial && !all.next) notes.push(note("Partial: some reads were cut short by the per-request budget."));
-        if (all.next) notes.push(el("div", { class: "note row" }, "Showing " + str(all.shown) + " of " + str(all.total) + " channels; " + str(all.omitted) + " more not loaded.",
-          moreButton("Load more", function () { loadAll(S.all.next); })));
-        body = renderEntries(all.entries, { channel: true });
+        if (all.next && !all.stale) notes.push(el("div", { class: "note row" }, "Showing " + str(all.shown) + " of " + str(all.total) + " channels; " + str(all.omitted) + " more not loaded.",
+          moreButton("Load more", function () { loadAll(S.all.next); }, "more:all")));
+        body = renderEntries(all.entries, { channel: true, focusSet: opts.focusSet, onFocusTarget: setTarget });
         if (!body.length) body = [el("div", { class: "empty" }, "No entries in the channels shown.")];
       }
     } else if (S.view === "search" && S.search) {
@@ -1105,11 +1320,21 @@
       if (sr.scope === "all") cover = renderCoverage("all");
       (sr.notes || []).forEach(function (t) { notes.push(note(t, "warn")); });
       if (sr.total !== undefined) notes.push(note("Searched " + str(sr.searched) + " of " + str(sr.total) + " channels; " + sr.matches.length + " match" + (sr.matches.length === 1 ? "" : "es") + ", newest first."));
-      if (sr.partial) notes.push(note("Partial: each channel's newest " + str(sr.window || PAGE_LIMIT) + " entries are searched, and some reads or matches were cut short."));
-      if (sr.next) notes.push(el("div", { class: "note row" }, "More channels to search.", moreButton("Load more", function () { runSearch(sr.q, sr.scope, sr.next); })));
+      if (sr.partial && !sr.next) notes.push(note("Partial: each channel's newest " + str(sr.window || PAGE_LIMIT) + " entries are searched, and some reads or matches were cut short."));
+      if (sr.next) {
+        notes.push(el("div", { class: "note row" },
+          sr.matches.length ? "More channels to search." : "No matches in the first " + str(sr.searched) + " channels yet — Load more to search the rest.",
+          moreButton("Load more", function () { runSearch(sr.q, sr.scope, sr.next); }, "more:search")));
+      }
       notes.push(el("div", { class: "note row" }, moreButton("Close search", function () { closeSearch(); })));
-      body = sr.matches.map(function (m) { return renderEntry(m, { channel: true, search: true }); });
-      if (!body.length && sr.total !== undefined) body = [el("div", { class: "empty" }, "No matches.")];
+      var marked = false;
+      body = sr.matches.map(function (m) {
+        var mark = !marked && Array.isArray(opts.focusSet) && opts.focusSet.indexOf(m) >= 0;
+        var node = renderEntry(m, { channel: true, search: true, focusTarget: mark });
+        if (mark && node) { marked = true; setTarget(node); }
+        return node;
+      });
+      if (!body.length && sr.total !== undefined) body = [el("div", { class: "empty" }, sr.next ? "No matches yet." : "No matches.")];
     } else {
       var key = S.selected;
       var row = S.rows[key];
@@ -1121,7 +1346,13 @@
       if (page && page.coverage && typeof page.coverage.native_claude === "boolean") covRow.coverage.native_claude = page.coverage.native_claude;
       cover = renderCoverage("channel", covRow);
       notes = renderPageNotes(page);
-      body = page ? renderChannelPage(page, { onOlder: function () { loadOlder(key); } }) : [el("div", { class: "empty" }, "Loading…")];
+      if (page) {
+        body = renderChannelPage(page, { onOlder: function () { loadOlder(key); }, focusSet: opts.focusSet, onFocusTarget: setTarget });
+      } else if (S.pageErrors[key] && !S.loading[key]) {
+        body = [el("div", { class: "empty", role: "alert" }, "This channel could not be loaded: the server did not answer. It loads again once the connection is back.")];
+      } else {
+        body = [el("div", { class: "empty" }, "Loading…")];
+      }
     }
     fill($("title"), title);
     fill($("sub"), sub);
@@ -1133,13 +1364,22 @@
     else if (typeof opts.keepFromBottom === "number") stream.scrollTop = stream.scrollHeight - opts.keepFromBottom;
     else if (opts.toBottom || stick) stream.scrollTop = stream.scrollHeight;
     else stream.scrollTop = prevTop;
+    // After a "Load more"/"Load older": focus the button that replaced the one pressed, else the
+    // first newly loaded entry, so keyboard focus never drops to the document.
+    if (opts.focusMore) {
+      var again = S.focusables[opts.focusMore];
+      if (again && again.focus) again.focus();
+      else if (target && target.focus) target.focus();
+    }
   }
 
   function closeSearch() {
     S.search = null;
     var q = $("q");
     if (q) q.value = "";
-    return selectChannel(S.selected);
+    var done = selectChannel(S.selected);
+    if (q && q.focus) q.focus();
+    return done;
   }
 
   function showError(err) {
@@ -1158,7 +1398,20 @@
     fill($("stream"), el("div", { class: "fatal", role: "alert" },
       el("h2", null, "This page needs the URL peers.py web printed"), el("p", null, text)));
     S.live = { mode: "stopped" };
+    S.liveText = null;
     fill($("live"), "Not connected");
+  }
+
+  // A hash that arrives later (the URL peers.py web printed, pasted into this tab) is a
+  // same-document navigation: the no-token page starts with it; a running page keeps its token
+  // and still clears the new hash from the address bar and history entry.
+  function watchHash() {
+    if (S.waiting || typeof root.addEventListener !== "function") return;
+    S.waiting = true;
+    root.addEventListener("hashchange", function () {
+      if (S.token) { readToken(); return; }
+      root.PeersApp.ready = start();
+    });
   }
 
   // ------------------------------------------------------------------------
@@ -1175,13 +1428,32 @@
     html.classList.remove("theme-dark");
     html.classList.remove("theme-light");
     if (theme === "dark" || theme === "light") html.classList.add("theme-" + theme);
+    renderThemeButton();
+  }
+
+  function isDark() {
+    var html = document.documentElement;
+    return html.classList.contains("theme-dark") ||
+      (!html.classList.contains("theme-light") && !!(root.matchMedia && root.matchMedia("(prefers-color-scheme: dark)").matches));
+  }
+
+  // A toggle button: its name stays "Dark theme", aria-pressed says whether it is on.
+  function renderThemeButton() {
+    var host = $("themebox");
+    if (!host) return;
+    withFocus(function () {
+      var b = el("button", { class: "iconbtn", type: "button", "aria-label": "Dark theme", "aria-pressed": isDark() ? "true" : "false",
+        title: "Dark theme", "data-focus": "theme" },
+        el("svg:svg", { viewBox: "0 0 16 16", "aria-hidden": "true" },
+          el("svg:path", { d: "M8 1.5a6.5 6.5 0 1 0 0 13z", fill: "currentColor" }),
+          el("svg:path", { d: "M8 1.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 1 0 0-13", stroke: "currentColor", fill: "none", "stroke-width": "1.4" })));
+      S.focusables.theme = b;
+      fill(host, on(b, "click", toggleTheme));
+    });
   }
 
   function toggleTheme() {
-    var html = document.documentElement;
-    var dark = html.classList.contains("theme-dark") ||
-      (!html.classList.contains("theme-light") && !!(root.matchMedia && root.matchMedia("(prefers-color-scheme: dark)").matches));
-    var next = dark ? "light" : "dark";
+    var next = isDark() ? "light" : "dark";
     applyTheme(next);
     try { if (root.localStorage) root.localStorage.setItem(THEME_KEY, next); } catch (e) { /* theme stays for this tab */ }
   }
@@ -1191,7 +1463,8 @@
   // ------------------------------------------------------------------------
 
   function wire() {
-    on($("theme"), "click", toggleTheme);
+    if (S.wired) return;
+    S.wired = true;
     var q = $("q");
     on(q, "keydown", function (event) {
       if (event.key !== "Enter") return;
@@ -1208,6 +1481,7 @@
   function start() {
     applyTheme(storedTheme());
     S.token = readToken();
+    watchHash();
     renderLegend();
     if (!S.token) {
       showFatal("Open the address peers.py web printed: it ends in #token=…. The token lives only in this tab's memory, so a reload or a copied link without it cannot read any data.");
@@ -1215,6 +1489,7 @@
     }
     wire();
     setPane(S.pane);
+    S.live = { mode: "starting" };
     renderLive();
     return refreshState().then(function () {
       return selectChannel(S.selected);
@@ -1234,8 +1509,17 @@
     renderRail: renderRail, renderDetails: renderDetails, renderMain: renderMain, applyChanges: applyChanges,
     applyUpdate: applyUpdate, pollOnce: pollOnce, setState: setState, selectChannel: selectChannel, showAll: showAll,
     loadAll: loadAll, runSearch: runSearch, tallyOf: tallyOf, copyable: copyable, gapNote: gapNote, start: start,
-    toggleTheme: toggleTheme, state: S, THEME_KEY: THEME_KEY
+    toggleTheme: toggleTheme, THEME_KEY: THEME_KEY
   };
+  // A read-only view of the model for tests and debugging: everything but the token.
+  Object.defineProperty(root.PeersApp, "state", {
+    enumerable: true,
+    get: function () {
+      var view = {};
+      Object.keys(S).forEach(function (key) { if (key !== "token") view[key] = S[key]; });
+      return view;
+    }
+  });
 
   if (typeof root.location === "object" && root.location && typeof document === "object" && document && document.getElementById) {
     if (document.readyState === "loading") {

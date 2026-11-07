@@ -123,13 +123,13 @@ function makeFetch(routes, calls) {
     calls.push({ url, init })
     const key = Object.keys(routes).filter((k) => url.startsWith(k)).sort((a, b) => b.length - a.length)[0]
     let body = key === undefined ? { __status: 404 } : routes[key]
-    if (typeof body === "function") body = body(url)
+    if (typeof body === "function") body = await body(url)
     const status = body && body.__status ? body.__status : 200
     return { ok: status >= 200 && status < 300, status, json: async () => (status === 200 ? structuredClone(body) : {}) }
   }
 }
 
-function load({ location, fetch, storageLog } = {}) {
+function load({ location, fetch, storageLog, media } = {}) {
   const document = makeDocument()
   const timers = []
   const log = storageLog || []
@@ -141,7 +141,11 @@ function load({ location, fetch, storageLog } = {}) {
     localStorage: makeStorage(log),
     sessionStorage: makeStorage(log),
     structuredClone,
+    windowListeners: {},
+    addEventListener(type, fn) { (context.windowListeners[type] = context.windowListeners[type] || []).push(fn) },
+    removeEventListener() {},
   }
+  if (media) context.matchMedia = (q) => ({ matches: media(q) })
   if (location) {
     context.location = location
     context.history = { replaceState: (...args) => { historyCalls.push(args); location.hash = "" } }
@@ -414,15 +418,15 @@ test("details: runtime, state, typed address, copy only for strict ids, Codex bu
   assert.ok(!text.includes("Ping") && !text.includes("shim log") && !text.includes("Open gates"))
 })
 
-function bootFixture(extraRoutes = {}) {
+function bootFixture(extraRoutes = {}, { media, hash } = {}) {
   const calls = []
   const routes = Object.assign({
     "/api/state": stateFixture(),
     "/api/channel/general": pageFixture("general", [sendEntry(1, "@all freeze", { delivery: { state: "complete", recipients: [row(CODEX_B, "transport accepted", { ack: "pending" })] }, tally: { acked: 0, total: 1, missing: [CODEX_B], unverified: 0 } })]),
     "/api/channel/ops": pageFixture("ops", [sendEntry(1, "first in ops")]),
   }, extraRoutes)
-  const location = { hash: "#token=" + "ab".repeat(32), pathname: "/", search: "" }
-  const env = load({ location, fetch: makeFetch(routes, calls) })
+  const location = { hash: hash === undefined ? "#token=" + "ab".repeat(32) : hash, pathname: "/", search: "" }
+  const env = load({ location, fetch: makeFetch(routes, calls), media })
   return Object.assign(env, { calls, routes, location })
 }
 
@@ -437,15 +441,25 @@ test("the token travels only as X-Peers-Token, the hash is cleared, and nothing 
     assert.equal(call.init.credentials, "omit")
     assert.equal(call.init.cache, "no-store")
     assert.equal(call.init.method, "GET")
+    assert.equal(call.init.redirect, "error", "a redirect never carries the token elsewhere")
+    assert.equal(call.init.referrerPolicy, "no-referrer")
   }
+  assert.ok(!("token" in env.app.state), "the exported state view holds no token")
+  assert.ok(!JSON.stringify(Object.keys(env.app.state)).includes("token"))
   assert.equal(env.location.hash, "")
   assert.equal(env.historyCalls.length, 1)
   assert.equal(env.historyCalls[0][2], "/")
   assert.ok(env.storageLog.every((op) => op[1] === env.app.THEME_KEY), JSON.stringify(env.storageLog))
   assert.ok(!JSON.stringify(env.storageLog).includes("abab"))
-  env.document.byId.theme.dispatch("click")
+  const themeButton = () => env.document.byId.themebox.childNodes[0]
+  assert.equal(themeButton().attributes["aria-pressed"], "false")
+  assert.equal(themeButton().attributes["aria-label"], "Dark theme")
+  themeButton().dispatch("click")
   assert.deepEqual(env.storageLog.filter((op) => op[0] === "set").map((op) => op[1]), [env.app.THEME_KEY])
-  assert.ok(env.document.documentElement.classList.contains("theme-dark") || env.document.documentElement.classList.contains("theme-light"))
+  assert.ok(env.document.documentElement.classList.contains("theme-dark"))
+  assert.equal(themeButton().attributes["aria-pressed"], "true", "the toggle reports its state")
+  themeButton().dispatch("click")
+  assert.equal(themeButton().attributes["aria-pressed"], "false")
   assert.equal(env.timers.length, 1)
   assert.equal(env.timers[0].ms, 2000)
   assert.deepEqual(env.document.htmlWrites, [])
@@ -561,10 +575,15 @@ test("search is server-side, tagged with channel, and states its partial coverag
   const text = env.document.byId.stream.textContent
   assert.ok(text.includes("found <b>it</b>"))
   assert.ok(text.includes("in #ops"))
-  const notes = env.document.byId.notes.textContent
+  let notes = env.document.byId.notes.textContent
   assert.ok(notes.includes("Searched 1 of 2 channels"))
-  assert.ok(notes.includes("newest 200 entries"))
+  assert.ok(notes.includes("More channels to search."))
   assert.ok(notes.includes("Load more"))
+  assert.ok(!notes.includes("Partial"), "not partial while more channels remain to search")
+  env.routes["/api/search"] = { matches: [], partial: true, searched_channels: 2, total_channels: 2, next: null, window: 200 }
+  await env.app.runSearch("found", "all", "S1")
+  notes = env.document.byId.notes.textContent
+  assert.ok(notes.includes("Partial: each channel's newest 200 entries"))
 })
 
 test("a failed first state read is retried by the poll before any /api/changes call", async () => {
@@ -588,4 +607,313 @@ test("a rail lane is selectable by keyboard", async () => {
   await new Promise((r) => setImmediate(r))
   assert.equal(env.app.state.selected, "ops")
   assert.ok(env.calls.some((c) => c.url === "/api/channel/ops?limit=200"))
+})
+
+// ---------------------------------------------------------------- rework (#161 m4 review)
+
+const tick = () => new Promise((r) => setImmediate(r))
+async function settle() { for (let i = 0; i < 12; i++) await tick() }
+const plain = (v) => JSON.parse(JSON.stringify(v))
+const buttonNamed = (host, label) => elementsOf(host).find((n) => n.tagName === "button" && n.textContent === label)
+const quiet = (cursor, extra = {}) => Object.assign({ channels: {}, updates: [], cursor, partial: false }, extra)
+
+test("a settled send: recipients the update does not name take its state, or unknown when complete (as channels.delivery_rows)", async () => {
+  const R2 = "codex:00000000-0000-4000-8000-0000000000d2"
+  const env = bootFixture({ "/api/channel/general": pageFixture("general", [
+    sendEntry(5, "a", { delivery: { state: "in progress", recipients: [row(CODEX_B, "in progress", { ack: "pending" })] } }),
+    sendEntry(6, "b", { delivery: { state: "in progress", recipients: [row(CODEX_B, "in progress", { ack: "pending" }), row(R2, "in progress", { ack: "pending" }),
+      row(OC_C, "refused: no journal slot", { ack: "not requested (unverified)" }), row(CC_A, "acked", { ack: "acked" })] } }),
+    sendEntry(7, "c", { journaled: false, delivery: { state: "in progress", recipients: [row(CODEX_B, "in progress"), row(R2, "in progress")] } }),
+  ]) })
+  await env.app.ready
+  env.routes["/api/changes"] = quiet("C1", { updates: [
+    { channel: "general", message_id: "m5", delivery: { state: "unknown", recipients: [] } },
+    { channel: "general", message_id: "m6", delivery: { state: "complete", recipients: [{ recipient: CODEX_B, state: "transport accepted" }] } },
+    { channel: "general", message_id: "m7", delivery: { state: "unverified", recipients: [] } },
+  ] })
+  await env.app.pollOnce()
+  const delivery = (seq) => plain(env.app.state.pages.general.entries.find((e) => e.seq === seq).delivery)
+  assert.deepEqual(delivery(5), { state: "unknown", recipients: [row(CODEX_B, "unknown", { ack: "pending" })] })
+  assert.deepEqual(delivery(6), { state: "complete", recipients: [
+    row(CODEX_B, "transport accepted", { ack: "pending" }), row(R2, "unknown", { ack: "pending" }),
+    row(OC_C, "refused: no journal slot", { ack: "not requested (unverified)" }), row(CC_A, "acked", { ack: "acked" })] })
+  assert.deepEqual(delivery(7), { state: "unverified", recipients: [row(CODEX_B, "unverified"), row(R2, "unverified")] })
+  assert.ok(!env.document.byId.stream.textContent.includes("in progress"), "no row is left in progress")
+})
+
+test("All channels never keeps 'Showing N of N' once a new channel, a covered gap or uncovered entries appear", async () => {
+  const allUrls = []
+  const env = bootFixture({ "/api/all": (url) => { allUrls.push(url); return { entries: [Object.assign(sendEntry(1, "from general"), { channel: "general" })], partial: false, omitted: 0, total: 1, shown: 1, next: null, trimmed: 0 } } })
+  await env.app.ready
+  await env.app.showAll()
+  const sub = () => env.document.byId.sub.textContent
+  const notes = () => env.document.byId.notes.textContent
+  assert.equal(sub(), "Showing 1 of 1 channels")
+  const reloadAll = async () => {
+    const before = allUrls.length
+    buttonNamed(env.document.byId.notes, "Reload All channels").dispatch("click")
+    await settle()
+    assert.equal(allUrls.length, before + 1)
+    assert.equal(allUrls[allUrls.length - 1], "/api/all", "reloaded from the start")
+    assert.equal(sub(), "Showing 1 of 1 channels")
+    assert.ok(!notes().includes("Reload All channels"))
+  }
+  env.routes["/api/changes"] = quiet("C1", { channels: { fresh: { entries: [], gap: null, new: true } } })
+  await env.app.pollOnce()
+  assert.ok(!sub().includes("Showing 1 of 1"), sub())
+  assert.ok(sub().startsWith("Out of date"))
+  assert.ok(notes().includes("A new channel exists (#fresh)"))
+  await reloadAll()
+  env.routes["/api/changes"] = quiet("C2", { channels: { general: { entries: [], gap: { from: 1, to: 9, reason: "pruned" } } } })
+  await env.app.pollOnce()
+  assert.ok(notes().includes("#general has entries this view could not stream; it may be incomplete."), notes())
+  await reloadAll()
+  // A channel the view holds no entry of (not loaded, or in a batch with 0 entries).
+  env.routes["/api/changes"] = quiet("C3", { channels: { ops: { entries: [sendEntry(9, "new in ops")], gap: null } } })
+  await env.app.pollOnce()
+  assert.ok(notes().includes("New entries arrived in #ops, which this view may not include."))
+  await reloadAll()
+  // Stale while hidden: opening the view again reloads it from the start.
+  await env.app.selectChannel("general")
+  env.routes["/api/changes"] = quiet("C4", { channels: { fresh2: { entries: [], gap: null, new: true } } })
+  await env.app.pollOnce()
+  const n = allUrls.length
+  await env.app.showAll()
+  assert.equal(allUrls.length, n + 1)
+  assert.equal(sub(), "Showing 1 of 1 channels")
+})
+
+test("a channel named constructor is a plain key: selected, loaded, polled; member states are not prototype keys", async () => {
+  const state = stateFixture()
+  state.channels.push({ key: "constructor", name: "constructor", display: "constructor", kind: "named", owner: CC_A,
+    members: [{ typed: CC_A, state: "constructor", name: "landish8" }], handover_chain: [], alert: null, coverage: {} })
+  const env = bootFixture({ "/api/state": state, "/api/channel/constructor": pageFixture("constructor", [sendEntry(1, "hello constructor")]) })
+  await env.app.ready
+  await env.app.selectChannel("constructor")
+  assert.ok(env.calls.some((c) => c.url === "/api/channel/constructor?limit=200"), "its page is fetched, not mistaken for Object.prototype.constructor")
+  const stream = env.document.byId.stream
+  assert.ok(stream.textContent.includes("hello constructor"))
+  env.routes["/api/changes"] = quiet("C1", { channels: {
+    constructor: { entries: [sendEntry(2, "second constructor")], gap: null },
+    general: { entries: [sendEntry(2, "general news")], gap: null } } })
+  await env.app.pollOnce()
+  assert.equal(env.app.state.cursor, "C1")
+  assert.ok(stream.textContent.includes("second constructor"))
+  await env.app.selectChannel("general")
+  assert.ok(stream.textContent.includes("general news"))
+  const lanes = env.document.byId.lanes.textContent
+  assert.ok(!lanes.includes("function") && !lanes.includes("native code"), lanes)
+  assert.ok(lanes.includes("(Unverified)"))
+})
+
+test("live appends are capped: a page keeps its newest 500 (Load older reaches the rest), All channels keeps 500", async () => {
+  const env = bootFixture()
+  await env.app.ready
+  const stream = env.document.byId.stream
+  env.routes["/api/changes"] = quiet("C1", { channels: { general: { entries: Array.from({ length: 600 }, (_, i) => sendEntry(i + 2, "bulk " + (i + 2))), gap: null } } })
+  await env.app.pollOnce()
+  let page = env.app.state.pages.general
+  assert.equal(page.entries.length, 500)
+  assert.equal(page.entries[0].seq, 102)
+  assert.equal(page.entries[499].seq, 601)
+  assert.equal(page.next, 102, "Load older continues where the trim cut")
+  env.routes["/api/channel/general?before=102"] = pageFixture("general", [sendEntry(101, "just trimmed")], { next: 1 })
+  buttonNamed(stream, "Load older").dispatch("click")
+  await settle()
+  assert.ok(env.calls.some((c) => c.url === "/api/channel/general?before=102&limit=200"))
+  assert.ok(stream.textContent.includes("just trimmed"))
+  page = env.app.state.pages.general
+  assert.equal(page.entries.length, 501)
+  env.routes["/api/changes"] = quiet("C2", { channels: { general: { entries: [sendEntry(602, "one more")], gap: null } } })
+  await env.app.pollOnce()
+  assert.equal(page.entries.length, 501, "older entries the reader loaded are kept")
+  env.routes["/api/all"] = { entries: [Object.assign(sendEntry(602, "g"), { channel: "general" })], partial: false, omitted: 0, total: 1, shown: 1, next: null, trimmed: 0 }
+  await env.app.showAll()
+  env.routes["/api/changes"] = quiet("C3", { channels: { general: { entries: Array.from({ length: 600 }, (_, i) => sendEntry(1000 + i, "all " + i)), gap: null } } })
+  await env.app.pollOnce()
+  const all = env.app.state.all
+  assert.equal(all.entries.length, 500)
+  assert.equal(all.entries[499].seq, 1599)
+  assert.equal(all.trimmed, 101)
+  assert.ok(env.document.byId.notes.textContent.includes("101 older entries of these channels are left out"))
+})
+
+test("query values are URL-encoded: the since= cursor and the search q", async () => {
+  const odd = "a&b#c/d?e%f g"
+  const state = stateFixture()
+  state.cursor = odd
+  const env = bootFixture({ "/api/state": state, "/api/search": { matches: [], partial: false, searched_channels: 2, total_channels: 2, next: null } })
+  await env.app.ready
+  env.routes["/api/changes"] = quiet("C1")
+  await env.app.pollOnce()
+  assert.equal(env.calls.find((c) => c.url.startsWith("/api/changes")).url, "/api/changes?since=a%26b%23c%2Fd%3Fe%25f%20g")
+  await env.app.runSearch("x&scope=general#/?%", "all", null)
+  assert.equal(env.calls.find((c) => c.url.startsWith("/api/search")).url, "/api/search?q=x%26scope%3Dgeneral%23%2F%3F%25&scope=all")
+})
+
+test("a malformed #token hash is refused and still cleared from the address bar", async () => {
+  for (const hash of ["#token=short", "#token=" + "ab".repeat(32) + "&x=1", "#x=1&token=" + "ab".repeat(32)]) {
+    const calls = []
+    const location = { hash, pathname: "/p", search: "?q" }
+    const env = load({ location, fetch: makeFetch({}, calls) })
+    assert.equal(await env.app.ready, false, hash)
+    assert.equal(calls.length, 0, hash)
+    assert.equal(location.hash, "", hash)
+    assert.equal(env.historyCalls.length, 1, hash)
+    assert.equal(env.historyCalls[0][2], "/p?q")
+  }
+})
+
+test("the no-token page starts once a valid #token= arrives", async () => {
+  const env = bootFixture({}, { hash: "" })
+  assert.equal(await env.app.ready, false)
+  assert.equal(env.calls.length, 0)
+  env.location.hash = "#token=" + "cd".repeat(32)
+  for (const fn of env.context.windowListeners.hashchange || []) fn({ type: "hashchange" })
+  assert.equal(await env.app.ready, true)
+  assert.equal(env.calls[0].url, "/api/state")
+  assert.equal(env.calls[0].init.headers["X-Peers-Token"], "cd".repeat(32))
+  assert.equal(env.location.hash, "")
+  assert.ok(env.document.byId.stream.textContent.includes("@all freeze"))
+  // A later hash in the running page is cleared too; the token in memory stays.
+  env.location.hash = "#token=" + "ef".repeat(32)
+  for (const fn of env.context.windowListeners.hashchange || []) fn({ type: "hashchange" })
+  assert.equal(env.location.hash, "")
+  assert.equal(env.context.windowListeners.hashchange.length, 1, "one listener")
+  env.routes["/api/changes"] = quiet("C1")
+  await env.app.pollOnce()
+  assert.equal(env.calls[env.calls.length - 1].init.headers["X-Peers-Token"], "cd".repeat(32))
+})
+
+test("a journal gap note stays until a fresh state and page load", async () => {
+  const env = bootFixture()
+  await env.app.ready
+  const rail = () => env.document.byId.railnotes.textContent
+  env.routes["/api/changes"] = quiet("C1", { journal_gap: true })
+  await env.app.pollOnce()
+  assert.ok(rail().includes("Some ACK changes could not be read"))
+  env.routes["/api/changes"] = quiet("C2")
+  await env.app.pollOnce()
+  assert.ok(rail().includes("Some ACK changes could not be read"), "sticky across polls")
+  env.routes["/api/changes"] = { __status: 400 }
+  await env.app.pollOnce()
+  assert.ok(!rail().includes("Some ACK changes could not be read"), "cleared by the fresh reload")
+})
+
+test("entries and updates polled while a channel's page is loading are applied to it, once", async () => {
+  let release
+  const gate = new Promise((r) => { release = r })
+  const env = bootFixture({ "/api/channel/ops": async () => { await gate; return pageFixture("ops", [sendEntry(1, "first in ops"), sendEntry(2, "second in ops")]) } })
+  await env.app.ready
+  const picked = env.app.selectChannel("ops")
+  await settle()
+  const stream = env.document.byId.stream
+  assert.ok(stream.textContent.includes("Loading"))
+  env.routes["/api/changes"] = quiet("C1", {
+    channels: { ops: { entries: [sendEntry(2, "second in ops"), sendEntry(3, "third in ops")], gap: null } },
+    updates: [{ message_id: "m1", recipient: CODEX_B, ack: "acked", state: "acked" }] })
+  await env.app.pollOnce()
+  assert.equal(env.app.state.cursor, "C1")
+  assert.equal(env.calls.filter((c) => c.url.startsWith("/api/channel/ops")).length, 1, "no second load while one is in flight")
+  release()
+  await picked
+  const text = stream.textContent
+  assert.ok(text.includes("third in ops"), "the polled entry is not lost")
+  assert.equal(text.split("second in ops").length - 1, 1, "deduplicated by seq")
+  const m1 = env.app.state.pages.ops.entries.find((e) => e.message_id === "m1")
+  assert.equal(m1.delivery.recipients[0].ack, "acked", "the buffered ACK update reached the page")
+})
+
+test("Codex reply budget: a bare Claude session id as requester is named through its cc: form", () => {
+  const { app } = load()
+  const state = stateFixture()
+  state.sessions[1].reply_budget.requester = CC_A.slice(3)
+  app.setState(state)
+  assert.ok(textOf(app.renderDetails(app.state.rows.ops)).includes("93 of 100 toward landish8"))
+  state.sessions[1].reply_budget.requester = DISK4.slice(3)
+  app.setState(state)
+  assert.ok(textOf(app.renderDetails(app.state.rows.ops)).includes("93 of 100 toward cc:94d0…7a11"), "unknown: a shortened id")
+})
+
+test("search with more channels left and no matches yet says so", async () => {
+  const env = bootFixture({ "/api/search": { matches: [], partial: true, searched_channels: 32, total_channels: 40, next: "S1", window: 200 } })
+  await env.app.ready
+  await env.app.runSearch("zzz", "all", null)
+  const notes = env.document.byId.notes.textContent
+  assert.ok(notes.includes("No matches in the first 32 channels yet — Load more to search the rest."))
+  assert.ok(!notes.includes("Partial"))
+  assert.ok(env.document.byId.stream.textContent.includes("No matches yet."))
+})
+
+test("focus: Load more lands on the new Load more button or the first new entry; Close search on #q; a phone pick on #title", async () => {
+  const batch = (seq, ch, next) => ({ entries: [Object.assign(sendEntry(seq, "batch " + seq), { channel: ch, ts: "2026-11-07T1" + seq + ":00:00Z" })], partial: !!next, omitted: next ? 1 : 0, total: 3, shown: 3 - (next ? 1 : 0), next, trimmed: 0 })
+  const env = bootFixture({
+    "/api/all": (url) => url.endsWith("TOK2") ? batch(3, "ops", null) : url.endsWith("TOK1") ? batch(2, "ops", "TOK2") : batch(1, "general", "TOK1"),
+    "/api/search": (url) => url.includes("next=") ? { matches: [Object.assign(sendEntry(8, "match two"), { channel: "ops" })], searched_channels: 2, total_channels: 2, next: null }
+      : { matches: [Object.assign(sendEntry(7, "match one"), { channel: "general" })], searched_channels: 1, total_channels: 2, next: "S1" },
+  }, { media: () => true })
+  await env.app.ready
+  const doc = env.document
+  await env.app.showAll()
+  buttonNamed(doc.byId.notes, "Load more").dispatch("click")
+  await settle()
+  assert.ok(doc.activeElement !== null && doc.activeElement.textContent === "Load more", "the new Load more button")
+  assert.ok(doc.activeElement.parentNode, "and it is in the page")
+  buttonNamed(doc.byId.notes, "Load more").dispatch("click")
+  await settle()
+  assert.ok(doc.activeElement !== null && doc.activeElement.attributes.tabindex === "-1", "a focusable entry")
+  assert.ok(doc.activeElement.textContent.includes("batch 3"), "the first new entry")
+  await env.app.runSearch("match", "all", null)
+  buttonNamed(doc.byId.notes, "Load more").dispatch("click")
+  await settle()
+  assert.ok(doc.activeElement.textContent.includes("match two"))
+  buttonNamed(doc.byId.notes, "Close search").dispatch("click")
+  await settle()
+  assert.ok(doc.activeElement === doc.byId.q, "Close search focuses #q")
+  doc.byId.lanes.childNodes[1].dispatch("click")
+  await settle()
+  assert.ok(doc.activeElement === doc.byId.title, "a phone pick moves focus to the conversation title")
+  assert.ok(doc.byId.app.classList.contains("pane-main"))
+})
+
+test("the live status is rewritten only when it changes", async () => {
+  const env = bootFixture()
+  await env.app.ready
+  env.routes["/api/changes"] = quiet("C1")
+  await env.app.pollOnce()
+  const live = env.document.byId.live
+  const first = live.childNodes[0]
+  assert.ok(live.textContent.includes("Live"))
+  await env.app.pollOnce()
+  await env.app.pollOnce()
+  assert.ok(live.childNodes[0] === first, "same text: the status region is left alone")
+  env.routes["/api/changes"] = quiet("C2", { partial: true })
+  await env.app.pollOnce()
+  assert.ok(live.textContent.includes("Live (partial)"))
+})
+
+test("a channel picked while the server is down shows an error, then loads after reconnecting", async () => {
+  const env = bootFixture({ "/api/channel/ops": { __status: 502 } })
+  await env.app.ready
+  await env.app.selectChannel("ops")
+  const stream = env.document.byId.stream
+  assert.ok(stream.textContent.includes("This channel could not be loaded"), stream.textContent)
+  assert.ok(!stream.textContent.includes("Loading"))
+  env.routes["/api/channel/ops"] = pageFixture("ops", [sendEntry(1, "first in ops")])
+  env.routes["/api/changes"] = quiet("C1")
+  await env.app.pollOnce()
+  assert.ok(stream.textContent.includes("first in ops"))
+})
+
+test("nits: budget gap wording, acked rows with a transport error, #general count labels, chip state text", () => {
+  const { app } = load()
+  app.setState(stateFixture())
+  assert.equal(app.gapNote({ reason: "budget" }), "Not all new entries could be read in this update (read budget) — reloaded the latest page.")
+  const d = app.renderDelivery({ state: "complete", recipients: [row(CODEX_B, "acked", { ack: "acked", transport_error: "late pipe error" })] })
+  assert.equal(elementsOf(d).find((n) => (n.attributes.class || "").startsWith("drow ")).attributes.class, "drow t-ok")
+  const lanes = app.renderRail(app.state.state, "general", () => {})
+  const srs = elementsOf(lanes[0]).filter((n) => n.attributes.class === "sr").map((n) => n.textContent)
+  assert.deepEqual(srs, ["Claude Code session", "Codex session", "OpenCode sessions"])
+  const chipSr = elementsOf(lanes[1]).filter((n) => n.attributes.class === "sr").map((n) => n.textContent)
+  assert.deepEqual(chipSr, ["(Working)", "(Idle)"])
 })

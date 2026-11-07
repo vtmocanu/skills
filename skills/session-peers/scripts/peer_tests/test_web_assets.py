@@ -27,6 +27,31 @@ def read(name):
     return (WEB / name).read_text(encoding="utf-8")
 
 
+def light_tokens(css):
+    """The custom properties of the light ``:root`` block."""
+    block = re.search(r":root\{([^}]*)\}", css).group(1)
+    return dict(re.findall(r"--([a-z0-9-]+):\s*([^;]+);", block))
+
+
+def luminance(hex_colour):
+    channels = [int(hex_colour.lstrip("#")[i:i + 2], 16) / 255 for i in (0, 2, 4)]
+    lin = [c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4 for c in channels]
+    return 0.2126 * lin[0] + 0.7152 * lin[1] + 0.0722 * lin[2]
+
+
+def contrast(fg, bg):
+    hi, lo = sorted((luminance(fg), luminance(bg)), reverse=True)
+    return (hi + 0.05) / (lo + 0.05)
+
+
+def rule(css, selector):
+    """The declarations of the first rule whose selector list is exactly ``selector``."""
+    match = re.search(r"(?:^|[}\s])%s\{([^}]*)\}" % re.escape(selector), css)
+    if match is None:
+        raise AssertionError("no rule for %s" % selector)
+    return match.group(1)
+
+
 def function_body(source, name):
     """The text of ``function <name>(...) { ... }`` by brace matching (the helper holds no braces in strings)."""
     match = re.search(r"\bfunction\s+%s\s*\(" % re.escape(name), source)
@@ -137,6 +162,8 @@ class WebAssetTests(unittest.TestCase):
         self.assertIn('"X-Peers-Token": S.token', self.js)
         self.assertIn('credentials: "omit"', self.js)
         self.assertIn('cache: "no-store"', self.js)
+        self.assertIn('redirect: "error"', self.js)
+        self.assertIn('referrerPolicy: "no-referrer"', self.js)
         for literal in re.findall(r'"(/[^"]*)"', self.js):
             self.assertTrue(literal == "/" or literal.startswith("/api/"), literal)
         self.assertNotRegex(self.js, r"\b(?:XMLHttpRequest|WebSocket|EventSource|sendBeacon)\b")
@@ -149,6 +176,39 @@ class WebAssetTests(unittest.TestCase):
         self.assertEqual(len(paths), 3)
         for d in paths:
             self.assertIn('"%s"' % d, self.js)
+
+    def test_server_keyed_tables_have_no_prototype(self):
+        # A channel named "constructor" must not hit Object.prototype: no {} table keyed by data.
+        self.assertNotRegex(self.js, r"\b(?:names|members|rows|sessions|pages|pendingNotes|covered|focusables|loading|pageErrors)\s*[:=]\s*\{\s*\}")
+        self.assertIn("Object.create(null)", self.js)
+
+    # -- app.css ------------------------------------------------------------
+
+    def test_light_theme_text_contrast_is_aa(self):
+        tokens = light_tokens(self.css)
+        pairs = [("ink-3", "line-2"), ("ink-3", "paper"), ("ink-3", "raised"), ("ink-3", "panel"),
+                 ("mention", "paper"), ("mention", "raised"), ("ink-2", "line-2")]
+        for fg, bg in pairs:
+            ratio = contrast(tokens[fg], tokens[bg])
+            self.assertGreaterEqual(ratio, 4.5, "--%s on --%s is %.2f:1" % (fg, bg, ratio))
+        self.assertIn("color:var(--mention)", rule(self.css, ".mention"))
+
+    def test_screen_reader_text_cannot_stretch_the_page(self):
+        sr = rule(self.css, ".sr")
+        for want in ("position:absolute", "width:1px", "height:1px", "overflow:hidden", "margin:-1px"):
+            self.assertIn(want, sr)
+        positioned = re.search(r"\n([^{}\n]*)\{position:relative\}", self.css)
+        self.assertIsNotNone(positioned, "a positioned ancestor rule for .sr hosts")
+        hosts = {s.strip() for s in positioned.group(1).split(",")}
+        self.assertLessEqual({".lane", ".card", ".who"}, hosts)
+
+    def test_details_pane_reachable_up_to_1080px(self):
+        narrow = re.search(r"@media \(max-width:1080px\)\{(.*?)\n\}", self.css, re.S)
+        self.assertIsNotNone(narrow)
+        self.assertRegex(narrow.group(1), r"\.mobtabs\{display:flex")
+        mid = re.search(r"@media \(min-width:721px\) and \(max-width:1080px\)\{(.*?)\n\}", self.css, re.S)
+        self.assertIsNotNone(mid)
+        self.assertIn(".app.pane-info aside{display:block}", mid.group(1))
 
     # -- index.html ---------------------------------------------------------
 

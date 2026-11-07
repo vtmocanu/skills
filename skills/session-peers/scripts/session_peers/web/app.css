@@ -1,9 +1,9 @@
 /* session-peers web dashboard. Colour roles and layout follow the design mock
    (prds/mockups/161-session-peers-web); system fonts only, as the CSP allows no font fetch. */
 :root{
-  --paper:#EEF1F5; --panel:#F8FAFC; --raised:#FFFFFF; --ink:#18212C; --ink-2:#475466; --ink-3:#5F6B7C;
+  --paper:#EEF1F5; --panel:#F8FAFC; --raised:#FFFFFF; --ink:#18212C; --ink-2:#475466; --ink-3:#5A6676;
   --line:#D5DCE5; --line-2:#E4E9EF; --focus:#2F6BFF;
-  --claude:#C9643F; --claude-bg:#F9E9E2; --brand-claude:#D97757; --codex:#16836A; --codex-bg:#E2F3EE; --oc:#A06A00; --oc-bg:#F6EED9;
+  --claude:#C9643F; --mention:#A84E2C; --claude-bg:#F9E9E2; --brand-claude:#D97757; --codex:#16836A; --codex-bg:#E2F3EE; --oc:#A06A00; --oc-bg:#F6EED9;
   --ok:#0F7259; --warn:#985A00; --bad:#B42F26; --ok-bg:#E2F3EE; --warn-bg:#FBF0DC; --bad-bg:#FBE5E3;
   --shadow:0 1px 0 rgba(24,33,44,.04), 0 6px 24px -12px rgba(24,33,44,.18);
   --sans:ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
@@ -13,7 +13,7 @@
 @media (prefers-color-scheme: dark){ :root:not(.theme-light){
   --paper:#0F141B; --panel:#151C25; --raised:#1B2430; --ink:#E6EBF1; --ink-2:#A9B4C2; --ink-3:#8A96A7;
   --line:#283341; --line-2:#212B37; --focus:#7AA2FF;
-  --claude:#E8957A; --claude-bg:#3A2219; --codex:#4CC9A6; --codex-bg:#16302A; --oc:#E2AE3D; --oc-bg:#352A12;
+  --claude:#E8957A; --mention:#E8957A; --claude-bg:#3A2219; --codex:#4CC9A6; --codex-bg:#16302A; --oc:#E2AE3D; --oc-bg:#352A12;
   --ok:#4CC9A6; --warn:#F0B44C; --bad:#FF7A70;
   --ok-bg:#16302A; --warn-bg:#3A2C12; --bad-bg:#3B1C1A; --shadow:0 6px 24px -12px rgba(0,0,0,.6);
   color-scheme:dark;
@@ -21,7 +21,7 @@
 :root.theme-dark{
   --paper:#0F141B; --panel:#151C25; --raised:#1B2430; --ink:#E6EBF1; --ink-2:#A9B4C2; --ink-3:#8A96A7;
   --line:#283341; --line-2:#212B37; --focus:#7AA2FF;
-  --claude:#E8957A; --claude-bg:#3A2219; --codex:#4CC9A6; --codex-bg:#16302A; --oc:#E2AE3D; --oc-bg:#352A12;
+  --claude:#E8957A; --mention:#E8957A; --claude-bg:#3A2219; --codex:#4CC9A6; --codex-bg:#16302A; --oc:#E2AE3D; --oc-bg:#352A12;
   --ok:#4CC9A6; --warn:#F0B44C; --bad:#FF7A70;
   --ok-bg:#16302A; --warn-bg:#3A2C12; --bad-bg:#3B1C1A; --shadow:0 6px 24px -12px rgba(0,0,0,.6);
   color-scheme:dark;
@@ -33,7 +33,9 @@ button,input,select{font:inherit;color:inherit}
 :focus-visible{outline:2px solid var(--focus);outline-offset:2px;border-radius:6px}
 .mono{font-family:var(--mono);font-size:.86em;letter-spacing:-.01em}
 .muted{color:var(--ink-3);font-size:13px}
-.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+/* visually hidden, still read; the positioned ancestors below keep it from stretching the page */
+.sr{position:absolute;width:1px;height:1px;padding:0;margin:-1px;border:0;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap}
+.lane,.card,.who,.drow,.msg,.sysline{position:relative}
 
 /* shell */
 .app{display:grid;grid-template-columns:288px minmax(0,1fr) 320px;grid-template-rows:56px minmax(0,1fr);height:100vh}
@@ -53,6 +55,10 @@ header{grid-column:1/-1;display:flex;align-items:center;gap:16px;padding:0 16px;
 .search select{border:0;background:var(--line-2);border-radius:7px;padding:2px 6px;font-size:12.5px;color:var(--ink-2)}
 .iconbtn{border:1px solid var(--line);background:var(--raised);border-radius:10px;height:34px;min-width:34px;padding:0 10px;cursor:pointer;display:inline-flex;align-items:center;gap:6px;color:var(--ink-2)}
 .iconbtn:hover{color:var(--ink)}
+.iconbtn svg{width:16px;height:16px}
+.iconbtn[aria-pressed="true"]{color:var(--ink);background:var(--line-2)}
+.themebox{display:contents}
+#title:focus{outline:none} #title:focus-visible{outline:2px solid var(--focus)}
 
 /* rail */
 nav.rail{border-right:1px solid var(--line);background:var(--panel);overflow:auto;padding:12px 10px 24px}
@@ -122,7 +128,7 @@ main{display:flex;flex-direction:column;min-width:0;min-height:0}
 .body{margin-top:2px;color:var(--ink);overflow-wrap:anywhere}
 .body .text{margin:0 0 6px;white-space:pre-wrap}
 .body code{font-family:var(--mono);font-size:.86em;background:var(--line-2);padding:1px 5px;border-radius:5px}
-.mention{color:var(--claude)}
+.mention{color:var(--mention)}
 .ref{font-weight:500}
 .sysline{align-self:flex-start;margin-left:46px;max-width:714px;font-size:13px;color:var(--ink-2);display:flex;flex-wrap:wrap;gap:8px;align-items:baseline;overflow-wrap:anywhere}
 .sysline::before{content:"";width:6px;height:6px;border-radius:50%;background:var(--line);flex:none;align-self:center}
@@ -187,9 +193,22 @@ aside h2{font-size:15px;margin:0 0 10px;font-weight:700;overflow-wrap:anywhere}
 .acts button:hover{border-color:var(--ink-3)}
 .acts button[aria-disabled="true"]{opacity:.5;cursor:not-allowed}
 
-/* narrow and phone */
+/* narrow and phone: up to 1080 px the details panel is a pane behind the tab bar */
 .mobtabs{display:none}
-@media (max-width:1080px){ .app{grid-template-columns:260px minmax(0,1fr)} aside{display:none} .fleet{display:none} }
+@media (max-width:1080px){
+  .app{grid-template-columns:260px minmax(0,1fr);grid-template-rows:56px minmax(0,1fr) 48px}
+  aside{display:none} .fleet{display:none}
+  .mobtabs{display:flex;grid-column:1/-1;grid-row:3;border-top:1px solid var(--line);background:var(--panel)}
+  .mobtabs button{flex:1;border:0;background:none;color:var(--ink-3);font-weight:600;font-size:13.5px;cursor:pointer}
+  .mobtabs button[aria-selected="true"]{color:var(--ink);box-shadow:inset 0 2px 0 var(--focus)}
+}
+@media (min-width:721px) and (max-width:1080px){
+  /* the channel list stays visible beside the conversation; the tabs switch Chat and Details */
+  .mobtabs button[data-focus="pane:rail"]{display:none}
+  aside{grid-column:2;grid-row:2}
+  .app.pane-info aside{display:block}
+  .app.pane-info main{display:none}
+}
 @media (max-width:720px){
   .app{grid-template-columns:1fr;grid-template-rows:auto minmax(0,1fr) 56px}
   header{flex-wrap:wrap;gap:8px 12px;padding:8px 12px}
@@ -199,9 +218,7 @@ aside h2{font-size:15px;margin:0 0 10px;font-weight:700;overflow-wrap:anywhere}
   .app.pane-rail nav.rail{display:block}
   .app.pane-main main{display:flex}
   .app.pane-info aside{display:block}
-  .mobtabs{display:flex;grid-row:3;border-top:1px solid var(--line);background:var(--panel)}
-  .mobtabs button{flex:1;border:0;background:none;color:var(--ink-3);font-weight:600;font-size:13.5px;cursor:pointer}
-  .mobtabs button[aria-selected="true"]{color:var(--ink);box-shadow:inset 0 2px 0 var(--focus)}
+  .mobtabs{grid-column:1}
   .stream,.convhead{padding-left:14px;padding-right:14px}
   .convhead{flex-wrap:wrap}
   .tabs{margin-left:0}
