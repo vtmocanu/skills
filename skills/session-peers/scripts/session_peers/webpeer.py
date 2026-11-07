@@ -119,16 +119,26 @@ class BrowserPeer:
             raise WebPeerError("the browser peer was already stopped; make a new one")
         try:
             self._take_lock()
+            self._refuse_if_stopped()
             self._bind()
+            self._refuse_if_stopped()
             self._write_record()
             self._accept = threading.Thread(target=self._accept_loop, name="web-peer-accept", daemon=True)
             self._accept.start()
             self._notifier = threading.Thread(target=self._notify_loop, name="web-peer-notify", daemon=True)
             self._notifier.start()
         except BaseException:
-            self._cleanup()
+            # Forced: a stop() on another thread may already have run cleanup
+            # before this start acquired the lock or bound the socket; what
+            # start acquired is released here either way (the lock is still
+            # held, so no other instance owns these paths yet).
+            self._cleanup(force=True)
             raise
         return self
+
+    def _refuse_if_stopped(self):
+        if self.stop_requested or self._cleaned:
+            raise WebPeerError("the browser peer was stopped while starting")
 
     def stop(self):
         """Owner-thread teardown: idempotent, removes the record, socket and lock.
@@ -144,9 +154,9 @@ class BrowserPeer:
             if t is not None and t is not me and t.is_alive():
                 t.join(_JOIN_TIMEOUT)
 
-    def _cleanup(self):
+    def _cleanup(self, force=False):
         with self._mutex:
-            if self._cleaned:
+            if self._cleaned and not force:
                 return
             self._cleaned = True
         # Only what this instance created: a start that lost the lock must not
@@ -481,7 +491,7 @@ class BrowserPeer:
             )
         # The status frame reaches only a sender tracking this message; a plain
         # SendMessage is not, so tell it once per failure episode with no reply
-        # route (no loop). A successful journal write starts a new episode.
+        # route (no loop). This sender's next successful journal write starts a new episode.
         with self._notified_lock:
             if typed in self._notified:
                 return

@@ -395,7 +395,32 @@ class WebPeerCleanupTests(WebPeerBase):
     def test_a_request_stop_during_the_record_write_leaves_no_record(self):
         self._stop_during_the_write(after_write=True)
 
-    def test_stop_shuts_down_accepted_connections_and_never_calls_on_inbound_after(self):
+    def _stop_on_another_thread_during(self, target, attr):
+        peer = sp_webpeer.BrowserPeer()
+        real = getattr(target, attr)
+
+        def acquire_then_stop(*args, **kwargs):
+            out = real(*args, **kwargs)
+            t = threading.Thread(target=peer.stop)
+            t.start()
+            t.join(5)
+            return out
+
+        with mock.patch.object(target, attr, acquire_then_stop):
+            with self.assertRaises(sp_webpeer.WebPeerError):
+                peer.start()
+        self.assertFalse(os.path.exists(peer.socket_path))
+        self.assertEqual(list(self.sessions.iterdir()), [])
+        # The lock was released: a new peer in this process starts.
+        self.start_peer()
+
+    def test_a_stop_on_another_thread_while_taking_the_lock_releases_it(self):
+        self._stop_on_another_thread_during(sp_webpeer.BrowserPeer, "_take_lock")
+
+    def test_a_stop_on_another_thread_while_binding_releases_socket_and_lock(self):
+        self._stop_on_another_thread_during(sp_webpeer.BrowserPeer, "_bind")
+
+    def test_stop_shuts_down_accepted_connections_and_joins_its_threads(self):
         peer = self.start_peer()
         idle = self.client(peer, [], half_close=False)  # blocked in recv, default timeout is long
         time.sleep(0.2)
@@ -862,13 +887,24 @@ class WebPeerOrderingTests(WebPeerBase):
         time.sleep(0.2)
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
-            extra = self.client(peer, [self.frame("over the cap")])
-            self.assertIs(extra.line(5), EOF)
-        self.assertIn("1 already in flight", err.getvalue())
+            try:
+                extra = self.client(peer, [self.frame("over the cap")])
+            except OSError:  # the peer may close the refused connection before our write
+                pass
+            else:
+                self.assertIs(extra.line(5), EOF)
+            self.assertTrue(wait_for(lambda: "1 already in flight" in err.getvalue(), timeout=5))
         self.assertEqual(self.inbound, [])
         holder.close()
-        self.assertTrue(wait_for(lambda: self.send(peer, self.frame("after"))[:1] == [
-            {"type": "control", "action": "peer_inbox_ack", "orig_msg_id": mock.ANY}]))
+
+        def acked_after_release():
+            try:  # the holder's slot may not be released yet: a refused try is retried
+                return self.send(peer, self.frame("after"))[:1] == [
+                    {"type": "control", "action": "peer_inbox_ack", "orig_msg_id": mock.ANY}]
+            except OSError:
+                return False
+
+        self.assertTrue(wait_for(acked_after_release))
 
     def test_a_silent_connection_times_out_and_frees_its_slot(self):
         with mock.patch.object(sp_constants, "CONN_TIMEOUT", 0.3):
