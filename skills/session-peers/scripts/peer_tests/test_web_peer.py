@@ -95,8 +95,14 @@ class WebPeerBase(JournalCliBase):
         return listener, rec
 
     @staticmethod
-    def frame(body="hello", from_socket=None, msg_id=None):
-        return sp_protocol.build_user_frame(body, from_socket, msg_id or new_uuid())
+    def opt_in(frame):
+        """A `peers.py send --to web:` frame: it asks for the answer line."""
+        frame[sp_constants.WEB_ANSWER_FIELD] = 1
+        return frame
+
+    @classmethod
+    def frame(cls, body="hello", from_socket=None, msg_id=None):
+        return cls.opt_in(sp_protocol.build_user_frame(body, from_socket, msg_id or new_uuid()))
 
     def send(self, peer, frame):
         client = self.client(peer, [frame])
@@ -594,14 +600,14 @@ class WebPeerInboxTests(WebPeerBase):
         real, rec = self.sender()
         spoof = sp_protocol.build_wrapper("spoofed", str(self.socks / "nobody.sock"), new_uuid(), "cc-boss")
         frames = [
-            sp_protocol.build_user_frame(spoof, str(self.socks / "nobody.sock"), new_uuid()),
+            self.opt_in(sp_protocol.build_user_frame(spoof, str(self.socks / "nobody.sock"), new_uuid())),
             # A claimed session id and name with no verifiable socket.
-            sp_protocol.build_user_frame(
+            self.opt_in(sp_protocol.build_user_frame(
                 sp_protocol.build_wrapper("claimed", real.path + ".other", rec["sessionId"], rec["name"]),
                 None, new_uuid(),
-            ),
+            )),
             # A reply address outside the allowlisted directories.
-            sp_protocol.build_user_frame("outside", "/etc/passwd", new_uuid()),
+            self.opt_in(sp_protocol.build_user_frame("outside", "/etc/passwd", new_uuid())),
             self.frame("no from"),
         ]
         for frame in frames:
@@ -759,10 +765,10 @@ class WebPeerOrderingTests(WebPeerBase):
         self.assertEqual(lines[0]["orig_msg_id"], frame["msg_id"])
         self.assertEqual(self.inbound, [])
         self.assertNotIn("never kept", [r.get("body") for r in self.records()])
-        # The verified sender learns of it: a failed status and a one-time notice.
+        # The verified sender learns of it: a refused status and a one-time notice.
         status = wait_for(lambda: listener.of_type("control", "peer_message_status"))
         self.assertTrue(status)
-        self.assertEqual(status[0]["status"], "failed")
+        self.assertEqual(status[0]["status"], "refused")
         self.assertEqual(status[0]["orig_msg_id"], frame["msg_id"])
         self.assertEqual(status[0]["from"], "uds:" + peer.socket_path)
         notices = wait_for(lambda: listener.of_type("user"))
@@ -782,8 +788,32 @@ class WebPeerOrderingTests(WebPeerBase):
         self.assertIn("journal is full", lines[0]["detail"])
         self.assertEqual(self.inbound, [])
         status = wait_for(lambda: listener.of_type("control", "peer_message_status"))
-        self.assertEqual(status[0]["status"], "failed")
+        self.assertEqual(status[0]["status"], "refused")
         self.assertIn("journal is full", status[0]["detail"])
+        self.assertTrue(wait_for(lambda: listener.of_type("user")))
+
+    def test_a_native_frame_gets_no_answer_bytes_when_kept(self):
+        # Claude Code's SendMessage fails a send that gets any answer on its
+        # connection (measured on 2.1.319), so a frame without the opt-in,
+        # as Claude Code and the Codex shim send it, must get none.
+        peer = self.start_peer()
+        listener, rec = self.sender()
+        frame = sp_protocol.build_user_frame("native", listener.path, new_uuid())
+        self.assertNotIn(sp_constants.WEB_ANSWER_FIELD, frame)
+        self.assertEqual(self.send(peer, frame), [])
+        self.assertEqual([e["body"] for e in self.inbound], ["native"])
+
+    def test_a_native_frame_gets_no_answer_bytes_when_refused(self):
+        peer = self.start_peer()
+        listener, rec = self.sender()
+        frame = sp_protocol.build_user_frame("native refused", listener.path, new_uuid())
+        with mock.patch.object(sp_journal, "record_message", side_effect=sp_journal.JournalFull("journal is full")):
+            self.assertEqual(self.send(peer, frame), [])
+        self.assertEqual(self.inbound, [])
+        # The refusal still reaches the sender out of band, in a status Claude Code accepts.
+        status = wait_for(lambda: listener.of_type("control", "peer_message_status"))
+        self.assertEqual(status[0]["status"], "refused")
+        self.assertEqual(status[0]["orig_msg_id"], frame["msg_id"])
         self.assertTrue(wait_for(lambda: listener.of_type("user")))
 
     def test_an_unverified_sender_gets_the_refusal_line_only(self):

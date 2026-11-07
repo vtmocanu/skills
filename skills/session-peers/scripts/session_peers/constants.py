@@ -92,6 +92,10 @@ POLL_INTERVAL_DEFAULT = 1.0
 LIVENESS_INTERVAL_DEFAULT = 5.0
 ALIAS_REFRESH_INTERVAL_DEFAULT = 30.0
 CONN_TIMEOUT = 30.0
+# A frame to the browser peer opts in to an answer line on its own connection
+# with this field set to 1. Claude Code's native sender fails a send that
+# gets any answer, so frames without it get no bytes back.
+WEB_ANSWER_FIELD = "want_peer_inbox_ack"
 MAX_RECORD_REWRITES = 2
 PROCESSED_TURN_HISTORY = 200
 CONTACT_HISTORY = 200

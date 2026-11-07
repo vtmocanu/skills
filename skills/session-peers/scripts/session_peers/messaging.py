@@ -295,6 +295,7 @@ def _send_web(ident, args, oc_sender=None):
         sys.stderr.write("error: %s\n" % exc)
         return _transport_failed(args, msg_id, exc)
     frame = sp_protocol.build_user_frame(body, reply_socket, msg_id)
+    frame[sp_constants.WEB_ANSWER_FIELD] = 1  # opt in to the inbox's answer line
     try:
         outcome, detail = _web_exchange(rec, frame)
     except OSError as exc:

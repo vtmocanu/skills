@@ -2,9 +2,11 @@
 
 It stands in the fabric as `web:<uuid>`. Peers reach it with the same user
 frames they send a Claude session; an inbound message counts as received only
-after `journal.record_message` returns, and only then is it shown and
-acknowledged on the sender's connection (`peer_inbox_ack`, or
-`peer_inbox_refused` when the journal refused it).
+after `journal.record_message` returns, and only then is it shown. Only a
+frame carrying `want_peer_inbox_ack: 1` (`peers.py send --to web:`) gets an
+answer line on its connection (`peer_inbox_ack`, or `peer_inbox_refused` when
+the journal refused it). Every other frame gets no bytes back: Claude Code's
+native sender treats any answer on its connection as a failed send.
 """
 
 from __future__ import annotations
@@ -387,6 +389,8 @@ class BrowserPeer:
         try:
             ftype = frame.get("type")
             if ftype == "user":
+                if frame.get(sp_constants.WEB_ANSWER_FIELD) != 1:
+                    conn = None  # a native or shim sender: never write back
                 return self._handle_user(conn, frame)
             elif ftype == "control" and frame.get("action") == "peer_message_status":
                 sender, _name, _rec = self._verified_sender(frame, {})
@@ -499,7 +503,9 @@ class BrowserPeer:
                     "type": "control",
                     "action": "peer_message_status",
                     "orig_msg_id": orig,
-                    "status": "failed",
+                    # `refused`: Claude Code drops a status outside
+                    # held|denied|expired|delivered|refused|dropped.
+                    "status": "refused",
                     "detail": detail,
                     "from": "uds:%s" % self.socket_path,
                 },
@@ -540,6 +546,8 @@ class BrowserPeer:
 
     @staticmethod
     def _answer(conn, payload):
+        if conn is None:
+            return
         try:
             conn.sendall(json.dumps(payload).encode("utf-8") + b"\n")
         except OSError:
