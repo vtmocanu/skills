@@ -620,7 +620,8 @@ class TestCorrelatedAskReply(Base):
             time.sleep(0.05)
             changed = dict(rec)
             changed["status"] = "idle"
-            path.write_text(json.dumps(changed))
+            # Atomic: a truncate-then-write would let `wait` read an empty record and miss the change.
+            sp_runtime.write_json_atomic(str(path), changed)
 
         thread = threading.Thread(target=make_idle)
         thread.start()
