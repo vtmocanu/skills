@@ -417,6 +417,25 @@ class WebPeerCleanupTests(WebPeerBase):
     def test_a_stop_on_another_thread_while_taking_the_lock_releases_it(self):
         self._stop_on_another_thread_during(sp_webpeer.BrowserPeer, "_take_lock")
 
+    def test_a_stop_that_cleans_up_before_the_lock_is_recorded_still_releases_it(self):
+        # The stop's cleanup runs inside _take_lock, before the fd is recorded:
+        # only start's forced cleanup can release that lock.
+        peer = sp_webpeer.BrowserPeer()
+        real = sp_webpeer.fcntl.flock
+
+        def flock_then_stop(fd, op):
+            out = real(fd, op)
+            t = threading.Thread(target=peer.stop)
+            t.start()
+            t.join(5)
+            return out
+
+        with mock.patch.object(sp_webpeer.fcntl, "flock", flock_then_stop):
+            with self.assertRaises(sp_webpeer.WebPeerError):
+                peer.start()
+        self.assertIsNone(peer._lock_fd)
+        self.start_peer()  # the lock was released
+
     def test_a_stop_on_another_thread_while_binding_releases_socket_and_lock(self):
         self._stop_on_another_thread_during(sp_webpeer.BrowserPeer, "_bind")
 

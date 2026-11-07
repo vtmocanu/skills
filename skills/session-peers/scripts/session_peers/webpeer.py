@@ -129,11 +129,14 @@ class BrowserPeer:
             self._notifier.start()
         except BaseException:
             # Forced: a stop() on another thread may already have run cleanup
-            # before this start acquired the lock or bound the socket; what
-            # start acquired is released here either way (the lock is still
-            # held, so no other instance owns these paths yet).
+            # before this start acquired the lock or bound the socket. Each
+            # resource is claimed under the mutex before it is released, so
+            # whatever that cleanup did not claim is released here, once.
             self._cleanup(force=True)
             raise
+        if self.stop_requested or self._cleaned:  # stopped as the threads started
+            self.stop()
+            raise WebPeerError("the browser peer was stopped while starting")
         return self
 
     def _refuse_if_stopped(self):
@@ -159,13 +162,19 @@ class BrowserPeer:
             if self._cleaned and not force:
                 return
             self._cleaned = True
+            # Claim each resource so a concurrent or forced pass never releases
+            # it twice (a reused fd, or a path another instance took since).
+            record, self._record_written = self._record_written, False
+            bound, self._bound = self._bound, False
+            lock_fd, self._lock_fd = self._lock_fd, None
         # Only what this instance created: a start that lost the lock must not
-        # remove the files of the instance that holds it.
+        # remove the files of the instance that holds it. The lock is released
+        # last, after the paths are gone.
         paths = []
-        if self._record_written:
+        if record:
             paths.append(self.record_path)
             paths.append("%s.tmp.%d" % (self.record_path, os.getpid()))
-        if self._bound:
+        if bound:
             paths.append(self.socket_path)
         for path in paths:
             try:
@@ -184,12 +193,11 @@ class BrowserPeer:
                 self.srv.close()
             except OSError:
                 pass
-        if self._lock_fd is not None:
+        if lock_fd is not None:
             try:
-                os.close(self._lock_fd)  # drops the flock
+                os.close(lock_fd)  # drops the flock
             except OSError:
                 pass
-            self._lock_fd = None
 
     # -- lock, socket, record ----------------------------------------------
 
@@ -213,7 +221,8 @@ class BrowserPeer:
             if exc.errno in (errno.EWOULDBLOCK, errno.EAGAIN, errno.EACCES):
                 raise WebPeerError(LOCK_HELD)
             raise WebPeerError("cannot lock %s: %s" % (os.path.join(path, LOCK_NAME), exc))
-        self._lock_fd = fd  # held for life: closing would drop the lock
+        with self._mutex:
+            self._lock_fd = fd  # held for life: closing would drop the lock
 
     def _bind(self):
         try:
@@ -234,7 +243,8 @@ class BrowserPeer:
             pass
         self.srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.srv.bind(self.socket_path)
-        self._bound = True
+        with self._mutex:
+            self._bound = True
         os.chmod(self.socket_path, 0o600)
         self.srv.listen(16)
         self.srv.settimeout(0.5)
@@ -274,7 +284,8 @@ class BrowserPeer:
             pass
         # Set before the write: a crash inside it may leave the temp file or the
         # record, and cleanup must try to remove the record either way.
-        self._record_written = True
+        with self._mutex:
+            self._record_written = True
         sp_runtime.write_json_atomic(self.record_path, self.record(), mode=0o644)
         if self.stop_requested or self._cleaned:
             # A stop() on another thread may have run its cleanup before the
