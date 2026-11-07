@@ -530,7 +530,10 @@ class ChatRefusalTests(ChatBase):
         for to, text in cases:
             with self.subTest(to=to, text=text):
                 self.refused(self.post(to, text, tick=False), 403, text)
-        self.assertEqual(self.post("#ops", "@allx not an all", tick=False).status, 202)
+        resp = self.post("#ops", "@allx not an all", tick=False)
+        self.assertEqual(resp.status, 202)
+        # Let the worker finish: a job still running at teardown writes into a later test's journal.
+        self.wait_row(resp.json()["message_id"])
 
     def test_a_body_that_never_completes_is_408_and_sends_nothing(self):
         body = self.body_of("#ops")
