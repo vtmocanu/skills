@@ -155,7 +155,7 @@
     selected: "general", view: "conv", pages: table(), pendingNotes: table(), loading: table(), pageErrors: table(),
     all: null, search: null, cursor: null, polls: 0, failures: 0, polling: false, stopped: false, timer: null,
     needState: false, live: { mode: "starting" }, liveText: null, untracked: 0, journalGap: false, pane: "main",
-    focusables: table(), wired: false, waiting: false
+    focusables: table(), wired: false, waiting: false, allInflight: null
   };
 
   var RT_LABEL = { claude: "Claude Code", codex: "Codex", oc: "OpenCode", unknown: "Unknown runtime" };
@@ -903,7 +903,12 @@
 
   function loadAll(next) {
     var url = "/api/all" + (next ? "?next=" + encodeURIComponent(next) : "");
+    // Channels with live activity while this request is in flight: the batch may have been read
+    // before that activity, so they are judged against the batch once it arrives.
+    var inflight = table();
+    S.allInflight = inflight;
     return api(url).then(function (data) {
+      if (S.allInflight === inflight) S.allInflight = null;
       var entries = (Array.isArray(data.entries) ? data.entries : []).filter(function (e) { return e && typeof e === "object"; });
       if (!next || !S.all) S.all = newAll();
       var all = S.all;
@@ -930,8 +935,12 @@
       all.shown = data.shown; all.total = data.total; all.omitted = data.omitted;
       all.next = data.next || null; all.partial = !!data.partial; all.trimmed += data.trimmed || 0;
       capAll(all);
+      Object.keys(inflight).forEach(function (k) {
+        if (all.read[k] || !all.next) markAllStale("New entries arrived in " + chanText(k) + " while this view was loading; it may not include them.");
+      });
       if (S.view === "all") renderMain(next ? { focusMore: "more:all", focusSet: entries } : { toBottom: true });
     }, function (err) {
+      if (S.allInflight === inflight) S.allInflight = null;
       if (err && err.status === 409) {
         S.all = null;
         return loadAll(null).then(function () { if (S.all) S.all.notes.push("The channel list changed; reloaded from the start."); if (S.view === "all") renderMain({}); });
@@ -978,6 +987,7 @@
     var page = S.pages[key];
     if (page && appendToPage(page, entries)) changed = true;
     var all = S.all;
+    if (S.allInflight && entries.length) S.allInflight[key] = true;
     if (all && all.covered[key]) {
       entries.forEach(function (e) {
         if (!e || typeof e !== "object") return;
@@ -1083,7 +1093,8 @@
       }
       if (c.gap) {
         reloads.push([key, c.gap]);
-        if (S.all && S.all.covered[key] && markAllStale(chanText(key) + " has entries this view could not stream; it may be incomplete.")) changed = true;
+        if (S.allInflight) S.allInflight[key] = true;
+        if (S.all && (S.all.covered[key] || S.all.read[key] || !S.all.next) && markAllStale(chanText(key) + " has entries this view could not stream; it may be incomplete.")) changed = true;
         return;
       }
       if (Array.isArray(c.entries) && c.entries.length && appendEntries(key, c.entries)) changed = true;

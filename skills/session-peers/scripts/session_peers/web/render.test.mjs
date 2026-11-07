@@ -1057,6 +1057,36 @@ test("All channels: an entry for a channel not yet read with Load more pending k
   assert.ok(buttonNamed(env.document.byId.notes, "Load more"))
 })
 
+test("All channels: a gap in a channel a batch read, with no next batch, marks the view out of date", async () => {
+  const env = bootFixture({ "/api/all": allBatch([Object.assign(sendEntry(1, "from general"), { channel: "general" })], { total: 2, shown: 2, next: null, channels: ["general", "quietch"] }) })
+  await env.app.ready
+  await env.app.showAll()
+  env.routes["/api/changes"] = quiet("C1", { channels: { quietch: { entries: [], gap: { from: 1, to: 9, reason: "pruned" } } } })
+  await env.app.pollOnce()
+  const sub = env.document.byId.sub.textContent
+  assert.ok(sub.startsWith("Out of date"), sub)
+  assert.ok(!sub.includes("Showing 2 of 2"), sub)
+})
+
+test("All channels: a live entry that arrives while Load more is in flight is not lost", async () => {
+  let release
+  const gate = new Promise((r) => { release = r })
+  const first = allBatch([Object.assign(sendEntry(1, "from general"), { channel: "general" })], { partial: true, omitted: 1, total: 2, shown: 1, next: "TOK", channels: ["general"] })
+  const last = allBatch([], { total: 2, shown: 2, next: null, channels: ["ops"] })
+  const env = bootFixture({ "/api/all": (url) => (url.includes("next=TOK") ? gate.then(() => last) : first) })
+  await env.app.ready
+  await env.app.showAll()
+  const loading = env.app.loadAll("TOK")
+  env.routes["/api/changes"] = quiet("C1", { channels: { ops: { entries: [sendEntry(9, "live in ops")], gap: null } } })
+  await env.app.pollOnce()
+  release()
+  await loading
+  const sub = env.document.byId.sub.textContent
+  const text = env.document.byId.stream.textContent + env.document.byId.notes.textContent
+  assert.ok(!sub.includes("Showing 2 of 2") || text.includes("live in ops"), sub)
+  assert.ok(sub.startsWith("Out of date"), sub)
+})
+
 test("a channel load error says updates stopped after the token was refused", async () => {
   const env = bootFixture({ "/api/channel/ops": { __status: 502 } })
   await env.app.ready
