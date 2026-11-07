@@ -13,6 +13,7 @@ import fcntl
 import getpass
 import json
 import os
+import queue
 import re
 import socket
 import threading
@@ -26,6 +27,9 @@ LOCK_DIR = "~/.codex/session-peers"
 LOCK_NAME = "web-chat.lock"
 LOCK_HELD = "another peers.py web --chat is running for this user"
 _DETAIL_MAX = 300
+NOTIFY_QUEUE_MAX = 32
+_ORIG_ID_RE = re.compile(r"[A-Za-z0-9._:-]{1,128}")
+_NOTIFIED_MAX = 1024
 
 
 class WebPeerError(RuntimeError):
@@ -71,25 +75,62 @@ class BrowserPeer:
         self._record_written = False
         self._mutex = threading.Lock()
         self._cleaned = False
+        self._stop_requested = False
         self._clients = threading.Semaphore(sp_constants.MAX_CONCURRENT_CLIENTS)
         self._accept = None
+        self._notifier = None
+        self._notices = queue.Queue(maxsize=NOTIFY_QUEUE_MAX)
+        self._notified = set()  # senders already told about the current failure episode
+        self._notified_lock = threading.Lock()
 
     # -- lifecycle ---------------------------------------------------------
 
+    @property
+    def stop_requested(self):
+        return self._stop_requested or self.stop_event.is_set()
+
+    def request_stop(self):
+        """Ask the peer to stop. The only call to make from a signal handler.
+
+        It assigns one plain attribute and takes no lock, so a handler that
+        interrupts the owner inside ``stop()`` or ``start()`` cannot deadlock.
+        The owner polls ``stop_requested`` / ``wait_for_stop()`` and then calls
+        ``stop()`` from its own ``finally``, as the shim does in ``run()``.
+        """
+        self._stop_requested = True
+
+    def wait_for_stop(self, timeout=None):
+        """Block the owner until a stop is requested; True when it was."""
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while not self.stop_requested:
+            if deadline is not None and time.monotonic() >= deadline:
+                return False
+            time.sleep(0.05)
+        return True
+
     def start(self):
+        if self.stop_requested or self._cleaned:
+            raise WebPeerError("the browser peer was already stopped; make a new one")
         try:
             self._take_lock()
             self._bind()
             self._write_record()
             self._accept = threading.Thread(target=self._accept_loop, name="web-peer-accept", daemon=True)
             self._accept.start()
+            self._notifier = threading.Thread(target=self._notify_loop, name="web-peer-notify", daemon=True)
+            self._notifier.start()
         except BaseException:
             self._cleanup()
             raise
         return self
 
     def stop(self):
-        """Idempotent; safe from a signal handler (an event and a cleanup)."""
+        """Owner-thread teardown: idempotent, removes the record, socket and lock.
+
+        Not for a signal handler (it takes locks): a handler calls
+        ``request_stop()`` and the owner calls this from its ``finally``.
+        """
+        self._stop_requested = True
         self.stop_event.set()
         self._cleanup()
 
@@ -103,6 +144,7 @@ class BrowserPeer:
         paths = []
         if self._record_written:
             paths.append(self.record_path)
+            paths.append("%s.tmp.%d" % (self.record_path, os.getpid()))
         if self._bound:
             paths.append(self.socket_path)
         for path in paths:
@@ -147,7 +189,10 @@ class BrowserPeer:
         self._lock_fd = fd  # held for life: closing would drop the lock
 
     def _bind(self):
-        sp_claude.ensure_socket_dir(self.sock_dir)
+        try:
+            sp_claude.ensure_socket_dir(self.sock_dir)
+        except SystemExit as exc:  # its refusals (symlink, wrong owner) are SystemExit
+            raise WebPeerError(str(exc.code) if exc.code else "unsafe socket directory %s" % self.sock_dir)
         if not sp_claude.socket_path_ok(self.socket_path):
             raise WebPeerError(
                 "refusing to bind %s: outside the allowlisted socket directories" % self.socket_path
@@ -192,15 +237,25 @@ class BrowserPeer:
         }
 
     def _write_record(self):
+        if self.stop_requested or self._cleaned:
+            raise WebPeerError("stop requested before the registry record was written")
+        d = sp_storage.claude_sessions_dir()
+        os.makedirs(d, exist_ok=True)
+        try:
+            os.chmod(d, 0o700)
+        except OSError:
+            pass
         # Set before the write: a crash inside it may leave the temp file or the
         # record, and cleanup must try to remove the record either way.
         self._record_written = True
         sp_runtime.write_json_atomic(self.record_path, self.record(), mode=0o644)
+        if self.stop_requested or self._cleaned:
+            raise WebPeerError("stop requested while the registry record was written")
 
     # -- connections -------------------------------------------------------
 
     def _accept_loop(self):
-        while not self.stop_event.is_set():
+        while not self.stop_requested:
             try:
                 conn, _addr = self.srv.accept()
             except socket.timeout:
@@ -228,7 +283,7 @@ class BrowserPeer:
             deadline = time.time() + sp_constants.CONN_TIMEOUT
             frames = 0
             buf = b""
-            while not self.stop_event.is_set():
+            while not self.stop_requested:
                 remaining = deadline - time.time()
                 if remaining <= 0:
                     return
@@ -245,7 +300,8 @@ class BrowserPeer:
                     frames += 1
                     if frames > sp_constants.MAX_FRAMES_PER_CONNECTION:
                         return
-                    self._handle_line(conn, line.decode("utf-8", "replace"))
+                    if self._handle_line(conn, line.decode("utf-8", "replace")) is False:
+                        return
                 if len(buf) > sp_constants.MAX_TEXT_CHARS:
                     return
             if buf.strip() and frames < sp_constants.MAX_FRAMES_PER_CONNECTION:
@@ -270,7 +326,7 @@ class BrowserPeer:
         try:
             ftype = frame.get("type")
             if ftype == "user":
-                self._handle_user(conn, frame)
+                return self._handle_user(conn, frame)
             elif ftype == "control" and frame.get("action") == "peer_message_status":
                 sender, _name, _rec = self._verified_sender(frame, {})
                 self.on_status(frame, sender)
@@ -310,14 +366,17 @@ class BrowserPeer:
         if not body.strip():
             return
         orig = frame.get("msg_id")
-        orig = orig if isinstance(orig, str) else None
+        # Echoed into logs, frames and on_inbound: only a plain token passes.
+        orig = orig if isinstance(orig, str) and _ORIG_ID_RE.fullmatch(orig) else None
         typed, sender_name, sender_rec = self._verified_sender(frame, attrs)
-        message_id = str(uuid.uuid4())  # always fresh: no lookup accepts an existing record
         try:
-            sp_journal.record_message(typed, [self.typed], body, message_id=message_id)
+            # No message_id: a fresh one, so the journal does not scan for a duplicate.
+            message_id = sp_journal.record_message(typed, [self.typed], body)
         except sp_journal.JournalError as exc:
-            self._refuse(conn, orig, sender_rec, exc)
+            self._refuse(conn, orig, typed, sender_rec, exc)
             return
+        with self._notified_lock:
+            self._notified.clear()  # a new failure episode may notify again
         entry = {
             "message_id": message_id,
             "orig_msg_id": orig,
@@ -329,12 +388,16 @@ class BrowserPeer:
         try:
             self.on_inbound(entry)
         except Exception as exc:
-            sp_runtime.log("browser peer: on_inbound failed: %r" % (exc,))
+            # Journaled but never shown: no ack and no refusal, so the sender
+            # sees a closed connection ("outcome unknown") rather than a false ack.
+            sp_runtime.log("browser peer: on_inbound failed, dropping the connection unacknowledged: %r" % (exc,))
+            return False
         self._answer(conn, {"type": "control", "action": "peer_inbox_ack", "orig_msg_id": orig})
 
-    def _refuse(self, conn, orig, rec, exc):
-        detail = " ".join(str(exc).split())[:_DETAIL_MAX] or type(exc).__name__
-        sp_runtime.log("browser peer: not keeping message %s: %s" % (orig or "unknown", detail))
+    def _refuse(self, conn, orig, typed, rec, exc):
+        text = "".join(c if c.isprintable() else " " for c in str(exc))
+        detail = " ".join(text.split())[:_DETAIL_MAX] or type(exc).__name__
+        sp_runtime.log("browser peer: not keeping message %r: %r" % (orig, detail))
         self._answer(
             conn,
             {"type": "control", "action": "peer_inbox_refused", "orig_msg_id": orig, "detail": detail},
@@ -342,7 +405,7 @@ class BrowserPeer:
         if not rec:
             return
         if orig:
-            sp_claude.deliver_to_record(
+            self._notify(
                 rec,
                 {
                     "type": "control",
@@ -354,10 +417,35 @@ class BrowserPeer:
                 },
             )
         # The status frame reaches only a sender tracking this message; a plain
-        # SendMessage is not, so tell it once with no reply route (no loop).
+        # SendMessage is not, so tell it once per failure episode with no reply
+        # route (no loop). A successful journal write starts a new episode.
+        with self._notified_lock:
+            if typed in self._notified:
+                return
+            if len(self._notified) >= _NOTIFIED_MAX:
+                self._notified.clear()
+            self._notified.add(typed)
         notice = "[session-peers] your message to %s was not kept: %s" % (self.name, detail)
         body = "%s\n%s" % (sp_protocol.build_origin("web", self.name, self.sid), notice)
-        sp_claude.deliver_to_record(rec, sp_protocol.build_user_frame(body, None))
+        self._notify(rec, sp_protocol.build_user_frame(body, None))
+
+    def _notify(self, rec, frame):
+        """Queue a delivery for the notifier thread; never blocks a connection slot."""
+        try:
+            self._notices.put_nowait((rec, frame))
+        except queue.Full:
+            sp_runtime.log("browser peer: notifier queue full; dropping a notice")
+
+    def _notify_loop(self):
+        while not self.stop_requested:
+            try:
+                rec, frame = self._notices.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            try:
+                sp_claude.deliver_to_record(rec, frame)  # bounded by send_frame's timeout
+            except Exception as exc:
+                sp_runtime.log("browser peer: notice delivery failed: %r" % (exc,))
 
     @staticmethod
     def _answer(conn, payload):

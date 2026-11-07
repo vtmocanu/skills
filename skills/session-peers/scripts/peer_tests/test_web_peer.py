@@ -16,12 +16,16 @@ class RawClient:
 
     def __init__(self, path, frames, half_close=True):
         self.conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self.conn.connect(path)
-        for frame in frames:
-            self.conn.sendall(json.dumps(frame).encode("utf-8") + b"\n")
-        if half_close:
-            self.conn.shutdown(socket.SHUT_WR)
         self.buf = b""
+        try:
+            self.conn.connect(path)
+            for frame in frames:
+                self.conn.sendall(json.dumps(frame).encode("utf-8") + b"\n")
+            if half_close:
+                self.conn.shutdown(socket.SHUT_WR)
+        except BaseException:
+            self.conn.close()
+            raise
 
     def line(self, timeout=5.0):
         """The next parsed line, None on timeout, EOF at end of stream."""
@@ -35,6 +39,8 @@ class RawClient:
                 chunk = self.conn.recv(4096)
             except socket.timeout:
                 return None
+            except ConnectionResetError:  # the peer closed with our bytes unread
+                return EOF
             if not chunk:
                 return EOF
             self.buf += chunk
@@ -159,8 +165,8 @@ class WebPeerRecordTests(WebPeerBase):
         thread = threading.Thread(target=reader, daemon=True)
         thread.start()
         try:
-            for _ in range(400):
-                sp_runtime.write_json_atomic(peer.record_path, peer.record(), mode=0o644)
+            for _ in range(100):
+                peer._write_record()
         finally:
             stop.set()
             thread.join(5)
@@ -180,6 +186,9 @@ class WebPeerRecordTests(WebPeerBase):
         self.assertEqual(proc.returncode, -signal.SIGKILL)
         self.assertEqual(list(self.sessions.glob("*.json")), [])
         self.assertEqual(sp_claude.live_claude_records(), [])
+        # SIGKILL runs no cleanup, so only the killed writer's temp file may remain
+        # (never a record); a handled failure leaves none (see the cleanup tests).
+        self.assertTrue(all(".json.tmp." in p.name for p in self.sessions.iterdir()))
         # The kernel released the lock with the process: a new peer starts.
         self.start_peer()
 
@@ -192,13 +201,27 @@ class WebPeerLockTests(WebPeerBase):
         first = self.start_peer()
         os.environ["CODEX_HOME"] = str(self.root / "other-cx")
         second = sp_webpeer.BrowserPeer()
-        with self.assertRaises(sp_webpeer.WebPeerError) as ctx:
-            second.start()
-        self.assertEqual(str(ctx.exception), "another peers.py web --chat is running for this user")
+        errors = []
+
+        def attempt():
+            try:
+                second.start()
+            except BaseException as exc:  # reported below, from the test thread
+                errors.append(exc)
+
+        # A second start that blocked on the lock (no LOCK_NB) would hang here.
+        thread = threading.Thread(target=attempt, daemon=True)
+        thread.start()
+        thread.join(10)
+        self.assertFalse(thread.is_alive(), "the second start blocked instead of failing fast")
+        self.assertEqual(len(errors), 1)
+        self.assertIsInstance(errors[0], sp_webpeer.WebPeerError)
+        self.assertEqual(str(errors[0]), "another peers.py web --chat is running for this user")
         # The loser shares this pid, but must not have removed the winner's files.
         self.assertTrue(os.path.exists(first.record_path))
         self.assertTrue(os.path.exists(first.socket_path))
-        self.assertEqual(json.loads(open(first.record_path).read())["sessionId"], first.sid)
+        with open(first.record_path, encoding="utf-8") as fh:
+            self.assertEqual(json.load(fh)["sessionId"], first.sid)
         self.assertEqual(self.send(first, self.frame())[0]["action"], "peer_inbox_ack")
 
     def test_lock_is_released_by_stop(self):
@@ -230,13 +253,31 @@ class WebPeerLockTests(WebPeerBase):
             sp_webpeer.BrowserPeer().start()
         self.assertEqual(target.read_text(), "x")
 
-    def test_lock_file_with_another_owner_is_refused(self):
-        os.makedirs(self.lock_dir(), mode=0o700)
-        with mock.patch.object(sp_journal.os, "geteuid", return_value=os.geteuid() + 1):
+    def _refused_with_euid_wrong_on_call(self, wrong_call):
+        """Start with sp_journal's geteuid wrong only on its Nth call (1: directory, 2: file)."""
+        real = os.geteuid
+        calls = []
+
+        def fake():
+            calls.append(1)
+            return real() + 1 if len(calls) == wrong_call else real()
+
+        with mock.patch.object(sp_journal.os, "geteuid", fake):
             with self.assertRaises(sp_webpeer.WebPeerError) as ctx:
                 sp_webpeer.BrowserPeer().start()
-        self.assertIn("owned by this user", str(ctx.exception))
         self.assertEqual(list(self.sessions.glob("*.json")), [])
+        return str(ctx.exception), len(calls)
+
+    def test_lock_directory_with_another_owner_is_refused(self):
+        os.makedirs(self.lock_dir(), mode=0o700)
+        message, _calls = self._refused_with_euid_wrong_on_call(1)
+        self.assertIn("is not a directory owned by this user", message)
+
+    def test_lock_file_with_another_owner_is_refused(self):
+        os.makedirs(self.lock_dir(), mode=0o700)
+        message, calls = self._refused_with_euid_wrong_on_call(2)
+        self.assertEqual(calls, 2)  # the directory check passed; the file check refused
+        self.assertIn("web-chat.lock is not owned by this user", message)
 
 
 class WebPeerCleanupTests(WebPeerBase):
@@ -271,6 +312,67 @@ class WebPeerCleanupTests(WebPeerBase):
         # The lock was released too.
         self.start_peer()
 
+    def test_a_failed_record_replace_leaves_no_temp_file(self):
+        peer = sp_webpeer.BrowserPeer()
+        with mock.patch.object(sp_webpeer.sp_runtime.os, "replace", side_effect=OSError(errno.EIO, "boom")):
+            with self.assertRaises(OSError):
+                peer.start()
+        self.assertEqual(list(self.sessions.iterdir()), [])
+
+    def test_stop_before_start_leaks_nothing_and_start_is_refused(self):
+        peer = sp_webpeer.BrowserPeer()
+        peer.stop()
+        with self.assertRaises(sp_webpeer.WebPeerError):
+            peer.start()
+        peer.stop()
+        self.assertEqual(list(self.sessions.iterdir()), [])
+        self.assertEqual(list(self.socks.glob("*.sock")), [])
+        self.start_peer()  # the lock was never kept
+
+    def test_request_stop_before_start_is_refused_too(self):
+        peer = sp_webpeer.BrowserPeer()
+        peer.request_stop()
+        with self.assertRaises(sp_webpeer.WebPeerError):
+            peer.start()
+        self.assertEqual(list(self.sessions.iterdir()), [])
+        self.start_peer()
+
+    def test_a_stop_between_the_bind_and_the_record_write_leaves_nothing(self):
+        peer = sp_webpeer.BrowserPeer()
+        real_bind = peer._bind
+
+        def bind_then_stop():
+            real_bind()
+            peer.request_stop()
+
+        peer._bind = bind_then_stop
+        with self.assertRaises(sp_webpeer.WebPeerError):
+            peer.start()
+        self.assertEqual(list(self.sessions.iterdir()), [])
+        self.assertFalse(os.path.exists(peer.socket_path))
+        self.start_peer()  # the lock was released
+
+    def test_request_stop_takes_no_lock(self):
+        peer = self.start_peer()
+        with peer._mutex, peer.stop_event._cond:  # a handler firing inside stop() or wait()
+            peer.request_stop()
+        self.assertTrue(peer.stop_requested)
+        peer.stop()
+        self.assertFalse(os.path.exists(peer.record_path))
+
+    def test_an_unsafe_socket_directory_is_a_web_peer_error(self):
+        elsewhere = self.root / "elsewhere-socks"
+        elsewhere.mkdir(mode=0o700)
+        link = self.root / "link-socks"
+        os.symlink(str(elsewhere), str(link))
+        peer = sp_webpeer.BrowserPeer()
+        peer.sock_dir = str(link)
+        with self.assertRaises(sp_webpeer.WebPeerError) as ctx:
+            peer.start()
+        self.assertIn("symlink", str(ctx.exception))
+        self.assertEqual(list(self.sessions.iterdir()), [])
+        self.start_peer()
+
     def test_startup_failure_in_the_bind_releases_the_lock(self):
         peer = sp_webpeer.BrowserPeer()
         with mock.patch.object(sp_webpeer.sp_claude, "socket_path_ok", return_value=False):
@@ -284,9 +386,12 @@ class WebPeerCleanupTests(WebPeerBase):
             "sys.path.insert(0, %r)\n"
             "from session_peers.webpeer import BrowserPeer\n"
             "p = BrowserPeer().start()\n"
-            "signal.signal(signal.SIGTERM, lambda s, f: p.stop())\n"
+            "signal.signal(signal.SIGTERM, lambda s, f: p.request_stop())\n"
             "print(p.sid, flush=True)\n"
-            "p.stop_event.wait(60)\n" % str(HERE)
+            "try:\n"
+            "    p.wait_for_stop(60)\n"
+            "finally:\n"
+            "    p.stop()\n" % str(HERE)
         )
         proc = subprocess.Popen([sys.executable, "-c", script], env=dict(os.environ),
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -547,9 +652,85 @@ class WebPeerOrderingTests(WebPeerBase):
         self.assertTrue(wait_for(lambda: self.inbound))
         self.assertEqual(self.send(peer, self.frame("still works"))[0]["action"], "peer_inbox_ack")
 
-    def test_on_inbound_failure_does_not_lose_the_ack(self):
+    def test_on_inbound_failure_closes_without_an_ack_or_refusal(self):
         def boom(_entry):
             raise RuntimeError("feed broke")
 
         peer = self.start_peer(on_inbound=boom)
-        self.assertEqual(self.send(peer, self.frame())[0]["action"], "peer_inbox_ack")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            client = self.client(peer, [self.frame(), self.frame("second")])
+            self.assertIs(client.line(5), EOF)  # closed, nothing written
+        self.assertIn("on_inbound failed", err.getvalue())
+
+    def test_a_foreign_uid_client_is_dropped_before_anything_happens(self):
+        peer = self.start_peer()
+        sp_journal.record_message(None, [peer.typed], "seed")
+        before = len(self.records())
+        with mock.patch.object(sp_process, "peer_uid", lambda _conn: os.getuid() + 1):
+            lines = self.send(peer, self.frame("intruder"))
+        self.assertEqual(lines, [])
+        self.assertEqual(self.inbound, [])
+        self.assertEqual(len(self.records()), before)
+        self.assertNotIn("intruder", [r.get("body") for r in self.records()])
+        # The same peer serves a client with our uid afterwards.
+        self.assertEqual(self.send(peer, self.frame("ours"))[0]["action"], "peer_inbox_ack")
+
+    def test_an_unsafe_msg_id_is_dropped_from_the_log_frames_and_feed(self):
+        peer = self.start_peer()
+        evil = "abc\n[session-peers] forged\x1b[31m‮evil\r"
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            with mock.patch.object(sp_journal, "record_message", side_effect=sp_journal.JournalFull("full\x1b[2J\nx")):
+                refused = self.send(peer, self.frame("refused", msg_id=evil))
+            accepted = self.send(peer, self.frame("kept", msg_id=evil))
+        self.assertEqual(refused[0]["orig_msg_id"], None)
+        self.assertNotIn("\x1b", refused[0]["detail"])
+        self.assertNotIn("\n", refused[0]["detail"])
+        self.assertEqual(accepted, [{"type": "control", "action": "peer_inbox_ack", "orig_msg_id": None}])
+        self.assertIsNone(self.inbound[0]["orig_msg_id"])
+        logged = err.getvalue()
+        self.assertIn("not keeping message", logged)
+        for ch in logged:
+            self.assertTrue(ch == "\n" or ch.isprintable(), "raw %r in the log" % ch)
+        self.assertNotIn("\n[session-peers] forged", logged)
+        self.assertNotIn("forged", [line.strip() for line in logged.splitlines()])
+        for ok in ("0123-abc", "a" * 128, "id:1.2_x"):
+            self.assertEqual(self.send(peer, self.frame("ok", msg_id=ok))[0]["orig_msg_id"], ok)
+        self.assertIsNone(self.send(peer, self.frame("long", msg_id="a" * 129))[0]["orig_msg_id"])
+        self.assertIsNone(self.send(peer, dict(self.frame("empty"), msg_id=""))[0]["orig_msg_id"])
+
+    def test_the_notice_is_sent_once_per_failure_episode(self):
+        peer = self.start_peer()
+        listener, _rec = self.sender()
+        with mock.patch.object(sp_journal, "record_message", side_effect=sp_journal.JournalFull("journal is full")):
+            for i in range(5):
+                lines = self.send(peer, self.frame("m%d" % i, listener.path))
+                self.assertEqual(lines[0]["action"], "peer_inbox_refused")
+        self.assertTrue(wait_for(lambda: len(listener.of_type("control", "peer_message_status")) == 5))
+        self.assertTrue(wait_for(lambda: listener.of_type("user")))
+        time.sleep(0.3)
+        self.assertEqual(len(listener.of_type("user")), 1)
+        # A successful write ends the episode: the next failure notifies again.
+        self.assertEqual(self.send(peer, self.frame("fine", listener.path))[0]["action"], "peer_inbox_ack")
+        with mock.patch.object(sp_journal, "record_message", side_effect=sp_journal.JournalFull("journal is full")):
+            self.send(peer, self.frame("again", listener.path))
+        self.assertTrue(wait_for(lambda: len(listener.of_type("user")) == 2))
+
+    def test_the_client_cap_refuses_extra_connections(self):
+        with mock.patch.object(sp_constants, "MAX_CONCURRENT_CLIENTS", 1):
+            peer = self.start_peer()
+        holder = self.client(peer, [], half_close=False)  # holds the only slot, sends nothing
+        time.sleep(0.2)
+        extra = self.client(peer, [self.frame("over the cap")])
+        self.assertIs(extra.line(5), EOF)
+        self.assertEqual(self.inbound, [])
+        holder.close()
+        self.assertTrue(wait_for(lambda: self.send(peer, self.frame("after"))[:1] == [
+            {"type": "control", "action": "peer_inbox_ack", "orig_msg_id": mock.ANY}]))
+
+    def test_a_silent_connection_times_out_and_frees_its_slot(self):
+        with mock.patch.object(sp_constants, "CONN_TIMEOUT", 0.3):
+            peer = self.start_peer()
+            idle = self.client(peer, [], half_close=False)
+            self.assertIs(idle.line(5), EOF)
