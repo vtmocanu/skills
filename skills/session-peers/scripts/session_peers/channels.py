@@ -302,7 +302,7 @@ def _check_roster_cap(rec):
 
 
 def _actor_identity(typed):
-    parsed = sp_identity.parse_typed(typed)
+    parsed = sp_identity.parse_address(typed)
     return {"kind": parsed["kind"], "uuid": parsed["uuid"]}
 
 
@@ -464,7 +464,11 @@ def _claude_liveness(sid, cache):
     records, error = cache["cc"]
     if error is not None:
         return "unverified"
-    matches = [r for r in records if str(r.get("sessionId")).lower() == sid.lower()]
+    # A browser peer's record is not a Claude session, whatever its sessionId.
+    matches = [
+        r for r in records
+        if r.get("entrypoint") != "web" and str(r.get("sessionId")).lower() == sid.lower()
+    ]
     if not matches:
         return "gone"
     states = {sp_claude.record_liveness(r) for r in matches}
@@ -604,6 +608,8 @@ def _discover_general():
         gaps.append("Claude registry: %s" % _reason(claude_error))
         records = sp_claude.read_claude_records()
     for record in records:
+        if record.get("entrypoint") == "web":
+            continue  # the browser peer joins a channel by explicit membership, never by discovery
         if sp_claude.record_liveness(record) in ("live", "unverified"):
             kind = "codex" if record.get("entrypoint") == "codex" else "cc"
             add("%s:%s" % (kind, record.get("sessionId")))

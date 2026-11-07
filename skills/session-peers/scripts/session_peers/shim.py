@@ -934,7 +934,8 @@ class Shim:
         addressed = sp_constants.AT_NAME_RE.match(text.lstrip())
         if addressed:
             name = addressed.group(1)
-            matches = sp_claude.claude_record_by_name(name, records)
+            # include_web: a Codex reply may be addressed to the browser peer by name.
+            matches = sp_claude.claude_record_by_name(name, records, include_web=True)
             if not matches:
                 sp_runtime.log("no live Claude session named %r" % name)
             elif len(matches) > 1:

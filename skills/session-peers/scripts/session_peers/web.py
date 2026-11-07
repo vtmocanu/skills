@@ -133,7 +133,10 @@ def _clip(name):
 
 def _registry_view(typed, kind, ident, live, by_sid):
     """``(activity, name)`` of a Claude session or Codex shim from its registry record."""
-    matches = [r for r in by_sid.get(ident.lower(), ()) if (r.get("entrypoint") == "codex") == (kind == "codex")]
+    matches = [
+        r for r in by_sid.get(ident.lower(), ())
+        if r.get("entrypoint") != "web" and (r.get("entrypoint") == "codex") == (kind == "codex")
+    ]
     name = next((_clip(r.get("name")) for r in matches if _clip(r.get("name"))), None)
     activity = "unknown"
     if live:

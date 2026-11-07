@@ -154,10 +154,12 @@ def _full_oc(value):
 
 def _norm(value):
     """A typed id in canonical form (lowercase UUID), or ValueError."""
-    typed = sp_identity.parse_typed(value)
+    typed = sp_identity.parse_address(value)
     kind, ident = typed["kind"], typed["uuid"]
     if not (_full_oc(ident) if kind == "oc" else _full_uuid(ident)):
-        raise ValueError("expected cc:<uuid>, codex:<uuid> or oc:<ses_id>, got %r" % (value,))
+        raise ValueError(
+            "expected cc:<uuid>, codex:<uuid>, oc:<ses_id> or web:<uuid>, got %r" % (value,)
+        )
     return "%s:%s" % (kind, ident if kind == "oc" else ident.lower())
 
 
@@ -1123,6 +1125,10 @@ def _resolve_recipients(to):
             raise JournalRefused("recipient is not a typed identity: %s" % exc)
         if slot not in seen:
             seen.append(slot)
+            if slot.startswith("web:"):
+                # A browser peer holds no registry record while the page is
+                # closed; `_norm` has already checked the address is well formed.
+                continue
             try:
                 resolved = sp_identity.resolve_typed(slot)
             except sp_codex.ResolveError as exc:

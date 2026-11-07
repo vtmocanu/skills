@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 import os
+import re
 from . import constants as sp_constants, runtime as sp_runtime
 from . import claude as sp_claude, codex as sp_codex, opencode as sp_opencode
 
@@ -47,6 +48,34 @@ def parse_typed(value):
     kind, sep, ident = str(value or "").partition(":")
     if not sep or not valid_ident(kind, ident):
         raise ValueError("expected cc:<uuid>, codex:<uuid> or oc:<ses_id>, got %r" % value)
+    return {"kind": kind, "uuid": ident}
+
+
+ADDRESS_KINDS = sp_constants.BUDDY_KINDS + ("web",)
+
+
+def _web_id(ident) -> bool:
+    """A browser peer's id: a full lowercase UUID."""
+    return (
+        isinstance(ident, str)
+        and re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", ident)
+        is not None
+    )
+
+
+def parse_address(value):
+    """`parse_typed`'s forms plus `web:<lowercase uuid>`, or ValueError.
+
+    A browser peer is an address (a journal recipient or channel actor) but
+    never a buddy, so `parse_typed` keeps refusing it.
+    """
+    kind, sep, ident = str(value or "").partition(":")
+    if sep and kind == "web" and _web_id(ident):
+        return {"kind": "web", "uuid": ident}
+    if not sep or kind not in sp_constants.BUDDY_KINDS or not valid_ident(kind, ident):
+        raise ValueError(
+            "expected cc:<uuid>, codex:<uuid>, oc:<ses_id> or web:<uuid>, got %r" % value
+        )
     return {"kind": kind, "uuid": ident}
 
 

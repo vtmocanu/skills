@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import collections
 import os
+import socket
 import sys
 import time
 import uuid as uuidlib
@@ -47,7 +48,8 @@ def _record_before_send(args, message_id, recipient):
     """
     if not getattr(args, "record", False):
         return None
-    sender = sp_journal.sender_or_none()
+    web = _web_sender(args)
+    sender = "web:%s" % web["sid"] if web else sp_journal.sender_or_none()
     try:
         sp_journal.record_message(sender, [recipient], args.message, message_id=message_id)
     except sp_journal.JournalError as exc:
@@ -132,6 +134,8 @@ def _dispatch_send(args, claude_sender_sid=None):
     except ValueError as exc:
         sys.stderr.write("error: %s\n" % exc)
         return 2
+    if target.startswith("web:"):
+        return _send_web(target[len("web:") :], args, oc_sender)
     if target.startswith("codex:"):
         return _send_codex(target[len("codex:") :], args, oc_sender)
     if target.startswith("cc:"):
@@ -141,8 +145,167 @@ def _dispatch_send(args, claude_sender_sid=None):
         if claude_sender_sid:
             return _send_claude_channel(target[len("cc:") :], args, claude_sender_sid)
         return _send_claude(target[len("cc:") :], args, oc_sender)
-    sys.stderr.write("error: --to must start with codex:, cc: or oc:\n")
+    sys.stderr.write("error: --to must start with codex:, cc:, oc: or web:\n")
     return 2
+
+
+def _web_sender(args):
+    """The browser peer sending through the chat server, or None.
+
+    ``args.web_sender`` ({"sid", "name", "socket"}) is set only by the server
+    and has no CLI flag. When present it replaces every environment-derived
+    identity. A malformed one raises ValueError rather than falling back to the
+    environment, which would attribute the send to the wrong sender.
+    """
+    web = getattr(args, "web_sender", None)
+    if web is None:
+        return None
+    try:
+        sid = sp_identity.parse_address("web:%s" % web["sid"])["uuid"]
+        return {"sid": sid, "name": web.get("name"), "socket": web.get("socket")}
+    except (TypeError, KeyError, AttributeError, ValueError):
+        raise ValueError("malformed browser sender %r" % (web,))
+
+
+def _record_kind(rec):
+    """The typed-address kind a registry record is read as."""
+    runtime = sp_protocol.sender_runtime(rec)
+    return runtime if runtime in ("codex", "web") else "cc"
+
+
+WEB_ACK_TIMEOUT = 15.0
+_WEB_LINE_MAX = 65536
+
+
+def _web_exchange(rec, frame, timeout=None):
+    """Send ``frame`` to the browser peer's inbox and read its one NDJSON answer.
+
+    Returns ("ack", None), ("refused", detail) or ("unknown", detail). The
+    write side is half-closed after the frame, so the answer is one line (the
+    inbox's `peer_inbox_ack` or `peer_inbox_refused` for this frame's msg_id);
+    a timeout or a close without one leaves the outcome unknown. A failed
+    connect or send raises OSError: nothing was delivered.
+    """
+    timeout = WEB_ACK_TIMEOUT if timeout is None else timeout
+    path = rec.get("messagingSocketPath")
+    if not sp_claude.socket_path_ok(path):
+        raise OSError("refusing to write to %r: symlink or non-allowlisted directory" % (path,))
+    deadline = time.monotonic() + timeout
+    conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        conn.settimeout(timeout)
+        conn.connect(path)
+        token = sp_claude.peer_token_for(rec)
+        if token:
+            conn.sendall(json.dumps({"type": "auth", "token": token}).encode("utf-8") + b"\n")
+        conn.sendall(json.dumps(frame).encode("utf-8") + b"\n")
+        conn.shutdown(socket.SHUT_WR)
+        buf = b""
+        while True:
+            while b"\n" in buf:
+                line, _sep, buf = buf.partition(b"\n")
+                try:
+                    answer = json.loads(line.decode("utf-8"))
+                except (ValueError, UnicodeError):
+                    continue
+                if not isinstance(answer, dict) or answer.get("type") != "control":
+                    continue
+                if answer.get("orig_msg_id") != frame["msg_id"]:
+                    continue
+                if answer.get("action") == "peer_inbox_ack":
+                    return "ack", None
+                if answer.get("action") == "peer_inbox_refused":
+                    return "refused", str(answer.get("detail") or "no detail")
+            if len(buf) > _WEB_LINE_MAX:
+                return "unknown", "the browser peer answered with an oversized line"
+            left = deadline - time.monotonic()
+            if left <= 0:
+                return "unknown", "no answer within %g s" % timeout
+            conn.settimeout(left)
+            try:
+                chunk = conn.recv(4096)
+            except socket.timeout:
+                return "unknown", "no answer within %g s" % timeout
+            except OSError as exc:
+                return "unknown", "the connection failed before an answer: %s" % exc
+            if not chunk:
+                return "unknown", "the connection closed without an answer"
+            buf += chunk
+    finally:
+        try:
+            conn.close()
+        except OSError:
+            pass
+
+
+def _send_web(ident, args, oc_sender=None):
+    """Send one message to the browser peer's inbox and wait for its acknowledgement.
+
+    With no live record the message is not delivered: under `--record` it is
+    journaled and a transport_error follows; routes.check refuses otherwise.
+    Exit 0 only on `peer_inbox_ack`; a refusal is "not delivered" and a
+    timeout or EOF "outcome unknown", both exit 1.
+    """
+    try:
+        runtime, from_name, address = _caller_view(args, oc_sender)
+    except ValueError as exc:
+        sys.stderr.write("error: %s\n" % exc)
+        return 2
+    if (refused := sp_routes.verify(args, "web", ident)) is not None:
+        return refused
+    try:
+        rec = sp_routes.web_record(ident)
+    except sp_routes._Refusal as exc:
+        sys.stderr.write(exc.text + "\n")
+        return exc.code
+    msg_id = _new_msg_id(args)
+    failed = _record_before_send(args, msg_id, "web:" + ident)
+    if failed is not None:
+        return failed
+    if rec is None:
+        sys.stderr.write("error: browser peer web:%s is not running; nothing was delivered\n" % ident)
+        return _transport_failed(args, msg_id, "browser peer is not running")
+    sender_ident = address.partition(":")[2] if address else None
+    lines = [sp_protocol.build_origin(runtime, from_name, sender_ident)]
+    sock = getattr(args, "from_socket", None) or os.environ.get("CLAUDE_CODE_MESSAGING_SOCKET")
+    sender_rec = sp_claude.claude_record_by_socket(sock) if sock else None
+    reply_socket = sender_rec.get("messagingSocketPath") if sender_rec else None
+    if address and not reply_socket:
+        lines.append(sp_protocol.reply_route_hint(address))
+    body = "\n".join(lines + [args.message])
+    try:
+        sp_claude.check_wrapped_size(body)
+    except ValueError as exc:
+        sys.stderr.write("error: %s\n" % exc)
+        return _transport_failed(args, msg_id, exc)
+    frame = sp_protocol.build_user_frame(body, reply_socket, msg_id)
+    try:
+        outcome, detail = _web_exchange(rec, frame)
+    except OSError as exc:
+        sys.stderr.write("error: could not reach browser peer web:%s: %s\n" % (ident, exc))
+        return _transport_failed(args, msg_id, exc)
+    if outcome == "refused":
+        sys.stderr.write("error: browser peer web:%s refused the message: %s; not delivered\n" % (ident, detail))
+        return _transport_failed(args, msg_id, "refused: %s" % detail)
+    if outcome == "unknown":
+        sys.stderr.write(
+            "error: outcome unknown: browser peer web:%s did not acknowledge message %s (%s); "
+            "it may or may not have been kept; check its inbox before resending\n" % (ident, msg_id, detail)
+        )
+        return _transport_failed(args, msg_id, "outcome unknown: %s" % detail)
+    _print_send_result(
+        args,
+        {
+            "status": "sent",
+            "target": "web",
+            "session_id": ident,
+            "session_name": rec.get("name"),
+            "message_id": msg_id,
+            "acknowledged": True,
+        },
+        "sent to browser peer web:%s, message %s (acknowledged)" % (ident, msg_id),
+    )
+    return 0
 
 
 def _opencode_sender(args):
@@ -157,7 +320,7 @@ def _opencode_sender(args):
         getattr(args, name, None)
         for name in ("from_thread", "from_name", "from_sid", "from_socket")
     )
-    if not sid or explicit:
+    if not sid or explicit or _web_sender(args):
         return None
     if (os.environ.get("CLAUDE_CODE_SESSION_ID")
             or os.environ.get("CLAUDE_CODE_MESSAGING_SOCKET")
@@ -179,6 +342,9 @@ def _caller_view(args, oc_sender=None):
     Used where the recipient has no native route back: the address goes into
     an explicit reply hint. Unknown senders return ("unknown", None, None).
     """
+    web = _web_sender(args)
+    if web:
+        return "web", web["name"], "web:%s" % web["sid"]
     if oc_sender:
         return "opencode", oc_sender.get("title"), "oc:%s" % oc_sender["id"]
     sock = os.environ.get("CLAUDE_CODE_MESSAGING_SOCKET")
@@ -186,11 +352,12 @@ def _caller_view(args, oc_sender=None):
     if rec is None:
         sid = os.environ.get("CLAUDE_CODE_SESSION_ID")
         if sp_runtime.is_uuid(sid):
-            matches = sp_claude.claude_record_by_target(sid)
+            # include_web: a caller whose id names the browser peer is that peer.
+            matches = sp_claude.claude_record_by_target(sid, include_web=True)
             rec = matches[0] if len(matches) == 1 else None
     if rec is not None and rec.get("sessionId"):
         runtime = sp_protocol.sender_runtime(rec)
-        kind = "codex" if runtime == "codex" else "cc"
+        kind = runtime if runtime in ("codex", "web") else "cc"
         return runtime, rec.get("name"), "%s:%s" % (kind, rec["sessionId"])
     tid = sp_identity._thread_from_args(args)
     if tid:
@@ -207,6 +374,8 @@ def _may_wake_opencode(args, session_id, owner=None):
         return False
     if getattr(args, "wake", False):
         return True
+    if _web_sender(args):
+        return False  # the browser peer has no buddy binding
     try:
         owner = owner or sp_identity.caller_identity(args)
     except ValueError:
@@ -387,6 +556,7 @@ def _send_codex(target, args, oc_sender=None):
                 "but drains only when its user types the next prompt" % thread["id"]
             )
     from_name, from_sid = args.from_name, args.from_sid
+    web = _web_sender(args)
     if oc_sender:
         # No socket: the Codex shim cannot forward the final message back, so
         # the body names the explicit route instead.
@@ -406,11 +576,15 @@ def _send_codex(target, args, oc_sender=None):
         if result and reply_id:
             sp_reply_wake.forget(reply_id)
         return result
-    from_socket = args.from_socket or os.environ.get(
-        "CLAUDE_CODE_MESSAGING_SOCKET"
-    )
+    if web:
+        # The browser peer speaks for itself: never the server process's environment.
+        from_socket, from_sid, from_name = web["socket"], web["sid"], web["name"]
+    else:
+        from_socket = args.from_socket or os.environ.get(
+            "CLAUDE_CODE_MESSAGING_SOCKET"
+        )
     env_sid = os.environ.get("CLAUDE_CODE_SESSION_ID")
-    if not from_socket and not args.from_sid and sp_runtime.is_uuid(env_sid):
+    if not web and not from_socket and not args.from_sid and sp_runtime.is_uuid(env_sid):
         matches = sp_claude.claude_record_by_target(env_sid)
         if len(matches) == 1:
             from_socket = matches[0].get("messagingSocketPath")
@@ -422,6 +596,12 @@ def _send_codex(target, args, oc_sender=None):
             sys.stderr.write(
                 "error: no live Claude session listens on %s, so --from-socket "
                 "would name a reply address nothing answers\n" % from_socket
+            )
+            return 1
+        if web and (rec.get("entrypoint") != "web" or rec.get("sessionId") != web["sid"]):
+            sys.stderr.write(
+                "error: %s is not the browser peer web:%s, so it names no reply address for it\n"
+                % (from_socket, web["sid"])
             )
             return 1
         from_sid = from_sid or rec.get("sessionId")
@@ -486,8 +666,9 @@ def _send_claude(target, args, oc_sender=None):
         if oc_sender and getattr(args, "allow_reply_wake", None) is not None:
             reply_id = _issue_reply_wake(args, oc_sender, "cc:" + rec["sessionId"], msg_id)
             oc_sender = dict(oc_sender, reply_wake_id=reply_id)
+        web = _web_sender(args)
         try:
-            thread_id = None if oc_sender else sp_identity._thread_from_args(
+            thread_id = None if oc_sender or web else sp_identity._thread_from_args(
                 args, required=bool(os.environ.get("CLAUDE_CODE_SESSION_ID"))
             )
         except ValueError as exc:
@@ -495,16 +676,15 @@ def _send_claude(target, args, oc_sender=None):
             return 2
         if getattr(args, "record", False):
             # A near-cap message is refused before it is recorded.
-            sp_claude.claude_body(args.message, thread_id, opencode_sender=oc_sender)
+            sp_claude.claude_body(args.message, thread_id, opencode_sender=oc_sender, web_sender=web)
             # A Codex shim's record is a `codex:` slot, the kind its owner reads as.
-            kind = "codex" if rec.get("entrypoint") == "codex" else "cc"
-            failed = _record_before_send(args, msg_id, "%s:%s" % (kind, rec.get("sessionId")))
+            failed = _record_before_send(args, msg_id, "%s:%s" % (_record_kind(rec), rec.get("sessionId")))
             if failed is not None:
                 if reply_id:
                     sp_reply_wake.forget(reply_id)
                 return failed
         msg_id, reply_capable = sp_claude._deliver_claude(
-            rec, args.message, thread_id, opencode_sender=oc_sender, msg_id=msg_id
+            rec, args.message, thread_id, opencode_sender=oc_sender, msg_id=msg_id, web_sender=web
         )
     except (sp_codex.ResolveError, ValueError) as exc:
         if reply_id:
@@ -709,10 +889,8 @@ def _prepare_request(args, purpose):
     meta = sp_requests._request_meta(request_id, requester, rec, expires_at, reply_path)
     if kind == "oc":
         target_typed = "oc:%s" % rec["sessionId"]
-    elif rec.get("entrypoint") == "codex":
-        target_typed = "codex:%s" % rec["sessionId"]
     else:
-        target_typed = "cc:%s" % rec["sessionId"]
+        target_typed = "%s:%s" % (_record_kind(rec), rec["sessionId"])
     meta["target_typed"] = target_typed
     # Order: mailbox, then journal, then send. A journal refusal removes the mailbox again. The
     # uuid4 request id is not exposed to anyone until the send, so no reply or await can address
@@ -1170,7 +1348,8 @@ def cmd_wait_peer(args):
         interval = sp_constants.WAIT_POLL_INTERVAL_DEFAULT
     while time.monotonic() < deadline:
         candidates = [
-            item for item in sp_claude.read_claude_records() if item.get("sessionId") == sid
+            item for item in sp_claude.read_claude_records()
+            if item.get("sessionId") == sid and not sp_claude.is_web_record(item)
         ]
         if candidates:
             current = candidates[0]

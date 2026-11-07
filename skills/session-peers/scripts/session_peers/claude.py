@@ -99,17 +99,31 @@ def unverified_claude_records():
     return [r for r in read_claude_records() if record_liveness(r) == "unverified"]
 
 
-def claude_record_by_name(name, records=None):
-    """Every live record carrying this exact name."""
-    if records is None:
-        records = live_claude_records()
-    return [r for r in records if r.get("name") == name]
+def is_web_record(rec) -> bool:
+    """True for the browser peer's registry record (entrypoint "web")."""
+    return isinstance(rec, dict) and rec.get("entrypoint") == "web"
 
 
-def claude_record_by_target(target, records=None):
-    """Every record addressed by mutable name or stable session UUID."""
+def claude_record_by_name(name, records=None, include_web=False):
+    """Every live record carrying this exact name.
+
+    The browser peer's record is skipped unless ``include_web``: a `cc:` or
+    `@name` lookup must not mistake it for a Claude session.
+    """
     if records is None:
         records = live_claude_records()
+    return [r for r in records if r.get("name") == name and (include_web or not is_web_record(r))]
+
+
+def claude_record_by_target(target, records=None, include_web=False):
+    """Every record addressed by mutable name or stable session UUID.
+
+    The browser peer's record is skipped unless ``include_web``.
+    """
+    if records is None:
+        records = live_claude_records()
+    if not include_web:
+        records = [r for r in records if not is_web_record(r)]
     if sp_runtime.is_uuid(target):
         return [r for r in records if r.get("sessionId") == target]
     return [r for r in records if r.get("name") == target]
@@ -311,13 +325,26 @@ def check_wrapped_size(body):
         )
 
 
-def claude_body(message, thread_id=None, reply_route=True, opencode_sender=None):
+def claude_body(message, thread_id=None, reply_route=True, opencode_sender=None, web_sender=None):
     """(wrapped body, reply socket route) of one user frame, size-checked.
 
     Raises ValueError over the peer cap, before anything is sent. ``send
     --record`` calls it ahead of recording so a near-cap message is refused
-    before it is recorded.
+    before it is recorded. ``web_sender`` ({"sid", "name", "socket"}, set by the
+    chat server) is the browser peer: browser provenance, wrapped with its
+    inbox socket as the reply route.
     """
+    if web_sender:
+        route = web_sender.get("socket") if reply_route else None
+        inner = "%s\n%s" % (
+            sp_protocol.build_origin("web", web_sender.get("name"), web_sender["sid"]), message
+        )
+        body = (
+            sp_protocol.build_wrapper(inner, route, web_sender["sid"], web_sender.get("name"))
+            if route else inner
+        )
+        check_wrapped_size(body)
+        return body, route
     if opencode_sender:
         # A correlated request (no reply route) is answered through its
         # mailbox, so it carries no `send` hint that would invite a stale turn.
@@ -343,14 +370,22 @@ def claude_body(message, thread_id=None, reply_route=True, opencode_sender=None)
     return body, route
 
 
-def _deliver_claude(rec, message, thread_id=None, reply_route=True, opencode_sender=None, msg_id=None):
+def _deliver_claude(rec, message, thread_id=None, reply_route=True, opencode_sender=None, msg_id=None,
+                    web_sender=None):
     """One user frame to a Claude session; (msg_id, reply_capable).
+
+    ``web_sender`` (the browser peer, see `claude_body`) sends the frame from
+    its inbox socket instead of any environment-derived sender.
 
     ``opencode_sender`` (`{"id", "title"}`, verified by the caller) names an
     OpenCode sender, which has no socket: its body says how to answer instead.
     ``msg_id`` puts a caller-chosen id on the frame; a reply-wake id wins.
     """
-    body, route = claude_body(message, thread_id, reply_route, opencode_sender)
+    body, route = claude_body(message, thread_id, reply_route, opencode_sender, web_sender)
+    if web_sender:
+        frame = sp_protocol.build_user_frame(body, route, msg_id)
+        send_frame(rec["messagingSocketPath"], frame, auth_token=peer_token_for(rec))
+        return frame["msg_id"], bool(route)
     if opencode_sender:
         frame = sp_protocol.build_user_frame(body, None, msg_id)
         if opencode_sender.get("reply_wake_id"):
@@ -369,6 +404,6 @@ def _current_claude_session_id():
     sock = os.environ.get("CLAUDE_CODE_MESSAGING_SOCKET")
     if sock:
         rec = claude_record_by_socket(sock, read_claude_records())
-        if rec:
+        if rec and not is_web_record(rec):  # the browser peer is not a Claude session
             return rec.get("sessionId")
     return None

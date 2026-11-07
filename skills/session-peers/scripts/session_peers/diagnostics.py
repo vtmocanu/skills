@@ -85,7 +85,7 @@ def cmd_list(args):
 
     def claude_view(record):
         return {
-            "runtime": "codex" if record.get("entrypoint") == "codex" else "claude",
+            "runtime": sp_protocol.sender_runtime(record),  # claude, codex or web
             "thread_title": codex_title(record),
             "pid": record.get("pid"),
             "sessionId": record.get("sessionId"),
@@ -168,6 +168,8 @@ def cmd_list(args):
             label += ' [Codex thread%s]' % (
                 ' "%s"' % c["thread_title"] if c["thread_title"] else ", untitled"
             )
+        elif c["runtime"] == "web":
+            label += " [browser peer]"
         print("  %-24s pid %-7s %-6s %s" % (label, c["pid"], c["status"] or "?", c["cwd"] or ""))
     if claude_unverified:
         print(
