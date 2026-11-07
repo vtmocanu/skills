@@ -101,6 +101,12 @@ detected identity.
   are recipients of retained messages can still use up the global cap (accepted
   limit).
 - It grants read and ACK only: no approvals and no reply allowance.
+- It also writes a receipt (`{from, to, through_seq, at}`) under
+  `~/.codex/session-peers/channels/grants/`. `peers.py handover --to TYPED`
+  (channel handover, see [channels](channels.md#leave-and-handover)) accepts a
+  live grant or a receipt younger than 14 days, so it still works after the
+  journal pruned the grant. A receipt failure only warns on stderr; the grant
+  is recorded and the exit stays 0.
 - A predecessor whose environment is gone cannot grant.
 
 ## Retention

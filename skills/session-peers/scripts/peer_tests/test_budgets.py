@@ -661,7 +661,12 @@ class TestRestartAndBuddyReplies(BuddyBase):
     def test_binding_without_replies_grants_the_default_total(self):
         rc, out, err = self.bind()
         self.assertEqual(rc, 0, err)
-        self.assertEqual(err, "")
+        # No session env is set, so buddy channel upkeep skips with exactly this warning.
+        self.assertEqual(
+            err,
+            "warning: buddy channel not updated: cannot tell which session is asking: none of "
+            "CLAUDE_CODE_SESSION_ID, CODEX_THREAD_ID, CODEX_SESSION_ID or OPENCODE_SESSION_ID is set\n",
+        )
         default = sp_constants.BUDDY_REPLIES_DEFAULT
         self.assertIn("replies left: %d of %d" % (default, default), out)
         self.assertEqual(

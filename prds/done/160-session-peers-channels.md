@@ -4,6 +4,7 @@
 **Umbrella**: [#163](https://github.com/vtmocanu/skills/issues/163) (child 1 of 3)
 **Blocked by**: [#157](https://github.com/vtmocanu/skills/issues/157) (critical-message journal and explicit ACK, including its "Interface requirements from the follow-up PRDs" section: multi-recipient messages, per-recipient ACKs, the same-user read-only reader and verified handover). #157 merged in c469e20 (interface: `skills/session-peers/references/journal.md`) and the #158 route check in 5ca6512 (`references/messaging.md`, "Route check"); this PRD was adjusted to both on 2026-11-06.
 **Area**: `skills/session-peers/` (`scripts/session_peers/`, `SKILL.md`, `references/`), plus one step in `skills/done/SKILL.md`.
+**Status**: **Complete 2026-11-06**, M1 and M2 done (D1-D3 decided by the lander and buddy, 2026-11-06). Implemented on branch `agent/issue-160`; interface in `skills/session-peers/references/channels.md`. Moved to `prds/done/`.
 
 ## Problem
 
@@ -20,7 +21,7 @@ Named **channels** with explicit membership. A channel is a member list plus a h
 
 Commands:
 
-- `peers.py channel create NAME [--member ADDR]...`, `channel join NAME`, `channel leave NAME`, `channel remove NAME ADDR` (the channel's owner only: its creator, or for a buddy channel the lead), `channel list [--json]`, `channel members NAME [--json]`, `channel tail NAME [--since SEQ] [--json]`. ACK state for a journaled message is #157's `peers.py inbox acks MSG_ID` (no separate channel command).
+- `peers.py channel create NAME [--member ADDR]...`, `channel join NAME`, `channel leave NAME`, `channel remove NAME ADDR` (the channel's owner only: its creator, or for a buddy channel the lead, or its handover successor), `channel list [--json]`, `channel members NAME [--json]`, `channel tail NAME [--since SEQ] [--json]`. ACK state for a journaled message is #157's `peers.py inbox acks MSG_ID` (no separate channel command).
 - `peers.py send --to '#NAME' (--message TEXT | --message-file PATH) [--record]` appends the message to the channel history (journaling it first, as one #157 entry naming every intended recipient, when `--record` is given or the text starts with `@all`), then delivers to each member except the sender.
 - `peers.py leave` and `peers.py handover --to TYPED_ADDR` (lifecycle, below).
 
@@ -111,3 +112,21 @@ Channel store and commands, fan-out with outcomes and pacing, derived `#general`
 - **`inbox acks` instead of `channel acks`**: one ACK view. Rejected: a channel-labelled duplicate command.
 - **Channel handover reuses a recorded `inbox handover` grant**: one verification concept. Rejected: `handover` creating the grant itself.
 - **Channel fan-out is exempt from #158's Claude-to-Claude refusal, internally and only after channel and membership validation**: native `SendMessage` cannot fan out. Rejected: refusing Claude members of a channel; exempting direct `send`.
+- **D1, ACK limitation accepted** (lander and buddy, 2026-11-06, on the owner's delegation). The recipient snapshot is preflighted and only members the journal resolves are journaled; each excluded member is reported `refused: <reason>` with `ACK not requested (unverified)` and sits outside the `inbox acks` denominator. If none resolve, the post is refused before anything is recorded or delivered. A member that becomes unreachable after journaling stays pending with its refused outcome. #157's existing-session check is not weakened.
+- **D2, `#general` OpenCode coverage is the list view** (lander and buddy, 2026-11-06). Coverage is the top-level sessions `peers.py list` discovers that were updated within `SESSION_PEERS_OPENCODE_RECENT_HOURS` (default 24 h), not every stored OpenCode session. `#general` posts (including `@all` there) print and record that limit, or that OpenCode was not enumerated. `@all` on a stored channel prints no coverage line: its member list is explicit and involves no enumeration.
+- **D3, stricter OpenCode gone rule** (lander and buddy, 2026-11-06). A member is gone only when a complete walk omits it and `get_session` returns not found; otherwise it stays unverified and is delivered without waking. This narrows the Outcome's "complete walk omits" rule (a child session is absent from the top-level walk yet exists).
+- **The channel store is user-wide** under `~/.codex/session-peers/channels/`, derived from HOME like the journal, so every session of the OS user shares it whatever its `CODEX_HOME`. Ordinary topics stay scoped to `CODEX_HOME`. The store lock is `.channels.lock`, outside the channel key namespace.
+- **Torn topic-append recovery**: a final line without its newline is never read and is cut before the next append, for channel history and ordinary topics alike.
+- **The `channel:` prefix is reserved in `topic post`** (exit 2) to avoid confusion with channel history; not a security boundary.
+- **`--record` on a plain `#general` post is journaled and not delivered.**
+- **`@all` allowance**: consumed at reservation, before journaling; one stable per-sender lock is held through reservation, journaling and restore; a refused journal restores it; a future-dated stamp refuses (fail closed). Rejected: a message-id-guarded rollback.
+- **`#general` senders must be sessions `peers.py list` discovers** (found in review): a made-up id would otherwise get its own `@all` allowance. A session that left `#general` may still post. Identity remains environment-derived (`journal.caller()`), so this guards against mistakes, not a hostile same-user process.
+- **Membership is written before history**, so history never describes a change that did not happen.
+- **The owner keeps ownership on leave**; `handover` also moves channels the caller owns but left.
+- **No `channel join` on buddy channels.**
+- **Leave markers last until the session is verified gone** (never removed by age).
+- **Exit codes**: 0 every member accepted, queued, not woken or skipped gone; 1 a member refused or nothing resolvable; 2 argument, name, membership or limit refusal; 75 or 1 journal failure before sending; 76 a `transport_error` update failed.
+- **The `@all` cap counts the delivery set** (members except the sender, minus gone members).
+- **Handover receipt**: `inbox handover` also writes a receipt under `channels/grants/`, accepted by `handover` for 14 days, because the journal may prune the grant sooner. Writing it only warns on failure.
+- **Membership records are validated on read** (size, field types, canonical deduplicated members, roster cap) because any same-user process can write them.
+- **A lead that handed its buddy channel over gets no new one**: its derived key belongs to the successor; `buddy set` warns and names the owner. Rejected: a second key scheme.

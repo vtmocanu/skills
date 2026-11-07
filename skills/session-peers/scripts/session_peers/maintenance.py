@@ -6,7 +6,7 @@ import sys
 import time
 from . import constants as sp_constants, runtime as sp_runtime
 from . import claude as sp_claude, codex as sp_codex, lifecycle as sp_lifecycle, requests as sp_requests, storage as sp_storage
-from . import opencode as sp_opencode, topics as sp_topics
+from . import channels as sp_channels, opencode as sp_opencode, topics as sp_topics
 from . import reply_wake as sp_reply_wake
 
 def _bridge_thread_ids():
@@ -219,14 +219,17 @@ def cmd_gc(args):
         sys.stderr.write("error: %s\n" % exc)
         return 2
     buddies = gc_buddy_records(days=days, dry_run=args.dry_run)
+    markers = sp_channels.gc_left_markers(dry_run=args.dry_run)
+    receipts = sp_channels.gc_receipts(dry_run=args.dry_run)
     grants = sp_reply_wake.cleanup(time.time(), dry_run=args.dry_run)
     requests = sp_requests.cleanup_expired_requests(dry_run=args.dry_run)
     if not args.dry_run:
         sp_topics.topic_prune_all()
+        sp_channels.prune_all()
     for request_id in requests:
         print("%s expired request %s" % ("would prune" if args.dry_run else "pruned", request_id))
     for message_id in grants:
         print("%s expired reply-wake grant %s" % ("would prune" if args.dry_run else "pruned", message_id))
-    if not removed and not requests and not buddies and not grants:
+    if not removed and not requests and not buddies and not grants and not markers and not receipts:
         print("no stale bridge metadata")
     return 0

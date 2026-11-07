@@ -10,7 +10,8 @@ from . import journal as sp_journal
 from . import watches as sp_watches
 from . import diagnostics as sp_diagnostics, lifecycle as sp_lifecycle
 from . import shim as sp_shim
-from . import buddy as sp_buddy, diagnostics as sp_diagnostics, hooks as sp_hooks, maintenance as sp_maintenance, messaging as sp_messaging, topics as sp_topics
+from . import channels as sp_channels
+from . import buddy as sp_buddy, hooks as sp_hooks, maintenance as sp_maintenance, messaging as sp_messaging, topics as sp_topics
 
 # --------------------------------------------------------------------------
 # CLI
@@ -40,6 +41,10 @@ def build_parser():
     _register_hooks(sub)
 
     _register_topics(sub)
+
+    _register_channels(sub)
+
+    _register_lifecycle_channels(sub)
 
     _register_maintenance(sub)
 
@@ -418,6 +423,56 @@ def _register_topics(sub):
     p_tlist.add_argument("--json", action="store_true", help="machine-readable output")
     p_tlist.set_defaults(func=sp_topics.cmd_topic)
     p_topic.set_defaults(func=sp_topics.cmd_topic, topic_cmd=None)
+
+
+def _register_channels(sub):
+    p_chan = sub.add_parser("channel", help="named member lists with a shared history")
+    csub = p_chan.add_subparsers(dest="channel_cmd")
+    p_create = csub.add_parser("create", help="create a channel you own")
+    p_create.add_argument("name", metavar="NAME")
+    p_create.add_argument(
+        "--member", action="append", metavar="ADDR",
+        help="add a session (typed id or name); repeatable",
+    )
+    p_join = csub.add_parser("join", help="join a channel")
+    p_join.add_argument("name", metavar="NAME")
+    p_leave = csub.add_parser("leave", help="leave a channel")
+    p_leave.add_argument("name", metavar="NAME")
+    p_remove = csub.add_parser("remove", help="remove a member (owner only)")
+    p_remove.add_argument("name", metavar="NAME")
+    p_remove.add_argument("member", metavar="ADDR")
+    p_list = csub.add_parser("list", help="channels and your role in each")
+    p_list.add_argument("--json", action="store_true", help="machine-readable output")
+    p_members = csub.add_parser("members", help="members with liveness live/unverified/gone")
+    p_members.add_argument("name", metavar="NAME")
+    p_members.add_argument("--json", action="store_true", help="machine-readable output")
+    p_tail = csub.add_parser("tail", help="print history entries after a cursor")
+    p_tail.add_argument("name", metavar="NAME")
+    p_tail.add_argument("--since", type=int, metavar="SEQ", help="print entries after SEQ")
+    p_tail.add_argument(
+        "--limit", type=int, default=sp_constants.TOPIC_TAIL_DEFAULT, metavar="N",
+        help="at most N entries (default %d, maximum %d)"
+        % (sp_constants.TOPIC_TAIL_DEFAULT, sp_constants.TOPIC_TAIL_MAX),
+    )
+    p_tail.add_argument("--json", action="store_true", help="machine-readable output")
+    for parser in (p_create, p_join, p_leave, p_remove, p_list, p_members, p_tail):
+        parser.set_defaults(func=sp_channels.cmd_channel)
+    p_chan.set_defaults(func=sp_channels.cmd_channel, channel_cmd=None)
+
+
+def _register_lifecycle_channels(sub):
+    p_leave = sub.add_parser(
+        "leave", help="leave every stored channel and #general (a session that is done)")
+    p_leave.set_defaults(func=sp_channels.cmd_leave)
+    p_handover = sub.add_parser(
+        "handover",
+        help="move this session's channels to a successor (after `inbox handover --to` recorded the grant)",
+    )
+    p_handover.add_argument(
+        "--to", required=True, metavar="cc:<uuid>|codex:<uuid>|oc:<ses_id>",
+        help="the successor's full typed identity (names are refused)",
+    )
+    p_handover.set_defaults(func=sp_channels.cmd_handover)
 
 
 def _register_maintenance(sub):

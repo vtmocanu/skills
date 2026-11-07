@@ -277,9 +277,24 @@ def _verdict(args, verb, sender, tgt):
     elif tgt.runtime == "claude" and verb != "wait":
         if sender.kind == "unknown":
             return _UNATTRIBUTED
-        if _claudeish(sender):
+        if _claudeish(sender) and not _channel_member(args, verb, tgt):
             return _claude_to_claude(verb, tgt.rec)
     return None
+
+
+def _channel_member(args, verb, tgt):
+    """True only for the internal channel verb with a validated snapshot listing this target.
+
+    The snapshot is a ``channels._Snapshot`` that ``send_channel`` builds after the
+    channel exists and the sender is a member; no CLI argument can supply one.
+    """
+    if verb != "channel":
+        return False
+    from . import channels as sp_channels  # channels imports the senders that import this module
+
+    snapshot = getattr(args, "channel_snapshot", None)
+    return (isinstance(snapshot, sp_channels._Snapshot)
+            and "cc:%s" % str(tgt.ident).lower() in snapshot.members)
 
 
 def _liveness(tgt):
@@ -364,7 +379,20 @@ def _resolve_typed(args, verb, prefix, rest, sender):
     return Target("oc", session["id"], "opencode", session.get("title"), None)
 
 
+def _channel_route(value):
+    """The route of a `send --to '#NAME'` target: a stored channel that exists."""
+    from . import channels as sp_channels
+
+    try:
+        key = sp_channels.require_target(value)
+    except sp_channels.ChannelError as exc:
+        raise _Refusal(exc.code, "error: %s" % exc)
+    return {"kind": "channel", "id": key, "runtime": "channel", "target": value}
+
+
 def _route(args, verb, value):
+    if verb == "send" and value.startswith("#"):
+        return _channel_route(value)
     sender = sender_kind(args)
     prefix, sep, rest = value.partition(":")
     if not value or (sep and prefix not in KINDS):

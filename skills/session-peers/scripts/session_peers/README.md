@@ -28,6 +28,7 @@ the reply command included in a request envelope.
 | buddy | Buddy records, binding transactions, and budget commands |
 | hooks | Hook installation, trust metadata, and startup reconciliation |
 | topics | Pull-only shared logs, retention, identity, and cursor commands |
+| channels | Channel store under the user-wide root, membership-first history, member liveness, and the `channel` commands |
 | maintenance | Owned bridge metadata and buddy garbage collection |
 | cli | Argument registration and command dispatch |
 

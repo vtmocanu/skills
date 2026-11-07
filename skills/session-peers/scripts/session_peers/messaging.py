@@ -68,7 +68,15 @@ def _transport_failed(args, message_id, exc):
     return sp_journal.transport_failed(message_id, slot, exc)
 
 
+def _new_msg_id(args):
+    """The logical message id: a channel fan-out picks one id for all its deliveries."""
+    return getattr(args, "channel_msg_id", None) or str(uuidlib.uuid4())
+
+
 def _print_send_result(args, payload, human):
+    sink = getattr(args, "result_sink", None)
+    if sink is not None:
+        sink.append(dict(payload))
     if getattr(args, "reply_wake_result", None):
         payload["reply_wake"] = args.reply_wake_result
     if getattr(args, "journal_result", None):
@@ -94,6 +102,11 @@ def cmd_send(args):
     failed = _expand_buddy_arg(args, "to", "send")
     if failed is not None:
         return failed
+    if str(args.to).startswith("#"):
+        # A channel send validates its own flags, before the reply-wake rules apply.
+        from . import channels as sp_channels
+
+        return sp_channels.send_channel(args)
     try:
         args.message = sp_runtime.message_from_args(args)
         _validate_reply_wake(args)
@@ -102,6 +115,15 @@ def cmd_send(args):
         return 1
     if (refused := sp_routes.check(args, "send", "to")) is not None:
         return refused
+    return _dispatch_send(args)
+
+
+def _dispatch_send(args, claude_sender_sid=None):
+    """Deliver ``args.message`` to the already route-checked ``args.to`` through its runtime's sender.
+
+    ``claude_sender_sid`` is set only by a channel fan-out run by a Claude
+    session: its Claude members are then reached through `_send_claude_channel`.
+    """
     target = args.to
     if target.startswith("oc:"):
         return _send_opencode(target[len("oc:") :], args)
@@ -116,6 +138,8 @@ def cmd_send(args):
         shim_thread = _codex_shim_thread(target[len("cc:") :], args)
         if shim_thread:
             return _send_codex(shim_thread, args, oc_sender)
+        if claude_sender_sid:
+            return _send_claude_channel(target[len("cc:") :], args, claude_sender_sid)
         return _send_claude(target[len("cc:") :], args, oc_sender)
     sys.stderr.write("error: --to must start with codex:, cc: or oc:\n")
     return 2
@@ -176,7 +200,11 @@ def _caller_view(args, oc_sender=None):
 
 
 def _may_wake_opencode(args, session_id, owner=None):
-    """Only an explicit wake or this caller's bound buddy starts a headless turn."""
+    """Only an explicit wake or this caller's bound buddy starts a headless turn.
+
+    A channel fan-out (``never_wake``) wakes nobody, not even a bound buddy."""
+    if getattr(args, "never_wake", False):
+        return False
     if getattr(args, "wake", False):
         return True
     try:
@@ -222,7 +250,7 @@ def _send_opencode(target, args):
             "sender identity absent: the OpenCode session cannot reply; send "
             "from a Claude, Codex or OpenCode session's own shell"
         )
-    msg_id = str(uuidlib.uuid4())
+    msg_id = _new_msg_id(args)
     try:
         reply_id = _issue_reply_wake(args, oc_sender, "oc:" + session["id"], msg_id)
     except (ValueError, OSError) as exc:
@@ -332,6 +360,7 @@ def _send_codex(target, args, oc_sender=None):
     if (refused := sp_routes.verify(args, "codex", thread["id"])) is not None:
         return refused
     degraded = thread.get("degraded")
+    paused = False
     if degraded:
         sp_runtime.log("liveness unverified: the Codex state schema is unknown")
     else:
@@ -351,7 +380,8 @@ def _send_codex(target, args, oc_sender=None):
                 "(the queue would sit undrained)\n" % thread["id"]
             )
             return 1
-        if sp_rollout.thread_is_paused(thread["rollout_path"]):
+        paused = bool(sp_rollout.thread_is_paused(thread["rollout_path"]))
+        if paused:
             sp_runtime.log(
                 "thread %s is paused after an interrupt: the message is queued "
                 "but drains only when its user types the next prompt" % thread["id"]
@@ -360,7 +390,7 @@ def _send_codex(target, args, oc_sender=None):
     if oc_sender:
         # No socket: the Codex shim cannot forward the final message back, so
         # the body names the explicit route instead.
-        msg_id = str(uuidlib.uuid4())
+        msg_id = _new_msg_id(args)
         try:
             reply_id = _issue_reply_wake(args, oc_sender, "codex:" + thread["id"], msg_id)
         except (ValueError, OSError) as exc:
@@ -372,7 +402,7 @@ def _send_codex(target, args, oc_sender=None):
             sp_protocol.reply_route_hint("oc:%s" % oc_sender["id"], reply_id),
             args.message,
         ])
-        result = _queue_codex(thread, text, msg_id, args)
+        result = _queue_codex(thread, text, msg_id, args, paused)
         if result and reply_id:
             sp_reply_wake.forget(reply_id)
         return result
@@ -402,16 +432,16 @@ def _send_codex(target, args, oc_sender=None):
             "sending from Claude Code, use its Bash tool so "
             "CLAUDE_CODE_MESSAGING_SOCKET is available"
         )
-    msg_id = str(uuidlib.uuid4())
+    msg_id = _new_msg_id(args)
     tag = sp_protocol.build_tag(from_name, from_sid, from_socket, msg_id)
     origin = sp_protocol.build_origin(
         sp_protocol.sender_runtime(rec if from_socket else None), from_name, from_sid
     )
     text = "%s\n%s\n%s" % (tag, origin, args.message)
-    return _queue_codex(thread, text, msg_id, args)
+    return _queue_codex(thread, text, msg_id, args, paused)
 
 
-def _queue_codex(thread, text, msg_id, args):
+def _queue_codex(thread, text, msg_id, args, paused=False):
     # A local size refusal comes before anything is recorded.
     try:
         sp_codex.check_queue_text(text)
@@ -437,6 +467,8 @@ def _queue_codex(thread, text, msg_id, args):
             "thread_id": thread["id"],
             "thread_name": thread.get("name"),
             "message_id": msg_id,
+            # Only a channel fan-out reads this; a plain send's JSON is unchanged.
+            **({"paused": True} if paused and getattr(args, "result_sink", None) is not None else {}),
         },
         "queued to %s (%s), message %s" % (name, thread["id"], msg_id),
     )
@@ -446,7 +478,7 @@ def _queue_codex(thread, text, msg_id, args):
 def _send_claude(target, args, oc_sender=None):
     reply_id = None
     # One id for the frame, a reply-wake grant and the journal entry.
-    msg_id = str(uuidlib.uuid4())
+    msg_id = _new_msg_id(args)
     try:
         rec = sp_claude._resolve_claude_record(target)
         if (refused := sp_routes.verify_record(args, rec)) is not None:
@@ -500,6 +532,66 @@ def _send_claude(target, args, oc_sender=None):
             "from_thread": thread_id,
             "from_opencode": oc_sender["id"] if oc_sender else None,
             "reply_capable": reply_capable,
+        },
+        "sent to %s (pid %s), message %s" % (target, rec.get("pid"), msg_id),
+    )
+    return 0
+
+
+def _send_claude_channel(target, args, sender_sid):
+    """One channel delivery from a Claude session to a Claude member.
+
+    `_send_claude` cannot serve a Claude sender (it asks for a Codex thread), and
+    a direct `send` is refused by the route check. A channel fan-out reaches
+    here only after `routes.check(..., "channel", ...)` accepted the member from
+    a validated membership snapshot; the frame carries the Claude sender's own
+    provenance line and reply socket, and `verify_record` still pins the target.
+    """
+    msg_id = _new_msg_id(args)
+    try:
+        rec = sp_claude._resolve_claude_record(target)
+        if (refused := sp_routes.verify_record(args, rec)) is not None:
+            return refused
+        matches = sp_claude.claude_record_by_target(sender_sid)
+        sock = os.environ.get("CLAUDE_CODE_MESSAGING_SOCKET")
+        sender_rec = matches[0] if len(matches) == 1 else (
+            sp_claude.claude_record_by_socket(sock) if sock else None
+        )
+        if not isinstance(sender_rec, dict) or sender_rec.get("sessionId") != sender_sid:
+            # No live registry record proves this environment's session id: the
+            # origin is labelled unverified and no reply route is named.
+            sender_rec = None
+        name = sender_rec.get("name") if sender_rec else None
+        sender_sock = sender_rec.get("messagingSocketPath") if sender_rec else None
+        origin = sp_protocol.build_origin(sp_protocol.sender_runtime(sender_rec), name, sender_sid)
+        inner = "%s\n%s" % (origin, args.message)
+        # Without a registry record there is no reply socket to name: a bare body, as a shim-less Codex sender.
+        # Cut the wrapper's name as build_tag cuts its own (control characters out, then
+        # MAX_TAG_FIELD_CHARS characters) so it stays within what channels._check_size measured.
+        wrapper_name = (
+            sp_constants.C0_RE.sub("", str(name))[:sp_constants.MAX_TAG_FIELD_CHARS] if name is not None else None
+        )
+        body = (
+            sp_protocol.build_wrapper(inner, sender_sock, sender_sid, wrapper_name) if sender_sock else inner
+        )
+        sp_claude.check_wrapped_size(body)
+        frame = sp_protocol.build_user_frame(body, sender_sock, msg_id=msg_id)
+        sp_claude.send_frame(rec["messagingSocketPath"], frame, auth_token=sp_claude.peer_token_for(rec))
+    except (sp_codex.ResolveError, ValueError) as exc:
+        sys.stderr.write("error: %s\n" % exc)
+        return 1
+    except OSError as exc:
+        sys.stderr.write("error: could not reach %s: %s\n" % (target, exc))
+        return 1
+    _print_send_result(
+        args,
+        {
+            "status": "sent",
+            "target": "claude",
+            "session_id": rec.get("sessionId"),
+            "session_name": rec.get("name"),
+            "message_id": msg_id,
+            "reply_capable": bool(sender_sock),
         },
         "sent to %s (pid %s), message %s" % (target, rec.get("pid"), msg_id),
     )

@@ -382,7 +382,34 @@ def cmd_buddy(args):
     return 0
 
 
+def _upkeep_buddy_channel(owner, buddy, action):
+    """Keep the owner's buddy channel in step with a binding change; only ever warns.
+
+    Runs after the binding work released its locks, so no channel lock is taken
+    under ``owner_lock`` or a binding lock. It acts only when the calling session
+    is the binding's owner (``buddy set --as OTHER`` is not).
+    """
+    def warn(reason):
+        sys.stderr.write("warning: buddy channel not updated: %s\n" % reason)
+
+    try:
+        from . import channels as sp_channels, journal as sp_journal
+        owner_typed = sp_journal._norm("%s:%s" % (owner["kind"], owner["uuid"]))
+        if sp_journal.caller() != owner_typed:
+            warn("the caller is not the binding's owner")
+            return
+        buddy_typed = sp_journal._norm("%s:%s" % (buddy["kind"], buddy["uuid"]))
+        if action == "add":
+            sp_channels.buddy_channel_add(owner_typed, buddy_typed)
+        else:
+            sp_channels.buddy_channel_remove(owner_typed, buddy_typed)
+    except Exception as exc:  # the binding already happened; a channel problem never fails it
+        from . import journal as sp_journal
+        warn(str(sp_journal._human(exc))[:300])
+
+
 def _clear_buddy(owner, path):
+    old = None
     try:
         with sp_storage.owner_lock(owner["uuid"]):
             old = read_buddy(owner)
@@ -407,6 +434,8 @@ def _clear_buddy(owner, path):
         sys.stderr.write("error: %s; the buddy is still bound, retry\n" % exc)
         return 1
     print("buddy cleared")
+    if old is not None:
+        _upkeep_buddy_channel(owner, old["buddy"], "remove")
     return 0
 
 
@@ -480,6 +509,7 @@ def _set_buddy(args, owner, path):
     if isinstance(result, int):
         return result
     rec = result
+    _upkeep_buddy_channel(owner, buddy, "add")
     if no_shim and _replies_left(rec) is None:
         # The default never attaches a shim, and the status line below may
         # show one that started meanwhile, so say the total is missing.

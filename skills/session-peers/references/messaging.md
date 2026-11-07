@@ -230,6 +230,12 @@ command's existing identity checks, unchanged (for example, `send` refuses it wi
 `--from-*` flags"). `ask`, `dispatch` and `wait` validate `--timeout` before the
 route check.
 
+A `#NAME` target is a [channel](channels.md): it is resolved against the channel
+store (unknown channel: refused, rc 2) and fanned out, each member checked with
+this route check. The Claude-session refusal above has one exemption: a channel
+delivery to a Claude member, only after the channel exists and the sender is a
+member. A direct `send --to cc:<uuid>` from a Claude session stays refused.
+
 Not covered: a native `SendMessage` aimed at a Codex shim never passes through
 `peers.py`, so it cannot be intercepted. It is asynchronous and uncorrelated,
 and there is no correlated equivalent until #88. The CLI tests prove which
