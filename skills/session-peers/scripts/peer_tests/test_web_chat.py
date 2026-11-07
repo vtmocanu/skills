@@ -1481,7 +1481,9 @@ class ChatReworkTests(ChatFeedBase):
             one = self.changes(cursor)
             self.assertIn("first reply", [e["text"] for e in one["browser"]["entries"]])
             self.assertTrue(one["partial"])
-            self.assertEqual(self.state.row(mid)["recipients"][cc]["ack"], "unverified")
+            [shown] = [r for r in one["browser"]["sends"] if r["mid"] == mid]
+            self.assertEqual(shown["recipients"][cc]["ack"], "unverified")  # this response only
+            self.assertEqual(self.state.row(mid)["recipients"][cc]["ack"], "pending")
             b_one = self.b_of(one)  # the cursor carries a position, so the next poll is not a first page
             self.inbound("second reply")
             two = self.changes(one["cursor"])
@@ -1509,14 +1511,62 @@ class ChatReworkTests(ChatFeedBase):
             for row in page["browser"]["sends"]:
                 self.assertNotEqual(row["recipients"][cc]["ack"], "unverified")
 
-    def test_an_unverified_hint_never_covers_a_fact_the_row_holds(self):
+    def test_an_unverified_tail_update_lands_on_a_pending_slot_even_with_a_transport_error_and_on_nothing_else(self):
         mid, cc, _listener = self.direct_send()
         self.state.apply_journal(mid, cc, transport_error="no route")
         self.state.apply_journal(mid, cc, ack="unverified")
+        self.assertEqual(self.state.row(mid)["recipients"][cc]["ack"], "unverified")
+        self.assertEqual(self.state.row(mid)["recipients"][cc]["transport_error"], "no route")
+        # Never over an ACK, a not-requested slot or an expired one.
+        for fact in ("acked", "expired", "not requested"):
+            with self.subTest(fact=fact):
+                self.state.update(mid, recipients={cc: {"outcome": None, "ack": fact}})
+                self.state.apply_journal(mid, cc, ack="unverified")
+                self.assertEqual(self.state.row(mid)["recipients"][cc]["ack"], fact)
+
+    def test_a_large_feed_does_not_leave_a_verifiable_ack_unverified(self):
+        mid, cc, _listener = self.direct_send()
+        sp_journal.ack(mid, cc)
+        for _ in range(5):
+            self.inbound("中" * 100000)  # about 600 KB each on the wire
+        for n in range(370):
+            self.state.accept_channel(new_uuid(), "ops", "中" * 2000, True)
+        need = self.state.first_page_bytes()
+        self.assertGreater(need, 7 * 1024 * 1024)
+        first = self.first_page()
+        [shown] = [r for r in first["browser"]["sends"] if r["mid"] == mid]
+        self.assertEqual(shown["recipients"][cc]["ack"], "acked")
+        self.assertEqual(self.state.row(mid)["recipients"][cc]["ack"], "acked")
+
+    def test_a_hydration_that_cannot_reach_the_ack_is_unverified_for_that_response_only(self):
+        mid, cc, _listener = self.direct_send()
+        sp_journal.ack(mid, cc)
+        real = sp_journal.read_since
+
+        def unreached(cursor_arg, budget, want=None, **kw):
+            result = real(cursor_arg, budget, want=want, **kw)
+            if not want:
+                return result
+            return dict(result, complete=False, journal_prefix="unread",
+                        context={m: {"state": "unreached"} for m in want})
+
+        cursor = self.start_cursor()
+        with mock.patch.object(sp_journal, "read_since", unreached):
+            [shown] = [r for r in self.changes(cursor)["browser"]["sends"] if r["mid"] == mid]
+        self.assertEqual(shown["recipients"][cc]["ack"], "unverified")
         self.assertEqual(self.state.row(mid)["recipients"][cc]["ack"], "pending")
-        self.state.update(mid, recipients={cc: {"outcome": None, "ack": "not requested"}})
-        self.state.apply_journal(mid, cc, ack="unverified")
-        self.assertEqual(self.state.row(mid)["recipients"][cc]["ack"], "not requested")
+        [again] = [r for r in self.first_page()["browser"]["sends"] if r["mid"] == mid]
+        self.assertEqual(again["recipients"][cc]["ack"], "acked")
+        self.assertEqual(self.state.row(mid)["recipients"][cc]["ack"], "acked")
+
+    def test_a_first_page_serves_the_newest_entries_that_fit_contiguously(self):
+        self.inbound("older")
+        self.inbound("\U0001F600" * 250000)  # about 3 MiB on the wire: does not fit
+        self.inbound("newer")
+        cursor = self.start_cursor()
+        page = webdata.changes(cursor, budget=webdata.Budget(2 * 1024 * 1024), browser=self.state)["browser"]
+        self.assertEqual([e["text"] for e in page["entries"]], ["newer"])  # not "older" behind the gap
+        self.assertTrue(page["gap"])
 
     def test_a_first_page_that_leaves_an_entry_out_for_want_of_budget_flags_a_gap(self):
         self.inbound("\U0001F600" * 250000)  # about 3 MiB on the wire

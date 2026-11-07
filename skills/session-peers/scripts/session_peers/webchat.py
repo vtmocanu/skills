@@ -323,8 +323,9 @@ class BrowserState:
 
         ``recipient`` None means every recipient of the row. ``acked`` always lands, even on a slot
         that was ``not requested``; ``pending`` and ``expired`` replace only a still-open state
-        (``pending``, ``unverified`` or ``expired``); ``unverified`` lands only on a ``pending`` slot
-        with no transport error. An unknown message or recipient is ignored."""
+        (``pending``, ``unverified`` or ``expired``); ``unverified`` (the journal tail's guess) lands only
+        on a ``pending`` slot, with or without a transport error, never over ``acked``, ``not requested``
+        or ``expired``. An unknown message or recipient is ignored."""
         with self._lock:
             row = self._sends.get(mid) if isinstance(mid, str) else None
             if row is None:
@@ -337,8 +338,8 @@ class BrowserState:
                     continue
                 if ack is not None and ack != slot["ack"]:
                     if ack == ACK_UNVERIFIED:
-                        # Only a guess: it never covers a slot that already holds a fact.
-                        land = slot["ack"] == ACK_PENDING and "transport_error" not in slot
+                        # Only a guess: it never covers an ACK state that already holds a fact.
+                        land = slot["ack"] == ACK_PENDING
                     else:
                         land = ack == ACK_ACKED or (slot["ack"] in _ACK_SOFT and ack in _ACK_SOFT)
                     if land:
@@ -406,8 +407,10 @@ class BrowserState:
                 for entry, size in reversed(items):
                     if used + size > max_bytes:
                         cut = True
-                        gap = True  # the cursor is set past it, so an entry left out is flagged lost
-                        continue
+                        # The newest entries that fit contiguously are served; the cursor is set past
+                        # everything older, so those are flagged lost, as a retention gap would be.
+                        gap = True
+                        break
                     entries.append(entry)
                     used += size
                 entries.reverse()

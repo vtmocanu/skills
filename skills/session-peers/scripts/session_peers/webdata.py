@@ -821,11 +821,8 @@ class JournalContext:
         return None, {}, ctx is not None and ctx.get("state") == "unreached"
 
 
-def read_journal_context(budget, want, with_position=False, limit=None):
+def read_journal_context(budget, want, with_position=False):
     """One ``journal.read_since(None, remaining, want=...)``; its bytes are charged to ``budget``.
-
-    ``limit`` caps the read below the remaining budget, so a caller can keep the rest for other
-    sections; a message the capped read does not reach is unverified.
 
     A journal that cannot be read, or no budget left for it, makes every ACK unverified.
     With ``with_position`` the answer is ``(JournalContext, position)``: ``position`` is
@@ -841,7 +838,7 @@ def read_journal_context(budget, want, with_position=False, limit=None):
 
     if not ids:
         return answer(JournalContext())
-    room = budget.remaining() if limit is None else min(budget.remaining(), limit)
+    room = budget.remaining()
     if room <= 0:
         return answer(JournalContext(available=False, budget_skipped=True))
     try:
@@ -1560,8 +1557,12 @@ def _change_update(key, mid, state, outcomes=None):
     return {"channel": key, "message_id": mid, "delivery": {"state": state, "recipients": _delivery_rows_of(outcomes or {})}}
 
 
-def _browser_section(browser, position, first_page, restarted, budget):
+def _browser_section(browser, position, first_page, restarted, budget, unverified=()):
     """``(section, new b position or None, partial)``: what the Browser feed holds past ``position``.
+
+    ``unverified`` is the set of message ids whose ACK state hydration could not read: their still
+    ``pending`` slots (no transport error) read ``unverified`` in this response's copies of the rows,
+    never in the shared rows.
 
     ``position`` is the cursor's ``[uuid, log seq, status-row seq]``. The page is cut to the request
     budget (entries oldest first on a poll, newest first on a first page) and the position stays
@@ -1570,6 +1571,11 @@ def _browser_section(browser, position, first_page, restarted, budget):
     after_log, after_rows = (0, 0) if first_page else (position[1], position[2])
     page = browser.page(after_log, after_rows, first_page, budget.remaining())
     budget.charge(page["bytes"])
+    for row in page["sends"]:  # copies: the overlay never reaches the shared rows
+        if row.get("mid") in unverified:
+            for slot in row["recipients"].values():
+                if slot.get("ack") == "pending" and "transport_error" not in slot:
+                    slot["ack"] = "unverified"
     section = {
         "entries": page["entries"], "sends": page["sends"], "gap": bool(page["gap"]),
         "restarted": restarted, "since_start": first_page,
@@ -1587,18 +1593,26 @@ def _after_first_page_hydration():
 def _hydrate_browser(browser, ctx, mids):
     """Merge one journal context read into the Browser feed's rows for ``mids`` (idempotent).
 
-    A message the read did not reach, or a journal it could not read, is ``unverified``; one the
-    whole journal read does not hold is ``expired`` (pruned from the journal)."""
+    Only definite facts reach the shared rows (``acked``, ``pending``, ``expired``, a transport error;
+    one the whole journal read does not hold is ``expired``, pruned from the journal). A message the
+    read did not reach, or a journal it could not read, is returned as an ``unverified`` mid: that
+    holds for this response only (see ``_browser_section``), so a later reload with more budget can
+    still show ``acked``."""
+    unverified = set()
     for mid in mids:
         acks, errors, _partial = ctx.acks_for(mid)
         if acks is None:
             reached = ctx.available and (ctx.contexts.get(mid) or {}).get("state") != "unreached"
-            browser.apply_journal(mid, None, ack="expired" if reached else "unverified")
+            if reached:
+                browser.apply_journal(mid, None, ack="expired")
+            else:
+                unverified.add(mid)
             continue
         for slot, state in acks.items():
             browser.apply_journal(mid, slot, ack=state)
         for slot, detail in errors.items():
             browser.apply_journal(mid, slot, transport_error=str(detail))
+    return unverified
 
 
 def _apply_browser_updates(browser, updates):
@@ -1648,6 +1662,7 @@ def changes(cursor_text, budget=None, now=None, browser=None):
     first_page = restarted = False
     hydrated_at = None
     reserved = 0
+    unverified_mids = set()
     if browser is not None:
         position = cursor.get("b")
         restarted = position is not None and position[0] != browser.uuid
@@ -1656,17 +1671,19 @@ def changes(cursor_text, budget=None, now=None, browser=None):
             # Hydrate before the tail read: `pre` is the position before it, `pos` the position of
             # the hydration read itself. An event written after either is re-read by a later poll.
             # The page's own bytes (plus a margin for rows that hydration changes) are set aside until
-            # the section is built: hydration, the tail and the channels take everything else, so a
-            # journal that never reaches every wanted id cannot starve the feed on every poll.
+            # the section is built, but at most half the request budget: a journal that never reaches
+            # every wanted id cannot starve the feed on every poll, and a large feed cannot starve
+            # hydration, the tail and the channels. A page that does not fit its reserve serves its
+            # newest entries (see BrowserState.page); the rest of the budget is shared by the others.
             need = browser.first_page_bytes()
-            reserved = min(budget.remaining(), need + need // HYDRATION_MARGIN)
+            reserved = min(budget.remaining() // 2, need + need // HYDRATION_MARGIN)
             budget.total -= reserved
             mids = browser.restorable_mids()
             if mids:
                 pre, _skipped = _journal_baseline(budget)
                 ctx, pos = read_journal_context(budget, mids, with_position=True)
                 partial = partial or ctx.prefix_unread or not ctx.available
-                _hydrate_browser(browser, ctx, mids)
+                unverified_mids = _hydrate_browser(browser, ctx, mids)
                 _after_first_page_hydration()
                 hydrated_at = pos or pre
     new_j, journal_gap, journal_partial = _journal_tail(cursor["j"], budget, updates)
@@ -1783,7 +1800,8 @@ def changes(cursor_text, budget=None, now=None, browser=None):
     if browser is not None:
         _apply_browser_updates(browser, updates)
         budget.total += reserved
-        section, b_position, b_partial = _browser_section(browser, cursor.get("b"), first_page, restarted, budget)
+        section, b_position, b_partial = _browser_section(browser, cursor.get("b"), first_page, restarted, budget,
+                                                             unverified_mids)
         result["browser"] = section
         result["partial"] = partial or b_partial
         if b_position is not None:
