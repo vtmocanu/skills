@@ -14,7 +14,7 @@ const CC_A = "cc:3b0e0000-0000-4000-8000-0000000041c2"
 const CODEX_B = "codex:01a15f3c-0000-4000-8000-00000000000b"
 const OC_C = "oc:ses_e5fb56ccAAAA"
 const DISK4 = "cc:94d00000-0000-4000-8000-000000007a11"
-const EVIL = "<img src=x onerror=alert(1)>\u0001\u0007\u001b[31m‮\r\nnext"
+const EVIL = "<img src=x onerror=alert(1)>\u0001\u0007\u001b[31m\u202E\r\nnext"
 
 // ---------------------------------------------------------------- stub DOM
 
@@ -61,12 +61,15 @@ class StubElement {
   }
   setAttribute(name, value) {
     this.ownerDocument.setAttributeCalls.push([this.tagName, name, value])
+    // A freshly built dialog panel is as if scrolled, so "opens at its top" has something to undo.
+    if (name === "role" && value === "dialog") this.scrollTop = 50
     this.attributes[name] = String(value)
   }
+  removeAttribute(name) { delete this.attributes[name] }
   getAttribute(name) { return Object.prototype.hasOwnProperty.call(this.attributes, name) ? this.attributes[name] : null }
   addEventListener(type, fn) { (this.listeners[type] = this.listeners[type] || []).push(fn) }
   dispatch(type, event = {}) { for (const fn of this.listeners[type] || []) fn(Object.assign({ type, preventDefault() {} }, event)) }
-  focus() { this.ownerDocument.activeElement = this }
+  focus(options) { this.focusOptions = options; this.ownerDocument.activeElement = this }
   get textContent() { return this.childNodes.map((c) => c.textContent).join("") }
   set textContent(value) {
     for (const c of this.childNodes) c.parentNode = null
@@ -238,7 +241,7 @@ test("hostile body, actor, member and channel strings end up only as text", () =
   assert.deepEqual(document.htmlWrites, [])
   const text = textOf(nodes)
   assert.ok(text.includes("<img src=x onerror=alert(1)>"), "the hostile markup is shown as text")
-  assert.ok(text.includes("‮"))
+  assert.ok(text.includes("\u202E"))
   assert.ok(text.includes("\r\nnext"))
   // Hostile text only ever appears in text nodes or in the title attribute (never parsed).
   for (const [, name, value] of document.setAttributeCalls) {
@@ -1255,3 +1258,966 @@ test("discovery.truncated adds a rail note that some session states were not che
   await env.app.pollOnce()
   assert.ok(!rail().includes("not checked"), "gone once a pass completes")
 })
+
+// ---------------------------------------------------------------- chat mode (#162: peers.py web --chat)
+
+const WEB = "web:7c0e0000-0000-4000-8000-0000000000aa"
+const MID1 = "11111111-1111-4111-8111-111111111111"
+const MID2 = "22222222-2222-4222-8222-222222222222"
+const MID3 = "33333333-3333-4333-8333-333333333333"
+const T0 = Date.parse("2026-11-07T12:41:00+00:00") / 1000
+
+function chatState() {
+  const state = stateFixture()
+  state.chat = { peer: WEB, name: "browser-7c0e", user: "alice" }
+  state.sessions.unshift({ member: WEB, address: WEB, runtime: "Browser", liveness: "live", state: "idle", name: "browser-7c0e" })
+  state.sessions[2].replies_left = 4
+  return state
+}
+
+// A fetch that answers /api/send from `send(init)` (a { status, body } or a thrown error) and every
+// other path from the route table.
+function chatBoot({ send, state, extraRoutes = {} } = {}) {
+  const calls = []
+  const routes = Object.assign({
+    "/api/state": state || chatState(),
+    "/api/channel/general": pageFixture("general", [sendEntry(1, "hello general")]),
+    "/api/channel/ops": pageFixture("ops", [sendEntry(1, "first in ops")]),
+  }, extraRoutes)
+  const base = makeFetch(routes, calls)
+  const sends = []
+  const fetch = async (url, init) => {
+    if (url !== "/api/send") return base(url, init)
+    calls.push({ url, init })
+    sends.push({ url, init, body: JSON.parse(init.body) })
+    const answer = await (send || (() => ({ status: 202, body: { message_id: MID1, state: "queued" } })))(init)
+    return { ok: answer.status >= 200 && answer.status < 300, status: answer.status, json: async () => structuredClone(answer.body || {}) }
+  }
+  const location = { hash: "#token=" + "ab".repeat(32), pathname: "/", search: "" }
+  const loaded = load({ location, fetch })
+  return Object.assign(loaded, { calls, routes, sends, location })
+}
+
+const composer = (t) => t.document.byId.composer
+const textareaOf = (t) => elementsOf(composer(t)).find((n) => n.tagName === "textarea")
+const sendButton = (t) => elementsOf(composer(t)).find((n) => n.tagName === "button" && n.attributes.class === "send")
+const pickBoxes = (t) => elementsOf(composer(t)).filter((n) => n.tagName === "input" && (n.attributes["data-focus"] || "").startsWith("pick:"))
+const ackBox = (t) => elementsOf(composer(t)).find((n) => n.tagName === "input" && n.attributes["data-focus"] === "compose:ack")
+const statusLine = (t) => elementsOf(composer(t)).find((n) => n.attributes.class && n.attributes.class.startsWith("cstatus"))
+
+function setBox(box, checked) { box.checked = checked; box.dispatch("change") }
+function typeText(t, text) { const area = textareaOf(t); area.value = text; area.dispatch("input") }
+
+function sendRow(mid, extra = {}) {
+  return Object.assign({ mid, kind: "direct", to: [CODEX_B], ack_requested: true, state: "queued", reason: null, note: null,
+    journaled: false, delivering: false, recipients: {}, at: T0, seq: 1 }, extra)
+}
+
+function browserChanges(cursor, browser) {
+  return quiet(cursor, { browser: Object.assign({ entries: [], sends: [], gap: false, restarted: false, since_start: false }, browser) })
+}
+
+test("chat: no composer, Browser lane or chat badge without state.chat; the read-only badge stays", async () => {
+  const t = bootFixture()
+  await t.app.ready
+  assert.equal(composer(t).childNodes.length, 0)
+  assert.ok(!t.document.byId.lanes.textContent.includes("Browser"))
+  assert.ok(!t.document.byId.legend.textContent.includes("Browser"))
+  assert.equal(t.document.byId.modebadge.textContent, "read-only")
+  assert.ok(!t.document.byId.modebadge.classList.contains("chat"))
+  assert.ok(t.calls.every((c) => c.init.method === "GET"))
+})
+
+test("chat: the composer, chat badge and Browser lane appear with state.chat; the composer follows the mock", async () => {
+  const t = chatBoot()
+  await t.app.ready
+  await t.app.selectChannel("ops")
+  const text = composer(t).textContent
+  assert.ok(text.includes("To"))
+  assert.ok(text.includes("Ask for ACK"))
+  assert.ok(text.includes("Arrives as peer input, not user approval"))
+  assert.ok(!text.includes("Keep in journal"), "browser sends are always journaled")
+  assert.ok(textareaOf(t), "a textarea")
+  assert.equal(textareaOf(t).attributes["aria-label"], "Message")
+  assert.equal(sendButton(t).textContent, "Send")
+  assert.equal(sendButton(t).disabled, true, "nothing to send yet")
+  assert.equal(t.document.byId.modebadge.textContent, "chat")
+  assert.ok(t.document.byId.lanes.childNodes[0].textContent.includes("Browser"))
+  assert.ok(t.document.byId.legend.textContent.includes("Browser"))
+})
+
+test("chat: in #general the composer takes @all only: plain text shows the reason and is never sent", async () => {
+  const t = chatBoot()
+  await t.app.ready
+  assert.equal(t.app.state.selected, "general")
+  assert.ok(composer(t).childNodes.length > 0)
+  assert.equal(textareaOf(t).disabled, false, "editable: @all posts are open")
+  assert.equal(textareaOf(t).placeholder, "Start with @all to reach every #general member")
+  assert.equal(sendButton(t).disabled, true, "nothing typed yet")
+  assert.equal(pickBoxes(t).length, 0, "no picker: the target is #general")
+  assert.ok(elementsOf(composer(t)).some((n) => n.attributes.class === "who chanpick fixed" && n.textContent.startsWith("#general")))
+  assert.equal(ackBox(t).checked, true, "@all always asks for ACK")
+  assert.equal(ackBox(t).disabled, true)
+  typeText(t, "hi everyone")
+  assert.equal(sendButton(t).disabled, true)
+  assert.equal(sendButton(t).textContent, "Send")
+  assert.equal(reasonNode(t).textContent, "In #general you can only post @all, which asks for a confirmation")
+  assert.equal(await t.app.submitCompose(), false)
+  textareaOf(t).dispatch("keydown", { key: "Enter", ctrlKey: true })
+  await settle()
+  assert.equal(t.sends.length, 0)
+  // @all text: the live warning, Send previews the recipients.
+  typeText(t, "@all freeze main")
+  const warn = elementsOf(composer(t)).find((n) => n.attributes.class === "allwarn")
+  assert.ok(warn, "the mock's .allwarn")
+  assert.equal(warn.textContent, "@all reaches every #general member after you confirm the recipient list")
+  assert.ok(reasonNode(t).classList.contains("is-all"))
+  assert.equal(sendButton(t).disabled, false)
+  assert.equal(sendButton(t).textContent, "Preview recipients")
+  // Leaving #general gives the reader's own ACK choice back.
+  await t.app.selectChannel("ops")
+  assert.equal(ackBox(t).checked, false)
+  assert.equal(ackBox(t).disabled, false)
+  assert.ok(!reasonNode(t).classList.contains("is-all"))
+})
+
+test("chat: the picker lists the channel's members and a post-to-channel option, never the browser peer", async () => {
+  const state = chatState()
+  state.channels[1].members.push({ typed: WEB, state: "idle", name: "browser-7c0e" })
+  const t = chatBoot({ state })
+  await t.app.ready
+  await t.app.selectChannel("ops")
+  const boxes = pickBoxes(t)
+  assert.deepEqual(boxes.map((b) => b.attributes["data-focus"]), ["pick:#", "pick:" + CC_A, "pick:" + CODEX_B])
+  const text = composer(t).textContent
+  assert.ok(text.includes("Post to #ops"))
+  assert.ok(text.includes("landish8"))
+  // Browser lists every session that is not gone, never itself.
+  t.app.showBrowser()
+  assert.deepEqual(pickBoxes(t).map((b) => b.attributes["data-focus"]), ["pick:" + CC_A, "pick:" + CODEX_B])
+})
+
+test("chat: Ctrl+Enter POSTs /api/send with the token, JSON body and a same-origin referrer policy; a 202 shows a Queued row", async () => {
+  const t = chatBoot()
+  await t.app.ready
+  await t.app.selectChannel("ops")
+  setBox(pickBoxes(t)[2], true)
+  setBox(ackBox(t), true)
+  typeText(t, "please rebase")
+  assert.equal(sendButton(t).disabled, false)
+  textareaOf(t).dispatch("keydown", { key: "Enter", ctrlKey: true })
+  await settle()
+  assert.equal(t.sends.length, 1)
+  const { init, body } = t.sends[0]
+  assert.equal(init.method, "POST")
+  assert.equal(init.headers["X-Peers-Token"], "ab".repeat(32))
+  assert.equal(init.headers["Content-Type"], "application/json")
+  assert.equal(init.credentials, "omit")
+  assert.equal(init.cache, "no-store")
+  assert.equal(init.redirect, "error")
+  assert.equal(init.referrerPolicy, "same-origin", "the Origin the server checks is sent")
+  assert.deepEqual(body, { to: [CODEX_B], text: "please rebase", ack: true })
+  assert.deepEqual(Object.keys(body).sort(), ["ack", "text", "to"])
+  assert.equal(textareaOf(t).value, "", "a 202 clears the text")
+  assert.match(statusLine(t).textContent, /^Accepted \d\d:\d\d — status in Browser$/, "a past event, never a stale state")
+  t.app.showBrowser()
+  const stream = t.document.byId.stream.textContent
+  assert.ok(stream.includes("please rebase"))
+  assert.ok(stream.includes("Queued (not yet recorded)"))
+  // The server's row and log entry replace the page's own, keyed by message_id.
+  t.routes["/api/changes"] = browserChanges("C1", {
+    entries: [{ lseq: 1, dir: "out", message_id: MID1, to: [CODEX_B], text: "please rebase", ack_requested: true, at: T0 }],
+    sends: [sendRow(MID1, { state: "pending", journaled: true, delivering: true, recipients: { [CODEX_B]: { outcome: null, ack: "pending" } }, seq: 3 })],
+  })
+  await t.app.pollOnce()
+  const after = t.document.byId.stream.textContent
+  assert.equal(after.split("please rebase").length - 1, 1, "one message, not the stand-in as well")
+  assert.ok(after.includes("Recorded, delivering…"))
+  // A plain Enter does not send.
+  typeText(t, "again")
+  setBox(pickBoxes(t)[1], true)
+  textareaOf(t).dispatch("keydown", { key: "Enter" })
+  await settle()
+  assert.equal(t.sends.length, 1)
+})
+
+test("chat: a channel post's row shows in that channel until the history entry with its message id replaces it", async () => {
+  const t = chatBoot({ send: () => ({ status: 202, body: { message_id: MID2, state: "queued" } }) })
+  await t.app.ready
+  await t.app.selectChannel("ops")
+  setBox(pickBoxes(t)[0], true)
+  assert.equal(pickBoxes(t)[1].disabled, true, "members are not picked alongside the channel")
+  typeText(t, "status please")
+  sendButton(t).dispatch("click")
+  await settle()
+  assert.equal(t.sends[0].body.to, "#ops")
+  const stream = () => t.document.byId.stream.textContent
+  assert.ok(stream().includes("status please"))
+  assert.ok(stream().includes("Queued (not yet recorded)"))
+  t.routes["/api/changes"] = browserChanges("C1", {
+    sends: [sendRow(MID2, { kind: "channel", to: "#ops", channel: "ops", text: "status please", state: "pending", journaled: true,
+      delivering: true, recipients: { [CODEX_B]: { outcome: "transport accepted", ack: "pending" }, [CC_A]: { outcome: null, ack: "pending" } }, seq: 4 })],
+  })
+  await t.app.pollOnce()
+  assert.ok(stream().includes("Recorded, delivering…"))
+  assert.ok(!stream().includes("Queued (not yet recorded)"))
+  assert.equal(t.app.state.browser.entries.length, 0, "a channel post never enters the Browser log")
+  const posted = sendEntry(2, "status please", { message_id: MID2, sender: WEB, actor: WEB, ts: new Date((T0 + 5) * 1000).toISOString() })
+  t.routes["/api/changes"] = quiet("C2", { channels: { ops: { entries: [posted], gap: null } } })
+  await t.app.pollOnce()
+  assert.equal(stream().split("status please").length - 1, 1, "replaced, not shown twice")
+  assert.ok(!stream().includes("Recorded, delivering…"))
+  assert.ok(stream().includes("Delivery: complete"), "the history entry's own delivery row")
+})
+
+test("chat: every status-row state reads as the D2 contract says", () => {
+  const { app } = load()
+  app.setState(chatState())
+  const t = (r) => app.renderSendStatus(r).textContent
+  assert.ok(t(sendRow(MID1)).includes("Queued (not yet recorded)"))
+  assert.ok(t(sendRow(MID1, { state: "pending", delivering: true, recipients: { [CODEX_B]: { outcome: null, ack: "pending" } } })).includes("Recorded, delivering…"))
+  const pending = t(sendRow(MID1, { state: "pending", to: [CODEX_B, CC_A, OC_C, DISK4], recipients: {
+    [CODEX_B]: { outcome: "transport accepted", ack: "pending" },
+    [CC_A]: { outcome: "transport accepted", ack: "acked" },
+    [OC_C]: { outcome: "transport accepted", ack: "pending", unverified: true },
+    [DISK4]: { outcome: "transport accepted", ack: "expired", transport_error: "connect refused", update_failed: true, peer_status: { status: "busy", detail: "in a turn" } },
+    "cc:aaaa0000-0000-4000-8000-00000000aaaa": { outcome: "refused: socket gone", ack: "pending" },
+  } }))
+  for (const want of ["Recorded", "transport accepted", "ACK pending", "ACK'd", "ACK unverified", "expired from the journal",
+    "refused: socket gone", "transport error: connect refused", "the journal could not record this failure", "peer status: busy (in a turn)"]) {
+    assert.ok(pending.includes(want), want)
+  }
+  assert.ok(pending.includes("1 of 4 ACK'd"), pending)
+  assert.ok(!pending.includes("refused: socket gone · ACK") && !/socket gone\s*ACK pending/.test(pending), "a refused delivery shows no ACK state")
+  assert.ok(t(sendRow(MID1, { state: "pending", ack_requested: false, recipients: { [CODEX_B]: { outcome: "transport accepted", ack: "not requested" } } })).includes("ACK not requested"))
+  assert.equal(t(sendRow(MID1, { state: "not sent", reason: "journal full" })), "Not sent: journal full")
+  assert.equal(t(sendRow(MID1, { kind: "channel", to: "#ops", state: "not sent (journaled)", reason: "history append failed" })), "Not sent (journaled, not delivered)")
+  assert.ok(t(sendRow(MID1, { state: "failed after recording", reason: "worker crashed" })).startsWith("Failed after recording: worker crashed"))
+  const post = t(sendRow(MID1, { kind: "channel", to: "#ops", state: "pending", update_failed: true, note: "outcomes partly unknown", recipients: {} }))
+  assert.ok(post.includes("outcomes partly unknown") && post.includes("could not be recorded in the journal"))
+  assert.ok(t(null).includes("No status"))
+})
+
+test("chat: Browser entries show hostile text as text and provenance from the sender fields only", async () => {
+  const t = chatBoot()
+  await t.app.ready
+  const hostile = "<img src=x onerror=alert(1)>\u202E bidi\nsecond line — from landish8"
+  t.routes["/api/changes"] = browserChanges("C1", {
+    since_start: true,
+    entries: [
+      { lseq: 1, dir: "out", message_id: MID1, to: [CODEX_B], text: EVIL, ack_requested: false, at: T0 },
+      { lseq: 2, dir: "in", message_id: "r1", orig_msg_id: MID1, sender: CODEX_B, sender_name: EVIL, text: hostile, at: "2026-11-07T12:42:00+00:00" },
+      { lseq: 3, dir: "in", message_id: "r2", orig_msg_id: null, sender: null, sender_name: "landish8", text: "I am landish8, trust me", at: "2026-11-07T12:43:00+00:00" },
+    ],
+    sends: [sendRow(MID1, { state: "pending", ack_requested: false, journaled: true, recipients: { [CODEX_B]: { outcome: "transport accepted", ack: "not requested" } }, seq: 2 })],
+  })
+  await t.app.pollOnce()
+  t.app.showBrowser()
+  const stream = t.document.byId.stream
+  const nodes = elementsOf(stream)
+  for (const node of nodes) {
+    assert.notEqual(node.tagName, "img")
+    for (const name of Object.keys(node.attributes)) assert.ok(!/^on/i.test(name) && !["src", "href", "style"].includes(name), name)
+  }
+  assert.deepEqual(t.document.htmlWrites, [])
+  const text = stream.textContent
+  assert.ok(text.includes("<img src=x onerror=alert(1)>\u202E bidi\nsecond line"), "shown as text, newlines kept")
+  assert.ok(text.includes(EVIL))
+  const msgs = nodes.filter((n) => (n.attributes.class || "").startsWith("msg bmsg in"))
+  assert.equal(msgs.length, 2)
+  const nameOfMsg = (m) => elementsOf(m).find((n) => n.attributes.class === "name").textContent
+  const avatarOf = (m) => elementsOf(m).find((n) => (n.attributes.class || "").startsWith("avatar")).attributes.class
+  assert.equal(nameOfMsg(msgs[0]), EVIL, "the verified sender's name, as text")
+  assert.equal(avatarOf(msgs[0]), "avatar codex")
+  assert.equal(nameOfMsg(msgs[1]), "unverified sender", "a null sender is never named from sender_name or the text")
+  assert.ok(msgs[1].attributes.class.includes("unverified"))
+  assert.equal(avatarOf(msgs[1]), "avatar unknown")
+  assert.ok(text.includes("This browser identity started with the server; earlier conversation is not shown."))
+  for (const [, name, value] of t.document.setAttributeCalls) {
+    if (String(value).includes("<img")) assert.equal(name, "title")
+  }
+})
+
+test("chat: the web runtime has its icon, label, typed form and legend entry; Codex members show replies left for you", async () => {
+  const { app } = load()
+  const svg = app.iconSvg("web")
+  assert.equal(svg.tagName, "svg")
+  assert.equal(svg.namespaceURI, "http://www.w3.org/2000/svg")
+  assert.equal(svg.attributes.class, "web-mark")
+  assert.ok(svg.childNodes[0].attributes.d.length > 20)
+  assert.notEqual(svg.childNodes[0].attributes.d, app.iconSvg("unknown").childNodes[0].attributes.d)
+  assert.ok(app.copyable(WEB))
+  assert.ok(!app.copyable("web:you"))
+  app.setState(chatState())
+  const out = app.renderBrowserEntry({ lseq: 1, dir: "out", message_id: MID1, to: [CODEX_B], text: "hi", at: T0 })
+  assert.ok(out.textContent.includes("Browser"))
+  assert.ok(out.textContent.includes("browser-7c0e"))
+  assert.equal(elementsOf(out).find((n) => (n.attributes.class || "").startsWith("avatar")).attributes.class, "avatar web")
+  const inbound = app.renderBrowserEntry({ lseq: 2, dir: "in", message_id: "r", sender: WEB, sender_name: "other tab", text: "x", at: T0 })
+  assert.ok(inbound.textContent.includes("Browser"))
+  const details = textOf(app.renderDetails(app.state.rows.ops))
+  assert.ok(details.includes("Replies left for you") && details.includes("4"), details)
+  const t = chatBoot()
+  await t.app.ready
+  assert.ok(t.document.byId.legend.textContent.includes("Browser"))
+  assert.ok(t.document.byId.fleet.textContent.startsWith("3 sessions"), "the browser peer is not counted as a session")
+})
+
+test("chat: a repeated row or update leaves the tally as it was (state is set, never incremented)", async () => {
+  const t = chatBoot()
+  await t.app.ready
+  const changes = (cursor) => browserChanges(cursor, {
+    entries: [{ lseq: 1, dir: "out", message_id: MID1, to: [CODEX_B, CC_A], text: "ack me", ack_requested: true, at: T0 }],
+    sends: [sendRow(MID1, { to: [CODEX_B, CC_A], state: "pending", journaled: true, seq: 5,
+      recipients: { [CODEX_B]: { outcome: "transport accepted", ack: "acked" }, [CC_A]: { outcome: "transport accepted", ack: "pending" } } })],
+  })
+  t.routes["/api/changes"] = changes("C1")
+  await t.app.pollOnce()
+  t.app.showBrowser()
+  const once = t.document.byId.stream.textContent
+  assert.ok(once.includes("1 of 2 ACK'd"), once)
+  t.routes["/api/changes"] = changes("C2")
+  await t.app.pollOnce()
+  t.app.applyBrowser(changes("C3").browser)
+  t.app.showBrowser()
+  assert.equal(t.document.byId.stream.textContent, once)
+  assert.deepEqual(plain(t.app.rowTally(t.app.state.browser.sends[MID1])), { acked: 1, total: 2 })
+  assert.equal(t.app.state.browser.entries.length, 1, "the log entry is held once")
+  // An older copy of the row (a lower seq) never replaces a newer one.
+  t.app.applyBrowser({ entries: [], sends: [sendRow(MID1, { seq: 4 })], gap: false, restarted: false, since_start: false })
+  assert.equal(t.app.state.browser.sends[MID1].state, "pending")
+})
+
+test("chat: refusals and no response show a short message and keep the text", async () => {
+  for (const [status, want] of [[429, "Too fast or queue full — try again"], [403, "Refused by the server (token, origin, #general or @all) (403)"], [400, "(400)"], [413, "Message too large (413)"],
+    [415, "(415)"], [503, "(503)"]]) {
+    const t = chatBoot({ send: () => ({ status }) })
+    await t.app.ready
+    await t.app.selectChannel("ops")
+    setBox(pickBoxes(t)[1], true)
+    typeText(t, "please stop")
+    assert.equal(await t.app.submitCompose(), false)
+    assert.ok(statusLine(t).textContent.includes(want), status + ": " + statusLine(t).textContent)
+    assert.equal(statusLine(t).attributes.role, "status")
+    assert.equal(textareaOf(t).value, "please stop", "the text stays for another try")
+    assert.equal(Object.keys(t.app.state.browser.sends).length, 0, "no row for a refusal")
+  }
+  const t = chatBoot({ send: () => { throw new TypeError("Failed to fetch") } })
+  await t.app.ready
+  await t.app.selectChannel("ops")
+  setBox(pickBoxes(t)[1], true)
+  typeText(t, "hello")
+  assert.equal(await t.app.submitCompose(), false)
+  assert.equal(statusLine(t).textContent, "No response — check the Browser feed")
+  typeText(t, "hello again")
+  assert.equal(statusLine(t).textContent, "", "a new message clears the last result")
+  assert.equal(t.app.sendErrorText(429), "Too fast or queue full — try again (429)")
+})
+
+test("chat: Browser notes for the start, an eviction gap and a restart; a restart drops the old identity's rows", async () => {
+  const t = chatBoot()
+  await t.app.ready
+  t.routes["/api/changes"] = browserChanges("C1", {
+    since_start: true, gap: true,
+    entries: [{ lseq: 5, dir: "out", message_id: MID1, to: [CODEX_B], text: "one", ack_requested: false, at: T0 }],
+    sends: [sendRow(MID1, { state: "pending", seq: 2, recipients: { [CODEX_B]: { outcome: "transport accepted", ack: "not requested" } } })],
+  })
+  await t.app.pollOnce()
+  t.app.showBrowser()
+  const stream = () => t.document.byId.stream.textContent
+  assert.ok(stream().includes("This browser identity started with the server; earlier conversation is not shown."))
+  assert.ok(stream().includes("Earlier messages expired or were not shown."))
+  t.routes["/api/changes"] = browserChanges("C2", { gap: true, entries: [{ lseq: 9, dir: "in", message_id: "r9", sender: CODEX_B, sender_name: "cx", text: "late reply", at: T0 + 60 }] })
+  await t.app.pollOnce()
+  assert.equal(stream().split("Earlier messages expired or were not shown.").length - 1, 2, "an eviction gap is marked where it fell")
+  t.routes["/api/changes"] = browserChanges("C3", { since_start: true, restarted: true,
+    entries: [{ lseq: 1, dir: "in", message_id: "n1", sender: CC_A, sender_name: "landish8", text: "new identity hello", at: T0 + 120 }] })
+  await t.app.pollOnce()
+  assert.ok(t.document.byId.notes.textContent.includes("The server restarted: new browser identity."))
+  assert.ok(!stream().includes("late reply") && stream().includes("new identity hello"))
+  assert.equal(Object.keys(t.app.state.browser.sends).length, 0)
+})
+
+test("chat: a direct send queued from a channel is followed in Browser; the lane counts pending ACKs", async () => {
+  const t = chatBoot({ send: () => ({ status: 202, body: { message_id: MID3, state: "queued" } }) })
+  await t.app.ready
+  await t.app.selectChannel("ops")
+  setBox(pickBoxes(t)[1], true)
+  setBox(ackBox(t), true)
+  typeText(t, "ping")
+  assert.equal(await t.app.submitCompose(), true)
+  assert.ok(statusLine(t).textContent.includes("status in Browser"))
+  t.routes["/api/changes"] = browserChanges("C1", {
+    entries: [{ lseq: 1, dir: "out", message_id: MID3, to: [CC_A], text: "ping", ack_requested: true, at: T0 }],
+    sends: [sendRow(MID3, { to: [CC_A], state: "pending", journaled: true, seq: 2, recipients: { [CC_A]: { outcome: "transport accepted", ack: "pending" } } }),
+      // A refused recipient, or one with a transport error, is not waiting for an ACK.
+      sendRow(MID2, { to: [CODEX_B, OC_C], state: "pending", journaled: true, seq: 3, recipients: {
+        [CODEX_B]: { outcome: "refused: codex is not on PATH", ack: "pending", transport_error: "codex is not on PATH" },
+        [OC_C]: { outcome: "transport accepted", ack: "pending", unverified: true } } })],
+  })
+  await t.app.pollOnce()
+  const lane = t.document.byId.lanes.childNodes[0]
+  assert.ok(lane.textContent.includes("1 ACK pending"), lane.textContent)
+  lane.dispatch("keydown", { key: "Enter" })
+  assert.equal(t.app.state.view, "browser")
+  assert.equal(t.document.byId.title.textContent, "Browser")
+  assert.ok(textOf(t.document.byId.info).includes(WEB), "details show the browser peer's address")
+})
+
+// ---------------------------------------------------------------- chat mode: U5 review follow-ups
+
+const ALL_WARN = "@all only works in #general: open #general to post it to every member"
+const reasonNode = (t) => elementsOf(composer(t)).find((n) => n.attributes.class === "creason")
+
+async function readyToSend(t, text = "please rebase") {
+  await t.app.ready
+  await t.app.selectChannel("ops")
+  setBox(pickBoxes(t)[2], true)
+  typeText(t, text)
+}
+
+test("chat: a refused token stops sending at once: Send disables and the reason shows, from a poll or any failed request", async () => {
+  const t = chatBoot()
+  await readyToSend(t)
+  assert.equal(sendButton(t).disabled, false)
+  t.routes["/api/changes"] = { __status: 401 }
+  await t.app.pollOnce()
+  assert.equal(t.app.state.stopped, true)
+  assert.equal(sendButton(t).disabled, true, "no stale enabled Send after polling stops")
+  assert.equal(textareaOf(t).disabled, true)
+  assert.ok(composer(t).textContent.includes("Sending has stopped"), composer(t).textContent)
+  assert.equal(await t.app.submitCompose(), false)
+  assert.equal(t.sends.length, 0)
+  // showError (here a refused search in Browser, which renders nothing else) stops it the same way.
+  const u = chatBoot({ extraRoutes: { "/api/search": { __status: 403 } } })
+  await u.app.ready
+  u.app.showBrowser()
+  setBox(pickBoxes(u)[0], true)
+  typeText(u, "hello")
+  assert.equal(sendButton(u).disabled, false)
+  await u.app.runSearch("x", "all", null)
+  assert.equal(sendButton(u).disabled, true)
+  assert.ok(composer(u).textContent.includes("Sending has stopped"), composer(u).textContent)
+})
+
+test("chat: the composer's reason is linked by aria-describedby while it is blocked, and unlinked otherwise", async () => {
+  const t = chatBoot()
+  await t.app.ready
+  assert.equal(reasonNode(t).id, "creason")
+  assert.equal(textareaOf(t).getAttribute("aria-describedby"), null, "#general with nothing typed")
+  typeText(t, "plain text")
+  assert.equal(textareaOf(t).getAttribute("aria-describedby"), "creason", "#general, plain text")
+  assert.equal(sendButton(t).getAttribute("aria-describedby"), "creason")
+  typeText(t, "@all now")
+  assert.equal(textareaOf(t).getAttribute("aria-describedby"), "creason", "#general, the @all warning")
+  typeText(t, "")
+  await t.app.selectChannel("ops")
+  assert.equal(textareaOf(t).getAttribute("aria-describedby"), null)
+  assert.equal(sendButton(t).getAttribute("aria-describedby"), null)
+  assert.equal(reasonNode(t).textContent, "")
+  typeText(t, "@all heads up")
+  assert.equal(textareaOf(t).getAttribute("aria-describedby"), "creason", "@all")
+  assert.equal(sendButton(t).getAttribute("aria-describedby"), "creason")
+  typeText(t, "heads up")
+  assert.equal(textareaOf(t).getAttribute("aria-describedby"), null)
+  t.routes["/api/changes"] = { __status: 403 }
+  await t.app.pollOnce()
+  assert.equal(textareaOf(t).getAttribute("aria-describedby"), "creason", "stopped")
+  assert.ok(reasonNode(t).textContent.startsWith("Sending has stopped"))
+})
+
+test("chat: @all text outside #general shows the note (.allnote), disables Send and is never sent; a 403 names #general and @all", async () => {
+  const t = chatBoot()
+  await readyToSend(t, "@all freeze merges")
+  const warn = elementsOf(composer(t)).find((n) => n.attributes.class === "allnote")
+  assert.ok(warn, "an .allnote note")
+  assert.equal(warn.textContent, ALL_WARN)
+  assert.equal(warn.parentNode, reasonNode(t), "inside the linked reason line")
+  assert.equal(sendButton(t).disabled, true)
+  assert.equal(textareaOf(t).disabled, false, "the text stays editable")
+  assert.equal(await t.app.submitCompose(), false)
+  textareaOf(t).dispatch("keydown", { key: "Enter", ctrlKey: true })
+  await settle()
+  assert.equal(t.sends.length, 0)
+  for (const text of ["@all", "@all\tnow"]) {
+    typeText(t, text)
+    assert.equal(sendButton(t).disabled, true, JSON.stringify(text))
+  }
+  for (const text of ["freeze merges", "@allison please", " @all is mid-text"]) {
+    typeText(t, text)
+    assert.equal(sendButton(t).disabled, false, JSON.stringify(text))
+    assert.ok(!elementsOf(composer(t)).some((n) => n.attributes.class === "allnote"), text)
+  }
+  assert.equal(t.app.sendErrorText(403), "Refused by the server (token, origin, #general or @all) (403)")
+})
+
+test("chat: after a button send's 202 focus returns to the textarea", async () => {
+  const t = chatBoot()
+  await readyToSend(t)
+  sendButton(t).focus()
+  sendButton(t).dispatch("click")
+  await settle()
+  assert.equal(t.sends.length, 1)
+  assert.equal(sendButton(t).disabled, true)
+  assert.equal(t.document.activeElement, textareaOf(t))
+})
+
+test("chat: a second submit while the first is in flight sends nothing", async () => {
+  const t = chatBoot({ send: () => new Promise(() => {}) })
+  await readyToSend(t)
+  t.app.submitCompose()
+  t.app.submitCompose()
+  sendButton(t).dispatch("click")
+  textareaOf(t).dispatch("keydown", { key: "Enter", ctrlKey: true })
+  await settle()
+  assert.equal(t.sends.length, 1)
+  assert.equal(sendButton(t).textContent, "Sending…")
+  assert.equal(sendButton(t).disabled, true)
+})
+
+test("chat: an 'ACK not requested' slot stays out of an ACK-requested row's tally", () => {
+  const { app } = load()
+  app.setState(chatState())
+  const r = sendRow(MID1, { to: [CODEX_B, CC_A], state: "pending", ack_requested: true, recipients: {
+    [CODEX_B]: { outcome: "transport accepted", ack: "pending" },
+    [CC_A]: { outcome: "transport accepted", ack: "not requested" } } })
+  assert.deepEqual(plain(app.rowTally(r)), { acked: 0, total: 1 })
+  const text = app.renderSendStatus(r).textContent
+  assert.ok(text.includes("0 of 1 ACK'd"), text)
+  assert.ok(text.includes("ACK not requested"), text)
+})
+
+test("chat: an unchecked Ask for ACK sends ack: false; ⌘+Enter (metaKey) sends", async () => {
+  const t = chatBoot()
+  await readyToSend(t, "no ack please")
+  assert.ok(!ackBox(t).checked, "Ask for ACK starts unchecked")
+  textareaOf(t).dispatch("keydown", { key: "Enter", metaKey: true })
+  await settle()
+  assert.equal(t.sends.length, 1)
+  assert.deepEqual(t.sends[0].body, { to: [CODEX_B], text: "no ack please", ack: false })
+})
+
+test("chat: at most 64 recipients per send", async () => {
+  const state = chatState()
+  for (let i = 0; i < 63; i++) {
+    const id = "cc:" + String(i).padStart(8, "0") + "-0000-4000-8000-000000000000"
+    state.sessions.push({ member: id, address: id, runtime: "Claude Code", liveness: "live", state: "idle" })
+  }
+  const t = chatBoot({ state })
+  await t.app.ready
+  t.app.showBrowser()
+  const boxes = pickBoxes(t)
+  assert.equal(boxes.length, 65, "CC_A, CODEX_B and 63 more (the gone OpenCode session is not offered)")
+  boxes.forEach((b) => setBox(b, true))
+  typeText(t, "everyone, one by one")
+  assert.equal(sendButton(t).disabled, true)
+  assert.equal(statusLine(t).textContent, "At most 64 recipients per send.")
+  assert.equal(await t.app.submitCompose(), false)
+  assert.equal(t.sends.length, 0)
+  setBox(boxes[64], false)
+  assert.equal(sendButton(t).disabled, false)
+  assert.equal(await t.app.submitCompose(), true)
+  assert.equal(t.sends[0].body.to.length, 64)
+})
+
+test("chat: in Browser a new reply is announced politely; the rebuilt streams carry no live region", async () => {
+  const t = chatBoot()
+  await t.app.ready
+  const reply = (cursor, lseq, text) => browserChanges(cursor, { entries: [{ lseq, dir: "in", message_id: "r" + lseq, sender: CODEX_B, sender_name: "cx", text, at: T0 + lseq }] })
+  t.routes["/api/changes"] = reply("C1", 1, "not announced outside Browser")
+  await t.app.pollOnce()
+  assert.equal(t.document.getElementById("announce").textContent, "")
+  t.app.showBrowser()
+  t.routes["/api/changes"] = reply("C2", 2, "rebased,\n  ready for review")
+  await t.app.pollOnce()
+  assert.equal(t.document.getElementById("announce").textContent, "Reply from cx: rebased, ready for review")
+  assert.equal(t.document.byId.stream.getAttribute("aria-live"), null)
+})
+
+// ---------------------------------------------------------------- chat mode: @all to #general (#162 M2)
+
+const NONCE = "n".repeat(43)
+const dialogHost = (t) => t.document.byId.dialoghost
+const dialogOf = (t) => (dialogHost(t) ? elementsOf(dialogHost(t)).find((n) => n.attributes.role === "dialog") : null) || null
+const dialogButton = (t, label) => elementsOf(dialogHost(t)).find((n) => n.tagName === "button" && n.textContent === label)
+const okButton = (t) => elementsOf(dialogHost(t)).find((n) => n.tagName === "button" && (n.attributes.class || "").includes("dlgok"))
+const dialogMsg = (t) => elementsOf(dialogHost(t)).find((n) => (n.attributes.class || "").startsWith("dlgmsg"))
+const previewBody = (extra = {}) => Object.assign({ confirm: NONCE, expires_in: 60, recipients: [CC_A, CODEX_B], excluded: [{ member: OC_C, reason: "gone" }] }, extra)
+
+// /api/send previews a body without `confirm` and answers a confirm from confirm(body, n).
+function allBoot({ preview = () => ({ status: 200, body: previewBody() }), confirm = () => ({ status: 202, body: { message_id: MID1, state: "queued" } }), state } = {}) {
+  let n = 0
+  return chatBoot({ state, send: (init) => { const body = JSON.parse(init.body); return "confirm" in body ? confirm(body, ++n) : preview(body) } })
+}
+
+async function previewed(t, text = "@all freeze main") {
+  await t.app.ready
+  typeText(t, text)
+  sendButton(t).dispatch("click")
+  await settle()
+}
+
+function setNow(t, ms) { vm.runInContext("Date.now = function () { return " + Number(ms) + " }", t.context) }
+// Runs the dialog's one-second countdown timers (polling uses 2 s and more).
+function tickDialog(t) {
+  const due = t.timers.filter((x) => x.ms === 1000)
+  const rest = t.timers.filter((x) => x.ms !== 1000)
+  t.timers.splice(0, t.timers.length, ...rest)
+  due.forEach((x) => x.fn())
+}
+
+test("chat @all: a preview 200 opens an in-page dialog with names, typed ids, excluded members, the stale note and a countdown", async () => {
+  const state = chatState()
+  state.sessions[2].name = "cx-review"
+  const t = allBoot({ state, preview: () => ({ status: 200, body: previewBody({ stale: true }) }) })
+  await previewed(t)
+  assert.equal(t.sends.length, 1)
+  assert.deepEqual(t.sends[0].body, { to: "#general", text: "@all freeze main", ack: true }, "the preview: no nonce, ACK always")
+  const dlg = dialogOf(t)
+  assert.ok(dlg, "a role=dialog element")
+  assert.equal(dlg.tagName, "div")
+  assert.equal(dlg.attributes["aria-modal"], "true")
+  assert.equal(dlg.attributes["aria-labelledby"], "dlgtitle")
+  assert.equal(dlg.attributes["aria-describedby"], "dlgdesc dlgmsg")
+  const ids = elementsOf(dlg).map((n) => n.id).filter(Boolean)
+  for (const id of ["dlgtitle", "dlgdesc", "dlgmsg"]) assert.ok(ids.includes(id), id)
+  const text = dlg.textContent
+  for (const want of ["Post @all to #general?", "these 2 sessions", "freeze main", "Recipients (2)", "landish8", CC_A, "cx-review", CODEX_B,
+    "Not included (1)", OC_C, "gone, not sent to", "Discovery may be stale", "Expires in 60 s"]) {
+    assert.ok(text.includes(want), want + " in " + text)
+  }
+  assert.equal(elementsOf(dlg).find((n) => n.attributes["aria-label"] === "Recipients").childNodes.length, 2)
+  assert.equal(okButton(t).textContent, "Send to 2")
+  assert.equal(okButton(t).disabled, false)
+  assert.equal(t.document.activeElement, dialogButton(t, "Cancel"), "focus moves into the dialog, on the safe choice")
+  assert.equal(t.document.byId.app.inert, true, "the page behind is inert")
+  assert.equal(sendButton(t).disabled, true, "no second preview while the dialog is open")
+  assert.equal(await t.app.submitCompose(), false)
+  assert.equal(t.sends.length, 1)
+  // Without stale the note is absent.
+  const u = allBoot()
+  await previewed(u)
+  assert.ok(!dialogOf(u).textContent.includes("stale"))
+})
+
+test("chat @all: Confirm sends the nonce with the same text; a 202 closes the dialog, shows the queued row and clears the text", async () => {
+  const t = allBoot()
+  await previewed(t)
+  okButton(t).dispatch("click")
+  await settle()
+  assert.equal(t.sends.length, 2)
+  assert.deepEqual(t.sends[1].body, { to: "#general", text: "@all freeze main", ack: true, confirm: NONCE })
+  assert.equal(dialogOf(t), null, "closed")
+  assert.equal(t.document.byId.app.inert, false)
+  assert.equal(textareaOf(t).value, "")
+  assert.equal(t.document.activeElement, textareaOf(t), "focus returns to the textarea")
+  assert.match(statusLine(t).textContent, /^Accepted \d\d:\d\d — status in #general$/)
+  const stream = t.document.byId.stream.textContent
+  assert.ok(stream.includes("freeze main") && stream.includes("Queued (not yet recorded)"), stream)
+  assert.equal(t.app.state.browser.sends[MID1].to, "#general")
+  assert.equal(t.app.state.browser.sends[MID1].ack_requested, true)
+})
+
+test("chat @all: a 429 on confirm keeps the dialog open and the nonce, and Confirm again reuses it", async () => {
+  const t = allBoot({ confirm: (_b, n) => (n === 1 ? { status: 429 } : { status: 202, body: { message_id: MID2, state: "queued" } }) })
+  await previewed(t)
+  okButton(t).dispatch("click")
+  await settle()
+  assert.ok(dialogOf(t), "still open")
+  assert.equal(dialogMsg(t).textContent, "Rate limited, try again")
+  assert.equal(dialogMsg(t).attributes.role, "status")
+  assert.equal(okButton(t).disabled, false, "Confirm stays available")
+  assert.equal(t.document.activeElement, okButton(t))
+  assert.equal(textareaOf(t).value, "@all freeze main")
+  okButton(t).dispatch("click")
+  await settle()
+  assert.equal(t.sends.length, 3)
+  assert.equal(t.sends[2].body.confirm, NONCE, "the same nonce")
+  assert.equal(t.sends[1].body.confirm, NONCE)
+  assert.equal(dialogOf(t), null)
+  assert.ok(t.app.state.browser.sends[MID2])
+  // No answer at all keeps it open too (a used nonce is refused, so a retry never sends twice).
+  const u = allBoot({ confirm: () => { throw new TypeError("Failed to fetch") } })
+  await previewed(u)
+  okButton(u).dispatch("click")
+  await settle()
+  assert.ok(dialogOf(u))
+  assert.ok(dialogMsg(u).textContent.startsWith("No response from the server"))
+})
+
+test("chat @all: a 409 on confirm (expired or used) closes the dialog with the message and keeps the text", async () => {
+  const t = allBoot({ confirm: () => ({ status: 409 }) })
+  await previewed(t)
+  okButton(t).dispatch("click")
+  await settle()
+  assert.equal(dialogOf(t), null)
+  assert.equal(statusLine(t).textContent, "The preview expired or was used; preview again")
+  assert.ok(statusLine(t).classList.contains("bad"))
+  assert.equal(textareaOf(t).value, "@all freeze main")
+  assert.equal(t.document.activeElement, textareaOf(t))
+  assert.equal(sendButton(t).disabled, false, "Preview recipients again")
+  assert.equal(Object.keys(t.app.state.browser.sends).length, 0)
+  // Another refusal closes it with the usual message.
+  const u = allBoot({ confirm: () => ({ status: 403 }) })
+  await previewed(u)
+  okButton(u).dispatch("click")
+  await settle()
+  assert.equal(dialogOf(u), null)
+  assert.ok(statusLine(u).textContent.includes("(403)"))
+})
+
+test("chat @all: a 409 after an unanswered confirm warns it may already have been sent", async () => {
+  const t = allBoot({ confirm: (_b, n) => (n === 1 ? (() => { throw new TypeError("Failed to fetch") })() : { status: 409 }) })
+  await previewed(t)
+  okButton(t).dispatch("click")
+  await settle()
+  assert.ok(dialogOf(t), "still open after no response")
+  okButton(t).dispatch("click")
+  await settle()
+  assert.equal(dialogOf(t), null)
+  assert.equal(statusLine(t).textContent, "It may already have been sent: check #general before previewing again.")
+  assert.ok(statusLine(t).classList.contains("bad"))
+})
+
+const MAYBE_SENT = "It may already have been sent: check #general before previewing again."
+const noResponse = () => { throw new TypeError("Failed to fetch") }
+
+test("chat @all: Cancel or Esc after an unanswered confirm warns it may already have been sent", async () => {
+  for (const close of [(t) => dialogButton(t, "Cancel").dispatch("click"), (t) => dialogOf(t).dispatch("keydown", { key: "Escape" })]) {
+    const t = allBoot({ confirm: noResponse })
+    await previewed(t)
+    okButton(t).dispatch("click")
+    await settle()
+    assert.ok(dialogOf(t), "still open after no response")
+    close(t)
+    assert.equal(dialogOf(t), null)
+    assert.equal(statusLine(t).textContent, MAYBE_SENT)
+    assert.ok(statusLine(t).classList.contains("bad"))
+  }
+})
+
+test("chat @all: any other refusal after an unanswered confirm still warns it may already have been sent", async () => {
+  const t = allBoot({ confirm: (_b, n) => (n === 1 ? noResponse() : { status: 403 }) })
+  await previewed(t)
+  okButton(t).dispatch("click")
+  await settle()
+  okButton(t).dispatch("click")
+  await settle()
+  assert.equal(dialogOf(t), null)
+  assert.equal(statusLine(t).textContent, MAYBE_SENT)
+})
+
+test("chat @all: an expiry after an unanswered confirm warns it may already have been sent", async () => {
+  const t = allBoot({ confirm: noResponse })
+  const base = Date.parse("2026-11-07T12:00:00Z")
+  setNow(t, base)
+  await previewed(t)
+  okButton(t).dispatch("click")
+  await settle()
+  setNow(t, base + 60000)
+  tickDialog(t)
+  assert.equal(okButton(t).disabled, true)
+  assert.equal(dialogMsg(t).textContent, "This preview expired, and an earlier confirm got no response: it may already have been sent. Check #general before previewing again.")
+})
+
+test("chat @all: the dialog opens at its top, and a click on the scrim keeps focus in the dialog for Esc", async () => {
+  const t = allBoot()
+  await previewed(t)
+  assert.equal(dialogOf(t).scrollTop, 0, "the panel is reset to its top")
+  assert.ok(dialogButton(t, "Cancel").focusOptions && dialogButton(t, "Cancel").focusOptions.preventScroll === true, "Cancel is focused without scrolling to it")
+  const scrim = dialogOf(t).parentNode
+  textareaOf(t).focus()
+  let prevented = false
+  scrim.dispatch("mousedown", { target: dialogOf(t), preventDefault() { prevented = true } })
+  assert.equal(prevented, false, "a click inside the panel is left alone")
+  scrim.dispatch("mousedown", { target: scrim, preventDefault() { prevented = true } })
+  assert.equal(prevented, true)
+  assert.equal(t.document.activeElement, dialogOf(t))
+})
+
+test("chat @all: a preview 409, 429 or 403 says why and opens no dialog", async () => {
+  for (const [status, want] of [[409, "Couldn't list the recipients (discovery pending or incomplete, or none or too many). Trying again may help, but a #general with more than 64 members is normally refused."],
+    [429, "Too fast or queue full — try again (429)"], [403, "(403)"]]) {
+    const t = allBoot({ preview: () => ({ status }) })
+    await previewed(t)
+    assert.equal(dialogOf(t), null, String(status))
+    assert.ok(statusLine(t).textContent.includes(want), status + ": " + statusLine(t).textContent)
+    assert.equal(textareaOf(t).value, "@all freeze main")
+    assert.equal(sendButton(t).textContent, "Preview recipients")
+  }
+  // A 200 whose body cannot be used opens nothing either.
+  const t = allBoot({ preview: () => ({ status: 200, body: { confirm: NONCE, expires_in: 60, recipients: [] } }) })
+  await previewed(t)
+  assert.equal(dialogOf(t), null)
+  assert.ok(statusLine(t).textContent.includes("could not be read"))
+  const { app } = load()
+  for (const bad of [null, {}, previewBody({ confirm: "" }), previewBody({ confirm: "x".repeat(129) }), previewBody({ expires_in: 0 }),
+    previewBody({ expires_in: "60" }), previewBody({ recipients: "cc:x" })]) {
+    assert.equal(app.readPreview(bad), null, JSON.stringify(bad))
+  }
+  assert.equal(app.readPreview(previewBody({ excluded: [null, { member: 5 }, { member: OC_C, reason: "gone" }] })).excluded.length, 1)
+})
+
+test("chat @all: reaching the expiry disables Confirm and offers Preview again", async () => {
+  const t = allBoot({ preview: (b) => ({ status: 200, body: previewBody({ confirm: "nonce-" + b.text.length + "-" + t.sends.length }) }) })
+  const base = Date.parse("2026-11-07T12:00:00Z")
+  setNow(t, base)
+  await previewed(t)
+  assert.ok(dialogOf(t).textContent.includes("Expires in 60 s"))
+  setNow(t, base + 15400)
+  tickDialog(t)
+  assert.ok(dialogOf(t).textContent.includes("Expires in 45 s"), dialogOf(t).textContent)
+  okButton(t).focus()
+  setNow(t, base + 60000)
+  tickDialog(t)
+  assert.equal(okButton(t).disabled, true, "Confirm disabled at the expiry")
+  assert.ok(dialogOf(t).textContent.includes("Expired"))
+  assert.equal(dialogMsg(t).textContent, "This preview expired. Preview again for a fresh recipient list.")
+  const again = dialogButton(t, "Preview again")
+  assert.ok(again, "Preview again offered")
+  assert.equal(t.document.activeElement, again, "focus leaves the disabled Confirm")
+  okButton(t).dispatch("click")
+  await settle()
+  assert.equal(t.sends.length, 1, "an expired preview is never confirmed")
+  assert.equal(t.timers.filter((x) => x.ms === 1000).length, 0, "the countdown stops")
+  again.dispatch("click")
+  await settle()
+  assert.equal(t.sends.length, 2)
+  assert.ok(!("confirm" in t.sends[1].body), "a fresh preview")
+  assert.ok(dialogOf(t), "a new dialog")
+  assert.equal(okButton(t).disabled, false)
+})
+
+test("chat @all: Confirm is guarded against a double submit; Esc and Cancel wait while it is in flight", async () => {
+  const t = allBoot({ confirm: () => new Promise(() => {}) })
+  await previewed(t)
+  okButton(t).focus()
+  okButton(t).dispatch("click")
+  okButton(t).dispatch("click")
+  await settle()
+  okButton(t).dispatch("click")
+  await settle()
+  assert.equal(t.sends.filter((s) => "confirm" in s.body).length, 1)
+  assert.equal(okButton(t).textContent, "Sending…")
+  assert.equal(okButton(t).disabled, true)
+  assert.equal(dialogButton(t, "Cancel").disabled, true)
+  assert.equal(t.document.activeElement, dialogOf(t), "focus stays in the dialog while its buttons are disabled")
+  dialogOf(t).dispatch("keydown", { key: "Escape" })
+  assert.ok(dialogOf(t), "Esc does not drop an in-flight confirm")
+})
+
+test("chat @all: Esc cancels and returns focus to the textarea; Tab stays inside the dialog", async () => {
+  const t = allBoot()
+  await previewed(t)
+  const cancel = dialogButton(t, "Cancel")
+  const ok = okButton(t)
+  const lists = elementsOf(dialogOf(t)).filter((n) => (n.attributes.class || "").startsWith("dlglist"))
+  assert.equal(lists.length, 2)
+  for (const l of lists) assert.equal(l.attributes.tabindex, "0", "a capped list is keyboard-scrollable")
+  const quote = elementsOf(dialogOf(t)).find((n) => n.attributes.class === "dlgquote")
+  assert.ok(quote, "the quoted message")
+  assert.equal(quote.attributes.tabindex, "0", "a capped quote is keyboard-scrollable")
+  assert.equal(quote.attributes["aria-label"], "Message")
+  const order = elementsOf(dialogOf(t))
+  assert.ok(order.indexOf(quote) < order.indexOf(lists[0]), "the quote comes before the lists")
+  ok.focus()
+  dialogOf(t).dispatch("keydown", { key: "Tab" })
+  assert.ok(t.document.activeElement === quote, "Tab from the last button wraps to the first stop, the quote")
+  dialogOf(t).dispatch("keydown", { key: "Tab", shiftKey: true })
+  assert.ok(t.document.activeElement === ok, "Shift+Tab from the first stop wraps to the last")
+  cancel.focus()
+  let prevented = false
+  dialogOf(t).dispatch("keydown", { key: "Tab", shiftKey: true, preventDefault() { prevented = true } })
+  assert.equal(prevented, false, "Shift+Tab from Cancel is left to the browser, which lands on the last list or the quote before it")
+  assert.ok(t.document.activeElement === cancel)
+  dialogOf(t).dispatch("keydown", { key: "Escape" })
+  assert.equal(dialogOf(t), null)
+  assert.equal(statusLine(t).textContent, "", "a plain Esc (no unanswered confirm) leaves no warning")
+  assert.equal(t.document.activeElement, textareaOf(t))
+  assert.equal(t.document.byId.app.inert, false)
+  assert.equal(textareaOf(t).value, "@all freeze main", "the text stays")
+  assert.equal(t.sends.length, 1, "nothing confirmed")
+  await previewed(t)
+  dialogButton(t, "Cancel").dispatch("click")
+  assert.equal(dialogOf(t), null)
+  assert.equal(t.sends.filter((s) => "confirm" in s.body).length, 0)
+})
+
+test("chat @all: a hostile recipient name and message render only as text in the dialog", async () => {
+  const state = chatState()
+  state.sessions[2].name = EVIL
+  const t = allBoot({ state })
+  await previewed(t, "@all " + EVIL)
+  const dlg = dialogOf(t)
+  const text = dlg.textContent
+  assert.ok(text.includes(EVIL), "the name, as text")
+  assert.ok(text.split(EVIL).length - 1 >= 2, "and the message, as text")
+  for (const node of elementsOf(dialogHost(t))) {
+    assert.notEqual(node.tagName, "img")
+    for (const name of Object.keys(node.attributes)) assert.ok(!/^on/i.test(name) && !["src", "href", "style"].includes(name), name)
+  }
+  assert.deepEqual(t.document.htmlWrites, [])
+})
+
+test("chat @all: #general's details hold the corrected 'How @all works' card", async () => {
+  const t = chatBoot()
+  await t.app.ready
+  const info = textOf(t.document.byId.info)
+  assert.ok(info.includes("How @all works"))
+  for (const want of ["The post goes to the #general members discovery found.",
+    "Preview recipients lists them; nothing is sent until you confirm that list.",
+    "Gone or refused members, idle OpenCode sessions (not woken) and discovery gaps show as their recorded outcomes.",
+    "If membership changes between your preview and the send, nothing is sent and you are asked to preview again."]) {
+    assert.ok(info.includes(want), want)
+  }
+  assert.ok(!/every (live )?session gets/i.test(info) && !info.includes("queues one turn in every"), "not the mock's too-strong wording")
+  await t.app.selectChannel("ops")
+  assert.ok(!textOf(t.document.byId.info).includes("How @all works"), "only in #general")
+  // Read-only: the card stays, without the preview step this page cannot take.
+  const { app } = load()
+  app.setState(stateFixture())
+  const ro = textOf(app.renderDetails(app.state.rows.general))
+  assert.ok(ro.includes("How @all works") && ro.includes("discovery found"))
+  assert.ok(!ro.includes("preview"))
+})
+
+test("chat @all: the browser's @all shows a live ACK tally on its row and on its #general history entry", async () => {
+  const t = allBoot()
+  await previewed(t)
+  okButton(t).dispatch("click")
+  await settle()
+  const stream = () => t.document.byId.stream
+  t.routes["/api/changes"] = browserChanges("C1", {
+    sends: [sendRow(MID1, { kind: "channel", to: "#general", channel: "general", text: "@all freeze main", state: "pending", journaled: true, delivering: true, seq: 4,
+      recipients: { [CC_A]: { outcome: "transport accepted", ack: "acked" }, [CODEX_B]: { outcome: "transport accepted", ack: "pending" },
+        [OC_C]: { outcome: "refused: gone", ack: "not requested" } } })],
+  })
+  await t.app.pollOnce()
+  const row = stream().textContent
+  assert.ok(row.includes("1 of 2 ACK'd"), row)
+  const chips = elementsOf(stream()).filter((n) => n.parentNode && n.parentNode.attributes && n.parentNode.attributes.class === "tally")
+  assert.deepEqual(chips.map((c) => [c.textContent, c.attributes.class]), [["landish8", "yes"], [nameOfShort(CODEX_B), "no"]], "refused stays out")
+  // A repeat of the row changes nothing; the ACK arriving moves the tally.
+  t.routes["/api/changes"] = browserChanges("C2", {
+    sends: [sendRow(MID1, { kind: "channel", to: "#general", channel: "general", text: "@all freeze main", state: "pending", journaled: true, delivering: false, seq: 5,
+      recipients: { [CC_A]: { outcome: "transport accepted", ack: "acked" }, [CODEX_B]: { outcome: "transport accepted", ack: "acked" },
+        [OC_C]: { outcome: "refused: gone", ack: "not requested" } } })],
+  })
+  await t.app.pollOnce()
+  assert.ok(stream().textContent.includes("2 of 2 ACK'd"))
+  // The history entry replaces the row and carries its own tally.
+  const posted = sendEntry(2, "@all freeze main", { message_id: MID1, sender: WEB, actor: WEB, ts: new Date((T0 + 5) * 1000).toISOString(),
+    delivery: { state: "complete", recipients: [row2(CC_A, "acked", "acked"), row2(CODEX_B, "transport accepted", "pending"), row2(OC_C, "refused: gone", "not requested")] } })
+  t.routes["/api/changes"] = quiet("C3", { channels: { general: { entries: [posted], gap: null } } })
+  await t.app.pollOnce()
+  const after = stream().textContent
+  assert.equal(after.split("freeze main").length - 1, 1, "the row gave way to the entry")
+  assert.ok(after.includes("1 of 2 acknowledged"), after)
+  assert.ok(after.includes("browser-7c0e"), "sent by the browser peer")
+  t.routes["/api/changes"] = quiet("C4", { updates: [{ message_id: MID1, recipient: CODEX_B, ack: "acked" }] })
+  await t.app.pollOnce()
+  assert.ok(stream().textContent.includes("2 of 2 acknowledged"))
+})
+
+function row2(recipient, state, ack) { return { recipient, state, ack } }
+function nameOfShort(typed) { const at = typed.indexOf(":"); const id = typed.slice(at + 1); return typed.slice(0, at + 1) + id.slice(0, 4) + "…" + id.slice(-4) }

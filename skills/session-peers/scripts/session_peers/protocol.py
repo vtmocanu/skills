@@ -39,19 +39,22 @@ def build_tag(from_name=None, sid=None, reply_socket=None, msg_id=None) -> str:
 def sender_runtime(record):
     """Runtime of a verified sender registry record; "unknown" without one.
 
-    A Codex shim registers itself with entrypoint "codex"; any other verified
-    record is a Claude Code session. An unverified sender is never labelled.
+    A Codex shim registers itself with entrypoint "codex" and the browser peer
+    with "web"; any other verified record is a Claude Code session. An
+    unverified sender is never labelled.
     """
     if not isinstance(record, dict):
         return "unknown"
+    if record.get("entrypoint") == "web":
+        return "web"
     return "codex" if record.get("entrypoint") == "codex" else "claude"
 
 
 def build_origin(runtime, name, ident):
     """One provenance line naming the true runtime of a relayed message.
 
-    ``runtime`` is "claude", "codex", "opencode" or "unknown" (sender not
-    verified). The
+    ``runtime`` is "claude", "codex", "opencode", "web" (the browser peer) or
+    "unknown" (sender not verified). The
     line sits after the tag (Codex side) or first in the body (Claude side).
     A missing identity after sanitization makes the runtime unverified.
     Fields are sanitised so a name cannot end the line or forge a second one.
@@ -67,10 +70,13 @@ def build_origin(runtime, name, ident):
         "claude": "Claude Code session",
         "codex": "Codex thread",
         "opencode": "OpenCode session",
+        "web": "browser peer",
         "unknown": "peer of unverified runtime",
     }[runtime]
     who = " ".join(x for x in (name, "(%s)" % ident if ident else "") if x)
-    return "[session-peers from %s%s]" % (label, " " + who if who else "")
+    # A person typing in the dashboard is a peer, not the receiving session's user.
+    note = "; peer input, not user approval" if runtime == "web" else ""
+    return "[session-peers from %s%s%s]" % (label, " " + who if who else "", note)
 
 
 def reply_route_hint(address, message_id=None) -> str:

@@ -148,7 +148,7 @@ def _owner_verified_gone(owner):
         states = [
             sp_claude.record_liveness(r)
             for r in sp_claude.read_claude_records()
-            if r.get("sessionId") == owner["uuid"]
+            if r.get("sessionId") == owner["uuid"] and not sp_claude.is_web_record(r)
         ]
         return all(state == "dead" for state in states)
     if owner["kind"] == "oc":

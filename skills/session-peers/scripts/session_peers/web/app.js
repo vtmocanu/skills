@@ -1,5 +1,7 @@
 /*
- * session-peers web dashboard: read-only rendering of the JSON the local server returns.
+ * session-peers web dashboard: rendering of the JSON the local server returns. Read-only unless
+ * the server runs in chat mode (/api/state has "chat"): then a composer POSTs /api/send and the
+ * Browser view shows the browser peer's own conversation and status rows.
  *
  * Rendering safety: every element is built by el(); text only ever enters the page as text
  * nodes; el() refuses any attribute outside a short allowlist and any tag outside a short
@@ -27,17 +29,46 @@
   var QUERY_MAX = 256;
   // A typed address the page may copy: exactly identity.parse_typed's forms
   // (constants.UUID_RE for cc/codex, constants.OPENCODE_SESSION_ID_RE for oc).
-  var TYPED_RE = /^(?:cc|codex):[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$|^oc:ses_[A-Za-z0-9]{8,64}$/;
+  // web: is the browser peer of a chat-mode server (`peers.py web --chat`).
+  var TYPED_RE = /^(?:cc|codex|web):[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$|^oc:ses_[A-Za-z0-9]{8,64}$/;
   var TOKEN_RE = /^#token=([A-Za-z0-9_-]{16,512})$/;
   var ALL_RE = /^@all(\s|$)/;
+  // Chat mode (POST /api/send): the server's limits, mirrored so the page can say no before asking.
+  var SEND_PATH = "/api/send";
+  var SEND_TO_MAX = 64;
+  var TEXT_MAX = 1048576;
+  var MID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+  // The composer's reason line (aria-describedby target) and the @all notes shown in it. Only an
+  // @all to #general is open (preview, then confirm, M2); the server refuses a plain #general post
+  // and an @all anywhere else with 403.
+  var REASON_ID = "creason";
+  var ALL_WARN = "@all only works in #general: open #general to post it to every member";
+  var ALL_GENERAL = " reaches every #general member after you confirm the recipient list";
+  var GENERAL_ONLY_ALL = "In #general you can only post @all, which asks for a confirmation";
+  var PREVIEW_409 = "Couldn't list the recipients (discovery pending or incomplete, or none or too many). Trying again may help, but a #general with more than 64 members is normally refused.";
+  var CONFIRM_409 = "The preview expired or was used; preview again";
+  var CONFIRM_429 = "Rate limited, try again";
+  var CONFIRM_NONE = "No response from the server. Confirm again: this preview can be used only once, so a retry never sends it twice.";
+  var CONFIRM_MAYBE_SENT = "It may already have been sent: check #general before previewing again.";
+  var CONFIRM_EXPIRED_MAYBE_SENT = "This preview expired, and an earlier confirm got no response: it may already have been sent. Check #general before previewing again.";
+  var CONFIRM_EXPIRED = "This preview expired. Preview again for a fresh recipient list.";
+  // The confirm dialog: its host (index.html, outside #app so #app can be made inert) and ids.
+  var DIALOG_HOST = "dialoghost";
+  var CONFIRM_MAX = 128;
+  var EXPIRES_MAX = 600;
+  // The Browser feed held in memory: at most the server's own log cap, and as many status rows.
+  var FEED_CAP = 1000;
+  var ROWS_CAP = 1000;
 
   // ------------------------------------------------------------------------
   // The one DOM helper
   // ------------------------------------------------------------------------
 
-  var HTML_TAGS = ["div", "span", "p", "b", "i", "code", "button", "ul", "li", "dl", "dt", "dd", "h1", "h2", "small", "strong"];
+  // label, input and textarea build the chat composer; their attributes are inert (no URL, no handler).
+  var HTML_TAGS = ["div", "span", "p", "b", "i", "code", "button", "ul", "li", "dl", "dt", "dd", "h1", "h2", "small", "strong",
+    "label", "input", "textarea"];
   var SVG_TAGS = ["svg", "path", "g"];
-  var ATTRS = ["class", "role", "title", "type", "tabindex"];
+  var ATTRS = ["class", "role", "title", "type", "tabindex", "checked", "disabled", "placeholder", "rows", "maxlength"];
   var SVG_ATTRS = ["viewBox", "d", "fill", "stroke", "stroke-width", "stroke-linecap", "stroke-linejoin", "fill-rule", "clip-rule", "xmlns"];
 
   function attrAllowed(name, svg) {
@@ -107,6 +138,8 @@
   var OPENAI_D = "M14.949 6.547a3.94 3.94 0 0 0-.348-3.273 4.11 4.11 0 0 0-4.4-1.934A4.1 4.1 0 0 0 8.423.2 4.15 4.15 0 0 0 6.305.086a4.1 4.1 0 0 0-1.891.948 4.04 4.04 0 0 0-1.158 1.753 4.1 4.1 0 0 0-1.563.679A4 4 0 0 0 .554 4.72a3.99 3.99 0 0 0 .502 4.731 3.94 3.94 0 0 0 .346 3.274 4.11 4.11 0 0 0 4.402 1.933c.382.425.852.764 1.377.995.526.231 1.095.35 1.67.346 1.78.002 3.358-1.132 3.901-2.804a4.1 4.1 0 0 0 1.563-.68 4 4 0 0 0 1.14-1.253 3.99 3.99 0 0 0-.506-4.716m-6.097 8.406a3.05 3.05 0 0 1-1.945-.694l.096-.054 3.23-1.838a.53.53 0 0 0 .265-.455v-4.49l1.366.778q.02.011.025.035v3.722c-.003 1.653-1.361 2.992-3.037 2.996m-6.53-2.75a2.95 2.95 0 0 1-.36-2.01l.095.057L5.29 12.09a.53.53 0 0 0 .527 0l3.949-2.246v1.555a.05.05 0 0 1-.022.041L6.473 13.3c-1.454.826-3.311.335-4.15-1.098m-.85-6.94A3.02 3.02 0 0 1 3.07 3.949v3.785a.51.51 0 0 0 .262.451l3.93 2.237-1.366.779a.05.05 0 0 1-.048 0L2.585 9.342a2.98 2.98 0 0 1-1.113-4.094zm11.216 2.571L8.747 5.576l1.362-.776a.05.05 0 0 1 .048 0l3.265 1.86a3 3 0 0 1 1.173 1.207 2.96 2.96 0 0 1-.27 3.2 3.05 3.05 0 0 1-1.36.997V8.279a.52.52 0 0 0-.276-.445m1.36-2.015-.097-.057-3.226-1.855a.53.53 0 0 0-.53 0L6.249 6.153V4.598a.04.04 0 0 1 .019-.04L9.533 2.7a3.07 3.07 0 0 1 3.257.139c.474.325.843.778 1.066 1.303.223.526.289 1.103.191 1.664zM5.503 8.575 4.139 7.8a.05.05 0 0 1-.026-.037V4.049c0-.57.166-1.127.476-1.607s.752-.864 1.275-1.105a3.08 3.08 0 0 1 3.234.41l-.096.054-3.23 1.838a.53.53 0 0 0-.265.455zm.742-1.577 1.758-1 1.762 1v2l-1.755 1-1.762-1z";
   var OPENCODE_D = "M5.5 3H3v10h2.5M10.5 3H13v10h-2.5";
   var UNKNOWN_D = "M8 2.5a5.5 5.5 0 1 0 0 11 5.5 5.5 0 1 0 0-11";
+  // The browser peer: a globe (outline, equator, two meridian arcs), drawn like the OpenCode glyph.
+  var WEB_D = "M8 1.75a6.25 6.25 0 1 0 0 12.5 6.25 6.25 0 1 0 0-12.5M1.75 8h12.5M8 1.75c-2.3 2.2-2.3 10.3 0 12.5M8 1.75c2.3 2.2 2.3 10.3 0 12.5";
   var WARN_D = ["M8 1.5 15 14H1z", "M8 6v3.5M8 11.6v.1"];
 
   function iconSvg(rt) {
@@ -120,6 +153,10 @@
     if (rt === "oc") {
       return el("svg:svg", { viewBox: "0 0 16 16", fill: "none", stroke: "currentColor", "stroke-width": "1.8",
         "stroke-linecap": "round", "stroke-linejoin": "round", "aria-hidden": "true" }, el("svg:path", { d: OPENCODE_D }));
+    }
+    if (rt === "web") {
+      return el("svg:svg", { viewBox: "0 0 16 16", class: "web-mark", fill: "none", stroke: "currentColor", "stroke-width": "1.4",
+        "stroke-linecap": "round", "aria-hidden": "true" }, el("svg:path", { d: WEB_D }));
     }
     return el("svg:svg", { viewBox: "0 0 16 16", fill: "none", stroke: "currentColor", "stroke-width": "1.6", "aria-hidden": "true" },
       el("svg:path", { d: UNKNOWN_D }));
@@ -154,10 +191,12 @@
     selected: "general", view: "conv", pages: table(), pendingNotes: table(), loading: table(), pageErrors: table(),
     all: null, search: null, cursor: null, polls: 0, failures: 0, polling: false, stopped: false, timer: null,
     needState: false, live: { mode: "starting" }, liveText: null, untracked: 0, journalGap: false, pane: "main",
-    focusables: table(), wired: false, waiting: false, allInflight: null, allLoadingNext: null, allLoadingOwner: null, allLoadingPromise: null, allGen: 0
+    focusables: table(), wired: false, waiting: false, allInflight: null, allLoadingNext: null, allLoadingOwner: null, allLoadingPromise: null, allGen: 0,
+    // Chat mode only (state.chat): the Browser feed and the composer's own state.
+    chat: null, browser: null, compose: null
   };
 
-  var RT_LABEL = { claude: "Claude Code", codex: "Codex", oc: "OpenCode", unknown: "Unknown runtime" };
+  var RT_LABEL = { claude: "Claude Code", codex: "Codex", oc: "OpenCode", web: "Browser", unknown: "Unknown runtime" };
   var STATE_LABEL = { working: "Working", idle: "Idle", unverified: "Unverified", gone: "Gone" };
 
   function str(value) {
@@ -166,7 +205,7 @@
 
   function rtOf(typed) {
     var kind = str(typed).split(":")[0];
-    return kind === "cc" ? "claude" : (kind === "codex" || kind === "oc") ? kind : "unknown";
+    return kind === "cc" ? "claude" : (kind === "codex" || kind === "oc" || kind === "web") ? kind : "unknown";
   }
 
   function shortId(typed) {
@@ -383,7 +422,7 @@
 
   function membershipNodes(text) {
     return str(text).split(/(\s+)/).map(function (token) {
-      return S.names[token] || S.members[token] || /^(?:cc|codex|oc):\S+$/.test(token) ? nameRef(token) : token;
+      return S.names[token] || S.members[token] || /^(?:cc|codex|oc|web):\S+$/.test(token) ? nameRef(token) : token;
     });
   }
 
@@ -444,6 +483,7 @@
       return sysline("oversized", el("span", null, "Entry too large to display" + (typeof entry.seq === "number" ? " (#" + entry.seq + ")" : "")), entry, opts);
     }
     if (kind === "send") return renderSend(entry, opts);
+    if (kind === "webpost" && entry.row && typeof entry.row === "object") return renderWebPost(entry);
     if (kind === "outcome") {
       // Outcomes are joined into their send's delivery row; only search shows the raw entry.
       return opts.search ? sysline("outcome", el("span", null, str(entry.text)), entry, opts) : null;
@@ -558,6 +598,13 @@
     return null;
   }
 
+  // The runtimes the legend names (the browser peer only in chat mode), and those #general counts
+  // (the browser peer only when it is a member).
+  function fleetRuntimes(members) {
+    var web = members ? members.some(function (m) { return m && rtOf(m.typed) === "web"; }) : !!S.chat;
+    return web ? ["claude", "codex", "oc", "web"] : ["claude", "codex", "oc"];
+  }
+
   function renderLane(row, current, select) {
     var key = str(row.key);
     var members = Array.isArray(row.members) ? row.members : [];
@@ -565,10 +612,10 @@
     if (row.unreadable) {
       body = el("div", { class: "lineage" }, "Membership record unreadable");
     } else if (key === "general") {
-      var counts = { claude: 0, codex: 0, oc: 0 };
+      var counts = { claude: 0, codex: 0, oc: 0, web: 0 };
       members.forEach(function (m) { var rt = rtOf(m.typed); if (rt in counts) counts[rt] += 1; });
       body = [el("div", { class: "lineage" }, "Every live session on this machine"),
-        el("div", { class: "members" }, ["claude", "codex", "oc"].map(function (rt) {
+        el("div", { class: "members" }, fleetRuntimes(members).map(function (rt) {
           return el("span", { class: "who " + rt, title: counts[rt] + " " + RT_LABEL[rt] }, hicon(rt), String(counts[rt]),
             el("span", { class: "sr" }, RT_LABEL[rt] + (counts[rt] === 1 ? " session" : " sessions")));
         }))];
@@ -641,11 +688,33 @@
     var kv = [el("dt", null, "State"), el("dd", null, own(STATE_LABEL, state) || "Unverified"),
       el("dt", null, "Address"), el("dd", { class: "mono" }, address)];
     if (rt === "codex") kv = kv.concat(budgetNodes(details));
+    // Chat mode: how many more replies this Codex session may send toward the browser peer.
+    if (rt === "codex" && S.chat && typeof details.replies_left === "number") {
+      kv = kv.concat([el("dt", null, "Replies left for you"), el("dd", null, String(details.replies_left))]);
+    }
     return el("div", { class: "card" },
       el("div", { class: "srow" }, chip({ typed: member.typed, state: state }),
         el("span", { class: "muted" }, (member.runtime || RT_LABEL[rt]) + (row && row.owner === member.typed ? ", owner" : ""))),
       el("dl", { class: "kv" }, kv),
       el("div", { class: "acts" }, copyButton(address)));
+  }
+
+  // #general's "How @all works" card (the mock's, corrected for #162 M2): it promises only what is
+  // recorded, never that every session gets a turn. The preview step exists only in chat mode.
+  var ALL_CARD = [
+    "The post goes to the #general members discovery found.",
+    "Gone or refused members, idle OpenCode sessions (not woken) and discovery gaps show as their recorded outcomes.",
+    "Every recipient is asked for an ACK; the tally shows who has not answered."
+  ];
+  var ALL_CARD_CHAT = [
+    "Preview recipients lists them; nothing is sent until you confirm that list.",
+    "If membership changes between your preview and the send, nothing is sent and you are asked to preview again."
+  ];
+
+  function renderAllCard() {
+    var lines = ALL_CARD.concat(S.chat ? ALL_CARD_CHAT : []);
+    return el("div", { class: "card small allcard" }, el("b", null, "How @all works"),
+      el("ul", { class: "gates" }, lines.map(function (line) { return el("li", null, line); })));
   }
 
   function renderDetails(row) {
@@ -654,11 +723,12 @@
     var out = [el("h2", null, chanText(row.key))];
     if (row.key === "general") {
       out.push(el("div", { class: "card" }, el("b", null, "Everyone"),
-        el("dl", { class: "kv" }, ["claude", "codex", "oc"].map(function (rt) {
+        el("dl", { class: "kv" }, fleetRuntimes(members).map(function (rt) {
           var mine = members.filter(function (m) { return rtOf(m.typed) === rt; });
           var working = mine.filter(function (m) { return m.state === "working"; }).length;
           return [el("dt", null, hicon(rt), " " + RT_LABEL[rt]), el("dd", null, mine.length + " live, " + working + " working")];
         }))));
+      out.push(renderAllCard());
     }
     if (row.unreadable) out.push(note("Membership record unreadable.", "warn"));
     members.forEach(function (m) { out.push(renderMemberCard(m, row)); });
@@ -671,14 +741,965 @@
   }
 
   // ------------------------------------------------------------------------
+  // Chat mode: the Browser feed, its status rows and the composer
+  // ------------------------------------------------------------------------
+  //
+  // The Browser feed (/api/changes "browser") holds log entries (direct sends out, replies in) and
+  // status rows ("sends", one per accepted send, direct or channel post). A row is a whole snapshot:
+  // the page replaces its copy and recomputes what it shows from it, so a repeated or re-sent row
+  // changes nothing. A channel post never appears among the entries: its row shows inside that
+  // channel's stream until the channel history holds the entry with the same message id.
+
+  function newBrowser() {
+    // entries: log entries (and gap markers) oldest first; local: direct sends the server accepted
+    // (202) whose log entry has not arrived yet; sends: status rows by message id.
+    return { entries: [], local: table(), sends: table(), lastLseq: 0, sinceStart: false, startGap: false, restarted: false };
+  }
+
+  function newCompose() {
+    // confirm: the open @all confirm dialog (see openConfirm); ackForced/ackSaved: #general forces
+    // "Ask for ACK" on and gives the reader's own choice back on leaving it.
+    return { targets: table(), channel: false, busy: false, msg: null, msgTone: null, sig: null, ctxKey: null, reasonKey: null, nodes: null, boxes: [],
+      confirm: null, ackForced: false, ackSaved: false };
+  }
+
+  function plainTable(value) {
+    return value && typeof value === "object" && !Array.isArray(value) ? Object.assign(table(), value) : table();
+  }
+
+  function browserAckText(slot) {
+    var a = str(slot && slot.ack);
+    if (a === "pending") return slot.unverified === true ? "ACK unverified" : "ACK pending";
+    if (a === "acked") return "ACK'd";
+    if (a === "not requested") return "ACK not requested";
+    if (a === "expired") return "expired from the journal";
+    return a ? "ACK " + a : "ACK unknown";
+  }
+
+  function rowHeadline(row) {
+    var state = str(row.state);
+    var reason = typeof row.reason === "string" && row.reason ? row.reason : "no reason given";
+    if (state === "queued") return "Queued (not yet recorded)";
+    if (state === "pending") return row.delivering ? "Recorded, delivering…" : "Recorded";
+    if (state === "not sent") return "Not sent: " + reason;
+    if (state === "not sent (journaled)") return "Not sent (journaled, not delivered)";
+    if (state === "failed after recording") return "Failed after recording: " + reason;
+    return state || "Unknown state";
+  }
+
+  // Recipients in the order the send named them (a direct send), else as the row lists them.
+  function rowOrder(row) {
+    var slots = plainTable(row.recipients);
+    var order = Array.isArray(row.to) ? row.to.filter(function (t) { return typeof t === "string" && t in slots; }) : [];
+    Object.keys(slots).forEach(function (t) { if (order.indexOf(t) < 0) order.push(t); });
+    return order;
+  }
+
+  // Counted from the row as it is now (never incremented): a refused recipient, or one whose ACK
+  // was not requested, is outside the tally unless it ACKed anyway.
+  function rowTally(row) {
+    var slots = plainTable(row.recipients);
+    var t = { acked: 0, total: 0 };
+    Object.keys(slots).forEach(function (typed) {
+      var slot = slots[typed];
+      if (!slot || typeof slot !== "object") return;
+      if (slot.ack === "acked") { t.acked += 1; t.total += 1; return; }
+      if (slot.ack === "not requested" || refusedState(slot.outcome)) return;
+      t.total += 1;
+    });
+    return t;
+  }
+
+  function rowTone(row, t) {
+    var state = str(row.state);
+    if (state === "queued") return "wait";
+    if (state === "pending") return row.delivering ? "now" : (t.total && t.acked === t.total ? "ok" : "sent");
+    return "bad";
+  }
+
+  function slotItem(typed, slot, row) {
+    var outcome = typeof slot.outcome === "string" && slot.outcome ? slot.outcome
+      : row.delivering ? "delivering…" : "no outcome recorded";
+    var acked = slot.ack === "acked";
+    // A refused delivery is never ACKed (the server may still hold its slot as pending): no ACK text.
+    var bits = [el("i", { "aria-hidden": "true" }), nameRef(typed), el("span", { class: "out" }, outcome),
+      refusedState(slot.outcome) && !acked ? null : el("span", { class: "ack" + (acked ? " yes" : "") }, browserAckText(slot))];
+    if (slot.transport_error) bits.push(el("span", { class: "terr" }, "transport error: " + str(slot.transport_error)));
+    if (slot.update_failed) bits.push(el("span", { class: "terr" }, "the journal could not record this failure"));
+    var ps = slot.peer_status;
+    if (ps && typeof ps === "object") {
+      bits.push(el("span", { class: "pstat" }, "peer status: " + str(ps.status) + (ps.detail ? " (" + str(ps.detail) + ")" : "")));
+    }
+    var t = acked ? "ok" : (slot.transport_error || refusedState(slot.outcome)) ? "bad"
+      : typeof slot.outcome === "string" && slot.outcome ? tone(slot.outcome) : row.delivering ? "now" : "warn";
+    return el("li", { class: "drow t-" + t }, bits);
+  }
+
+  function renderSendStatus(row) {
+    if (!row) {
+      return el("div", { class: "delivery sendstatus" },
+        el("span", { class: "dstate t-warn" }, "No status: this send is no longer in the server's memory"));
+    }
+    var slots = plainTable(row.recipients);
+    var t = rowTally(row);
+    var bits = [el("span", { class: "dstate t-" + rowTone(row, t) }, rowHeadline(row))];
+    if (row.state === "pending" && row.ack_requested && t.total) {
+      bits.push(el("span", { class: "ackline" + (t.acked < t.total ? " short" : "") }, t.acked + " of " + t.total + " ACK'd"));
+    }
+    var order = row.state === "queued" ? [] : rowOrder(row);
+    // An @all post (this page's #general broadcast) also shows its tally as named chips, like an
+    // @all entry in the channel history: who has ACKed and who has not, live from the row.
+    if (row.state === "pending" && row.ack_requested && row.kind === "channel" && ALL_RE.test(str(row.text))) {
+      var counted = order.filter(function (typed) {
+        var slot = slots[typed];
+        return slot && typeof slot === "object" && (slot.ack === "acked" || (slot.ack !== "not requested" && !refusedState(slot.outcome)));
+      });
+      if (counted.length) {
+        bits.push(el("div", { class: "tally" }, counted.map(function (typed) {
+          var acked = slots[typed].ack === "acked";
+          return el("span", { class: acked ? "yes" : "no", title: typed + ": " + browserAckText(slots[typed]) }, nameOf(typed));
+        })));
+      }
+    }
+    if (order.length) {
+      bits.push(el("ul", { class: "drows", "aria-label": "Status per recipient" }, order.map(function (typed) {
+        var slot = slots[typed];
+        return slot && typeof slot === "object" ? slotItem(typed, slot, row) : null;
+      })));
+    }
+    if (typeof row.note === "string" && row.note) bits.push(el("span", { class: "rownote" }, row.note));
+    if (row.update_failed === true) bits.push(el("span", { class: "terr" }, "A refused delivery of this post could not be recorded in the journal."));
+    return el("div", { class: "delivery sendstatus" }, bits);
+  }
+
+  function toNames(to) {
+    if (typeof to === "string") return chanText(to.replace(/^#/, ""));
+    var list = Array.isArray(to) ? to : [];
+    var names = list.slice(0, 4).map(function (t) { return nameOf(t); });
+    return names.join(", ") + (list.length > 4 ? " +" + (list.length - 4) : "");
+  }
+
+  function feedText(entry, clippedNote) {
+    return [el("p", { class: "text" }, str(entry.text)),
+      entry.text_clipped ? el("div", { class: "muted" }, clippedNote) : null];
+  }
+
+  // The outbound text a reply answers, as one short line.
+  function replyGist(mid) {
+    if (typeof mid !== "string" || !mid || !S.browser) return null;
+    var hit = null;
+    S.browser.entries.forEach(function (e) { if (e && e.dir === "out" && e.message_id === mid) hit = e; });
+    if (!hit) return null;
+    var line = str(hit.text).replace(/\s+/g, " ").trim();
+    return line.length > 60 ? line.slice(0, 59) + "…" : line;
+  }
+
+  function myName() {
+    return S.chat ? nameOf(S.chat.peer) : "Browser";
+  }
+
+  // Provenance comes from the verified sender fields only; the text never names its sender.
+  function renderInbound(entry) {
+    var sender = typeof entry.sender === "string" && entry.sender ? entry.sender : null;
+    var rt = sender ? rtOf(sender) : "unknown";
+    var name = sender ? (typeof entry.sender_name === "string" && entry.sender_name ? entry.sender_name : nameOf(sender)) : "unverified sender";
+    var gist = replyGist(entry.orig_msg_id);
+    return el("div", { class: "msg bmsg in" + (sender ? "" : " unverified") },
+      el("div", { class: "avatar " + rt, "aria-hidden": "true" }, iconSvg(rt)),
+      el("div", { class: "msgmain" },
+        el("div", { class: "meta" },
+          el("span", { class: "name", title: sender || "The server could not verify who sent this" }, name),
+          sender ? el("span", { class: "rt" }, RT_LABEL[rt]) : null,
+          gist ? el("span", { class: "re" }, "re: " + gist) : null,
+          el("span", { class: "at", title: str(entry.at) }, clock(entry.at))),
+        el("div", { class: "body" }, feedText(entry, "Shown clipped; the journal keeps the whole message."))));
+  }
+
+  // A send from this page: its text, then its status row. opts.post: a channel post not yet in the
+  // channel history (shown inside that channel's stream).
+  function renderOutbound(entry, row, opts) {
+    var post = opts && opts.post;
+    return el("div", { class: "msg bmsg out" + (post ? " webpost" : "") },
+      el("div", { class: "avatar web", "aria-hidden": "true" }, iconSvg("web")),
+      el("div", { class: "msgmain" },
+        el("div", { class: "meta" },
+          el("span", { class: "name", title: S.chat ? S.chat.peer : null }, myName()),
+          el("span", { class: "rt" }, RT_LABEL.web),
+          el("span", null, "to " + toNames(entry.to)),
+          el("span", { class: "at", title: str(entry.at) }, clock(entry.at))),
+        el("div", { class: "body" },
+          feedText(entry, post ? "Shown clipped to its first 2000 characters." : "Shown clipped; the journal keeps the whole message."),
+          renderSendStatus(row))));
+  }
+
+  function renderBrowserEntry(entry) {
+    if (!entry || typeof entry !== "object") return null;
+    if (entry.gapMarker) return note("Earlier messages expired or were not shown.");
+    if (entry.dir === "in") return renderInbound(entry);
+    if (entry.dir === "out") return renderOutbound(entry, S.browser ? S.browser.sends[entry.message_id] : null);
+    return null;
+  }
+
+  function browserItems() {
+    var B = S.browser;
+    if (!B) return [];
+    var local = Object.keys(B.local).map(function (mid) { return B.local[mid]; });
+    local.sort(function (a, b) { return stamp(a.at) - stamp(b.at); });
+    return B.entries.concat(local);
+  }
+
+  function renderBrowserStream() {
+    var B = S.browser;
+    var out = [];
+    if (!B) return out;
+    if (B.sinceStart) out.push(el("div", { class: "day start" }, "This browser identity started with the server; earlier conversation is not shown."));
+    if (B.startGap) out.push(note("Earlier messages expired or were not shown."));
+    var lastDay = null;
+    var shown = 0;
+    browserItems().forEach(function (entry) {
+      var node = renderBrowserEntry(entry);
+      if (!node) return;
+      var key = entry.at !== undefined && entry.at !== null ? dayKey(entry.at) : "";
+      if (key && key !== lastDay) {
+        out.push(el("div", { class: "day" }, dayLabel(entry.at)));
+        lastDay = key;
+      }
+      out.push(node);
+      if (!entry.gapMarker) shown += 1;
+    });
+    if (!shown) out.push(el("div", { class: "empty" }, "No direct messages yet. Pick sessions below and send."));
+    return out;
+  }
+
+  function browserNotes() {
+    return S.browser && S.browser.restarted ? [note("The server restarted: new browser identity.", "warn")] : [];
+  }
+
+  // Channel posts from this page that the channel history does not hold yet, placed among the page's
+  // entries by time. A post older than the page's first entry could only be in history beyond the
+  // page, so it is left out rather than shown at the wrong place.
+  function withChannelPosts(page, key) {
+    if (!page || !S.chat || !S.browser) return page;
+    var held = table();
+    page.entries.forEach(function (e) { if (e && typeof e.message_id === "string") held[e.message_id] = true; });
+    var first = null;
+    for (var i = 0; i < page.entries.length && first === null; i++) if (page.entries[i] && page.entries[i].ts !== undefined) first = stamp(page.entries[i].ts);
+    var posts = [];
+    Object.keys(S.browser.sends).forEach(function (mid) {
+      var row = S.browser.sends[mid];
+      if (!row || row.kind !== "channel" || held[mid]) return;
+      if (row.channel !== key && row.to !== "#" + key) return;
+      if (page.next !== null && first !== null && stamp(row.at) < first) return;
+      posts.push({ kind: "webpost", ts: row.at, row: row });
+    });
+    if (!posts.length) return page;
+    posts.sort(function (a, b) { return stamp(a.ts) - stamp(b.ts); });
+    var merged = [];
+    var p = 0;
+    page.entries.forEach(function (e) {
+      var at = e && e.ts !== undefined ? stamp(e.ts) : null;
+      while (p < posts.length && at !== null && stamp(posts[p].ts) < at) merged.push(posts[p++]);
+      merged.push(e);
+    });
+    while (p < posts.length) merged.push(posts[p++]);
+    return Object.assign(table(), page, { entries: merged });
+  }
+
+  function renderWebPost(entry) {
+    var row = entry.row;
+    return renderOutbound({ to: row.to, text: row.text, text_clipped: row.text_clipped, at: row.at }, row, { post: true });
+  }
+
+  // One /api/changes "browser" section. Returns whether anything shown changed.
+  function applyBrowser(section) {
+    if (!S.chat || !section || typeof section !== "object") return false;
+    var B = S.browser || (S.browser = newBrowser());
+    var entries = (Array.isArray(section.entries) ? section.entries : []).filter(function (e) {
+      return e && typeof e === "object" && typeof e.lseq === "number" && (e.dir === "in" || e.dir === "out");
+    });
+    var changed = false;
+    if (section.since_start === true) {
+      // A first page: the server's newest entries for its current browser identity replace ours.
+      if (section.restarted === true) {
+        B.local = table();
+        B.sends = table();
+        B.restarted = true;
+      }
+      B.entries = entries.map(function (e) { return Object.assign(table(), e); });
+      B.lastLseq = entries.reduce(function (m, e) { return Math.max(m, e.lseq); }, 0);
+      B.sinceStart = true;
+      B.startGap = section.gap === true;
+      changed = true;
+    } else {
+      if (section.gap === true) {
+        B.entries.push({ gapMarker: true, at: entries.length ? entries[0].at : null });
+        changed = true;
+      }
+      var replies = [];
+      entries.forEach(function (e) {
+        if (e.lseq <= B.lastLseq) return;
+        B.entries.push(Object.assign(table(), e));
+        B.lastLseq = e.lseq;
+        changed = true;
+        if (e.dir === "in") replies.push(e);
+      });
+      if (replies.length && S.view === "browser") announceReplies(replies);
+    }
+    if (B.entries.length > FEED_CAP) {
+      B.entries = B.entries.slice(B.entries.length - FEED_CAP);
+      B.startGap = true;
+    }
+    B.entries.forEach(function (e) {
+      if (e.dir === "out" && typeof e.message_id === "string" && B.local[e.message_id]) delete B.local[e.message_id];
+    });
+    (Array.isArray(section.sends) ? section.sends : []).forEach(function (row) { if (mergeRow(B, row)) changed = true; });
+    capRows(B);
+    return changed;
+  }
+
+  // The Browser view's live announcement (#announce, aria-live="polite" in index.html). The stream
+  // itself is rebuilt on every render, so a live region there would read the whole conversation
+  // again on each status change; only replies that just arrived are spoken.
+  function announceReplies(replies) {
+    var last = replies[replies.length - 1];
+    var who = typeof last.sender === "string" && last.sender
+      ? (typeof last.sender_name === "string" && last.sender_name ? last.sender_name : nameOf(last.sender)) : "unverified sender";
+    var line = str(last.text).replace(/\s+/g, " ").trim();
+    if (line.length > 140) line = line.slice(0, 139) + "…";
+    fill($("announce"), (replies.length > 1 ? replies.length + " new replies; latest from " : "Reply from ") + who + ": " + line);
+  }
+
+  // A row replaces the page's copy unless the copy is newer (a higher seq); a repeat changes nothing.
+  function mergeRow(B, row) {
+    if (!row || typeof row !== "object" || typeof row.mid !== "string" || !row.mid) return false;
+    var have = B.sends[row.mid];
+    if (have && !have.local && typeof have.seq === "number" && typeof row.seq === "number" && row.seq <= have.seq) return false;
+    var copy = Object.assign(table(), row);
+    copy.recipients = plainTable(row.recipients);
+    B.sends[row.mid] = copy;
+    return true;
+  }
+
+  function capRows(B) {
+    var mids = Object.keys(B.sends);
+    if (mids.length <= ROWS_CAP) return;
+    mids.sort(function (a, b) { return stamp(B.sends[a].at) - stamp(B.sends[b].at); });
+    mids.slice(0, mids.length - ROWS_CAP).forEach(function (mid) { delete B.sends[mid]; });
+  }
+
+  // A 202: the page's own Queued row (and, for a direct send, its stand-in entry) until the server's
+  // row and log entry arrive. A row the server already sent is never overwritten.
+  function addLocalSend(mid, to, text, ack) {
+    var B = S.browser || (S.browser = newBrowser());
+    var channel = typeof to === "string";
+    var at = Date.now() / 1000;
+    if (!B.sends[mid]) {
+      B.sends[mid] = Object.assign(table(), {
+        mid: mid, kind: channel ? "channel" : "direct", to: channel ? to : to.slice(), channel: channel ? to.slice(1) : undefined,
+        text: channel ? text.slice(0, 2000) : undefined, text_clipped: channel && text.length > 2000, ack_requested: !!ack,
+        state: "queued", recipients: table(), at: at, seq: -1, local: true
+      });
+    }
+    var logged = B.entries.some(function (e) { return e.dir === "out" && e.message_id === mid; });
+    if (!channel && !logged) B.local[mid] = { dir: "out", message_id: mid, to: to.slice(), text: text, ack_requested: !!ack, at: at, local: true };
+  }
+
+  function awaitingAcks() {
+    var n = 0;
+    if (!S.browser) return 0;
+    Object.keys(S.browser.sends).forEach(function (mid) {
+      var row = S.browser.sends[mid];
+      if (!row || row.state !== "pending") return;
+      var slots = plainTable(row.recipients);
+      Object.keys(slots).forEach(function (t) {
+        var slot = slots[t];
+        if (slot && slot.ack === "pending" && slot.unverified !== true && !slot.transport_error && !refusedState(slot.outcome)) n += 1;
+      });
+    });
+    return n;
+  }
+
+  function renderBrowserLane() {
+    var current = S.view === "browser";
+    var waiting = awaitingAcks();
+    var lane = el("div", { class: "lane weblane", role: "button", tabindex: "0", "aria-current": current ? "true" : null, "data-focus": "weblane" },
+      el("div", { class: "lanetop" }, el("span", { class: "lanename" }, hicon("web"), "Browser"),
+        waiting ? el("span", { class: "badge", title: "Recipients of your sends who have not ACKed yet" }, waiting + " ACK pending") : null),
+      el("div", { class: "lineage" }, "Direct messages as " + myName()));
+    S.focusables.weblane = lane;
+    return onActivate(lane, function () { showBrowser({ fromRail: true }); });
+  }
+
+  function renderBrowserDetails() {
+    var chat = S.chat;
+    var kv = [el("dt", null, "Address"), el("dd", { class: "mono" }, chat.peer)];
+    if (typeof chat.user === "string" && chat.user) kv.push(el("dt", null, "User"), el("dd", null, chat.user));
+    return [el("h2", null, "Browser"),
+      el("div", { class: "card" },
+        el("div", { class: "srow" }, chip({ typed: chat.peer, state: "idle" }), el("span", { class: "muted" }, "this page")),
+        el("dl", { class: "kv" }, kv),
+        el("div", { class: "acts" }, copyButton(chat.peer))),
+      el("div", { class: "card small" }, el("b", null, "How sending works"),
+        el("ul", { class: "gates" },
+          el("li", null, "A message arrives in each session as peer input from this browser identity, never as your approval. Approve in the session's own terminal."),
+          el("li", null, "Queued means the server holds it in memory only; Recorded means it is in the journal."),
+          el("li", null, "Sessions reply to this address; replies appear in Browser."),
+          el("li", null, "A server restart starts a new browser identity; earlier conversation is not shown.")))];
+  }
+
+  function showBrowser(opts) {
+    if (!S.chat) return;
+    S.view = "browser";
+    S.search = null;
+    renderChrome();
+    renderMain({ toBottom: true });
+    if (isNarrow() && S.pane !== "main") setPane("main");
+    if (opts && opts.fromRail && isPhone()) focusId("title");
+  }
+
+  // -- composer ------------------------------------------------------------
+
+  // The server refuses a plain #general post and an @all outside #general with 403 (the page blocks
+  // both before sending); an @all to #general goes through the preview and confirm round-trip.
+  var SEND_ERRORS = { 400: "The server could not accept this message", 403: "Refused by the server (token, origin, #general or @all)", 408: "The message reached the server too slowly",
+    413: "Message too large", 415: "Refused: wrong content type", 429: "Too fast or queue full — try again", 503: "Chat is not running on the server" };
+
+  function sendErrorText(status) {
+    if (!status) return "No response — check the Browser feed";
+    return (own(SEND_ERRORS, status) || "Not sent") + " (" + status + ")";
+  }
+
+  // POST /api/send. Resolves { status, data? }; status 0 is no response at all. A 202 (queued) and a
+  // 200 (an @all preview: the recipient list and its confirm nonce) carry a body.
+  function postSend(payload) {
+    return request(SEND_PATH, payload).then(function (res) {
+      var status = res.status;
+      if (status !== 202 && status !== 200) return { status: status };
+      return res.json().then(function (data) { return { status: status, data: data }; }, function () { return { status: status, data: null }; });
+    }, function () { return { status: 0 }; });
+  }
+
+  function composeContext() {
+    if (S.view === "browser") return { kind: "browser", key: null };
+    if (S.view === "conv" && S.selected === "general") return { kind: "general", key: "general" };
+    if (S.view === "conv" && S.rows[S.selected]) return { kind: "channel", key: S.selected };
+    return { kind: "none", key: null };
+  }
+
+  function blockedReason(ctx) {
+    if (S.stopped) return "Sending has stopped: the server refused the token. Reopen the URL peers.py web printed.";
+    if (ctx.kind === "none") return "Open a channel or Browser to send.";
+    return null;
+  }
+
+  // The sessions the picker offers: a channel's members, or (Browser) every session not gone.
+  function candidates(ctx) {
+    var out = [];
+    var seen = table();
+    function add(typed, state) {
+      if (typeof typed !== "string" || seen[typed] || rtOf(typed) === "web" || !TYPED_RE.test(typed)) return;
+      seen[typed] = true;
+      out.push({ typed: typed, state: str(state) || "unverified" });
+    }
+    if (ctx.kind === "channel") {
+      var row = S.rows[ctx.key];
+      (row && Array.isArray(row.members) ? row.members : []).forEach(function (m) { if (m && typeof m === "object") add(m.typed, m.state); });
+    } else if (ctx.kind === "browser") {
+      (S.state && Array.isArray(S.state.sessions) ? S.state.sessions : []).forEach(function (s) {
+        if (s && typeof s === "object" && s.state !== "gone") add(s.member, s.state);
+      });
+    }
+    return out;
+  }
+
+  function composeTo(ctx) {
+    var C = S.compose;
+    // #general takes no picks: an @all post there addresses every member (after a confirmation).
+    if (ctx.kind === "general") return "#general";
+    if (ctx.kind === "channel" && C.channel) return "#" + ctx.key;
+    if (ctx.kind !== "channel" && ctx.kind !== "browser") return null;
+    var list = C.boxes.filter(function (b) { return !b.gone && C.targets[b.typed]; }).map(function (b) { return b.typed; });
+    return list.length ? list : null;
+  }
+
+  function buildComposer() {
+    var targets = el("span", { class: "targets", role: "group", "aria-label": "Recipients" });
+    var text = el("textarea", { rows: "2", maxlength: String(TEXT_MAX), placeholder: "Ask, steer or brief a session", "aria-label": "Message", "data-focus": "compose:text" });
+    var send = el("button", { class: "send", type: "button", title: "Send (Ctrl+Enter or ⌘+Enter)", "data-focus": "compose:send" }, "Send");
+    var ack = el("input", { type: "checkbox", "data-focus": "compose:ack" });
+    var ackLabel = el("label", null, ack, "Ask for ACK");
+    var status = el("div", { class: "cstatus", role: "status" });
+    var reason = el("div", { class: "creason" });
+    reason.id = REASON_ID;
+    var box = el("div", { class: "cwrap", role: "group", "aria-label": "Send a message" },
+      el("div", { class: "toline" }, el("span", { class: "tolabel" }, "To"), targets),
+      reason,
+      el("div", { class: "box" }, text, send),
+      el("div", { class: "opts" },
+        ackLabel,
+        el("span", { class: "authority" }, "Arrives as peer input, not user approval"),
+        el("span", { class: "hint" }, "Ctrl/⌘+Enter sends")),
+      status);
+    on(text, "input", function () {
+      // A new message: the previous send's result no longer describes what is in the box.
+      if (S.compose.msg && !S.compose.busy) { S.compose.msg = null; S.compose.msgTone = null; }
+      updateComposerState();
+    });
+    on(text, "keydown", function (event) {
+      if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+        if (event.preventDefault) event.preventDefault();
+        submitCompose();
+      }
+    });
+    on(send, "click", function () { submitCompose(); });
+    return { root: box, targets: targets, text: text, send: send, ack: ack, ackLabel: ackLabel, status: status, reason: reason };
+  }
+
+  function pickerNodes(ctx, cands) {
+    var C = S.compose;
+    var out = [];
+    C.boxes = [];
+    if (ctx.kind === "general") {
+      out.push(el("span", { class: "who chanpick fixed", title: "An @all post reaches every #general member after you confirm the recipient list" },
+        el("span", { class: "nm" }, chanText("general")), el("span", { class: "muted" }, "everyone, after you confirm")));
+      return out;
+    }
+    if (ctx.kind === "channel") {
+      var chanBox = el("input", { type: "checkbox", checked: C.channel, "data-focus": "pick:#" });
+      S.focusables["pick:#"] = chanBox;
+      on(chanBox, "change", function () { C.channel = !!chanBox.checked; updateComposerState(); });
+      out.push(el("label", { class: "who chanpick", title: "Every member gets it, and it is kept in the channel's history" },
+        chanBox, "Post to " + chanText(ctx.key)));
+    }
+    cands.forEach(function (c) {
+      var rt = rtOf(c.typed);
+      var gone = c.state === "gone";
+      var box = el("input", { type: "checkbox", checked: !gone && !!C.targets[c.typed], disabled: gone, "data-focus": "pick:" + c.typed });
+      S.focusables["pick:" + c.typed] = box;
+      C.boxes.push({ typed: c.typed, box: box, gone: gone });
+      on(box, "change", function () {
+        if (box.checked) C.targets[c.typed] = true; else delete C.targets[c.typed];
+        updateComposerState();
+      });
+      out.push(el("label", { class: "who pick " + rt + (gone ? " is-gone" : ""), title: c.typed + (gone ? " (gone)" : "") },
+        box, hicon(rt), el("span", { class: "nm" }, nameOf(c.typed))));
+    });
+    if (!cands.length && ctx.kind === "browser") out.push(el("span", { class: "muted" }, "No live sessions to message."));
+    if (!cands.length && ctx.kind === "channel") out.push(el("span", { class: "muted" }, "No members to pick."));
+    return out;
+  }
+
+  // Rebuild the picker only when what it offers changed, so a poll never resets a choice or focus.
+  function renderPicker(ctx) {
+    var C = S.compose;
+    var cands = blockedReason(ctx) ? [] : candidates(ctx);
+    var ctxKey = ctx.kind + "|" + str(ctx.key);
+    var sig = ctxKey + "|" + cands.map(function (c) { return c.typed + "=" + c.state + "=" + nameOf(c.typed); }).join(",");
+    if (sig === C.sig) return;
+    if (C.ctxKey !== ctxKey) {
+      C.targets = table();
+      C.channel = false;
+      C.ctxKey = ctxKey;
+    }
+    C.sig = sig;
+    var offered = table();
+    cands.forEach(function (c) { if (c.state !== "gone") offered[c.typed] = true; });
+    Object.keys(C.targets).forEach(function (t) { if (!offered[t]) delete C.targets[t]; });
+    withFocus(function () { fill(C.nodes.targets, pickerNodes(ctx, cands)); });
+  }
+
+  // The one attribute set outside el(): the composer's reason, linked while it applies.
+  function describedBy(node, id) {
+    if (!node) return;
+    if (id) node.setAttribute("aria-describedby", id);
+    else if (node.removeAttribute) node.removeAttribute("aria-describedby");
+  }
+
+  function updateComposerState() {
+    var C = S.compose;
+    if (!C || !C.nodes) return;
+    var n = C.nodes;
+    var ctx = composeContext();
+    var blocked = blockedReason(ctx);
+    var value = str(n.text.value);
+    // The @all gate: in #general only @all text can be sent (it previews the recipients first);
+    // anywhere else @all text waits, editable, until it no longer starts with @all.
+    var general = !blocked && ctx.kind === "general";
+    var allText = !blocked && ALL_RE.test(value);
+    var plainGeneral = general && !allText && !!value.trim();
+    n.text.disabled = !!blocked;
+    var placeholder = general ? "Start with @all to reach every #general member" : "Ask, steer or brief a session";
+    if (n.text.placeholder !== placeholder) n.text.placeholder = placeholder;
+    // An @all always asks for ACKs: in #general the box shows that, checked and fixed.
+    if (general) {
+      if (!C.ackForced) { C.ackSaved = !!n.ack.checked; C.ackForced = true; }
+      n.ack.checked = true;
+      n.ack.disabled = true;
+      n.ackLabel.title = "@all always asks every recipient for an ACK";
+    } else {
+      if (C.ackForced) { n.ack.checked = C.ackSaved; C.ackForced = false; }
+      n.ack.disabled = !!blocked;
+      n.ackLabel.title = "";
+    }
+    if (n.root.classList) {
+      if (blocked) n.root.classList.add("is-blocked"); else n.root.classList.remove("is-blocked");
+    }
+    var reasonKey = blocked ? "b|" + blocked : general && allText ? "all-general" : plainGeneral ? "plain-general" : allText ? "all-elsewhere" : "";
+    if (C.reasonKey !== reasonKey) {
+      C.reasonKey = reasonKey;
+      fill(n.reason, blocked || (general && allText ? el("span", { class: "allwarn" }, el("b", null, "@all"), ALL_GENERAL)
+        : plainGeneral ? GENERAL_ONLY_ALL : allText ? el("span", { class: "allnote" }, ALL_WARN) : null));
+      if (n.reason.classList) {
+        if (reasonKey === "all-general") n.reason.classList.add("is-all"); else n.reason.classList.remove("is-all");
+      }
+    }
+    describedBy(n.text, reasonKey ? REASON_ID : null);
+    describedBy(n.send, reasonKey ? REASON_ID : null);
+    C.boxes.forEach(function (b) { b.box.disabled = b.gone || !!blocked || (ctx.kind === "channel" && C.channel); });
+    var to = blocked ? null : composeTo(ctx);
+    var tooMany = Array.isArray(to) && to.length > SEND_TO_MAX;
+    n.send.disabled = !!blocked || (general ? !allText : allText) || C.busy || !!C.confirm || to === null || tooMany || !value.trim();
+    var label = C.busy ? (general ? "Previewing…" : "Sending…") : general && allText ? "Preview recipients" : "Send";
+    if (n.send.textContent !== label) n.send.textContent = label;
+    var msg = tooMany ? "At most " + SEND_TO_MAX + " recipients per send." : C.msg;
+    var msgTone = tooMany ? "bad" : C.msgTone;
+    // The status region announces a change: rewrite it only when the message changes.
+    var key = str(msgTone) + "|" + str(msg);
+    if (C.statusKey !== key) {
+      C.statusKey = key;
+      if (n.status.classList) {
+        ["ok", "bad"].forEach(function (c) { if (c === msgTone) n.status.classList.add(c); else n.status.classList.remove(c); });
+      }
+      fill(n.status, msg);
+    }
+  }
+
+  function renderComposer() {
+    var host = $("composer");
+    if (!host) return;
+    if (!S.chat || !S.compose) {
+      if (host.firstChild) fill(host, null);
+      return;
+    }
+    var C = S.compose;
+    if (!C.nodes) C.nodes = buildComposer();
+    if (host.firstChild !== C.nodes.root) fill(host, C.nodes.root);
+    renderPicker(composeContext());
+    updateComposerState();
+  }
+
+  function submitCompose() {
+    var C = S.compose;
+    if (!S.chat || !C || !C.nodes || C.busy || C.confirm) return Promise.resolve(false);
+    var ctx = composeContext();
+    var text = str(C.nodes.text.value);
+    var to = blockedReason(ctx) ? null : composeTo(ctx);
+    if (to === null || !text.trim() || (Array.isArray(to) && to.length > SEND_TO_MAX)) return Promise.resolve(false);
+    if (ctx.kind === "general") return ALL_RE.test(text) ? previewAll(text) : Promise.resolve(false);
+    if (ALL_RE.test(text)) return Promise.resolve(false);
+    var ack = !!C.nodes.ack.checked;
+    C.busy = true;
+    C.msg = null;
+    C.msgTone = null;
+    updateComposerState();
+    return postSend({ to: to, text: text, ack: ack }).then(function (result) {
+      C.busy = false;
+      if (result.status === 202) {
+        var data = result.data && typeof result.data === "object" ? result.data : {};
+        var mid = typeof data.message_id === "string" && MID_RE.test(data.message_id) ? data.message_id : null;
+        if (mid) addLocalSend(mid, to, text, ack);
+        if (C.nodes.text.value === text) C.nodes.text.value = "";
+        // A past event, so it stays true however the row moves on (or a restart drops it).
+        C.msg = "Accepted " + clock(Date.now() / 1000) + " — status in " + (typeof to === "string" ? chanText(ctx.key) : "Browser");
+        C.msgTone = "ok";
+        renderLanes();
+        renderMain({ toBottom: true });
+      } else {
+        C.msg = sendErrorText(result.status);
+        C.msgTone = "bad";
+      }
+      updateComposerState();
+      if (result.status === 202) {
+        // The text is cleared and Send disabled: keep focus in the composer, not on <body>.
+        var active = document.activeElement;
+        if (!active || active === document.body || active === C.nodes.send || active === C.nodes.text) C.nodes.text.focus();
+      }
+      return result.status === 202;
+    });
+  }
+
+  // -- @all to #general: preview, confirm dialog, confirm --------------------
+  //
+  // Send in #general POSTs the @all text without a nonce: a 200 lists the recipients and carries a
+  // single-use nonce bound to that exact set and text. The page shows the list in its own dialog
+  // (never a native browser prompt), and Confirm POSTs the same text with the nonce. The dialog is
+  // modal: #app is made inert, Tab stays inside, Esc cancels, and focus returns to the textarea.
+
+  // The preview body, checked field by field; null when it cannot be used.
+  function readPreview(data) {
+    if (!data || typeof data !== "object") return null;
+    var nonce = data.confirm;
+    if (typeof nonce !== "string" || !nonce || nonce.length > CONFIRM_MAX) return null;
+    var recipients = (Array.isArray(data.recipients) ? data.recipients : []).filter(function (t) { return typeof t === "string" && t; });
+    if (!recipients.length) return null;
+    var excluded = (Array.isArray(data.excluded) ? data.excluded : []).filter(function (x) {
+      return x && typeof x === "object" && typeof x.member === "string" && x.member;
+    }).map(function (x) { return { member: x.member, reason: str(x.reason) }; });
+    var expires = typeof data.expires_in === "number" && isFinite(data.expires_in) && data.expires_in > 0 ? Math.min(data.expires_in, EXPIRES_MAX) : 0;
+    if (!expires) return null;
+    return { nonce: nonce, recipients: recipients, excluded: excluded, stale: data.stale === true, expires: expires };
+  }
+
+  function previewAll(text) {
+    var C = S.compose;
+    C.busy = true;
+    C.msg = null;
+    C.msgTone = null;
+    updateComposerState();
+    // The expiry counts from before the request left: the server's clock started no earlier.
+    var sentAt = Date.now();
+    return postSend({ to: "#general", text: text, ack: true }).then(function (result) {
+      C.busy = false;
+      var preview = result.status === 200 ? readPreview(result.data) : null;
+      if (preview) {
+        openConfirm(text, preview, sentAt);
+        updateComposerState();
+        return true;
+      }
+      C.msg = result.status === 200 ? "The server's recipient list could not be read; nothing was sent"
+        : result.status === 409 ? PREVIEW_409 : sendErrorText(result.status);
+      C.msgTone = "bad";
+      updateComposerState();
+      return false;
+    });
+  }
+
+  function excludedText(reason) {
+    return reason === "gone" ? "gone, not sent to" : reason ? reason : "left out";
+  }
+
+  function personItem(typed, extra) {
+    var rt = rtOf(typed);
+    return el("li", { class: "who " + rt, title: nameOf(typed) + " (" + typed + ")" },
+      hicon(rt), el("span", { class: "nm" }, nameOf(typed)), el("span", { class: "mono tid" }, typed),
+      extra ? el("span", { class: "why" }, extra) : null);
+  }
+
+  function buildConfirm(cf) {
+    var n = cf.recipients.length;
+    var title = el("h2", null, "Post @all to #general?");
+    title.id = "dlgtitle";
+    var desc = el("p", { class: "dlgdesc" }, "It goes to " + (n === 1 ? "this session" : "these " + n + " sessions") +
+      " as peer input from this browser, and each is asked for an ACK. If #general's members change before it is sent, nothing is sent.");
+    desc.id = "dlgdesc";
+    var msg = el("div", { class: "dlgmsg", role: "status" });
+    msg.id = "dlgmsg";
+    var clockNode = el("span", { class: "countdown" });
+    var cancel = el("button", { type: "button", class: "dlgcancel" }, "Cancel");
+    var confirmBtn = el("button", { type: "button", class: "send dlgok" }, "Send to " + n);
+    var acts = el("div", { class: "dlgacts" }, cancel, confirmBtn);
+    // The quote and the lists are focusable so a keyboard user can scroll them when capped.
+    var quote = el("div", { class: "dlgquote", "aria-label": "Message", tabindex: "0" }, el("p", { class: "text" }, bodyNodes(cf.text.length > 600 ? cf.text.slice(0, 599) + "…" : cf.text)));
+    var recList = el("ul", { class: "dlglist", "aria-label": "Recipients", tabindex: "0" }, cf.recipients.map(function (t) { return personItem(t); }));
+    var exclList = cf.excluded.length ? el("ul", { class: "dlglist excl", "aria-label": "Not included", tabindex: "0" },
+      cf.excluded.map(function (x) { return personItem(x.member, excludedText(x.reason)); })) : null;
+    var panel = el("div", { class: "dialog", role: "dialog", "aria-modal": "true", "aria-labelledby": "dlgtitle", "aria-describedby": "dlgdesc dlgmsg", tabindex: "-1" },
+      title, desc,
+      quote,
+      cf.stale ? el("div", { class: "note warn", role: "note" }, "Discovery may be stale: this list comes from the last completed check.") : null,
+      el("div", { class: "dlgsec" }, el("b", null, "Recipients (" + n + ")"),
+        recList),
+      exclList ? el("div", { class: "dlgsec" }, el("b", null, "Not included (" + cf.excluded.length + ")"), exclList) : null,
+      el("div", { class: "dlgfoot" }, clockNode, msg),
+      acts);
+    on(cancel, "click", function () { if (!cf.busy) cancelConfirm(cf); });
+    on(confirmBtn, "click", function () { confirmAll(cf); });
+    on(panel, "keydown", function (event) { confirmKey(cf, event); });
+    var scrim = el("div", { class: "scrim" }, panel);
+    // A click on the scrim must not leave focus on <body>, where Esc would do nothing.
+    on(scrim, "mousedown", function (event) {
+      if (event.target !== scrim) return;
+      if (event.preventDefault) event.preventDefault();
+      panel.focus();
+    });
+    return { root: scrim, panel: panel, lists: [quote, recList, exclList].filter(Boolean), cancel: cancel, confirm: confirmBtn, acts: acts, msg: msg, clock: clockNode, again: null };
+  }
+
+  function openConfirm(text, preview, sentAt) {
+    var C = S.compose;
+    var cf = { nonce: preview.nonce, text: text, recipients: preview.recipients, excluded: preview.excluded, stale: preview.stale,
+      deadline: sentAt + preview.expires * 1000, busy: false, expired: false, nodes: null };
+    C.confirm = cf;
+    cf.nodes = buildConfirm(cf);
+    fill($(DIALOG_HOST), cf.nodes.root);
+    var app = $("app");
+    if (app) app.inert = true;
+    tickConfirm(cf);
+    updateConfirm(cf);
+    // Not scrolling to the button: on a phone the dialog opens at its top.
+    cf.nodes.cancel.focus({ preventScroll: true });
+    cf.nodes.panel.scrollTop = 0;
+  }
+
+  // The countdown, from the clock (a background tab's timers are throttled, so never counted ticks).
+  function tickConfirm(cf) {
+    if (S.compose.confirm !== cf || cf.expired) return;
+    var left = Math.ceil((cf.deadline - Date.now()) / 1000);
+    if (left <= 0) {
+      expireConfirm(cf);
+      return;
+    }
+    fill(cf.nodes.clock, "Expires in " + left + " s");
+    if (typeof root.setTimeout === "function") root.setTimeout(function () { tickConfirm(cf); }, 1000);
+  }
+
+  function expireConfirm(cf) {
+    cf.expired = true;
+    fill(cf.nodes.clock, "Expired");
+    setConfirmMsg(cf, cf.unanswered ? CONFIRM_EXPIRED_MAYBE_SENT : CONFIRM_EXPIRED);
+    if (!cf.nodes.again) {
+      cf.nodes.again = on(el("button", { type: "button", class: "send dlgagain" }, "Preview again"), "click", function () {
+        if (cf.busy) return;
+        closeConfirm(null, null);
+        submitCompose();
+      });
+      append(cf.nodes.acts, cf.nodes.again);
+    }
+    var focusWasOk = document.activeElement === cf.nodes.confirm;
+    updateConfirm(cf);
+    if (focusWasOk && !cf.busy) cf.nodes.again.focus();
+  }
+
+  function setConfirmMsg(cf, text) {
+    fill(cf.nodes.msg, text);
+    if (cf.nodes.msg.classList) {
+      if (text) cf.nodes.msg.classList.add("bad"); else cf.nodes.msg.classList.remove("bad");
+    }
+  }
+
+  function updateConfirm(cf) {
+    var n = cf.nodes;
+    n.confirm.disabled = cf.busy || cf.expired;
+    n.cancel.disabled = cf.busy;
+    if (n.again) n.again.disabled = cf.busy;
+    var label = cf.busy ? "Sending…" : "Send to " + cf.recipients.length;
+    if (n.confirm.textContent !== label) n.confirm.textContent = label;
+  }
+
+  // Esc cancels (not while Confirm is in flight); Tab and Shift+Tab cycle inside the dialog.
+  function confirmKey(cf, event) {
+    if (event.key === "Escape" || event.key === "Esc") {
+      if (event.preventDefault) event.preventDefault();
+      if (!cf.busy) cancelConfirm(cf);
+      return;
+    }
+    if (event.key !== "Tab") return;
+    var n = cf.nodes;
+    var stops = n.lists.concat([n.cancel, n.again, n.confirm]).filter(function (b) { return b && !b.disabled; });
+    if (!stops.length) {
+      if (event.preventDefault) event.preventDefault();
+      n.panel.focus();
+      return;
+    }
+    var at = stops.indexOf(document.activeElement);
+    var next = event.shiftKey ? (at <= 0 ? stops[stops.length - 1] : null) : (at < 0 || at === stops.length - 1 ? stops[0] : null);
+    if (next) {
+      if (event.preventDefault) event.preventDefault();
+      next.focus();
+    }
+  }
+
+  // Cancel/Esc: after an unanswered confirm the post may already be out, so say so.
+  function cancelConfirm(cf) {
+    closeConfirm(cf.unanswered ? CONFIRM_MAYBE_SENT : null, cf.unanswered ? "bad" : null);
+  }
+
+  // Close the dialog (dropping its nonce); msg/tone go to the composer's status line.
+  function closeConfirm(msg, msgTone) {
+    var C = S.compose;
+    if (!C || !C.confirm) return;
+    C.confirm.nonce = null;
+    C.confirm = null;
+    fill($(DIALOG_HOST), null);
+    var app = $("app");
+    if (app) app.inert = false;
+    C.msg = msg;
+    C.msgTone = msgTone;
+    updateComposerState();
+    if (C.nodes && C.nodes.text.focus) C.nodes.text.focus();
+  }
+
+  function confirmAll(cf) {
+    var C = S.compose;
+    if (C.confirm !== cf || cf.busy || cf.expired || !cf.nonce) return Promise.resolve(false);
+    cf.busy = true;
+    setConfirmMsg(cf, null);
+    // The buttons disable while it is in flight: keep focus in the dialog, not on <body>.
+    if (document.activeElement === cf.nodes.confirm || document.activeElement === cf.nodes.cancel) cf.nodes.panel.focus();
+    updateConfirm(cf);
+    return postSend({ to: "#general", text: cf.text, ack: true, confirm: cf.nonce }).then(function (result) {
+      cf.busy = false;
+      if (C.confirm !== cf) return false;
+      var status = result.status;
+      if (status === 202) {
+        var data = result.data && typeof result.data === "object" ? result.data : {};
+        var mid = typeof data.message_id === "string" && MID_RE.test(data.message_id) ? data.message_id : null;
+        if (mid) addLocalSend(mid, "#general", cf.text, true);
+        if (C.nodes.text.value === cf.text) C.nodes.text.value = "";
+        closeConfirm("Accepted " + clock(Date.now() / 1000) + " — status in #general", "ok");
+        renderLanes();
+        renderMain({ toBottom: true });
+        return true;
+      }
+      if (status === 429 || status === 0) {
+        // The nonce stays usable (the server charged nothing, or never answered): Confirm again.
+        if (status === 0) cf.unanswered = true;
+        setConfirmMsg(cf, status === 429 ? CONFIRM_429 : CONFIRM_NONE);
+        updateConfirm(cf);
+        if (!cf.expired && document.activeElement !== cf.nodes.confirm) cf.nodes.confirm.focus();
+        return false;
+      }
+      // After an unanswered confirm the first may have landed, whatever this refusal says.
+      closeConfirm(cf.unanswered ? CONFIRM_MAYBE_SENT : status === 409 ? CONFIRM_409 : sendErrorText(status), "bad");
+      return false;
+    });
+  }
+
+  function renderModeBadge() {
+    var badge = $("modebadge");
+    if (!badge) return;
+    var text = S.chat ? "chat" : "read-only";
+    if (badge.textContent === text) return;
+    fill(badge, text);
+    badge.title = S.chat ? "This page can send messages as the browser peer: peer input, never user approval"
+      : "This page never sends, ACKs or changes anything";
+    if (badge.classList) {
+      if (S.chat) badge.classList.add("chat"); else badge.classList.remove("chat");
+    }
+  }
+
+  // ------------------------------------------------------------------------
   // Server access
   // ------------------------------------------------------------------------
 
-  function api(path) {
+  // The one request site. A GET sends no referrer. A POST (chat mode, payload given) carries a JSON
+  // body and a same-origin referrer policy: the server requires an Origin equal to its own. The
+  // current Fetch standard nulls Origin only for a request whose mode is not "cors" (the default mode
+  // of the request below), but browsers have sent "Origin: null" on a POST under no-referrer (the page's
+  // <meta name="referrer"> default), so same-origin is a defence against that. It never sends a
+  // referrer anywhere else; the token is in memory and the hash is already gone, so a Referer holds only "/".
+  function request(path, payload) {
+    var post = payload !== undefined;
+    var headers = { "X-Peers-Token": S.token };
+    if (post) headers["Content-Type"] = "application/json";
     return root.fetch(path, {
-      method: "GET", headers: { "X-Peers-Token": S.token }, credentials: "omit", cache: "no-store",
-      redirect: "error", referrerPolicy: "no-referrer"
-    }).then(function (res) {
+      method: post ? "POST" : "GET", headers: headers, body: post ? JSON.stringify(payload) : undefined,
+      credentials: "omit", cache: "no-store", redirect: "error", referrerPolicy: post ? "same-origin" : "no-referrer"
+    });
+  }
+
+  function api(path) {
+    return request(path).then(function (res) {
       if (!res.ok) {
         var err = new Error("HTTP " + res.status);
         err.status = res.status;
@@ -716,7 +1737,20 @@
         if (typeof m.name === "string" && m.name) names[str(m.typed)] = m.name;
       });
     });
-    (Array.isArray(S.state.sessions) ? S.state.sessions : []).forEach(function (s) { if (s && typeof s === "object") sessions[str(s.member)] = s; });
+    (Array.isArray(S.state.sessions) ? S.state.sessions : []).forEach(function (s) {
+      if (!s || typeof s !== "object") return;
+      sessions[str(s.member)] = s;
+      if (typeof s.name === "string" && s.name && !names[str(s.member)]) names[str(s.member)] = s.name;
+    });
+    var chat = S.state.chat && typeof S.state.chat === "object" && typeof S.state.chat.peer === "string" ? S.state.chat : null;
+    S.chat = chat;
+    if (chat) {
+      if (!S.browser) S.browser = newBrowser();
+      if (!S.compose) S.compose = newCompose();
+      if (typeof chat.name === "string" && chat.name) names[chat.peer] = chat.name;
+    } else if (S.view === "browser") {
+      S.view = "conv";
+    }
     S.names = names; S.members = members; S.rows = rows; S.sessions = sessions;
     if (typeof S.state.untracked === "number") S.untracked = S.state.untracked;
     if (!rows[S.selected]) S.selected = rows.general ? "general" : (S.state.channels && S.state.channels[0] ? str(S.state.channels[0].key) : "general");
@@ -1131,6 +2165,8 @@
     });
     var updates = Array.isArray(data.updates) ? data.updates : [];
     updates.forEach(function (u) { if (applyUpdate(u)) changed = true; });
+    var browserChanged = applyBrowser(data.browser);
+    if (browserChanged) changed = true;
     Object.keys(S.loading).forEach(function (key) { S.loading[key].updates = S.loading[key].updates.concat(updates); });
     if (typeof data.cursor === "string" && data.cursor) S.cursor = data.cursor;
     S.untracked = typeof data.untracked === "number" ? data.untracked : 0;
@@ -1155,6 +2191,7 @@
     return Promise.all(waits).then(function () {
       renderLive();
       renderRailNotes();
+      if (browserChanged) renderLanes();
       if (changed) renderMain({});
       return changed;
     });
@@ -1193,8 +2230,8 @@
         return true;
       }, function (err) {
         S.failures += 1;
-        if (err && (err.status === 401 || err.status === 403)) S.stopped = true;
-        S.live = S.stopped ? { mode: "stopped" } : { mode: "retry", delay: delay() };
+        if (err && (err.status === 401 || err.status === 403)) stopUpdates();
+        else S.live = { mode: "retry", delay: delay() };
         renderLive();
         if (S.view === "conv") renderMain({});
         return false;
@@ -1216,8 +2253,7 @@
     }).catch(function (err) {
       S.failures += 1;
       if (err && (err.status === 401 || err.status === 403)) {
-        S.stopped = true;
-        S.live = { mode: "stopped" };
+        stopUpdates();
       } else if (err && err.status === 400) {
         // The cursor no longer decodes: start again from a fresh state.
         S.cursor = null;
@@ -1234,6 +2270,13 @@
       S.polling = false;
       return result;
     });
+  }
+
+  // The token was refused: polling ends, and the composer (chat mode) disables with its reason.
+  function stopUpdates() {
+    S.stopped = true;
+    S.live = { mode: "stopped" };
+    renderComposer();
   }
 
   function delay() {
@@ -1311,7 +2354,8 @@
   function renderFleet() {
     var host = $("fleet");
     var st = S.state || {};
-    var sessions = Array.isArray(st.sessions) ? st.sessions : [];
+    // The browser peer (chat mode) is this page, not a session of the fleet.
+    var sessions = (Array.isArray(st.sessions) ? st.sessions : []).filter(function (s) { return s && rtOf(s.member) !== "web"; });
     var rows = Array.isArray(st.channels) ? st.channels : [];
     var working = sessions.filter(function (s) { return s.state === "working"; }).length;
     var missing = rows.filter(function (r) { return r.alert === "missing_acks"; }).length;
@@ -1325,8 +2369,8 @@
   }
 
   function renderLegend() {
-    fill($("legend"), [["claude"], ["codex"], ["oc"]].map(function (r) {
-      return el("span", null, hicon(r[0]), RT_LABEL[r[0]]);
+    fill($("legend"), fleetRuntimes().map(function (rt) {
+      return el("span", null, hicon(rt), RT_LABEL[rt]);
     }).concat([
       el("span", null, el("i", { class: "dot busy", "aria-hidden": "true" }), "Working"),
       el("span", null, el("i", { class: "dot", "aria-hidden": "true" }), "Idle"),
@@ -1361,18 +2405,23 @@
     fill(host, [el("i", { class: "livedot m-" + str(live.mode), "aria-hidden": "true" }), text]);
   }
 
+  function renderLanes() {
+    withFocus(function () {
+      fill($("lanes"), [S.chat ? renderBrowserLane() : null].concat(renderRail(S.state, S.view === "conv" ? S.selected : null, selectChannel)));
+    });
+  }
+
   function renderChrome() {
     S.focusables = table();
-    withFocus(function () {
-      fill($("lanes"), renderRail(S.state, S.view === "conv" ? S.selected : null, selectChannel));
-    });
+    renderLanes();
+    renderModeBadge();
     renderFleet();
     renderLegend();
     renderRailNotes();
     renderViewTabs();
     renderMobTabs();
     renderLive();
-    fill($("info"), renderDetails(S.rows[S.selected]));
+    fill($("info"), S.view === "browser" && S.chat ? renderBrowserDetails() : renderDetails(S.rows[S.selected]));
   }
 
   function moreButton(label, handler, focusKey) {
@@ -1409,6 +2458,11 @@
         body = renderEntries(all.entries, { channel: true, focusSet: opts.focusSet, onFocusTarget: setTarget });
         if (!body.length) body = [el("div", { class: "empty" }, "No entries in the channels shown.")];
       }
+    } else if (S.view === "browser" && S.chat) {
+      title = "Browser";
+      sub = "Direct messages as " + myName();
+      notes = browserNotes();
+      body = renderBrowserStream();
     } else if (S.view === "search" && S.search) {
       var sr = S.search;
       title = "Search";
@@ -1443,7 +2497,7 @@
       cover = renderCoverage("channel", covRow);
       notes = renderPageNotes(page);
       if (page) {
-        body = renderChannelPage(page, { onOlder: function () { loadOlder(key); }, focusSet: opts.focusSet, onFocusTarget: setTarget });
+        body = renderChannelPage(withChannelPosts(page, key), { onOlder: function () { loadOlder(key); }, focusSet: opts.focusSet, onFocusTarget: setTarget });
       } else if (S.pageErrors[key] && !S.loading[key]) {
         body = [el("div", { class: "empty", role: "alert" }, "This channel could not be loaded: the server did not answer. " + (S.stopped ? "Updates have stopped; reopen the URL peers.py web printed." : "It is tried again with the next update."))];
       } else {
@@ -1455,6 +2509,7 @@
     fill($("coverage"), cover);
     fill($("notes"), notes);
     fill(stream, body);
+    renderComposer();
     if (!stream) return;
     if (opts.toTop) stream.scrollTop = 0;
     else if (typeof opts.keepFromBottom === "number") stream.scrollTop = stream.scrollHeight - opts.keepFromBottom;
@@ -1481,8 +2536,7 @@
   function showError(err) {
     var status = err && err.status;
     if (status === 401 || status === 403) {
-      S.stopped = true;
-      S.live = { mode: "stopped" };
+      stopUpdates();
       renderLive();
     }
     fill($("notes"), note(status ? "The server refused the request (HTTP " + status + ")." : "The server could not be reached.", "bad"));
@@ -1605,7 +2659,10 @@
     renderRail: renderRail, renderDetails: renderDetails, renderMain: renderMain, applyChanges: applyChanges,
     applyUpdate: applyUpdate, pollOnce: pollOnce, setState: setState, selectChannel: selectChannel, showAll: showAll,
     loadAll: loadAll, runSearch: runSearch, tallyOf: tallyOf, copyable: copyable, gapNote: gapNote, start: start,
-    toggleTheme: toggleTheme, THEME_KEY: THEME_KEY
+    toggleTheme: toggleTheme, THEME_KEY: THEME_KEY,
+    applyBrowser: applyBrowser, renderSendStatus: renderSendStatus, renderBrowserEntry: renderBrowserEntry, renderComposer: renderComposer,
+    submitCompose: submitCompose, postSend: postSend, sendErrorText: sendErrorText, showBrowser: showBrowser, rowTally: rowTally,
+    readPreview: readPreview
   };
   // A read-only view of the model for tests and debugging: everything but the token.
   Object.defineProperty(root.PeersApp, "state", {

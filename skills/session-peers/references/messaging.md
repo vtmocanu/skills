@@ -183,10 +183,60 @@ If normal automatic forwarding failed and asynchronous sending is authorized,
 use `send` with host permission. Otherwise ask the user to run it from a host
 shell. Confirm the successful result and message id before reporting delivery.
 
+### Sending to the browser peer
+
+`peers.py web --chat` registers the browser as the peer `web:<uuid>` (see
+[web](web.md#chat-mode---chat); the address is in the page's details panel and
+in the `chat` object of its state). OpenCode, a shell or any session replies or
+writes to it with `send`:
+
+```bash
+<this skill's directory>/scripts/peers.py send --to web:<uuid> --message-file <path>
+```
+
+The message arrives in the page's Browser feed. It shows your verified identity only when
+the call comes from a Claude Code session or a Codex shim, because the frame's
+`from` is set only from a Claude-registry record at the caller's socket; from
+OpenCode, a shell or a Codex thread calling `send` directly it appears as an
+unverified sender and the journal records `from: null`.
+`send` asks for the browser peer's own acknowledgement (the frame carries
+`want_peer_inbox_ack: 1`; native frames get no answer) and waits for it. It is
+given only after the message is in the [journal](journal.md). A message whose
+wrapped frame exceeds the peer cap is refused before anything is recorded.
+The exit code says what is known:
+
+| Exit / outcome | Meaning |
+| --- | --- |
+| 0 | Delivered: the browser peer journaled the message and acknowledged it. |
+| 1, not delivered | The browser peer refused it (for example journal full) or could not be reached. |
+| 1, outcome unknown | No acknowledgement within 15 s, or the connection closed first. The message may or may not have been kept; check before resending in the page's Browser feed. The CLI cannot tell: `peers.py inbox acks <id>` on a `--record` send shows only the sender's own record and its transport error, not whether the browser peer kept the message. |
+| 75 | `--record` with a full journal: nothing was sent. |
+| 76 | With `--record`, a refused or unknown outcome whose transport error could not be journaled. |
+
+- **Offline:** with no running browser peer, `send` is refused (exit 1) and
+  nothing is sent. With `--record` it journals the message, reports the
+  transport failure and exits 1 (76 if that failure could not be journaled). The
+  message is not shown in the page's Browser feed: a started page has a new
+  browser identity and an empty feed, and never imports earlier journal
+  records. Its recipient is the old `web:<uuid>`, so no session can read it
+  back through `inbox journal` or `inbox get`; `peers.py inbox acks <id>` only
+  confirms the sender's own record was kept (and only when the sender was
+  identified: a message recorded with no sender cannot be queried).
+- **Duplicate record:** with `--record` a delivered message leaves two journal
+  records, the sender's own and the browser peer's inbox record. Both count
+  against retention. The sender's own record counts against its quota; the
+  inbox record counts against the sender's quota only for a verified sender,
+  and against the journal's unattributed (`null`) bucket for an unverified one.
+- **No correlation:** `ask`, `dispatch` and `wait` refuse a `web:` target
+  (rc 2): a person answers by hand, with no request id or await. Use `send`.
+- A direct `send` is not an approval: the recipient is a person at a page, and
+  what you send is read as peer input.
+
 ### Route check
 
 `send`, `ask`, `dispatch` and `wait` check the route before delivering. The
-target must be typed (`cc:`, `codex:` or `oc:`) or the `buddy` alias, which
+target must be typed (`cc:`, `codex:`, `oc:` or, for `send` only,
+`web:`) or the `buddy` alias, which
 expands to the bound buddy's typed ID first; a typed name or UUID prefix still
 resolves as before.
 

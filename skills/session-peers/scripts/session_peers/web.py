@@ -1,7 +1,16 @@
-"""Local, read-only web dashboard server for session-peers (PRD #161).
+"""Local web dashboard server for session-peers (PRD #161, chat mode PRD #162).
 
 Standard-library ``http.server`` bound to 127.0.0.1. It serves three fixed static files and a
-token-guarded JSON API built by ``webdata``; it never writes to any store and never logs a request.
+token-guarded JSON API built by ``webdata``; it never logs a request. By default it is read-only:
+it writes to no store and refuses every method but GET. Started with ``--chat`` it also registers a
+browser peer (``webpeer``) and accepts one write, ``POST /api/send``, whose checks run in this order:
+host, method and target, token, ``Origin`` equal to the page's own origin, a single JSON
+``Content-Type``, body framing (no ``Transfer-Encoding``, one digits-only ``Content-Length`` of 1 to
+BODY_MAX), the body read inside the connection deadline, strict ``{to, text, ack}`` JSON (plus ``confirm`` for an ``@all`` to ``#general``), the refusals
+(``#general`` unless an ``@all``, and an ``@all`` anywhere else; an ``@all`` to ``#general`` is a
+preview answered ``200`` with a confirm nonce, then a confirm), and the send gate
+(``webchat.SendGate``). A passed send is answered ``202 {"message_id", "state": "queued"}``: accepted in memory only, committed later by the
+single worker in ``webchat``. Every refusal body is ``{}``.
 
 Defences, in the order every request meets them: a connection slot (at most MAX_CONNECTIONS held
 at once, extra connections are closed unanswered), a short HEADER_DEADLINE for the request line and
@@ -42,8 +51,9 @@ import sys
 import threading
 import time
 import urllib.parse
-from . import channels as sp_channels, claude as sp_claude, constants as sp_constants
-from . import opencode as sp_opencode, runtime as sp_runtime, storage as sp_storage, webdata as sp_webdata
+from . import channels as sp_channels, claude as sp_claude, constants as sp_constants, identity as sp_identity
+from . import opencode as sp_opencode, runtime as sp_runtime, storage as sp_storage, webchat as sp_webchat
+from . import webdata as sp_webdata, webpeer as sp_webpeer
 
 MAX_CONNECTIONS = 16
 CONNECTION_DEADLINE = 10.0  # seconds until the socket is shut down; the slot is held until the handler
@@ -58,6 +68,12 @@ MEMBERS_PER_CHANNEL = 64
 MEMBERS_TOTAL = 512
 CHANNELS_MAX = 2048
 ASSET_MAX = 4 * 1024 * 1024
+BODY_MAX = 1024 * 1024  # largest POST body (Content-Length) a chat-mode send accepts
+BODY_GRACE = 0.5  # the body read gives up this long before the connection cut, so the 408 can still be written
+SEND_PATH = "/api/send"
+SEND_RECIPIENTS_MAX = 64
+CONFIRM_MAX = 128  # longest confirm nonce a send body may carry (a token_urlsafe(32) is 43 characters)
+NUMERAL_MAX = 32  # longest JSON numeral a send body may carry (it has no numeric field)
 ASSET_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
 
 _ASSETS = {
@@ -77,6 +93,7 @@ SECURITY_HEADERS = (
     ("Cross-Origin-Opener-Policy", "same-origin"),
 )
 _DIGITS_RE = re.compile(r"[0-9]{1,16}")
+_JSON_TYPE_RE = re.compile(r"application/json(?:\s*;\s*charset=utf-8)?", re.IGNORECASE)
 _CURSOR_RE = re.compile(r"[A-Za-z0-9_-]{1,65536}")
 _ACTIVITY = {"busy": "working", "idle": "idle"}
 _OC_ACTIVITY = {"running": "working", "idle": "idle"}
@@ -133,7 +150,10 @@ def _clip(name):
 
 def _registry_view(typed, kind, ident, live, by_sid):
     """``(activity, name)`` of a Claude session or Codex shim from its registry record."""
-    matches = [r for r in by_sid.get(ident.lower(), ()) if (r.get("entrypoint") == "codex") == (kind == "codex")]
+    matches = [
+        r for r in by_sid.get(ident.lower(), ())
+        if not sp_claude.is_web_record(r) and (r.get("entrypoint") == "codex") == (kind == "codex")
+    ]
     name = next((_clip(r.get("name")) for r in matches if _clip(r.get("name"))), None)
     activity = "unknown"
     if live:
@@ -165,8 +185,12 @@ def _opencode_view(members):
     return activity, names
 
 
-def run_discovery():
-    """One discovery pass: the ``discovery`` dict ``webdata.state_view`` takes. Reads only, never creates."""
+def run_discovery(requester=None):
+    """One discovery pass: the ``discovery`` dict ``webdata.state_view`` takes. Reads only, never creates.
+
+    ``requester`` (chat mode: the browser peer's sid) adds ``replies_left``: for each Codex member whose
+    home was found, the replies that requester has left in the member's saved reply budget (None when it
+    cannot be read). It is worked out here, on the discovery thread, never on a request thread."""
     with _DISCOVERY_LOCK, sp_storage.no_create(), sp_runtime.quiet():
         general, rosters = _rosters()
         members, seen = [], set()
@@ -177,14 +201,16 @@ def run_discovery():
                     members.append(typed)
         cache, liveness, activity, names, homes = {}, {}, {}, {}, {}
         deadline, subprocess_left, truncated = time.monotonic() + DISCOVERY_PASS_BUDGET, SUBPROCESS_MEMBERS_PER_PASS, False
-        checked = set()
+        checked, unchecked = set(), []
         for typed in members:
             if time.monotonic() >= deadline:
                 liveness[typed], truncated = "unverified", True
+                unchecked.append(typed)
                 continue
             if not typed.startswith("cc:"):
                 if subprocess_left <= 0:
                     liveness[typed], truncated = "unverified", True
+                    unchecked.append(typed)
                     continue
                 subprocess_left -= 1
             checked.add(typed)
@@ -211,14 +237,25 @@ def run_discovery():
             names.update(oc_names)
         elif oc_members:
             truncated = True
-        return {"general": general, "liveness": liveness, "activity": activity, "names": names,
-                "homes": homes, "stale": False, "pending": False, "truncated": truncated}
+        found = {"general": general, "liveness": liveness, "activity": activity, "names": names,
+                 "homes": homes, "stale": False, "pending": False, "truncated": truncated,
+                 "unchecked": unchecked}
+        if requester is not None:
+            replies = {}
+            for typed in members:
+                kind, _sep, ident = typed.partition(":")
+                if kind == "codex" and ident in homes:
+                    left = sp_webdata.codex_reply_budget(ident, homes[ident], requester=requester)
+                    replies[typed] = left.get("remaining") if isinstance(left, dict) else None
+            found["replies_left"] = replies
+        return found
 
 
 class Discovery:
     """Single-flight, cached discovery: one worker thread, one result per DISCOVERY_TTL."""
 
-    def __init__(self):
+    def __init__(self, requester=None):
+        self._requester = requester  # chat mode: a callable giving the browser peer's sid, or None
         self._cond = threading.Condition()
         self._result = None
         self._at = 0.0
@@ -229,7 +266,8 @@ class Discovery:
     def _work(self):
         result = None
         try:
-            result = run_discovery()
+            requester = self._requester() if self._requester is not None else None
+            result = run_discovery(requester) if requester is not None else run_discovery()
         except Exception:  # a failed pass marks the answer stale/pending; its cause is never logged
             result = None
         finally:
@@ -298,9 +336,11 @@ class Server(http.server.ThreadingHTTPServer):
         socketserver.TCPServer.server_bind(self)
         self.server_name, self.server_port = self.server_address[:2]
 
-    def __init__(self, port=0):
+    def __init__(self, port=0, chat=False, clock=None):
         self.token = secrets.token_bytes(32).hex()
-        self.discovery = Discovery()
+        # Chat mode: `chat` holds the (not yet started) services; None keeps the server read-only.
+        self.chat = sp_webchat.Chat(clock or time.monotonic, lambda: _DISCOVERY_LOCK) if chat else None
+        self.discovery = Discovery(self._requester if chat else None)
         self._slots = threading.BoundedSemaphore(MAX_CONNECTIONS)
         self._holders = set()
         self._holders_lock = threading.Lock()
@@ -309,6 +349,10 @@ class Server(http.server.ThreadingHTTPServer):
     @property
     def port(self):
         return self.server_address[1]
+
+    def _requester(self):
+        state = self.chat.state if self.chat is not None else None
+        return state.uuid if state is not None else None
 
     def _release(self, request):
         with self._holders_lock:
@@ -365,6 +409,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         pass
 
     def handle(self):
+        self._started = time.monotonic()
         timer = threading.Timer(CONNECTION_DEADLINE, self._cut)
         timer.daemon = True
         timer.start()
@@ -478,18 +523,24 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if given is None or not hmac.compare_digest(given, expected):
             raise _Refused(403)
 
-    def _dispatch(self):
-        self._check_host()
-        if self.command != "GET":
-            raise _Refused(405)
-        self._check_body()
+    def _parts(self):
+        """The split request target; 404 for one that is not absolute-path shaped."""
         # Newer Pythons collapse a leading "//" in self.path, so judge the raw request line.
         words = self.requestline.split()
         raw_target = words[1] if len(words) >= 2 else self.path
         target = self.path
         if not raw_target.startswith("/") or raw_target.startswith("//") or not target.startswith("/"):
             raise _Refused(404)
-        parts = urllib.parse.urlsplit(target)
+        return urllib.parse.urlsplit(target)
+
+    def _dispatch(self):
+        self._check_host()
+        if self.command == "POST" and self.server.chat is not None:
+            return self._post()
+        if self.command != "GET":
+            raise _Refused(405)
+        self._check_body()
+        parts = self._parts()
         path = parts.path
         if path.startswith("/api/"):
             self._check_token()
@@ -497,6 +548,179 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if path in _ASSETS:
             return self._static(path)
         raise _Refused(404)
+
+    # -- POST /api/send (chat mode) ------------------------------------------
+
+    def _post(self):
+        """The checks of a send, in order; each refusal is an empty-object response."""
+        parts = self._parts()
+        if parts.path != SEND_PATH:
+            raise _Refused(405)
+        self._query(parts.query, ())
+        self._check_token()
+        self._check_origin()
+        self._check_content_type()
+        length = self._content_length()
+        body = self._read_body(length)
+        to, text, ack, confirm = self._parse_send(body)
+        is_all = sp_channels.ALL_RE.match(text) is not None
+        if to == sp_constants.CHANNEL_GENERAL or is_all:
+            # Only an `@all` to #general is open (preview, then confirm); a plain #general post and an
+            # `@all` anywhere else stay refused.
+            if not (to == sp_constants.CHANNEL_GENERAL and is_all):
+                raise _Refused(403)
+            return self._post_all(text, confirm)
+        chat = self.server.chat
+        if not chat.ready:
+            raise _Refused(503)
+        mid = chat.accept(to, text, ack)
+        if mid is None:
+            raise _Refused(429)
+        self._send_json(202, {"message_id": mid, "state": "queued"})
+
+    def _post_all(self, text, confirm):
+        """An `@all` to #general. ACK is always requested, so the request's ``ack`` is not consulted."""
+        chat = self.server.chat
+        if not chat.ready:
+            raise _Refused(503)
+        if confirm is not None:
+            status, mid = chat.confirm_all(confirm, text)
+            if status == sp_webchat.CONFIRM_STALE:
+                raise _Refused(409)
+            if status == sp_webchat.CONFIRM_LIMITED:
+                raise _Refused(429)
+            return self._send_json(202, {"message_id": mid, "state": "queued"})
+        # Preview: the cached discovery only, no resolution; nothing is accepted, charged or queued.
+        found = self.server.discovery.get()
+        if found.get("pending"):
+            raise _Refused(409)
+        typed = chat.state.typed
+        liveness = found.get("liveness") or {}
+        unchecked = set(found.get("unchecked") or ())
+        recipients, excluded = [], []
+        for member in dict.fromkeys(found["general"][0]):
+            if member == typed:
+                continue
+            # Only an incomplete check of #general itself refuses; `truncated` may concern other channels.
+            if member in unchecked or member not in liveness:
+                raise _Refused(409)
+            if liveness.get(member) == "gone":
+                excluded.append({"member": member, "reason": "gone"})
+            else:
+                recipients.append(member)
+        if not recipients or len(recipients) > sp_channels.ALL_MAX_RECIPIENTS:
+            raise _Refused(409)
+        recipients.sort()
+        nonce = chat.preview_all(text, recipients)
+        reply = {
+            "confirm": nonce, "expires_in": sp_webchat.NONCE_TTL, "recipients": recipients,
+            "excluded": sorted(excluded, key=lambda x: x["member"]),
+        }
+        if found.get("stale"):
+            reply["stale"] = True
+        self._send_json(200, reply)
+
+    def _check_origin(self):
+        origin = self._single("Origin")
+        if origin is None or origin != "http://" + self._single("Host"):
+            raise _Refused(403)
+
+    def _check_content_type(self):
+        values = self.headers.get_all("Content-Type") or []
+        if len(values) != 1 or not _JSON_TYPE_RE.fullmatch(values[0]):
+            raise _Refused(415)
+
+    def _content_length(self):
+        if self.headers.get_all("Transfer-Encoding") is not None:
+            raise _Refused(400)
+        values = self.headers.get_all("Content-Length") or []
+        if len(values) != 1 or not _DIGITS_RE.fullmatch(values[0]):
+            raise _Refused(400)
+        length = int(values[0])
+        if length < 1:
+            raise _Refused(400)
+        if length > BODY_MAX:
+            raise _Refused(413)
+        return length
+
+    def _read_body(self, length):
+        """Exactly ``length`` bytes within the connection's remaining deadline; 408 on a short read or a timeout."""
+        deadline = self._started + CONNECTION_DEADLINE - BODY_GRACE
+        chunks, have = [], 0
+        while have < length:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                raise _Refused(408)
+            try:
+                self.connection.settimeout(left)
+                chunk = self.rfile.read1(min(65536, length - have))
+            except OSError:  # includes socket.timeout
+                raise _Refused(408)
+            if not chunk:
+                raise _Refused(408)
+            chunks.append(chunk)
+            have += len(chunk)
+        return b"".join(chunks)
+
+    @staticmethod
+    def _parse_send(body):
+        """``(to, text, ack, confirm)`` of a strict ``{to, text, ack}`` JSON body, or one that also carries
+        ``confirm`` (a bounded string, allowed only for an `@all` to #general; None when absent). 400 for anything else."""
+        def no_duplicates(pairs):
+            keys = [k for k, _v in pairs]
+            if len(set(keys)) != len(keys):
+                raise ValueError("duplicate key")
+            return dict(pairs)
+
+        def no_constant(_name):
+            raise ValueError("not JSON")
+
+        def no_long_number(text):
+            # No field is numeric; before Python 3.11 int() of a huge numeral is quadratic work.
+            if len(text) > NUMERAL_MAX:
+                raise ValueError("numeral too long")
+            return int(text)
+
+        def no_long_float(text):
+            if len(text) > NUMERAL_MAX:
+                raise ValueError("numeral too long")
+            return float(text)
+
+        try:
+            obj = json.loads(body.decode("utf-8"), object_pairs_hook=no_duplicates, parse_constant=no_constant,
+                             parse_int=no_long_number, parse_float=no_long_float)
+        except (ValueError, RecursionError):  # includes UnicodeDecodeError
+            raise _Refused(400)
+        if not isinstance(obj, dict) or set(obj) not in ({"to", "text", "ack"}, {"to", "text", "ack", "confirm"}):
+            raise _Refused(400)
+        to, text, ack, confirm = obj["to"], obj["text"], obj["ack"], obj.get("confirm")
+        if type(text) is not str or not 1 <= len(text) <= sp_constants.MAX_TEXT_CHARS or type(ack) is not bool:
+            raise _Refused(400)
+        if "confirm" in obj:
+            # A nonce belongs to an `@all` to #general and to nothing else.
+            if (type(confirm) is not str or not 1 <= len(confirm) <= CONFIRM_MAX or to != "#" + sp_constants.CHANNEL_GENERAL
+                    or sp_channels.ALL_RE.match(text) is None):
+                raise _Refused(400)
+        try:
+            text.encode("utf-8")
+        except UnicodeEncodeError:  # a lone surrogate (a JSON ud800 escape) can be neither journaled nor delivered
+            raise _Refused(400)
+        if type(to) is str:
+            if not to.startswith("#") or not sp_constants.CHANNEL_NAME_RE.fullmatch(to[1:]):
+                raise _Refused(400)
+            return to[1:], text, ack, confirm
+        if type(to) is not list or not 1 <= len(to) <= SEND_RECIPIENTS_MAX or len(set(map(str, to))) != len(to):
+            raise _Refused(400)
+        for address in to:
+            if type(address) is not str:
+                raise _Refused(400)
+            try:
+                kind = sp_identity.parse_address(address)["kind"]
+            except ValueError:
+                raise _Refused(400)
+            if kind == "web":
+                raise _Refused(400)
+        return to, text, ack, confirm
 
     # -- static ------------------------------------------------------------
 
@@ -543,7 +767,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if path == "/api/state":
             self._query(query, ())
             found = self.server.discovery.get()
-            view = sp_webdata.state_view(found)
+            chat = self.server.chat
+            view = sp_webdata.state_view(found, chat=chat.info() if chat is not None and chat.ready else None)
             if found.get("truncated"):
                 view["discovery"]["truncated"] = True
             return self._send_json(200, view)
@@ -568,7 +793,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             since = self._query(query, ("since",)).get("since")
             if since is None or not _CURSOR_RE.fullmatch(since):
                 raise _Refused(400)
-            return self._send_json(200, sp_webdata.changes(since))
+            chat = self.server.chat
+            browser = chat.state if chat is not None and chat.ready else None
+            return self._send_json(200, sp_webdata.changes(since, browser=browser))
         if path == "/api/all":
             token = self._query(query, ("next",)).get("next")
             if token is not None and not _CURSOR_RE.fullmatch(token):
@@ -596,27 +823,51 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 def cmd_web(args):
     port = args.port
+    chat = bool(getattr(args, "chat", False))
     if port != 0 and not 1024 <= port <= 65535:
         sys.stderr.write("error: --port must be 0 (any free port) or 1024-65535\n")
         return 2
     try:
-        server = Server(port)
+        server = Server(port, chat=chat)
     except OSError as exc:
         sys.stderr.write("error: cannot listen on 127.0.0.1:%d: %s\n" % (port, exc.strerror or exc))
         return 1
-    stop = threading.Event()
+    stopping = False
+
+    def on_signal(_signum, _frame):
+        # Only a plain assignment and `request_stop` (one attribute assignment): neither takes a lock,
+        # so a signal that lands while the main thread is waiting or inside its own teardown cannot
+        # deadlock it. (`threading.Event.set` takes the event's internal lock, so no Event is used.)
+        # The main loop polls the flag and does the work in its `finally`.
+        nonlocal stopping
+        stopping = True
+        if server.chat is not None:
+            server.chat.request_stop()
+
     previous = {}
     for number in (signal.SIGINT, signal.SIGTERM):
-        previous[number] = signal.signal(number, lambda _signum, _frame: stop.set())
-    serving = threading.Thread(target=server.serve_forever, name="peers-web-serve", daemon=True)
-    serving.start()
+        previous[number] = signal.signal(number, on_signal)
+    serving = None
     try:
+        if chat:
+            try:
+                server.chat.start()
+            except (sp_webpeer.WebPeerError, OSError) as exc:
+                if stopping:
+                    return 0  # asked to stop while starting
+                sys.stderr.write("error: %s\n" % exc)
+                return 1
+        serving = threading.Thread(target=server.serve_forever, name="peers-web-serve", daemon=True)
+        serving.start()
         print("http://127.0.0.1:%d/#token=%s" % (server.port, server.token), flush=True)
-        while not stop.wait(1.0):
-            pass
+        while not stopping:
+            time.sleep(0.5)
     finally:
-        server.shutdown()
-        serving.join(5)
+        if serving is not None:
+            server.shutdown()
+            serving.join(5)
+        if server.chat is not None:
+            server.chat.stop()
         server.server_close()
         for number, handler in previous.items():
             signal.signal(number, handler)

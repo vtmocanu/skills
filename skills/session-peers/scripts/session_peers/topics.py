@@ -297,6 +297,8 @@ def topic_sender(args):
     claude = None
     sock = os.environ.get("CLAUDE_CODE_MESSAGING_SOCKET")
     rec = sp_claude.claude_record_by_socket(sock) if sock else None
+    if rec and sp_claude.is_web_record(rec):
+        rec = None  # the browser peer posts through its own channel path, never as a Claude session
     if rec and sp_runtime.is_uuid(rec.get("sessionId")):
         claude = {"kind": "cc", "uuid": rec["sessionId"], "name": rec.get("name"),
                   "pid": rec.get("pid")}

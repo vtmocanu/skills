@@ -121,6 +121,42 @@ class WebAssetTests(unittest.TestCase):
         }
         for label, pattern in forbidden.items():
             self.assertIsNone(re.search(pattern, self.js), label)
+        # Handlers are attached with addEventListener (the CSP allows no inline handler); no handler
+        # property is assigned, and no text is parsed as markup by any other name.
+        self.assertIsNone(re.search(r"\.\s*on[a-z]+\s*=[^=]", self.js), "handler property")
+        self.assertIsNone(re.search(r"\b(?:innerText|outerText)\s*=", self.js), "innerText/outerText")
+        self.assertIsNone(re.search(r"\bparseFromString\b|\bsetHTML(?:Unsafe)?\b", self.js), "HTML parsing")
+
+    def test_el_allowlists_hold_no_active_tag_or_attribute(self):
+        tags = re.search(r"var HTML_TAGS = \[([^\]]*)\]", self.js).group(1)
+        attrs = re.search(r"var ATTRS = \[([^\]]*)\]", self.js).group(1)
+        tag_names = re.findall(r'"([^"]*)"', tags)
+        attr_names = re.findall(r'"([^"]*)"', attrs)
+        # Exact sets: any addition is a deliberate edit here. The composer's form controls are allowed;
+        # nothing that loads, navigates, submits or runs is (no script, iframe, a, img, form, style...;
+        # no on*, href, src, action, formaction, style, srcdoc, value, name, form, autofocus).
+        self.assertEqual(sorted(tag_names), sorted({
+            "div", "span", "p", "b", "i", "code", "button", "ul", "li", "dl", "dt", "dd", "h1", "h2", "small",
+            "strong", "label", "input", "textarea"}))
+        self.assertEqual(len(tag_names), len(set(tag_names)))
+        self.assertEqual(sorted(attr_names), sorted({
+            "class", "role", "title", "type", "tabindex", "checked", "disabled", "placeholder", "rows", "maxlength"}))
+        self.assertEqual(len(attr_names), len(set(attr_names)))
+
+    def test_the_all_confirmation_is_an_in_page_dialog(self):
+        # #162 M2: the @all recipient list is confirmed in a dialog built by el() (a div with
+        # role="dialog" and aria-modal, both inside the existing allowlist), never a native prompt
+        # that can show only a count and cannot list the recipients.
+        self.assertIsNone(re.search(r"\b(?:confirm|alert|prompt)\s*\(", self.js), "native dialog")
+        self.assertNotRegex(self.js, r"\bshowModal\b|\"dialog\"\s*,\s*\{|createElement\(\s*\"dialog\"")
+        self.assertIn('role: "dialog", "aria-modal": "true"', self.js)
+        # Its host sits outside #app, so the page behind can be made inert while it is open.
+        shell = _Shell()
+        shell.feed(self.html)
+        ids = [dict(attrs).get("id") for _tag, attrs in shell.tags]
+        self.assertIn("dialoghost", ids)
+        self.assertGreater(ids.index("dialoghost"), ids.index("mobtabs"))
+        self.assertRegex(self.html, r'</div>\n<div id="dialoghost"></div>\n<script')
 
     def test_timers_take_functions_never_strings(self):
         calls = list(re.finditer(r"\bset(?:Timeout|Interval)\s*\(\s*", self.js))
@@ -132,10 +168,13 @@ class WebAssetTests(unittest.TestCase):
 
     def test_set_attribute_is_called_only_inside_el(self):
         start, end = function_body(self.js, "el")
+        # describedBy() is the one other setter: it links the composer's reason, and names nothing else.
+        d_start, d_end = function_body(self.js, "describedBy")
+        self.assertEqual(re.findall(r'setAttribute\(\s*("[^"]*"|[^,]*)', self.js[d_start:d_end]), ['"aria-describedby"'])
         uses = [m.start() for m in re.finditer(r"setAttribute(?:NS)?\b", self.js)]
         self.assertTrue(uses, "el() sets attributes")
         for pos in uses:
-            self.assertTrue(start <= pos < end, "setAttribute outside el() at offset %d" % pos)
+            self.assertTrue(start <= pos < end or d_start <= pos < d_end, "setAttribute outside el() at offset %d" % pos)
         self.assertIsNone(re.search(r"\.\s*attributes\s*\[|\bsetAttributeNode\b|\.\s*(?:href|src|style)\s*=", self.js))
 
     def test_el_enforces_an_attribute_allowlist(self):
@@ -163,7 +202,12 @@ class WebAssetTests(unittest.TestCase):
         self.assertIn('credentials: "omit"', self.js)
         self.assertIn('cache: "no-store"', self.js)
         self.assertIn('redirect: "error"', self.js)
-        self.assertIn('referrerPolicy: "no-referrer"', self.js)
+        # A GET sends no referrer; the chat-mode POST keeps a same-origin policy, a defence against
+        # browsers that have sent "Origin: null" under no-referrer, so the server sees the real Origin.
+        self.assertIn('referrerPolicy: post ? "same-origin" : "no-referrer"', self.js)
+        self.assertIn('method: post ? "POST" : "GET"', self.js)
+        self.assertIn('headers["Content-Type"] = "application/json"', self.js)
+        self.assertIn('var SEND_PATH = "/api/send";', self.js)
         for literal in re.findall(r'"(/[^"]*)"', self.js):
             self.assertTrue(literal == "/" or literal.startswith("/api/"), literal)
         self.assertNotRegex(self.js, r"\b(?:XMLHttpRequest|WebSocket|EventSource|sendBeacon)\b")
@@ -190,7 +234,9 @@ class WebAssetTests(unittest.TestCase):
     def test_light_theme_text_contrast_is_aa(self):
         tokens = light_tokens(self.css)
         pairs = [("ink-3", "line-2"), ("ink-3", "paper"), ("ink-3", "raised"), ("ink-3", "panel"),
-                 ("mention", "paper"), ("mention", "raised"), ("ink-2", "line-2")]
+                 ("mention", "paper"), ("mention", "raised"), ("ink-2", "line-2"),
+                 # chat mode: the browser peer's name, the authority line and the chat badge
+                 ("human", "paper"), ("human", "panel"), ("human", "raised"), ("human", "human-bg")]
         for fg, bg in pairs:
             ratio = contrast(tokens[fg], tokens[bg])
             self.assertGreaterEqual(ratio, 4.5, "--%s on --%s is %.2f:1" % (fg, bg, ratio))

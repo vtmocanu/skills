@@ -14,9 +14,12 @@ import sys
 from . import protocol as sp_protocol, runtime as sp_runtime
 from . import claude as sp_claude, codex as sp_codex, identity as sp_identity, opencode as sp_opencode, requests as sp_requests
 
-KINDS = ("cc", "codex", "oc")
-LABELS = {"cc": "Claude Code session", "codex": "Codex thread", "oc": "OpenCode session"}
-_RUNTIME_KIND = {"claude": "cc", "codex": "codex", "opencode": "oc"}
+KINDS = ("cc", "codex", "oc", "web")
+LABELS = {
+    "cc": "Claude Code session", "codex": "Codex thread", "oc": "OpenCode session",
+    "web": "browser peer",
+}
+_RUNTIME_KIND = {"claude": "cc", "codex": "codex", "opencode": "oc", "web": "web"}
 REQUESTS = ("ask", "dispatch")
 # Never matched by `verify`: the existing prefix check refuses before delivery.
 UNCHECKED = "unchecked-prefix"
@@ -46,9 +49,11 @@ class _Refusal(Exception):
 
 
 def record_runtime(rec):
-    """`opencode`, `codex` (a shim's registry record) or `claude`."""
+    """`opencode`, `web` (the browser peer's record), `codex` (a shim's registry record) or `claude`."""
     if rec.get("_runtime") == "opencode":
         return "opencode"
+    if rec.get("entrypoint") == "web":
+        return "web"
     if rec.get("entrypoint") == "codex" and sp_runtime.is_uuid(rec.get("sessionId")):
         return "codex"
     return "claude"
@@ -72,6 +77,16 @@ def sender_kind(args):
 
     "unknown" is an OpenCode id beside a Claude or Codex one: delivery refuses it.
     """
+    web = getattr(args, "web_sender", None)
+    if web is not None:
+        # The chat server sends for the browser peer; its own environment (a
+        # scrubbed copy of whatever launched it) says nothing about the sender,
+        # so a malformed browser sender is refused, never attributed to it.
+        try:
+            sid = sp_identity.parse_address("web:%s" % web["sid"])["uuid"]
+        except (ValueError, TypeError, KeyError):
+            raise _Refusal(2, "error: malformed browser sender; nothing was sent")
+        return Sender("web", sid)
     claude = _claude_indicator()
     explicit = getattr(args, "from_thread", None)
     raw = explicit or os.environ.get("CODEX_THREAD_ID") or os.environ.get("CODEX_SESSION_ID")
@@ -269,6 +284,13 @@ def _claude_to_claude(verb, rec):
 
 def _verdict(args, verb, sender, tgt):
     """The refusal text for this sender, verb and target, or None when allowed."""
+    if tgt.runtime == "web":
+        if verb in ("send", "channel"):
+            return None
+        return (
+            "error: %s cannot reach the browser peer web:%s: a person answers it by hand, "
+            "with no request id or await. Use send." % (verb, sp_identity.display_id("web", tgt.ident))
+        )
     if tgt.runtime == "codex":
         if verb in REQUESTS:
             return _request_to_codex(verb, sender, tgt.ident)
@@ -350,7 +372,47 @@ def _resolve_bare(args, verb, value, sender):
     return Target(None, ident, runtime, found.get("name"), rec)
 
 
+def web_record(ident):
+    """The live browser-peer record for ``ident``, else None; raises _Refusal when unverifiable."""
+    for rec in sp_claude.read_claude_records():
+        if rec.get("entrypoint") != "web" or rec.get("sessionId") != ident:
+            continue
+        state = sp_claude.record_liveness(rec)
+        if state == "live":
+            return rec
+        if state == "unverified":
+            raise _Refusal(
+                1,
+                "error: cannot verify browser peer web:%s because the process-start probe is "
+                "unavailable; retry outside the sandbox or with host permission"
+                % sp_identity.display_id("web", ident),
+            )
+    return None
+
+
+def _resolve_web(args, verb, rest):
+    try:
+        ident = sp_identity.parse_address("web:" + rest)["uuid"]
+    except ValueError as exc:
+        raise _Refusal(2, "error: %s" % exc)
+    if verb not in ("send", "channel"):
+        # `_verdict` refuses this verb; the offline advice below names --record, which it lacks.
+        return Target("web", ident, "web", None, None)
+    rec = web_record(ident)
+    if rec is None and not getattr(args, "record", False):
+        # Without --record there is nothing to leave behind for a later page open.
+        raise _Refusal(
+            1,
+            "error: browser peer web:%s is not running; nothing was sent. "
+            "Use --record to leave the message in the journal for when it starts." % ident,
+        )
+    # No live record with --record: an offline verdict, `_send_web` journals it and reports the failed transport.
+    return Target("web", ident, "web", rec.get("name") if rec else None, rec)
+
+
 def _resolve_typed(args, verb, prefix, rest, sender):
+    if prefix == "web":
+        return _resolve_web(args, verb, rest)
     if prefix == "cc":
         try:
             rec = sp_claude._resolve_claude_record(rest)

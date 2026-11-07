@@ -3,6 +3,7 @@
 from __future__ import annotations
 import contextlib
 import hashlib
+import io
 import json
 import os
 import subprocess
@@ -62,6 +63,65 @@ def quiet():
         yield
     finally:
         _QUIET.depth = depth
+
+
+class ThreadRouter:
+    """A stream proxy for chat mode: writes go to this thread's capture buffer when one is set.
+
+    ``contextlib.redirect_stdout`` swaps ``sys.stdout`` for the whole process, so a
+    second thread's output would land in the first thread's buffer. With a router
+    installed as ``sys.stdout``/``sys.stderr``, ``capture_output`` sets a buffer for
+    the calling thread only; every other thread still writes to the wrapped stream.
+    """
+
+    def __init__(self, original):
+        self._original = original
+        self._local = threading.local()
+
+    @property
+    def original(self):
+        return self._original
+
+    def _target(self):
+        buffer = getattr(self._local, "buffer", None)
+        return self._original if buffer is None else buffer
+
+    def capture(self, buffer):
+        """Set (or, with None, clear) the calling thread's buffer; the previous one."""
+        previous = getattr(self._local, "buffer", None)
+        self._local.buffer = buffer
+        return previous
+
+    def write(self, text):
+        return self._target().write(text)
+
+    def flush(self):
+        return self._target().flush()
+
+    def __getattr__(self, name):
+        return getattr(self._original, name)
+
+
+@contextlib.contextmanager
+def capture_output():
+    """Yield ``(out, err)`` StringIO buffers holding what the block writes to stdout and stderr.
+
+    With ``ThreadRouter``s installed as ``sys.stdout`` and ``sys.stderr`` (chat mode) only the
+    calling thread is captured. Otherwise the process-wide ``redirect_stdout`` and
+    ``redirect_stderr`` apply, exactly as the CLI always did.
+    """
+    out, err = io.StringIO(), io.StringIO()
+    out_router, err_router = sys.stdout, sys.stderr
+    if isinstance(out_router, ThreadRouter) and isinstance(err_router, ThreadRouter):
+        previous = (out_router.capture(out), err_router.capture(err))
+        try:
+            yield out, err
+        finally:
+            out_router.capture(previous[0])
+            err_router.capture(previous[1])
+    else:
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            yield out, err
 
 
 def log(msg: str) -> None:

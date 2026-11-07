@@ -190,7 +190,11 @@ def expand_buddy(value, args, purpose):
 def _claude_status(uuid):
     status = {"name": None, "live": None, "registered": None, "shim_pid": None,
               "status": None, "paused": None}
-    records = [r for r in sp_claude.read_claude_records() if r.get("sessionId") == uuid]
+    # The browser peer is never a buddy, so its record is not a Claude session here.
+    records = [
+        r for r in sp_claude.read_claude_records()
+        if r.get("sessionId") == uuid and not sp_claude.is_web_record(r)
+    ]
     states = [(r, sp_claude.record_liveness(r)) for r in records]
     live = [r for r, state in states if state == "live"]
     if live:
@@ -725,7 +729,7 @@ def _binding_conflict(owner, buddy):
     evidence, reclaimable = [], {}
     refused = False
     for sid in sorted(holders):
-        matching = [r for r in registry if r["sessionId"] == sid]
+        matching = [r for r in registry if r["sessionId"] == sid and not sp_claude.is_web_record(r)]
         if error:
             decisions = [("unverified", error)]
         elif not matching:

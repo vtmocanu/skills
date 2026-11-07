@@ -484,8 +484,12 @@ def _register_maintenance(sub):
     p_doctor = sub.add_parser("doctor", help="check the bridge end to end")
     p_doctor.set_defaults(func=sp_diagnostics.cmd_doctor)
 
-    p_web = sub.add_parser("web", help="local read-only dashboard")
+    p_web = sub.add_parser("web", help="local dashboard (read-only; --chat adds a browser peer and sending)")
     p_web.add_argument("--port", type=int, default=0, help="TCP port on 127.0.0.1 (0 or 1024-65535; default: ephemeral)")
+    p_web.add_argument(
+        "--chat", action="store_true",
+        help="chat mode: register a browser peer (web-<user>) and accept POST /api/send; "
+             "without it the server only reads")
     p_web.set_defaults(func=sp_web.cmd_web)
 
 

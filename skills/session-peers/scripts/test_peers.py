@@ -46,6 +46,10 @@ MODULES = (
     "peer_tests.test_webdata",
     "peer_tests.test_web_server",
     "peer_tests.test_web_assets",
+    "peer_tests.test_web_routing",
+    "peer_tests.test_web_peer",
+    "peer_tests.test_web_chat",
+    "peer_tests.test_web_confirm",
 )
 
 # Expose test classes so unittest's existing TestClass[.test_method] selectors
