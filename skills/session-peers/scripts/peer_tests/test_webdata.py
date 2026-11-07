@@ -18,7 +18,7 @@ import unittest
 from unittest import mock
 
 from peer_tests.support import *  # noqa: F401,F403
-from peer_tests.test_channel_send import ChannelSendBase, HOLDER
+from peer_tests.test_channel_send import MISSING_OC, ChannelSendBase, HOLDER
 from peer_tests.test_opencode import OC_B
 from session_peers import channels as sp_channels, journal as sp_journal, storage as sp_storage, topics as sp_topics, webdata
 
@@ -191,6 +191,8 @@ class WebdataPureTests(unittest.TestCase):
         self.assertEqual(
             webdata.ack_tally(rows), {"acked": 1, "total": 3, "missing": ["b", "d"], "unverified": 1})
         self.assertEqual(webdata.ack_tally([{"recipient": "a", "state": "recorded"}])["total"], 0)
+        gone = [{"recipient": "e", "state": "skipped: gone", "ack": "not requested"}]
+        self.assertEqual(webdata.ack_tally(gone), {"acked": 0, "total": 0, "missing": [], "unverified": 0})
 
     def test_coverage_native_claude(self):
         self.assertEqual(webdata.channel_coverage(["codex:x", "cc:y"]), {"native_claude": True})
@@ -372,6 +374,19 @@ class WebdataParityTests(WebdataBase):
         self.assertTrue(plain)
         last = [e for e in webdata.channel_page("two")["entries"] if e["kind"] == "send"][-1]
         self.assertNotIn("tally", last)
+
+    def test_a_gone_recipient_is_outside_the_tally(self):
+        # A gone member is in the send's recipients but is never journaled, so its ACK is
+        # "not requested": counting it would leave the tally and the missing-ACK badge open forever.
+        sp_channels.create_channel("gone", self.me, ["codex:" + self.tid, "oc:" + MISSING_OC])
+        rc, result, err = self.send("--record", name="gone", message="@all freeze")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(result["outcomes"]["oc:" + MISSING_OC], "skipped: gone")
+        sp_journal.ack(result["message_id"], "codex:" + self.tid)
+        send = [e for e in webdata.channel_page("gone")["entries"] if e["kind"] == "send"][0]
+        rows = {r["recipient"]: r for r in send["delivery"]["recipients"]}
+        self.assertEqual(rows["oc:" + MISSING_OC]["ack"], "not requested")
+        self.assertEqual(send["tally"], {"acked": 1, "total": 1, "missing": [], "unverified": 0})
 
     def test_membership_entries_and_outcome_rows(self):
         self.send()

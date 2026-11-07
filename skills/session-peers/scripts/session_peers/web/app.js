@@ -304,10 +304,15 @@
     return "ACK " + a;
   }
 
+  // A refused recipient, or one whose ACK was never requested (a gone member), is outside the tally.
+  function tallied(row) {
+    return !!row && "ack" in row && str(row.state).indexOf("refused: ") !== 0 && row.ack !== "not requested";
+  }
+
   function tallyOf(rows) {
     var t = { acked: 0, total: 0, missing: [], unverified: 0 };
     (rows || []).forEach(function (row) {
-      if (!row || !("ack" in row) || str(row.state).indexOf("refused: ") === 0) return;
+      if (!tallied(row)) return;
       t.total += 1;
       if (row.ack === "acked") t.acked += 1;
       else {
@@ -339,7 +344,7 @@
   function renderTally(entry) {
     var rows = entry.delivery && Array.isArray(entry.delivery.recipients) ? entry.delivery.recipients : [];
     var t = entry.tally && typeof entry.tally === "object" ? entry.tally : tallyOf(rows);
-    var counted = rows.filter(function (r) { return r && "ack" in r && str(r.state).indexOf("refused: ") !== 0; });
+    var counted = rows.filter(tallied);
     var line = t.acked + " of " + t.total + " acknowledged";
     if (t.unverified) line += " (" + t.unverified + " unverified)";
     return el("div", { class: "tallybox" },

@@ -48,7 +48,8 @@ the same user. Connection, header and read-budget details are in the
   `skipped: gone`, `refused: <reason>`, `recorded`, or `acked` once the ACK is
   journaled) and the send's own state (`recorded`, `complete`, `in progress`,
   `unknown`, `unverified`). An `@all` post adds an ACK tally and names the
-  missing recipients; a recipient's journaled transport error is shown on its
+  missing recipients (refused and gone recipients, whose ACK was never
+  requested, are outside it); a recipient's journaled transport error is shown on its
   row. Membership changes (joined, left, removed, handover, created) are
   entries too.
 - **Details panel.** Runtime, state and the typed address of a member. `Copy

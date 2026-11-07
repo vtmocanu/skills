@@ -344,6 +344,18 @@ test("@all broadcasts show an ACK tally; refused recipients stay out of the deno
   assert.deepEqual(JSON.parse(JSON.stringify(app.tallyOf(recipients))), { acked: 1, total: 2, missing: [CODEX_B], unverified: 0 })
 })
 
+test("a gone recipient (ACK never requested) stays out of the tally and its chips", () => {
+  const { app } = load()
+  app.setState(stateFixture())
+  const recipients = [row(CC_A, "acked", { ack: "acked" }), row(OC_C, "skipped: gone", { ack: "not requested" })]
+  assert.deepEqual(JSON.parse(JSON.stringify(app.tallyOf(recipients))), { acked: 1, total: 1, missing: [], unverified: 0 })
+  const entry = sendEntry(7, "@all merge freeze", { delivery: { state: "complete", recipients } })
+  const node = app.renderEntry(entry, { channelKey: "general" })
+  assert.ok(node.textContent.includes("1 of 1 acknowledged"))
+  const chips = elementsOf(node).filter((n) => n.parentNode && (n.parentNode.attributes.class || "") === "tally")
+  assert.deepEqual(chips.map((c) => c.attributes.class), ["yes"])
+})
+
 test("membership, oversized and #general coverage entries; outcomes fold into their send", () => {
   const { app } = load()
   app.setState(stateFixture())

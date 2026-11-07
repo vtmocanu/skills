@@ -1002,10 +1002,13 @@ def detect_verdict(body):
 def ack_tally(rows):
     """``{"acked", "total", "missing": [slots], "unverified"}`` of a journaled post's rows.
 
-    A refused recipient is outside the denominator, as in the CLI."""
+    A refused recipient is outside the denominator, as in the CLI, and so is one whose ACK was
+    never requested (a gone member is a recipient but is not journaled)."""
     total, acked, missing, unverified = 0, 0, [], 0
     for row in rows:
         if "ack" not in row or str(row.get("state", "")).startswith(sp_channels.OUTCOME_REFUSED):
+            continue
+        if row["ack"] == "not requested":
             continue
         total += 1
         if row["ack"] == sp_channels.STATE_ACKED:
