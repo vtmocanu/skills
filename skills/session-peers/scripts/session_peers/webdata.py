@@ -36,6 +36,7 @@ from . import budgets as sp_budgets, channels as sp_channels, constants as sp_co
 from . import journal as sp_journal, runtime as sp_runtime, topics as sp_topics
 
 REQUEST_BUDGET = 8 * 1024 * 1024
+HYDRATION_SHARE = 4  # a first page's hydration read takes at most 1/HYDRATION_SHARE of the budget
 TOPIC_BUDGET = 1024 * 1024
 ENTRY_LINE_MAX = 6 * sp_constants.MAX_TEXT_CHARS + 512 * 1024
 PAGE_MAX = 200
@@ -820,8 +821,11 @@ class JournalContext:
         return None, {}, ctx is not None and ctx.get("state") == "unreached"
 
 
-def read_journal_context(budget, want, with_position=False):
+def read_journal_context(budget, want, with_position=False, limit=None):
     """One ``journal.read_since(None, remaining, want=...)``; its bytes are charged to ``budget``.
+
+    ``limit`` caps the read below the remaining budget, so a caller can keep the rest for other
+    sections; a message the capped read does not reach is unverified.
 
     A journal that cannot be read, or no budget left for it, makes every ACK unverified.
     With ``with_position`` the answer is ``(JournalContext, position)``: ``position`` is
@@ -837,10 +841,11 @@ def read_journal_context(budget, want, with_position=False):
 
     if not ids:
         return answer(JournalContext())
-    if budget.remaining() <= 0:
+    room = budget.remaining() if limit is None else min(budget.remaining(), limit)
+    if room <= 0:
         return answer(JournalContext(available=False, budget_skipped=True))
     try:
-        result = sp_journal.read_since(None, budget.remaining(), want=ids, strict=True)
+        result = sp_journal.read_since(None, room, want=ids, strict=True)
     except Exception:  # an unreadable journal only makes ACK state unverified
         return answer(JournalContext(available=False))
     budget.charge(result.get("bytes") or 0)
@@ -1652,7 +1657,10 @@ def changes(cursor_text, budget=None, now=None, browser=None):
             mids = browser.restorable_mids()
             if mids:
                 pre, _skipped = _journal_baseline(budget)
-                ctx, pos = read_journal_context(budget, mids, with_position=True)
+                # A quarter of the budget at most: the log section and the tail keep the rest, so a
+                # journal that never reaches every wanted id cannot starve the feed on every poll.
+                ctx, pos = read_journal_context(budget, mids, with_position=True, limit=budget.remaining() // HYDRATION_SHARE)
+                partial = partial or ctx.prefix_unread or not ctx.available
                 _hydrate_browser(browser, ctx, mids)
                 _after_first_page_hydration()
                 hydrated_at = pos or pre

@@ -71,6 +71,7 @@ BODY_MAX = 1024 * 1024  # largest POST body (Content-Length) a chat-mode send ac
 BODY_GRACE = 0.5  # the body read gives up this long before the connection cut, so the 408 can still be written
 SEND_PATH = "/api/send"
 SEND_RECIPIENTS_MAX = 64
+NUMERAL_MAX = 32  # longest JSON numeral a send body may carry (it has no numeric field)
 ASSET_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
 
 _ASSETS = {
@@ -621,14 +622,30 @@ class Handler(http.server.BaseHTTPRequestHandler):
         def no_constant(_name):
             raise ValueError("not JSON")
 
+        def no_long_number(text):
+            # No field is numeric; before Python 3.11 int() of a huge numeral is quadratic work.
+            if len(text) > NUMERAL_MAX:
+                raise ValueError("numeral too long")
+            return int(text)
+
+        def no_long_float(text):
+            if len(text) > NUMERAL_MAX:
+                raise ValueError("numeral too long")
+            return float(text)
+
         try:
-            obj = json.loads(body.decode("utf-8"), object_pairs_hook=no_duplicates, parse_constant=no_constant)
+            obj = json.loads(body.decode("utf-8"), object_pairs_hook=no_duplicates, parse_constant=no_constant,
+                             parse_int=no_long_number, parse_float=no_long_float)
         except (ValueError, RecursionError):  # includes UnicodeDecodeError
             raise _Refused(400)
         if not isinstance(obj, dict) or set(obj) != {"to", "text", "ack"}:
             raise _Refused(400)
         to, text, ack = obj["to"], obj["text"], obj["ack"]
         if type(text) is not str or not 1 <= len(text) <= sp_constants.MAX_TEXT_CHARS or type(ack) is not bool:
+            raise _Refused(400)
+        try:
+            text.encode("utf-8")
+        except UnicodeEncodeError:  # a lone surrogate (a JSON ud800 escape) can be neither journaled nor delivered
             raise _Refused(400)
         if type(to) is str:
             if not to.startswith("#") or not sp_constants.CHANNEL_NAME_RE.fullmatch(to[1:]):
@@ -757,12 +774,15 @@ def cmd_web(args):
     except OSError as exc:
         sys.stderr.write("error: cannot listen on 127.0.0.1:%d: %s\n" % (port, exc.strerror or exc))
         return 1
-    stop = threading.Event()
+    stopping = False
 
     def on_signal(_signum, _frame):
-        # Only these two calls: neither takes a lock, so a signal that lands inside the main
-        # thread's own teardown cannot deadlock it. The main loop does the work in its `finally`.
-        stop.set()
+        # Only a plain assignment and `request_stop` (one attribute assignment): neither takes a lock,
+        # so a signal that lands while the main thread is waiting or inside its own teardown cannot
+        # deadlock it. (`threading.Event.set` takes the event's internal lock, so no Event is used.)
+        # The main loop polls the flag and does the work in its `finally`.
+        nonlocal stopping
+        stopping = True
         if server.chat is not None:
             server.chat.request_stop()
 
@@ -775,15 +795,15 @@ def cmd_web(args):
             try:
                 server.chat.start()
             except (sp_webpeer.WebPeerError, OSError) as exc:
-                if stop.is_set():
+                if stopping:
                     return 0  # asked to stop while starting
                 sys.stderr.write("error: %s\n" % exc)
                 return 1
         serving = threading.Thread(target=server.serve_forever, name="peers-web-serve", daemon=True)
         serving.start()
         print("http://127.0.0.1:%d/#token=%s" % (server.port, server.token), flush=True)
-        while not stop.wait(0.5):
-            pass
+        while not stopping:
+            time.sleep(0.5)
     finally:
         if serving is not None:
             server.shutdown()

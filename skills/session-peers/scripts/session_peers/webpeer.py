@@ -477,7 +477,8 @@ class BrowserPeer:
         except Exception as exc:
             # Journaled but never shown: no ack and no refusal, so the sender
             # sees a closed connection ("outcome unknown") rather than a false ack.
-            sp_runtime.log("browser peer: on_inbound failed, dropping the connection unacknowledged: %r" % (exc,))
+            # The exception text can carry the message body, so only its type is logged.
+            sp_runtime.log("browser peer: on_inbound failed, dropping the connection unacknowledged: %s" % type(exc).__name__)
             return False
         self._answer(conn, {"type": "control", "action": "peer_inbox_ack", "orig_msg_id": orig})
 

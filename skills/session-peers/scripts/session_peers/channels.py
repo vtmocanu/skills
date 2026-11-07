@@ -1836,9 +1836,10 @@ def send_as_web(key, web_sender, body, ack, mid, deliver_guard=None, expected_re
     caller's lowercase uuid4. ``deliver_guard`` and ``resolve_guard`` are
     context-manager factories: the first is entered around each member's
     delivery, the second around the resolution and the two writes (journal,
-    history); neither is held across a pacing sleep. ``on_journaled()`` is called
-    once the journal write has succeeded, so a caller that sees an exception
-    escape afterwards knows the message was recorded. ``#general`` is refused
+    history); neither is held across a pacing sleep. ``on_journaled(deliver)`` is
+    called once the journal write has succeeded, with the typed ids that will be
+    delivered to, so a caller that sees an exception escape afterwards knows the
+    message was recorded and can show its recipients during the fan-out. ``#general`` is refused
     unless ``expected_recipients`` (typed ids the caller previewed) is given and
     ``body`` is an ``@all``; the live deliverable set must then equal it.
 
@@ -1881,7 +1882,7 @@ def send_as_web(key, web_sender, body, ack, mid, deliver_guard=None, expected_re
         except (ChannelError, sp_journal.JournalError, ValueError, KeyError, TypeError, OSError) as exc:
             return refuse(exc)
         if on_journaled is not None:
-            on_journaled()
+            on_journaled(list(plan.deliver))
         _failpoint("send_after_journal")
         try:
             lock = _append_send(plan, {"ack_requested": ask})

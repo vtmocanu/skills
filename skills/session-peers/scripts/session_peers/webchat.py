@@ -1,7 +1,9 @@
 """Chat mode of the web dashboard (PRD #162): the Browser feed state, the send gate and the single send worker.
 
-``web.py`` owns the HTTP side and hands a validated ``POST /api/send`` to ``Chat.accept``. Nothing here
-runs on a request thread except that call and the readers of ``BrowserState``:
+``web.py`` owns the HTTP side and hands a validated ``POST /api/send`` to ``Chat.accept``. The only
+code here that runs on a request thread is that call and the ``BrowserState`` methods ``webdata`` calls
+(``page`` and the readers, plus ``apply_journal``, which ``webdata``'s ``_hydrate_browser`` and
+``_apply_browser_updates`` use to write ACK state into rows); every one of them takes the state lock:
 
 * ``SendGate`` is the one acceptance lock. Under it a send is checked against the rate limits and the
   worker's queue capacity, charged, given a slot, and handed to ``BrowserState`` (a ``queued`` status row,
@@ -10,7 +12,8 @@ runs on a request thread except that call and the readers of ``BrowserState``:
   journal, delivers and records the outcomes in the row. It holds the discovery lock around resolution,
   the writes and each member delivery, and never across a pacing sleep. Nothing is retried.
 * ``BrowserState`` is the in-memory feed, guarded by one lock: the bounded log of inbound messages and
-  direct sends, the status rows of every send, and the set of channel-post ids.
+  direct sends, the status rows of every send. A channel post has a row but never a log entry, so the feed
+  never shows it as a message.
 
 Everything a peer supplies (a body, a sender name, a status detail) is stored as received. The JSON
 encoder and ``webdata``'s escaping make it safe on the wire and the page renders it as text; what is
@@ -36,7 +39,8 @@ RATE_MIN_GAP = 1.0  # seconds between two accepted sends
 RATE_PER_MINUTE = 30
 RATE_WINDOW = 60.0
 FEED_MAX_ENTRIES = 1000
-FEED_MAX_BYTES = 4 * 1024 * 1024
+FEED_MAX_BYTES = 4 * 1024 * 1024  # measured as the wire encodes it (see ``_size``)
+ENTRY_TEXT_MAX = 256 * 1024  # chars of a log entry's text kept for display; the journal keeps the whole message
 ROWS_MAX = 1000
 ROW_TEXT_MAX = 2000  # chars of a channel post's text kept in its status row
 DETAIL_MAX = 500
@@ -75,7 +79,16 @@ def _bounded(value, limit=DETAIL_MAX):
 
 
 def _size(entry):
-    return len(json.dumps(entry, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+    """Bytes of ``entry`` as ``web`` serves it: ``ensure_ascii=True``, which escapes a non-ASCII character
+    to up to 12 bytes and never raises on a lone surrogate."""
+    return len(json.dumps(entry, ensure_ascii=True, separators=(",", ":")).encode("ascii"))
+
+
+def _clip_text(text):
+    """``(text, clipped)``: a log entry's text cut to ENTRY_TEXT_MAX chars so one entry cannot wedge the feed."""
+    if isinstance(text, str) and len(text) > ENTRY_TEXT_MAX:
+        return text[:ENTRY_TEXT_MAX], True
+    return text, False
 
 
 # --------------------------------------------------------------------------
@@ -106,32 +119,44 @@ class BrowserState:
         self._lseq = 0
         self._sends = collections.OrderedDict()  # mid -> row, ordered by last change
         self._seq = 0
-        self._channel_mids = set()
 
     # -- log ---------------------------------------------------------------
 
-    def _append_locked(self, entry):
+    def _commit_locked(self, entry, size):
         self._lseq += 1
         entry["lseq"] = self._lseq
-        size = _size(entry)
         self._log.append((entry, size))
         self._log_bytes += size
         while len(self._log) > 1 and (len(self._log) > FEED_MAX_ENTRIES or self._log_bytes > FEED_MAX_BYTES):
             _old, old_size = self._log.popleft()
             self._log_bytes -= old_size
 
+    def _append_locked(self, entry):
+        self._commit_locked(entry, self._log_size_locked(entry))
+
+    def _log_size_locked(self, entry):
+        """The size ``entry`` will have once it carries the next lseq; nothing changes if this raises."""
+        return _size(dict(entry, lseq=self._lseq + 1))
+
     def add_inbound(self, entry):
-        """``BrowserPeer.on_inbound``: the message the inbox has already journaled."""
+        """``BrowserPeer.on_inbound``: the message the inbox has already journaled.
+
+        The text is kept for display up to ENTRY_TEXT_MAX chars (``text_clipped`` then); a lone
+        surrogate in a peer string is kept and leaves as an escape."""
+        text, clipped = _clip_text(entry.get("body"))
+        shown = {
+            "dir": "in",
+            "message_id": entry.get("message_id"),
+            "orig_msg_id": entry.get("orig_msg_id"),
+            "sender": entry.get("sender"),
+            "sender_name": entry.get("sender_name"),
+            "text": text,
+            "at": entry.get("at"),
+        }
+        if clipped:
+            shown["text_clipped"] = True
         with self._lock:
-            self._append_locked({
-                "dir": "in",
-                "message_id": entry.get("message_id"),
-                "orig_msg_id": entry.get("orig_msg_id"),
-                "sender": entry.get("sender"),
-                "sender_name": entry.get("sender_name"),
-                "text": entry.get("body"),
-                "at": entry.get("at"),
-            })
+            self._append_locked(shown)
 
     # -- rows --------------------------------------------------------------
 
@@ -140,7 +165,8 @@ class BrowserState:
         row["seq"] = self._seq
         self._sends.move_to_end(row["mid"])
 
-    def _new_row_locked(self, mid, kind, to, ack, text=None):
+    @staticmethod
+    def _make_row(mid, kind, to, ack, text=None):
         row = {
             "mid": mid, "kind": kind, "to": to, "ack_requested": bool(ack), "state": STATE_QUEUED,
             "reason": None, "note": None, "journaled": False, "delivering": False, "recipients": {},
@@ -149,10 +175,12 @@ class BrowserState:
         if text is not None:
             row["text"] = text[:ROW_TEXT_MAX]
             row["text_clipped"] = len(text) > ROW_TEXT_MAX
-        self._sends[mid] = row
+        return row
+
+    def _insert_row_locked(self, row):
+        self._sends[row["mid"]] = row
         self._touch_locked(row)
         self._evict_rows_locked()
-        return row
 
     def _evict_rows_locked(self):
         if len(self._sends) <= ROWS_MAX:
@@ -164,28 +192,44 @@ class BrowserState:
             if row["state"] == STATE_QUEUED or row["delivering"]:
                 continue  # a send the worker still owns
             del self._sends[mid]
-            self._channel_mids.discard(mid)
 
     def accept_direct(self, mid, to, text, ack):
-        """A direct send accepted: its ``queued`` row and its outbound log entry."""
+        """A direct send accepted: its ``queued`` row and its outbound log entry.
+
+        Everything is built and sized before either is stored, so a failure leaves neither."""
+        shown, clipped = _clip_text(text)
         with self._lock:
-            row = self._new_row_locked(mid, "direct", list(to), ack)
+            row = self._make_row(mid, "direct", list(to), ack)
             row["recipients"] = {t: {"outcome": None, "ack": ACK_PENDING if ack else ACK_NOT_REQUESTED} for t in to}
-            self._append_locked({
-                "dir": "out", "message_id": mid, "to": list(to), "text": text, "ack_requested": bool(ack),
+            entry = {
+                "dir": "out", "message_id": mid, "to": list(to), "text": shown, "ack_requested": bool(ack),
                 "at": row["at"],
-            })
+            }
+            if clipped:
+                entry["text_clipped"] = True
+            size = self._log_size_locked(entry)
+            self._insert_row_locked(row)
+            self._commit_locked(entry, size)
 
     def accept_channel(self, mid, key, text, ack):
-        """A channel post accepted: its ``queued`` row and its place in the channel-post set; no log entry."""
+        """A channel post accepted: its ``queued`` row only. A channel post is never logged, which is
+        what keeps it out of the feed's entries; the page shows it from its row."""
         with self._lock:
-            self._channel_mids.add(mid)
-            self._new_row_locked(mid, "channel", "#" + key, ack, text)
-            self._sends[mid]["channel"] = key
+            row = self._make_row(mid, "channel", "#" + key, ack, text)
+            row["channel"] = key
+            self._insert_row_locked(row)
 
-    def is_channel_post(self, mid):
+    def discard(self, mid):
+        """Remove an accepted send that never reached the worker: its row and its outbound log entry."""
         with self._lock:
-            return mid in self._channel_mids
+            self._sends.pop(mid, None)
+            kept = collections.deque()
+            for entry, size in self._log:
+                if entry["dir"] == "out" and entry["message_id"] == mid:
+                    self._log_bytes -= size
+                else:
+                    kept.append((entry, size))
+            self._log = kept
 
     def row(self, mid):
         """A copy of one status row, or None."""
@@ -222,6 +266,41 @@ class BrowserState:
             if row != before:
                 self._touch_locked(row)
 
+    def merge_recipients(self, mid, planned):
+        """Fold the final per-recipient outcomes (``{typed: {"outcome", "ack"}}``) into a row.
+
+        A slot the row already has keeps what arrived during the fan-out (``peer_status``,
+        ``transport_error``, and an ACK state past ``pending``); a ``not requested`` ack is applied."""
+        with self._lock:
+            row = self._sends.get(mid)
+            if row is None:
+                return
+            changed = False
+            for typed, new in planned.items():
+                slot = row["recipients"].get(typed)
+                if slot is None:
+                    row["recipients"][typed] = dict(new)
+                    changed = True
+                    continue
+                if new["outcome"] is not None and slot.get("outcome") != new["outcome"]:
+                    slot["outcome"] = new["outcome"]
+                    changed = True
+                ack = new["ack"]
+                if ack == ACK_NOT_REQUESTED and slot["ack"] not in (ACK_NOT_REQUESTED, ACK_ACKED):
+                    slot["ack"] = ack
+                    changed = True
+            if changed:
+                self._touch_locked(row)
+
+    def mark_update_failed(self, mid, typed):
+        """Note on one recipient that the journal could not record its transport failure."""
+        with self._lock:
+            row = self._sends.get(mid)
+            slot = row["recipients"].get(typed) if row is not None else None
+            if slot is not None and not slot.get("update_failed"):
+                slot["update_failed"] = True
+                self._touch_locked(row)
+
     def set_outcome(self, mid, typed, outcome):
         with self._lock:
             row = self._sends.get(mid)
@@ -236,9 +315,9 @@ class BrowserState:
     def apply_journal(self, mid, recipient, ack=None, transport_error=None):
         """Fold one journal fact into a row, idempotently per ``(mid, recipient)``.
 
-        ``recipient`` None means every recipient of the row. ``acked`` always lands; ``pending``,
-        ``unverified`` and ``expired`` replace only a still-open state; a row that asked for no ACK keeps
-        ``not requested``. An unknown message or recipient is ignored."""
+        ``recipient`` None means every recipient of the row. ``acked`` always lands, even on a slot
+        that was ``not requested``; ``pending``, ``unverified`` and ``expired`` replace only a
+        still-open state (one of those three). An unknown message or recipient is ignored."""
         with self._lock:
             row = self._sends.get(mid) if isinstance(mid, str) else None
             if row is None:
@@ -438,7 +517,10 @@ class SendWorker:
             try:
                 self._process(job)
             except Exception as exc:  # the attempt is consumed; nothing is retried
-                self._fail(job, exc)
+                try:
+                    self._fail(job, exc)
+                except Exception:  # the one worker thread must outlive any failure of its own reporting
+                    pass
             finally:
                 self.gate.release()
 
@@ -451,7 +533,10 @@ class SendWorker:
         mid = job["mid"]
         row = self.state.row(mid)
         reason = "%s: %s" % (type(exc).__name__, exc)
-        sp_runtime.log("web chat: send %s failed: %r" % (mid, reason))
+        try:
+            sp_runtime.log("web chat: send %s failed: %r" % (mid, reason))
+        except Exception:  # a broken log stream must not keep the row from reading its outcome
+            pass
         if row is not None and row["journaled"]:
             self.state.update(mid, state=STATE_FAILED_AFTER_RECORDING, reason=reason, delivering=False)
         else:
@@ -496,14 +581,18 @@ class SendWorker:
                 last_claude = sp_channels._clock()
             self.state.set_outcome(mid, member, outcome)
             if outcome.startswith(sp_channels.OUTCOME_REFUSED):
-                sp_journal.transport_failed(mid, member, outcome[len(sp_channels.OUTCOME_REFUSED):], rc=0)
+                # transport_failed returns its rc (0 here) only when the append worked.
+                if sp_journal.transport_failed(mid, member, outcome[len(sp_channels.OUTCOME_REFUSED):], rc=0):
+                    self.state.mark_update_failed(mid, member)
         self.state.update(mid, delivering=False)
 
     def _process_channel(self, job):
         mid, ack = job["mid"], job["ack"]
 
-        def on_journaled():
-            self.state.update(mid, state=STATE_PENDING, journaled=True, delivering=True)
+        def on_journaled(deliver):
+            # Seed the recipients now, so a status frame or ACK that arrives during the paced fan-out has a slot.
+            seeded = {t: {"outcome": None, "ack": ACK_PENDING if ack else ACK_NOT_REQUESTED} for t in deliver}
+            self.state.update(mid, state=STATE_PENDING, journaled=True, delivering=True, recipients=seeded)
 
         # `expected_recipients` is never passed in M1: a channel post addresses the channel's roster.
         # An exception escaping after the journal write reaches `_run`, which reads the row's `journaled`.
@@ -524,8 +613,8 @@ class SendWorker:
                 no_ack = (not asked) or member in excluded or member in notes
                 recipients[member] = {"outcome": outcome, "ack": ACK_NOT_REQUESTED if no_ack else ACK_PENDING}
             note = payload.get("outcome_problem")
-            self.state.update(mid, state=STATE_PENDING, journaled=True, delivering=False, recipients=recipients,
-                              note=note)
+            self.state.merge_recipients(mid, recipients)
+            self.state.update(mid, state=STATE_PENDING, journaled=True, delivering=False, note=note)
         elif state == sp_channels.WEB_NOT_SENT_JOURNALED:
             self.state.update(mid, state=STATE_NOT_SENT_JOURNALED, reason=payload.get("reason"), journaled=True,
                               delivering=False)
@@ -630,7 +719,11 @@ class Chat:
             else:
                 self.state.accept_direct(mid, to, text, ack)
                 job = {"kind": "direct", "mid": mid, "to": list(to), "text": text, "ack": ack}
-            self.worker.submit(job)
+            try:
+                self.worker.submit(job)
+            except BaseException:
+                self.state.discard(mid)  # a queued row nobody owns would never be evicted
+                raise
             return mid
 
         return self.gate.accept(build)

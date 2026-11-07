@@ -154,6 +154,13 @@ class ChatBase(WebBase):
         for listener in self._listeners:
             self.assertEqual(listener.of_type("user"), [])
 
+    def restart_chat(self, env=None):
+        self.chat.stop()
+        for name, value in (env or {}).items():
+            os.environ[name] = value
+        self.server.chat = webchat.Chat(lambda: self.clock[0], lambda: web._DISCOVERY_LOCK)
+        self.server.chat.start()
+
     def changes_of(self, cursor, **budget):
         return self.changes(cursor)
 
@@ -390,14 +397,6 @@ class ChatSendFlowTests(ChatBase):
         [record] = self.journal_entries()
         self.assertEqual(record["from"], self.peer.typed)
 
-    def restart_chat(self, env=None):
-        self.chat.stop()
-        for name, value in (env or {}).items():
-            os.environ[name] = value
-        self.server.chat = webchat.Chat(lambda: self.clock[0], lambda: web._DISCOVERY_LOCK)
-        self.server.chat.start()
-
-
 # ==========================================================================
 # Refusals (example 4)
 # ==========================================================================
@@ -425,6 +424,8 @@ class ChatRefusalTests(ChatBase):
             "https origin": (dict(replace={"Origin": "https://127.0.0.1:%d" % port}), 403),
             "other host name origin": (dict(replace={"Origin": "http://localhost:%d" % port}), 403),
             "null origin": (dict(replace={"Origin": "null"}), 403),
+            "bad origin and bad content type": (
+                dict(replace={"Origin": "http://evil.example", "Content-Type": "text/plain"}), 403),
             "no content type": (dict(omit=("Content-Type",)), 415),
             "text/plain": (dict(replace={"Content-Type": "text/plain"}), 415),
             "other charset": (dict(replace={"Content-Type": "application/json; charset=latin-1"}), 415),
@@ -446,6 +447,7 @@ class ChatRefusalTests(ChatBase):
         body = self.body_of("#ops")
         for name, (kw, status) in cases.items():
             with self.subTest(name):
+                self.restart_chat()  # fresh rows, gate and queue, so a failing case cannot dirty the next
                 self.refused(self.raw_post(body, **kw), status, name)
 
     def test_other_routes_and_methods_stay_closed(self):
@@ -892,8 +894,6 @@ class ChatFeedTests(ChatFeedBase):
         page = self.changes(before)["browser"]
         self.assertEqual([(e["message_id"], e["dir"], e["text"]) for e in page["entries"]], [(direct, "out", "to one")])
         self.assertEqual({r["mid"]: r["kind"] for r in page["sends"]}, {post: "channel", direct: "direct"})
-        self.assertTrue(self.state.is_channel_post(post))
-        self.assertFalse(self.state.is_channel_post(direct))
         # The channel's own history carries the post, once.
         sends = [e for e in self.ok("/api/channel/ops")["entries"] if e["kind"] == "send"]
         self.assertEqual([e["message_id"] for e in sends], [post])
@@ -1418,3 +1418,242 @@ class ChatProcessTests(Base):
         self.assertEqual(self.records(), [])
         proc.send_signal(signal.SIGTERM)
         self.assertEqual(proc.wait(timeout=30), 0)
+
+
+# ==========================================================================
+# Review rework: budget, starvation, surrogates, fan-out, worker, parsing
+# ==========================================================================
+
+
+class ChatReworkTests(ChatFeedBase):
+    def raw_changes(self, cursor):
+        resp = self.api("/api/changes?since=" + urllib.parse.quote(cursor, safe=""))
+        self.assertEqual(resp.status, 200, resp.body)
+        return resp
+
+    def two_claude_channel(self, name="duo"):
+        _l1, cc1 = self.peer_cc("duo-1")
+        _l2, cc2 = self.peer_cc("duo-2")
+        self.channel(name, cc1, cc2, owner=cc1)
+        return cc1, cc2
+
+    # -- budget (B1) ----------------------------------------------------------
+
+    def test_non_ascii_entries_are_budgeted_as_the_wire_encodes_them(self):
+        cursor = self.start_cursor()
+        for _ in range(3):
+            self.inbound("\U0001F600" * 200000)  # 12 bytes each on the ensure_ascii wire
+            self.inbound("中" * 200000)  # 6 bytes each
+        resp = self.raw_changes(cursor)
+        self.assertLessEqual(len(resp.body), webchat.FEED_MAX_BYTES)
+        reload = self.raw_changes(self.start_cursor())
+        self.assertLessEqual(len(reload.body), webchat.FEED_MAX_BYTES)
+        self.assertTrue(reload.json()["browser"]["entries"])
+
+    # -- starvation (B2) ------------------------------------------------------
+
+    def test_a_hydration_read_that_takes_the_whole_budget_cannot_starve_the_feed(self):
+        mid, cc, _listener = self.direct_send()
+        real = sp_journal.read_since
+        asked = []
+
+        def greedy(cursor_arg, budget, want=None, **kw):
+            result = real(cursor_arg, budget, want=want, **kw)
+            if not want:
+                return result
+            asked.append(budget)
+            return dict(result, bytes=budget, complete=False, journal_prefix="unread",
+                        context={m: {"state": "unreached"} for m in want})
+
+        self.inbound("first reply")
+        cursor = self.start_cursor()
+        with mock.patch.object(sp_journal, "read_since", greedy):
+            one = self.changes(cursor)
+            self.assertIn("first reply", [e["text"] for e in one["browser"]["entries"]])
+            self.assertTrue(one["partial"])
+            self.assertEqual(self.state.row(mid)["recipients"][cc]["ack"], "unverified")
+            b_one = self.b_of(one)  # the cursor carries a position, so the next poll is not a first page
+            self.inbound("second reply")
+            two = self.changes(one["cursor"])
+            self.assertEqual([e["text"] for e in two["browser"]["entries"]], ["second reply"])
+            self.assertGreater(self.b_of(two)[1], b_one[1])
+            three = self.changes(two["cursor"])
+            self.assertEqual(three["browser"]["entries"], [])
+            self.assertEqual(self.b_of(three), self.b_of(two))
+        self.assertEqual(len(asked), 1)
+        self.assertLessEqual(asked[0], webdata.REQUEST_BUDGET // 4)
+
+    # -- lone surrogates (3) ----------------------------------------------------
+
+    def test_a_lone_surrogate_in_a_post_is_a_400_that_leaves_no_row_and_charges_nothing(self):
+        _listener, cc, _codex = self.ops_with_claude()
+        for to in ("#ops", [cc]):
+            with self.subTest(to=to):
+                resp = self.post(to, "bad \ud800 text")
+                self.assert_refused(resp, 400)
+                self.assert_untouched()
+                self.assertEqual(self.first_page()["browser"]["sends"], [])
+        self.assertEqual(self.post("#ops", "fine", tick=True).status, 202)
+
+    def test_a_refused_acceptance_leaves_no_row_and_no_log_entry(self):
+        _l, cc = self.peer_cc("accept")
+        with mock.patch.object(webchat, "_size", side_effect=ValueError("sizing failed")):
+            with self.assertRaises(ValueError):
+                self.state.accept_direct(new_uuid(), [cc], "hello", True)
+        self.assertEqual((self.state.rows(), self.state.log_entries()), ([], []))
+        with mock.patch.object(self.chat.worker, "submit", side_effect=RuntimeError("queue broke")):
+            with self.assertRaises(RuntimeError):
+                self.chat.accept([cc], "hello", True)
+            with self.assertRaises(RuntimeError):
+                self.chat.accept("ops", "hello", True)
+        self.assertEqual((self.state.rows(), self.state.log_entries()), ([], []))
+        self.assertEqual(self.chat.gate.held, 0)
+
+    def test_an_inbound_lone_surrogate_does_not_break_the_feed(self):
+        cursor = self.start_cursor()
+        self.inbound("a\ud800b", name="n\udc00")
+        [entry] = self.changes(cursor)["browser"]["entries"]
+        self.assertEqual(entry["text"], "a\\ud800b")  # the page gets the escape as text, never a raw surrogate
+        [again] = self.first_page()["browser"]["entries"]
+        self.assertEqual(again["sender_name"], "n\\udc00")
+
+    def test_the_on_inbound_failure_log_carries_the_type_never_the_text(self):
+        listener, _cc = self.peer_cc("replier")
+        lines = []
+        with mock.patch.object(self.state, "add_inbound", side_effect=RuntimeError("SECRETBODY text")), \
+                mock.patch.object(sp_runtime, "log", lambda line, *a, **kw: lines.append(line)):
+            frames = self.reply_from(listener.path, body="SECRETBODY")
+        self.assertNotIn("peer_inbox_ack", [f.get("action") for f in frames])
+        failed = [line for line in lines if "on_inbound failed" in line]
+        self.assertEqual(len(failed), 1, lines)
+        self.assertIn("RuntimeError", failed[0])
+        self.assertNotIn("SECRETBODY", " ".join(lines))
+
+    # -- signal (N1) ------------------------------------------------------------
+
+    def test_the_signal_handler_takes_no_event_lock_and_stops_the_loop(self):
+        handlers = {}
+        box = []
+
+        def fake_signal(number, handler):
+            handlers[number] = handler
+            return signal.SIG_DFL
+
+        with mock.patch.object(web.signal, "signal", fake_signal), contextlib.redirect_stdout(io.StringIO()):
+            runner = threading.Thread(target=lambda: box.append(web.cmd_web(argparse.Namespace(port=0, chat=False))),
+                                      daemon=True)
+            runner.start()
+            wait_until(lambda: signal.SIGTERM in handlers, "the handlers to be installed")
+            time.sleep(0.3)
+            with mock.patch.object(threading.Event, "set", side_effect=AssertionError("an Event takes a lock")):
+                handlers[signal.SIGTERM](signal.SIGTERM, None)
+            runner.join(15)
+        self.assertEqual(box, [0])
+
+    # -- fan-out (N2) -----------------------------------------------------------
+
+    def test_a_status_frame_and_an_ack_arriving_mid_fan_out_are_kept(self):
+        cc1, cc2 = self.two_claude_channel()
+        seen = []
+
+        def pace(_wait):
+            [row] = self.state.rows()
+            seen.append(sorted(row["recipients"]))
+            for cc in (cc1, cc2):
+                self.state.on_status({"orig_msg_id": row["mid"], "status": "delivered", "detail": None}, cc)
+                self.state.apply_journal(row["mid"], cc, ack="acked")
+
+        with mock.patch.object(sp_channels, "_sleep", pace):
+            row = self.wait_row(self.accepted("#duo", "status?"))
+        self.assertEqual(seen, [sorted([cc1, cc2])])
+        for cc in (cc1, cc2):
+            slot = row["recipients"][cc]
+            self.assertEqual(slot["ack"], "acked")
+            self.assertEqual(slot["peer_status"]["status"], "delivered")
+            self.assertTrue(slot["outcome"])
+
+    # -- worker (N5, N6) --------------------------------------------------------
+
+    def test_the_worker_outlives_a_failing_failure_report(self):
+        _l, cc = self.peer_cc("survivor")
+        real_log, real_process = sp_runtime.log, webchat.SendWorker._process
+        calls = []
+
+        def log(line, *args, **kw):
+            if "web chat: send" in line:
+                raise OSError(32, "Broken pipe")
+            return real_log(line, *args, **kw)
+
+        def process(worker, job):
+            calls.append(job["mid"])
+            if len(calls) == 1:
+                raise RuntimeError("first job broke")
+            return real_process(worker, job)
+
+        with mock.patch.object(sp_runtime, "log", log), mock.patch.object(webchat.SendWorker, "_process", process):
+            first = self.wait_row(self.accepted([cc], "one"))
+            self.assertEqual(first["state"], "not sent")
+            self.assertIn("first job broke", first["reason"])
+            second = self.wait_row(self.accepted([cc], "two"))
+        self.assertEqual(second["state"], "pending")
+        self.assertEqual(second["recipients"][cc]["outcome"], "transport accepted")
+
+    def test_a_direct_send_records_a_transport_failure_the_journal_could_not_append(self):
+        _l, cc = self.peer_cc("refuser")
+        with mock.patch.object(sp_channels, "_deliver_member", return_value="refused: no route"), \
+                mock.patch.object(sp_journal, "transport_failed", return_value=76) as failed:
+            row = self.wait_row(self.accepted([cc], "hello"))
+        failed.assert_called_once()
+        self.assertTrue(row["recipients"][cc]["update_failed"])
+
+    # -- pacing (N3) --------------------------------------------------------------
+
+    def test_the_discovery_lock_is_not_held_across_a_pacing_sleep(self):
+        cc1, cc2 = self.two_claude_channel()
+        for to in ([cc1, cc2], "#duo"):
+            with self.subTest(to=to):
+                held = []
+                with mock.patch.object(sp_channels, "_sleep", lambda _wait: held.append(web._DISCOVERY_LOCK.locked())):
+                    self.wait_row(self.accepted(to, "hello"))
+                self.assertEqual(held, [False])
+
+    # -- request checks (9, 10) -----------------------------------------------------
+
+    def test_the_accepted_message_id_is_a_lowercase_uuid4(self):
+        _l, cc = self.peer_cc("ident")
+        mid = self.accepted([cc], "hello")
+        self.assertEqual(mid, mid.lower())
+        self.assertEqual(uuidlib.UUID(mid).version, 4)
+        self.assertEqual(str(uuidlib.UUID(mid)), mid)
+
+    def test_numerals_over_the_cap_are_refused_by_the_parser_itself(self):
+        captured = {}
+        real = web.json.loads
+
+        def spy(text, **kw):
+            captured.update(kw)
+            return real(text, **kw)
+
+        with mock.patch.object(web.json, "loads", spy):
+            web.Handler._parse_send(self.body_of("#ops"))
+        self.assertEqual(captured["parse_int"]("12"), 12)
+        self.assertEqual(captured["parse_float"]("1.5"), 1.5)
+        with self.assertRaises(ValueError):
+            captured["parse_int"]("9" * (web.NUMERAL_MAX + 1))
+        with self.assertRaises(ValueError):
+            captured["parse_float"]("1." + "0" * web.NUMERAL_MAX)
+        body = b'{"to":"#ops","text":"x","ack":true,"n":' + b"9" * 5000 + b"}"
+        self.assert_refused(self.raw_post(body), 400)
+
+    # -- oversized entries (11) --------------------------------------------------------
+
+    def test_a_log_entry_text_is_clipped_for_display_and_flagged(self):
+        _l, cc = self.peer_cc("clip")
+        self.inbound("short")
+        self.inbound("x" * (webchat.ENTRY_TEXT_MAX + 50))
+        self.state.accept_direct(new_uuid(), [cc], "y" * (webchat.ENTRY_TEXT_MAX + 50), True)
+        short, big, out = self.first_page()["browser"]["entries"]
+        self.assertNotIn("text_clipped", short)
+        for entry in (big, out):
+            self.assertEqual(len(entry["text"]), webchat.ENTRY_TEXT_MAX)
+            self.assertIs(entry["text_clipped"], True)
