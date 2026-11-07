@@ -770,6 +770,20 @@ class AnchorTests(ReaderBase):
         self.assertEqual(res["next"], 3)
         self.assertIsNone(res["next_anchor"])
 
+    def test_malformed_line_above_the_cursor_drops_the_callers_anchor(self):
+        self.put(self.mrec(1), self.mrec(2))
+        first = journal.read_since(None, BIG)
+        self.put(self.mrec(1), self.mrec(2), self.line({"seq": 3, "junk": True}))
+        res = journal.read_since(2, BIG, cursor_anchor=first["next_anchor"])
+        self.assertEqual(res["next"], 3)
+        self.assertIsNone(res["next_anchor"])
+
+    def test_malformed_line_repeating_the_last_seq_keeps_the_anchor(self):
+        self.put(self.mrec(1), self.mrec(2), self.line({"seq": 2, "junk": True}))
+        res = journal.read_since(None, BIG)
+        self.assertEqual(res["next"], 2)
+        self.assertIsNotNone(res["next_anchor"])
+
     def test_unchanged_poll_keeps_the_callers_anchor(self):
         self.put(self.mrec(1), self.mrec(2))
         first = journal.read_since(None, BIG)
