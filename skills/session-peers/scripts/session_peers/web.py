@@ -4,16 +4,25 @@ Standard-library ``http.server`` bound to 127.0.0.1. It serves three fixed stati
 token-guarded JSON API built by ``webdata``; it never writes to any store and never logs a request.
 
 Defences, in the order every request meets them: a connection slot (at most MAX_CONNECTIONS held
-at once, extra connections are closed unanswered), an absolute per-connection deadline, the Host
-header (DNS-rebinding guard), the method (GET only), no request body, the ``X-Peers-Token`` header
-for ``/api/*``, then route and parameter validation. Every response, errors included, leaves through
-``Handler._send`` and carries the same fixed security headers; error bodies are ``{}``.
+at once, extra connections are closed unanswered), a short HEADER_DEADLINE for the request line and
+headers plus an absolute per-connection deadline, the Host header (DNS-rebinding guard), the method
+(GET only), no request body, a 404 for a target that is not absolute-path shaped (no leading "/" or a
+leading "//" in the raw request line), the ``X-Peers-Token`` header for ``/api/*``, then route and
+parameter validation. Every response, errors included, leaves through ``Handler._send`` and carries
+the same fixed security headers; error bodies are ``{}``.
 
 Discovery (who is live, working or idle) shells out and walks registries, so it runs on one
 single-flight worker thread under a process-wide lock inside ``storage.no_create()`` (no state
 directory is created or chmod-ed by looking), and its result is cached for DISCOVERY_TTL seconds. A
 request waits for it at most DISCOVERY_WAIT seconds and then serves the last result marked
-``stale``, or an empty one marked ``pending``.
+``stale``, or an empty one marked ``pending``. A pass is bounded: DISCOVERY_PASS_BUDGET seconds in
+total and SUBPROCESS_MEMBERS_PER_PASS members that need a subprocess (Codex, OpenCode); members not
+reached are ``unverified`` and the result is marked ``truncated``. The pass runs with ``runtime.log``
+muted on its thread.
+
+Handler threads must never resolve CODEX_HOME: discovery's ``storage.codex_home_override`` mutates
+``os.environ`` process-wide while a pass runs, so a handler reads only what discovery handed it
+(``discovery["homes"]``).
 """
 
 from __future__ import annotations
@@ -26,18 +35,23 @@ import re
 import secrets
 import signal
 import socket
+import socketserver
 import sys
 import threading
 import time
 import urllib.parse
 from . import channels as sp_channels, claude as sp_claude, constants as sp_constants
-from . import opencode as sp_opencode, storage as sp_storage, webdata as sp_webdata
+from . import opencode as sp_opencode, runtime as sp_runtime, storage as sp_storage, webdata as sp_webdata
 
 MAX_CONNECTIONS = 16
-CONNECTION_DEADLINE = 10.0  # absolute seconds a connection may live
+CONNECTION_DEADLINE = 10.0  # seconds until the socket is shut down; the slot is held until the handler
+# returns, and the webdata budget (not this timer) bounds the work a handler does
+HEADER_DEADLINE = 2.0  # seconds for the request line and headers; then the connection is closed
 RECV_TIMEOUT = 10.0  # seconds one recv may block
 DISCOVERY_TTL = 5.0
 DISCOVERY_WAIT = 7.0
+DISCOVERY_PASS_BUDGET = 8.0  # seconds one pass may start new member checks
+SUBPROCESS_MEMBERS_PER_PASS = 64  # Codex/OpenCode members checked per pass (each may shell out)
 MEMBERS_PER_CHANNEL = 64
 MEMBERS_TOTAL = 512
 CHANNELS_MAX = 2048
@@ -151,7 +165,7 @@ def _opencode_view(members):
 
 def run_discovery():
     """One discovery pass: the ``discovery`` dict ``webdata.state_view`` takes. Reads only, never creates."""
-    with _DISCOVERY_LOCK, sp_storage.no_create():
+    with _DISCOVERY_LOCK, sp_storage.no_create(), sp_runtime.quiet():
         general, rosters = _rosters()
         members, seen = [], set()
         for roster in rosters:
@@ -160,7 +174,16 @@ def run_discovery():
                     seen.add(typed)
                     members.append(typed)
         cache, liveness, activity, names, homes = {}, {}, {}, {}, {}
+        deadline, subprocess_left, truncated = time.monotonic() + DISCOVERY_PASS_BUDGET, SUBPROCESS_MEMBERS_PER_PASS, False
         for typed in members:
+            if time.monotonic() >= deadline:
+                liveness[typed], truncated = "unverified", True
+                continue
+            if not typed.startswith("cc:"):
+                if subprocess_left <= 0:
+                    liveness[typed], truncated = "unverified", True
+                    continue
+                subprocess_left -= 1
             try:
                 liveness[typed] = sp_channels.member_liveness(typed, cache)
             except Exception:
@@ -183,7 +206,7 @@ def run_discovery():
             activity.update(oc_activity)
             names.update(oc_names)
         return {"general": general, "liveness": liveness, "activity": activity, "names": names,
-                "homes": homes, "stale": False, "pending": False}
+                "homes": homes, "stale": False, "pending": False, "truncated": truncated}
 
 
 class Discovery:
@@ -263,6 +286,11 @@ class Server(http.server.ThreadingHTTPServer):
     block_on_close = False
     allow_reuse_address = False
     request_queue_size = 32
+
+    def server_bind(self):
+        # HTTPServer.server_bind resolves the host's fully qualified name (reverse DNS); not needed here.
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
 
     def __init__(self, port=0):
         self.token = secrets.token_bytes(32).hex()
@@ -375,16 +403,23 @@ class Handler(http.server.BaseHTTPRequestHandler):
         return True
 
     def handle_one_request(self):
+        header_timer = threading.Timer(HEADER_DEADLINE, self._cut)
+        header_timer.daemon = True
+        header_timer.start()
         try:
-            self.raw_requestline = self.rfile.readline(65537)
-            if len(self.raw_requestline) > 65536:
-                self.requestline = self.request_version = self.command = ""
-                self.send_error(414)
-                return
-            if not self.raw_requestline:
-                self.close_connection = True
-                return
-            if not self.parse_request():
+            try:
+                self.raw_requestline = self.rfile.readline(65537)
+                if len(self.raw_requestline) > 65536:
+                    self.requestline = self.request_version = self.command = ""
+                    self.send_error(414)
+                    return
+                if not self.raw_requestline:
+                    self.close_connection = True
+                    return
+                parsed = self.parse_request()
+            finally:
+                header_timer.cancel()
+            if not parsed:
                 return
             try:
                 self._dispatch()
@@ -434,8 +469,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if self.command != "GET":
             raise _Refused(405)
         self._check_body()
+        # Newer Pythons collapse a leading "//" in self.path, so judge the raw request line.
+        words = self.requestline.split()
+        raw_target = words[1] if len(words) >= 2 else self.path
         target = self.path
-        if not target.startswith("/") or target.startswith("//"):
+        if not raw_target.startswith("/") or raw_target.startswith("//") or not target.startswith("/"):
             raise _Refused(404)
         parts = urllib.parse.urlsplit(target)
         path = parts.path
@@ -490,7 +528,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def _api(self, path, query):
         if path == "/api/state":
             self._query(query, ())
-            return self._send_json(200, sp_webdata.state_view(self.server.discovery.get()))
+            found = self.server.discovery.get()
+            view = sp_webdata.state_view(found)
+            if found.get("truncated"):
+                view["partial"] = True
+            return self._send_json(200, view)
         if path.startswith("/api/channel/"):
             key = path[len("/api/channel/"):]
             if not sp_constants.CHANNEL_NAME_RE.fullmatch(key):

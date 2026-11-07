@@ -25,7 +25,7 @@ from unittest import mock
 from peer_tests.support import *  # noqa: F401,F403
 from peer_tests.test_channel_send import ChannelSendBase
 from peer_tests.test_opencode import OC_B
-from session_peers import cli as sp_cli, channels as sp_channels, journal as sp_journal, storage as sp_storage, web, webdata
+from session_peers import cli as sp_cli, channels as sp_channels, journal as sp_journal, runtime as sp_runtime, storage as sp_storage, web, webdata
 
 REAL_ASSET_DIR = web.ASSET_DIR
 ASSET_NAMES = ("index.html", "app.css", "app.js")
@@ -63,7 +63,7 @@ class Resp:
         return json.loads(self.body.decode("ascii"))
 
 
-def snapshot(*roots, skip=lambda name: False):
+def snapshot(*roots):
     """(path, kind, mode, size, mtime_ns, sha256) of everything under the roots, directories included."""
     rows = []
     for root in roots:
@@ -76,8 +76,6 @@ def snapshot(*roots, skip=lambda name: False):
             st = os.lstat(base)
             rows.append((base, "dir", stat.S_IMODE(st.st_mode), None, st.st_mtime_ns, None))
             for name in sorted(files):
-                if skip(name):
-                    continue
                 path = os.path.join(base, name)
                 st = os.lstat(path)
                 digest = None
@@ -251,6 +249,55 @@ class StaticAndApiTests(WebBase):
         self.assertEqual(sessions[self.me]["liveness"], "live")
         self.assertEqual(sessions["codex:" + self.tid]["liveness"], "live")
         self.assertEqual(view["sessions"][0]["runtime"] in ("Claude Code", "Codex"), True)
+
+    def test_example_one_two_channels_and_four_sessions_all_appear(self):
+        self.ops_channel()
+        _listener, peer = self.peer_cc("beta")
+        self.channel("ops2", peer, "oc:" + OC_B)
+        view = self.ok("/api/state")
+        self.assertEqual({c["key"] for c in view["channels"]}, {"general", "ops", "ops2"})
+        sessions = {s["member"] for s in view["sessions"]}
+        self.assertLessEqual({self.me, "codex:" + self.tid, peer, "oc:" + OC_B}, sessions)
+        self.assertGreaterEqual(len(view["sessions"]), 4)
+
+    def test_a_codex_member_with_a_shim_state_file_shows_its_reply_budget(self):
+        tid = self.ops_channel()
+        sid = new_uuid()
+        shim = self.codex_dir / "session-peers"
+        shim.mkdir(exist_ok=True)
+        (shim / ("%s.json" % tid)).write_text(json.dumps(
+            {"budgets": {sid: 2}, "budget_sender_sid": sid, "budget_last_at": sp_runtime.now_iso()}))
+        sessions = {s["member"]: s for s in self.ok("/api/state")["sessions"]}
+        budget = sessions["codex:" + tid]["reply_budget"]
+        self.assertEqual((budget["requester"], budget["used"]), (sid, 2))
+        self.assertNotIn("budget_unknown", sessions["codex:" + tid])
+
+    def test_opencode_members_get_activity_and_name_from_opencode(self):
+        self.channel("ops", "oc:" + OC_B)
+        self.set_oc(active=[OC_B])
+        view = self.ok("/api/state")
+        sessions = {s["member"]: s for s in view["sessions"]}
+        self.assertEqual(sessions["oc:" + OC_B]["state"], "working")
+        members = {m["typed"]: m for c in view["channels"] for m in c["members"]}
+        self.assertEqual(members["oc:" + OC_B]["name"], "oc-buddy")
+        self.set_oc(active=[])
+        sessions = {s["member"]: s for s in self.ok("/api/state")["sessions"]}
+        self.assertEqual(sessions["oc:" + OC_B]["state"], "idle")
+
+    def test_a_member_that_is_not_live_has_unknown_activity(self):
+        sid = new_uuid()
+        dead = subprocess.Popen([sys.executable, "-c", "pass"])
+        dead.wait()
+        self.write_record(dead.pid, "ghost", sid, str(self.socks / "ghost.sock"), status="busy")
+        self.channel("ops", "cc:" + sid)
+        result = web.run_discovery()
+        self.assertNotEqual(result["liveness"]["cc:" + sid], "live")
+        self.assertEqual(result["activity"]["cc:" + sid], "unknown")
+
+    def test_double_slash_targets_are_404_whatever_the_python_version(self):
+        for target in ("//api/state", "///app.js", "//", "//app.js"):
+            with self.subTest(target=target):
+                self.assert_refused(self.fetch(target), 404)
 
     def test_discovery_reads_activity_and_names_from_the_registry(self):
         self.ops_channel()
@@ -570,6 +617,68 @@ class DeadlineTests(WebBase):
         self.assertLess(cut, 2.5)
         wait_until(lambda: self.server._slots._value == 16, "the slot to come back")
 
+    def test_a_client_that_never_finishes_its_headers_is_cut_at_the_header_deadline(self):
+        with mock.patch.object(web, "HEADER_DEADLINE", 0.5):
+            sock = socket.create_connection(("127.0.0.1", self.port), timeout=10)
+            started = time.monotonic()
+            try:
+                sock.sendall(b"GET /api/state HTTP/1.1\r\nHost: 127.0.0.1:1\r\n")
+                self.assertTrue(select.select([sock], [], [], 5)[0], "the connection was not closed")
+                try:
+                    self.assertEqual(sock.recv(65536), b"")
+                except ConnectionResetError:
+                    pass
+                cut = time.monotonic() - started
+            finally:
+                sock.close()
+        self.assertGreaterEqual(cut, 0.4)
+        self.assertLess(cut, 2.5)
+        wait_until(lambda: self.server._slots._value == 16, "the slot to come back")
+
+    def test_sixteen_header_stallers_do_not_block_a_real_request_for_long(self):
+        with mock.patch.object(web, "HEADER_DEADLINE", 0.5):
+            stalled = []
+            for _ in range(web.MAX_CONNECTIONS):
+                sock = socket.create_connection(("127.0.0.1", self.port), timeout=10)
+                sock.sendall(b"GET / HTTP/1.1\r\n")
+                stalled.append(sock)
+            self.addCleanup(lambda: [s.close() for s in stalled])
+            wait_until(lambda: self.server._slots._value == 0, "every slot to be taken")
+            started = time.monotonic()
+            status = 0
+            while status != 200 and time.monotonic() - started < 6:
+                status = self.fetch("/app.js").status
+                time.sleep(0.05)
+            took = time.monotonic() - started
+        self.assertEqual(status, 200)
+        self.assertLess(took, 2.5)
+
+    def test_a_request_that_finishes_its_headers_in_time_is_not_cut_by_the_header_deadline(self):
+        with mock.patch.object(web, "HEADER_DEADLINE", 0.5):
+            sock = socket.create_connection(("127.0.0.1", self.port), timeout=10)
+            try:
+                sock.sendall(b"GET /app.js HTTP/1.1\r\nHost: 127.0.0.1:%d\r\n\r\n" % self.port)
+                time.sleep(0.8)  # the timer would have fired by now
+                data = b""
+                while True:
+                    chunk = sock.recv(65536)
+                    if not chunk:
+                        break
+                    data += chunk
+            finally:
+                sock.close()
+        self.assertEqual(Resp(data).status, 200)
+
+    def test_startup_does_no_reverse_dns(self):
+        with mock.patch.object(socket, "getfqdn", side_effect=AssertionError("reverse DNS")), \
+                mock.patch.object(socket, "gethostbyaddr", side_effect=AssertionError("reverse DNS")):
+            server = web.Server(0)
+        try:
+            self.assertEqual(server.server_port, server.port)
+            self.assertEqual(server.server_name, "127.0.0.1")
+        finally:
+            server.server_close()
+
     def test_a_silent_client_is_cut_by_the_recv_timeout(self):
         with mock.patch.object(web, "RECV_TIMEOUT", 0.5):
             sock = socket.create_connection(("127.0.0.1", self.port), timeout=10)
@@ -742,6 +851,75 @@ class DiscoveryWorkerTests(WebBase):
                 mock.patch.object(sp_channels, "general_members", return_value=(ids[:5], {}, [])), \
                 mock.patch.object(sp_channels, "member_liveness", liveness):
             self.assertEqual(len(web.run_discovery()["liveness"]), 3)
+
+    # -- bounded fan-out ---------------------------------------------------
+
+    def many_codex_channels(self, channels=8, per=63):
+        members = []
+        for index in range(channels):
+            roster = ["codex:%s" % new_uuid() for _ in range(per)]
+            members.extend(roster)
+            self.channel("big%d" % index, *roster)
+        return members
+
+    def test_a_pass_over_512_codex_members_is_quiet_bounded_and_capped(self):
+        members = self.many_codex_channels()
+        calls = []
+        real = sp_channels.member_liveness
+
+        def counting(typed, cache=None):
+            calls.append(typed)
+            return real(typed, cache)
+
+        stderr = io.StringIO()
+        started = time.monotonic()
+        with contextlib.redirect_stderr(stderr), mock.patch.object(sp_channels, "member_liveness", counting):
+            result = web.run_discovery()
+        took = time.monotonic() - started
+        self.assertEqual(stderr.getvalue(), "")
+        self.assertLess(took, web.DISCOVERY_PASS_BUDGET)
+        codex_calls = [m for m in calls if m.startswith("codex:")]
+        self.assertEqual(len([m for m in calls if not m.startswith("cc:")]), web.SUBPROCESS_MEMBERS_PER_PASS)
+        self.assertTrue(result["truncated"])
+        self.assertLessEqual(set(members) & set(result["liveness"]), set(members))
+        self.assertGreater(len(set(members) & set(result["liveness"])), web.SUBPROCESS_MEMBERS_PER_PASS)
+        self.assertEqual({v for k, v in result["liveness"].items() if k.startswith("codex:") and k not in codex_calls},
+                         {"unverified"})
+
+    def test_a_pass_shares_one_cache_across_members(self):
+        self.channel("ops", "oc:" + OC_B, "oc:ses_zzzzzzzzzzzzZZZZZZZZZZZZZZ")
+        caches = []
+
+        def liveness(typed, cache=None):
+            caches.append(cache)
+            return "unverified"
+
+        with mock.patch.object(sp_channels, "member_liveness", liveness):
+            web.run_discovery()
+        self.assertGreaterEqual(len(caches), 2)
+        self.assertTrue(all(c is caches[0] and c is not None for c in caches))
+
+    def test_members_not_reached_before_the_pass_deadline_are_unverified_and_the_answer_partial(self):
+        self.ops_channel()
+        reached = []
+
+        def slow(typed, cache=None):
+            reached.append(typed)
+            time.sleep(0.3)
+            return "live"
+
+        with mock.patch.object(web, "DISCOVERY_PASS_BUDGET", 0.1), mock.patch.object(sp_channels, "member_liveness", slow):
+            result = web.run_discovery()
+            view = self.ok("/api/state")
+        self.assertEqual(len(reached), 2)  # one per pass: the deadline passed after the first member
+        self.assertTrue(result["truncated"])
+        self.assertIn("unverified", result["liveness"].values())
+        self.assertTrue(view["partial"])
+
+    def test_a_complete_pass_is_not_truncated(self):
+        self.ops_channel()
+        self.assertFalse(web.run_discovery()["truncated"])
+        self.assertFalse(self.ok("/api/state")["partial"])
 
 
 class NoCreateTests(unittest.TestCase):
