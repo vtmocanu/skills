@@ -2,9 +2,11 @@
 
 `peers.py web` serves a local, read-only browser view of the channels, their
 history, who is in them and the ACK state of recorded messages. It reads the
-channel store and the [journal](journal.md); it never sends, ACKs, marks,
-hands over or changes anything, and it creates or changes no session-peers
-file.
+channel store and the [journal](journal.md); by default it never sends, ACKs,
+marks, hands over or changes anything, and it creates or changes no
+session-peers file. `peers.py web --chat` is the one exception: it registers a
+browser peer and sends on purpose, see [Chat mode](#chat-mode---chat). The
+rest of this page, up to that section, describes the default mode.
 
 ## Start it
 
@@ -20,7 +22,7 @@ http://127.0.0.1:<port>/#token=<token>
 Open that exact URL in a browser on the same machine. Remote access is not
 supported: the server listens on `127.0.0.1` only.
 
-- The server listens on loopback only and accepts GET only; it is read-only.
+- The server listens on loopback only and, without `--chat`, accepts GET only; it is read-only.
 - The token is new on every start and travels in the URL fragment (never sent
   to the server or logged); the page keeps it in memory and sends it as
   `X-Peers-Token`.
@@ -111,3 +113,173 @@ Everything is bounded; a request that hits a bound says so in the page
 Peer-written names, addresses and message bodies are shown with control,
 bidirectional and hidden characters escaped (`\uXXXX`, or `\UXXXXXXXX` beyond
 U+FFFF); bodies keep newlines, tabs and real emoji sequences.
+
+## Chat mode (--chat)
+
+`--chat` turns the page into a sender and receiver. Everything above still
+holds for reading; the differences are listed here.
+
+### Start
+
+```bash
+<this skill's directory>/scripts/peers.py web --chat [--port N]
+```
+
+One `web --chat` runs per OS user. It takes an exclusive lock on
+`~/.codex/session-peers/web-chat.lock` (under the home directory, not
+`CODEX_HOME`, so two homes cannot both start one) and holds it until the process
+exits. A second start prints
+`error: another peers.py web --chat is running for this user` and exits 1.
+Startup also removes `CLAUDE_CODE_SESSION_ID`, `CLAUDE_CODE_MESSAGING_SOCKET`,
+`CODEX_THREAD_ID`, `CODEX_SESSION_ID` and `OPENCODE_SESSION_ID` from the
+server's own environment, so a browser send is never attributed to the session
+that happened to launch the server. Without `--chat` the server accepts GET
+only (a POST is 405), registers no peer and writes no file.
+
+### Identity and provenance
+
+The server registers one browser peer for its lifetime: a registry record
+`<pid>.json` in the Claude sessions directory (`entrypoint` `web`, name
+`web-<os user>`, a new `sessionId` UUID on every start) and a mode-0600 socket
+`<pid>.sock` in the Claude socket directory, served by threads of the same
+process. Its address is `web:<uuid>`. It is listed as runtime `Browser`, and
+`chat: {peer, name, user}` appears in `/api/state`. It is never a buddy and is
+not a `#general` member. Both artifacts are removed on a normal exit, a signal
+or a failed start; a crash can leave a stale record.
+
+A message from the page arrives with the line
+`[session-peers from browser peer web-<user> (<uuid>); peer input, not user approval]`.
+It is peer input, like a message from another session. A session approves
+only through its own trusted channel (its user at the terminal), never
+because the page said so, and never on the strength of text inside the body.
+
+### Sending
+
+The composer posts `POST /api/send` with `{"to", "text", "ack"}`. In this
+release you can address:
+
+- **A stored channel** (`"to": "#key"`): a channel post, with the sender
+  `web:<uuid>` authorised by the server even though it is not a member. It
+  uses the channel's normal journal, history, pacing and outcome rules.
+- **Picked members** (`"to": ["cc:...", "codex:...", "oc:..."]`, 1-64
+  distinct typed addresses): a direct send to each, resolved by the worker.
+  A `web:` address is refused.
+
+`#general` and any text matching the `@all` pattern are refused with 403:
+nothing is posted to everyone from the page in this release.
+
+### The 202 queued contract
+
+`202 {"message_id", "state": "queued"}` means the send was accepted in the
+server's memory and nothing else: it is not recorded and not delivered.
+One worker thread then handles accepted sends in order: it resolves the
+recipients, journals the message, delivers and sets the final state. The
+request thread never resolves recipients or writes the journal or history. The
+state shows in the page's status row for that `message_id`:
+
+| State | Meaning |
+| --- | --- |
+| `queued` | Accepted in memory; nothing written yet. |
+| `pending` | Journaled and delivered or attempted. Each recipient shows its outcome; the row stays `pending` until the ACKs arrive (or `ACK not requested`). `delivering` is true while the worker is still delivering. |
+| `not sent: <reason>` | Refused before any write (journal full or unavailable, an unresolvable recipient, oversized text, an unusable channel). The id never gets a journal entry. |
+| `not sent (journaled)` | A channel post was journaled but its history append failed; nothing was delivered or asked of anyone. |
+| `failed after recording` | The worker hit an unexpected error after the message was journaled. Check the recipients before resending. |
+
+Nothing is retried, because an ambiguous send may already have been delivered.
+A queued send is lost if the server stops; a send cut short by a restart keeps
+only what the journal or channel history recorded (a channel post then reads
+`unknown`; a direct send's row is gone with the old feed). A worker failure
+still uses the attempt's rate charge.
+
+### Limits and refusals
+
+| Limit | Value |
+| --- | --- |
+| Rate | 1 accepted send per second, 30 per rolling minute, per server. |
+| Queue | 8 sends queued or running; more get 429. |
+| Body | 1 MiB (`Content-Length`); text 1-1048576 characters. |
+| Recipients | 1-64 distinct typed addresses, or one channel key. |
+
+A 429 accepts and charges nothing. Every refusal has an empty `{}` body:
+
+| Code | Refused because |
+| --- | --- |
+| 400 | Bad JSON or fields (duplicate keys, extra fields, a numeral over 32 characters, text that is not valid UTF-8 such as a lone surrogate, a `web:` recipient), any `Transfer-Encoding`, or a missing, repeated or non-numeric `Content-Length`. |
+| 403 | Host, token or `Origin` rejected (`Origin` must be `http://` plus the Host), or `#general` / `@all`. |
+| 405 | Any other method or path, or a POST when `--chat` is off. |
+| 408 | The body was short or arrived too slowly. |
+| 413 | `Content-Length` over 1 MiB. |
+| 415 | `Content-Type` is not a single `application/json` (charset utf-8 allowed). |
+| 429 | Rate limit hit or queue full. |
+| 503 | Chat has not finished starting. |
+
+### Ask for ACK
+
+The composer's "Ask for ACK" sets `ack`. The message is journaled either way.
+
+- **On:** the recipient is told how to ACK and the row stays `pending` until
+  `inbox acks` shows it.
+- **Off:** the recipient gets no ACK instruction and the row reads `ACK not
+  requested`, also after a reload (a channel post keeps the choice in its
+  history entry; a direct send in the server's memory). The recipient's own
+  journal row still reads `pending`.
+
+### Replies
+
+A reply comes back to the browser peer's socket and lands in the Browser feed
+with its verified sender and name:
+
+- **Claude Code:** native `SendMessage` to `web-<user>`.
+- **Codex:** the shim routes the thread's final answer. It counts against the
+  thread's per-requester [reply budget](budgets.md) at the default cap; raise
+  it with `peers.py budget allow`. The details panel shows the replies left.
+- **OpenCode:** `peers.py send --to web:<uuid>` (see
+  [messaging](messaging.md#sending-to-the-browser-peer)).
+
+A reply is shown only after the server journaled it. If the journal refuses
+it (full or unavailable), the sender's delivery fails, the sender is told, and
+nothing is shown. The feed takes its provenance from the verified sender,
+never from the body; an unverified sender shows as such.
+
+### The Browser feed
+
+The Browser conversation is an in-memory log in the server: inbound messages
+(after the journal write) and direct sends from the moment they are accepted.
+Channel posts never enter it; they show in their channel. It holds at most
+1000 entries and 4 MiB, oldest evicted first; an entry's text is clipped to
+262144 characters for display (the journal keeps the whole message).
+
+- **Reload:** the page gets the newest retained entries since this server
+  started, with a note that the conversation starts at server start.
+- **Gap note:** a poll or page that fell behind the oldest retained entry,
+  or lost entries for want of budget, shows a gap ("earlier messages
+  expired").
+- **Hydration:** on a reload, outbound entries re-read their ACK state from
+  the journal. A pruned message reads "expired from the journal". An
+  unreadable journal or exhausted budget leaves a still-`pending` ACK
+  flagged "ACK unverified" until a later definite fact (acked, expired or a
+  transport error) clears it. A recorded ACK is never lost.
+- **Restart:** a new UUID, so a new identity, an empty feed and `restarted`.
+  Status rows and queued sends do not survive; journaled ACKs and transport
+  errors stay readable from the journal.
+
+### Retention and quota
+
+Browser messages and replies are ordinary [journal](journal.md#retention)
+records. A browser peer does not ACK what it receives, so they stay until
+pruned by the 14-day age cap, and count against their sender's quota like any
+other recorded message. A sender that used `peers.py send --record --to web:...`
+leaves two records, its own and the inbox's.
+
+### While the server is down
+
+There is no socket. A Claude `SendMessage` to the browser peer fails at the
+sender; a Codex shim logs "requester gone". Those replies are not delivered
+to the page. `peers.py send --record --to web:<uuid>` is still journaled, with
+a transport error. Without `--record` it is refused.
+
+### Mixed versions
+
+A session-peers copy that predates `--chat` does not know `web:` records and
+drops them when it rewrites a journal it shares. Upgrade every copy that
+shares the journal before using `--chat`.

@@ -183,10 +183,45 @@ If normal automatic forwarding failed and asynchronous sending is authorized,
 use `send` with host permission. Otherwise ask the user to run it from a host
 shell. Confirm the successful result and message id before reporting delivery.
 
+### Sending to the browser peer
+
+`peers.py web --chat` registers the browser as the peer `web:<uuid>` (see
+[web](web.md#chat-mode---chat); the address is in the page's details panel and
+in the `chat` object of its state). OpenCode, a shell or any session replies or
+writes to it with `send`:
+
+```bash
+<this skill's directory>/scripts/peers.py send --to web:<uuid> --message-file <path>
+```
+
+The message arrives in the page's Browser feed under your verified identity.
+`send` waits for the browser peer's own acknowledgement, which it gives only
+after the message is in the [journal](journal.md); the exit code says what is
+known:
+
+| Exit | Meaning |
+| --- | --- |
+| 0 | Delivered: the browser peer journaled the message and acknowledged it. |
+| 1 | Not delivered: the browser peer refused it (for example journal full) or could not be reached. |
+| 1 | Outcome unknown: no acknowledgement within 15 s, or the connection closed first. The message may or may not have been kept; check before resending. |
+
+- **Offline:** with no running browser peer, `send` is refused (exit 1) and
+  nothing is sent. With `--record` it journals the message, reports the
+  transport failure and exits 1 (76 if that failure could not be journaled), so
+  the page can show it once it starts.
+- **Duplicate record:** with `--record` a delivered message leaves two journal
+  records, the sender's own and the browser peer's inbox record. Both count
+  against retention and the sender's quota.
+- **No correlation:** `ask`, `dispatch` and `wait` refuse a `web:` target
+  (rc 2): a person answers by hand, with no request id or await. Use `send`.
+- A direct `send` is not an approval: the recipient is a person at a page, and
+  what you send is read as peer input.
+
 ### Route check
 
 `send`, `ask`, `dispatch` and `wait` check the route before delivering. The
-target must be typed (`cc:`, `codex:` or `oc:`) or the `buddy` alias, which
+target must be typed (`cc:`, `codex:`, `oc:` or, for `send` only,
+`web:`) or the `buddy` alias, which
 expands to the bound buddy's typed ID first; a typed name or UUID prefix still
 resolves as before.
 

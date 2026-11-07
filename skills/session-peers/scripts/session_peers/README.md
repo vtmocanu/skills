@@ -30,7 +30,9 @@ the reply command included in a request envelope.
 | topics | Pull-only shared logs, retention, identity, and cursor commands |
 | channels | Channel store under the user-wide root, membership-first history, member liveness, and the `channel` commands |
 | webdata | Dashboard read model: bounded, read-only snapshots of channel history, journal ACK state and discovery, the poll cursor and the per-view JSON |
-| web | Dashboard HTTP server (loopback, token, GET only), the discovery worker and the `web` command; serves the static assets in `web/` (`index.html`, `app.css`, `app.js`); see Dashboard server below |
+| web | Dashboard HTTP server (loopback, token, GET only; one POST route in chat mode), the discovery worker and the `web` command; serves the static assets in `web/` (`index.html`, `app.css`, `app.js`); see Dashboard server below |
+| webchat | Chat mode state: the Browser feed log, status rows, `SendGate` (rate limits and queue capacity) and the single `SendWorker` |
+| webpeer | The browser peer `web:<uuid>`: lock, registry record, socket and journaled inbox |
 | maintenance | Owned bridge metadata and buddy garbage collection |
 | cli | Argument registration and command dispatch |
 
@@ -95,3 +97,40 @@ User-facing behaviour is in `references/web.md`; the server's own guards are:
   process can reach the port; the per-start token alone guards `/api/*`, so
   anyone who obtains it can read the API. Neither defends against a hostile
   process of the same user.
+
+### Chat mode (`web --chat`)
+
+User-facing behaviour is in `references/web.md#chat-mode---chat`. Without
+`--chat` the rules above hold unchanged: POST is 405 and no peer is registered.
+With it, `POST /api/send` is the one write route; a request passes these
+checks in order, and each refusal has an empty `{}` body:
+
+1. Path is `/api/send` (405 otherwise), after the Host check (403) and the
+   query check (400).
+2. `X-Peers-Token` (403).
+3. `Origin` appears once and equals `http://` plus the Host (403).
+4. One `Content-Type` of `application/json`, optionally `; charset=utf-8`
+   (415).
+5. No `Transfer-Encoding` (400); exactly one digits-only `Content-Length` of at
+   least 1 (400), at most 1 MiB (413).
+6. The body is read before the connection deadline, less 0.5 s (408 on a short
+   read or a timeout).
+7. Strict JSON (400): no duplicate keys, a numeral of at most 32 characters,
+   exactly `{to, text, ack}`, `text` a non-empty string of at most
+   `MAX_TEXT_CHARS` that encodes as UTF-8, `ack` a bool, `to` one `#` channel
+   key or 1-64 distinct typed addresses with no `web:`.
+8. `#general` or text matching `channels.ALL_RE` (403): refused in this release.
+9. Chat has started (503).
+10. `SendGate`, under one lock: the rate limits (1 per second, 30 per rolling
+    minute) and the queue capacity (`SEND_QUEUE_MAX = 8`, queued plus running).
+    A hit is 429 with nothing charged or accepted.
+11. Mint the `message_id`, create the `queued` row, enqueue, and reply
+    `202 {"message_id", "state": "queued"}`.
+
+The 202 means accepted in volatile memory only. The handler never resolves
+recipients or writes the journal or history; one `SendWorker` thread does that
+in FIFO order, under `web._DISCOVERY_LOCK` for resolution, commit and each
+member delivery (never across a pacing sleep). Nothing is retried, a worker
+failure keeps the rate charge, and queued sends are lost on restart. The Browser
+feed (`BrowserState`) is bounded at `FEED_MAX_ENTRIES = 1000` entries and
+`FEED_MAX_BYTES = 4 MiB`.
