@@ -2666,10 +2666,6 @@ class WebdataContextEscapeTests(WebdataBase):
                 os.chdir(old)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class WebdataBrowserPostAckTests(BrowserPostHelpers, WebdataBase):
     """A browser post that asked for no ACK reads `not requested` after a reload and stays out of the tally."""
 
@@ -2706,3 +2702,7 @@ class WebdataBrowserPostAckTests(BrowserPostHelpers, WebdataBase):
         self.assertEqual({r["ack"] for r in rows}, {"not requested"})
         rows = sp_channels.delivery_rows(dict(data, ack_requested=True), "complete", {}, None)
         self.assertEqual({r["ack"] for r in rows}, {"unverified"})
+
+
+if __name__ == "__main__":
+    unittest.main()

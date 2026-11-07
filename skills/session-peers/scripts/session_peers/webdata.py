@@ -820,28 +820,40 @@ class JournalContext:
         return None, {}, ctx is not None and ctx.get("state") == "unreached"
 
 
-def read_journal_context(budget, want):
+def read_journal_context(budget, want, with_position=False):
     """One ``journal.read_since(None, remaining, want=...)``; its bytes are charged to ``budget``.
 
-    A journal that cannot be read, or no budget left for it, makes every ACK unverified."""
+    A journal that cannot be read, or no budget left for it, makes every ACK unverified.
+    With ``with_position`` the answer is ``(JournalContext, position)``: ``position`` is
+    ``_journal_position`` of that same read, or None when the read raised, was skipped for
+    want of budget or ids, or did not complete."""
     ids = []
     for mid in want or ():
         if isinstance(mid, str) and mid not in ids:
             ids.append(mid)
+
+    def answer(context, position=None):
+        return (context, position) if with_position else context
+
     if not ids:
-        return JournalContext()
+        return answer(JournalContext())
     if budget.remaining() <= 0:
-        return JournalContext(available=False, budget_skipped=True)
+        return answer(JournalContext(available=False, budget_skipped=True))
     try:
         result = sp_journal.read_since(None, budget.remaining(), want=ids, strict=True)
     except Exception:  # an unreadable journal only makes ACK state unverified
-        return JournalContext(available=False)
+        return answer(JournalContext(available=False))
     budget.charge(result.get("bytes") or 0)
     context = result.get("context") or {}
     # Partial only when a wanted message was not reached: an early stop once every wanted
     # record is in leaves the journal start unread but loses no ACK this page needs.
     unreached = any(isinstance(c, dict) and c.get("state") == "unreached" for c in context.values())
-    return JournalContext(context, True, result.get("journal_prefix") == "unread" and unreached)
+    position = None
+    if result.get("complete"):
+        position = _journal_position(result)
+        if result.get("oversized") or result.get("window_regression"):
+            position[2] = None
+    return answer(JournalContext(context, True, result.get("journal_prefix") == "unread" and unreached), position)
 
 
 # --------------------------------------------------------------------------
@@ -1175,7 +1187,7 @@ def channel_page(key, before=None, limit=PAGE_MAX, budget=None, members=None, no
 # Member details
 # --------------------------------------------------------------------------
 
-_RUNTIMES = {"cc": "Claude Code", "codex": "Codex", "oc": "OpenCode"}
+_RUNTIMES = {"cc": "Claude Code", "codex": "Codex", "oc": "OpenCode", "web": "Browser"}
 
 
 def _read_shim_state(path, budget):
@@ -1207,7 +1219,7 @@ def _read_shim_state(path, budget):
     return (state if isinstance(state, dict) else None), False
 
 
-def _reply_budget(tid, home, now, budget):
+def _reply_budget(tid, home, now, budget, requester=None):
     """``(reply budget dict or None, skipped)``; see ``codex_reply_budget``."""
     if not isinstance(tid, str) or not sp_constants.UUID_RE.fullmatch(tid) or not isinstance(home, str) or not home:
         return None, False
@@ -1215,7 +1227,7 @@ def _reply_budget(tid, home, now, budget):
     state, skipped = _read_shim_state(os.path.join(base, "%s.json" % tid), budget)
     if state is None:
         return None, skipped
-    sid = state.get("budget_sender_sid")
+    sid = requester if requester is not None else state.get("budget_sender_sid")
     if not isinstance(sid, str) or not sid:
         return {"requester": None, "label": BUDGET_LABEL}, False
     owner = types.SimpleNamespace(thread_id=tid)
@@ -1247,8 +1259,11 @@ def _reply_budget(tid, home, now, budget):
     }, False
 
 
-def codex_reply_budget(tid, home, now=None, budget=None):
+def codex_reply_budget(tid, home, now=None, budget=None, requester=None):
     """The reply budget toward a Codex thread's current requester, as last saved by its shim, or None.
+
+    ``requester`` (a sender sid, e.g. the browser peer's) replaces the saved requester: the
+    count and cap are then that sender's own.
 
     ``home`` is the CODEX_HOME the thread's shim runs under, supplied by the caller (finding it
     probes locks and scans shim records, which a request never does). Reads
@@ -1257,7 +1272,7 @@ def codex_reply_budget(tid, home, now=None, budget=None):
     replayed in memory. The state file is charged to ``budget`` (a fresh request budget when
     None); one that does not fit reads as None. Any malformed state reads as None."""
     try:
-        return _reply_budget(tid, home, now, budget if budget is not None else Budget())[0]
+        return _reply_budget(tid, home, now, budget if budget is not None else Budget(), requester)[0]
     except Exception:  # the file is peer-writable: whatever it holds, the view still works
         return None
 
@@ -1332,16 +1347,28 @@ def _is_seq(value):
 
 
 def encode_cursor(obj):
-    """The opaque cursor text of ``{"v":1,"c":[[key,seq,fp]],"j":[seq,fp,anchor],"u":[[ci,seq,mid]]}``."""
+    """The opaque cursor text of ``{"v":1,"c":[[key,seq,fp]],"j":[seq,fp,anchor],"u":[[ci,seq,mid]]}``.
+
+    Chat mode adds ``"b":[browser uuid, log seq, status-row seq]``, the Browser feed position."""
     text = _b64(json.dumps(obj, separators=(",", ":"), sort_keys=True))
     if len(text) > CURSOR_MAX:
         raise WebDataError("cursor too large", 500)
     return text
 
 
-def _validate_cursor(obj, keys):
-    if not isinstance(obj, dict) or set(obj) != _CURSOR_FIELDS or type(obj["v"]) is not int or obj["v"] != 1:
+def _validate_cursor(obj, keys, allow_browser=False):
+    allowed = [_CURSOR_FIELDS]
+    if allow_browser:
+        allowed.append(_CURSOR_FIELDS | {"b"})  # chat mode: the Browser feed position
+    if not isinstance(obj, dict) or set(obj) not in allowed or type(obj["v"]) is not int or obj["v"] != 1:
         raise ValueError("shape")
+    browser = None
+    if "b" in obj:
+        b = obj["b"]
+        if (not isinstance(b, list) or len(b) != 3 or not isinstance(b[0], str) or b[0] != b[0].lower()
+                or not sp_constants.UUID_RE.fullmatch(b[0]) or not _is_seq(b[1]) or not _is_seq(b[2])):
+            raise ValueError("browser position")
+        browser = [b[0], b[1], b[2]]
     c, j, u = obj["c"], obj["j"], obj["u"]
     if not isinstance(c, list) or len(c) > CURSOR_KEYS_MAX + 1 or not isinstance(u, list) or len(u) > CURSOR_UPDATES_MAX:
         raise ValueError("size")
@@ -1380,10 +1407,13 @@ def _validate_cursor(obj, keys):
             raise ValueError("update send")
         if ci in remap:
             pending.append([remap[ci], seq, mid])
-    return {"v": 1, "c": kept, "j": [j[0], j[1], j[2]], "u": pending}
+    out = {"v": 1, "c": kept, "j": [j[0], j[1], j[2]], "u": pending}
+    if browser is not None:
+        out["b"] = browser
+    return out
 
 
-def decode_cursor(text, keys=None):
+def decode_cursor(text, keys=None, allow_browser=False):
     """The validated cursor dict of ``text``; WebDataError 400 for anything malformed.
 
     Keys that are no longer stored channels are dropped (and the update entries of
@@ -1391,7 +1421,7 @@ def decode_cursor(text, keys=None):
     if not isinstance(text, str) or not text or len(text) > CURSOR_MAX:
         raise WebDataError("malformed cursor", 400)
     try:
-        return _validate_cursor(json.loads(_unb64(text)), keys)
+        return _validate_cursor(json.loads(_unb64(text)), keys, allow_browser)
     except (ValueError, RecursionError, TypeError, OverflowError, binascii.Error, UnicodeError, KeyError):
         raise WebDataError("malformed cursor", 400)
 
@@ -1525,8 +1555,65 @@ def _change_update(key, mid, state, outcomes=None):
     return {"channel": key, "message_id": mid, "delivery": {"state": state, "recipients": _delivery_rows_of(outcomes or {})}}
 
 
-def changes(cursor_text, budget=None, now=None):
+def _browser_section(browser, position, first_page, restarted, budget):
+    """``(section, new b position or None, partial)``: what the Browser feed holds past ``position``.
+
+    ``position`` is the cursor's ``[uuid, log seq, status-row seq]``. The page is cut to the request
+    budget (entries oldest first on a poll, newest first on a first page) and the position stays
+    where the cut fell, so the rest follows on the next poll. A first page that sent nothing for
+    want of budget returns no position, so the next poll is a first page again."""
+    after_log, after_rows = (0, 0) if first_page else (position[1], position[2])
+    page = browser.page(after_log, after_rows, first_page, budget.remaining())
+    budget.charge(page["bytes"])
+    section = {
+        "entries": page["entries"], "sends": page["sends"], "gap": bool(page["gap"]),
+        "restarted": restarted, "since_start": first_page,
+    }
+    new_position = [browser.uuid, page["log_seq"], page["rows_seq"]]
+    if first_page and page["cut"] and not page["entries"] and not page["sends"]:
+        new_position = None
+    return section, new_position, bool(page["cut"])
+
+
+def _after_first_page_hydration():
+    """No-op seam between the first page's hydration read and its cursor (tests patch it)."""
+
+
+def _hydrate_browser(browser, ctx, mids):
+    """Merge one journal context read into the Browser feed's rows for ``mids`` (idempotent).
+
+    A message the read did not reach, or a journal it could not read, is ``unverified``; one the
+    whole journal read does not hold is ``expired`` (pruned from the journal)."""
+    for mid in mids:
+        acks, errors, _partial = ctx.acks_for(mid)
+        if acks is None:
+            reached = ctx.available and (ctx.contexts.get(mid) or {}).get("state") != "unreached"
+            browser.apply_journal(mid, None, ack="expired" if reached else "unverified")
+            continue
+        for slot, state in acks.items():
+            browser.apply_journal(mid, slot, ack=state)
+        for slot, detail in errors.items():
+            browser.apply_journal(mid, slot, transport_error=str(detail))
+
+
+def _apply_browser_updates(browser, updates):
+    """Fold the journal tail's ack and transport-error updates into the Browser rows they name."""
+    for update in updates:
+        mid = update.get("message_id")
+        if "transport_error" in update:
+            browser.apply_journal(mid, update.get("recipient"), transport_error=update["transport_error"])
+        elif update.get("ack") in ("acked", "unverified"):
+            browser.apply_journal(mid, update.get("recipient"), ack=update["ack"])
+
+
+def changes(cursor_text, budget=None, now=None, browser=None):
     """What changed since ``cursor_text``, bounded by one request budget.
+
+    ``browser`` (chat mode) is the server's ``BrowserState``; then the cursor may carry ``"b"`` and the
+    result gains ``browser: {"entries", "sends", "gap", "restarted", "since_start"}`` (see
+    ``_browser_section``). A cursor without ``"b"`` (a reload) or with another server's uuid gets the
+    first page: the retained entries, the journal state of the restored outbound sends read once, and a
+    journal cursor that cannot skip an event written after that read.
 
     ``{"channels": {key: {"entries", "gap", "new"?}}, "updates", "cursor", "partial", "untracked"?,
     "journal_gap"?}``. A channel is read only when its meta ``next_seq`` is past the cursor's seq or
@@ -1547,14 +1634,32 @@ def changes(cursor_text, budget=None, now=None):
     recipient into the delivery it has, and ACK state arrives through the journal updates. Sends in
     progress are remembered in the cursor and re-probed on every call."""
     budget = budget if budget is not None else Budget()
-    cursor = decode_cursor(cursor_text)
+    cursor = decode_cursor(cursor_text, allow_browser=browser is not None)
     tracked, untracked = _tracked_keys()
     old = {key: (seq, fp) for key, seq, fp in cursor["c"]}
     old_u = [(cursor["c"][ci][0], seq, _mid_text(mid)) for ci, seq, mid in cursor["u"]]
     partial = untracked > 0
     updates = []
+    first_page = restarted = False
+    hydrated_at = None
+    if browser is not None:
+        position = cursor.get("b")
+        restarted = position is not None and position[0] != browser.uuid
+        first_page = position is None or restarted
+        if first_page:
+            # Hydrate before the tail read: `pre` is the position before it, `pos` the position of
+            # the hydration read itself. An event written after either is re-read by a later poll.
+            mids = browser.restorable_mids()
+            if mids:
+                pre, _skipped = _journal_baseline(budget)
+                ctx, pos = read_journal_context(budget, mids, with_position=True)
+                _hydrate_browser(browser, ctx, mids)
+                _after_first_page_hydration()
+                hydrated_at = pos or pre
     new_j, journal_gap, journal_partial = _journal_tail(cursor["j"], budget, updates)
     partial = partial or journal_partial
+    if hydrated_at is not None and not journal_partial:
+        new_j = hydrated_at
     positions, skipped, out, snaps = {}, set(), {}, {}
     for key in tracked:
         if key not in old:
@@ -1660,9 +1765,18 @@ def changes(cursor_text, budget=None, now=None):
             pending.append([index[key], _clamp(send_seq), hexed])
     if len(pending) > CURSOR_UPDATES_MAX:
         pending, partial = pending[:CURSOR_UPDATES_MAX], True
-    cursor_out = encode_cursor({
-        "v": 1, "c": [[key, positions[key][0], positions[key][1]] for key in order], "j": new_j, "u": pending})
-    result = {"channels": out, "updates": updates, "cursor": cursor_out, "partial": partial}
+    cursor_obj = {"v": 1, "c": [[key, positions[key][0], positions[key][1]] for key in order], "j": new_j, "u": pending}
+    result = {"channels": out, "updates": updates, "partial": partial}
+    if browser is not None:
+        _apply_browser_updates(browser, updates)
+        section, b_position, b_partial = _browser_section(browser, cursor.get("b"), first_page, restarted, budget)
+        result["browser"] = section
+        result["partial"] = partial or b_partial
+        if b_position is not None:
+            cursor_obj["b"] = b_position
+        elif not first_page:
+            cursor_obj["b"] = cursor["b"]
+    result["cursor"] = encode_cursor(cursor_obj)
     if untracked:
         result["untracked"] = untracked
     if journal_gap is not None:
@@ -1890,7 +2004,7 @@ def _journal_baseline(budget):
     return jpos, False
 
 
-def state_view(discovery, budget=None, now=None):
+def state_view(discovery, budget=None, now=None, chat=None):
     """Metadata for the page's first load: sessions, channels (#general first), the starting cursor.
 
     ``discovery`` is supplied by the caller: ``general`` = ``(members, opencode_coverage, gaps)`` from
@@ -1902,7 +2016,12 @@ def state_view(discovery, budget=None, now=None):
     not be established, e.g. the budget ran out); older entries are not examined. ``handover_chain``
     of a buddy channel is the ``member -> to`` sequence of the handover entries in that same page.
     The cursor starts every tracked channel at its current seq and fingerprint, the journal at its
-    newest record and anchor, and remembers the sends in progress in those pages."""
+    newest record and anchor, and remembers the sends in progress in those pages.
+
+    ``chat`` (chat mode) is ``{"peer": "web:<uuid>", "name", "user"}``: it is returned as ``chat``, the
+    browser peer is listed among the ``sessions`` (runtime ``Browser``), and a Codex session gains
+    ``replies_left`` from ``discovery["replies_left"]`` (the browser peer's remaining replies, worked
+    out by the discovery pass; absent or None is unknown)."""
     budget = budget if budget is not None else Budget()
     members, coverage, gaps = (tuple(discovery.get("general") or ((), None, ())) + ((), None, ()))[:3]
     liveness = discovery.get("liveness") or {}
@@ -1986,16 +2105,25 @@ def state_view(discovery, budget=None, now=None):
                     member["typed"], liveness.get(member["typed"]), activity.get(member["typed"]), now, budget,
                     home=homes.get(member["typed"].partition(":")[2]))
                 partial = partial or bool(details.get("partial"))
+                if chat is not None and member["typed"].startswith("codex:"):
+                    left = (discovery.get("replies_left") or {}).get(member["typed"])
+                    details["replies_left"] = left if isinstance(left, int) and not isinstance(left, bool) else None
                 sessions.append(details)
     pending = pending[::-1]
     if len(pending) > CURSOR_UPDATES_MAX:
         pending, partial = pending[:CURSOR_UPDATES_MAX], True
     cursor = encode_cursor({
         "v": 1, "c": [[key, seq, fp] for key, seq, fp in positions], "j": jpos, "u": pending})
+    if chat is not None:
+        browser_session = member_details(chat["peer"], "live", "idle")
+        browser_session["name"] = chat.get("name")
+        sessions.insert(0, browser_session)
     result = {
         "sessions": sessions, "channels": rows, "cursor": cursor, "partial": partial,
         "discovery": {"stale": bool(discovery.get("stale")), "pending": bool(discovery.get("pending"))},
     }
+    if chat is not None:
+        result["chat"] = {"peer": chat["peer"], "name": chat.get("name"), "user": chat.get("user")}
     if untracked:
         result["untracked"] = untracked
     return _clean(result)

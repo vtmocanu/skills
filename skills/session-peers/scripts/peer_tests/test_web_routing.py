@@ -408,6 +408,18 @@ class WebRouteCheckTests(WebRoutingBase):
         self.assertEqual(sp_routes.sender_kind(args), sp_routes.Sender("web", WEB))
         self.assertFalse(sp_routes._claudeish(sp_routes.sender_kind(args)))
 
+    def test_a_malformed_web_sender_is_refused_not_attributed_to_the_environment(self):
+        os.environ["CLAUDE_CODE_SESSION_ID"] = new_uuid()
+        args = argparse.Namespace(
+            web_sender={"sid": "not-a-uuid", "name": "x", "socket": None}, to="oc:" + OC_B, message="hi",
+            record=False, from_thread=None, from_name=None, from_sid=None, from_socket=None,
+            allow_reply_wake=None, in_reply_to=None, json=False, wake=False, never_wake=False)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = sp_routes.check(args, "send", "to")
+        self.assertEqual(rc, 2)
+        self.assertIn("malformed browser sender", err.getvalue())
+
 
 class WebSendTests(WebRoutingBase):
     def sender(self):

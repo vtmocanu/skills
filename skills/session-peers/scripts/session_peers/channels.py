@@ -1410,6 +1410,14 @@ def _check_size(key, mid, sender, members, body, journaled):
     if not members:
         return
     longest = max((_delivery_text(key, mid, sender, m, body, journaled) for m in members), key=len)
+    check_text_size(longest, members)
+
+
+def check_text_size(longest, members):
+    """Refuse (ChannelError) when ``longest`` once wrapped for any transport exceeds a peer cap.
+
+    ``longest`` is the longest per-member text; ``members`` are the typed ids it goes to.
+    """
     # build_tag and build_origin cut a field by characters while the Codex and
     # Claude caps also count UTF-8 bytes, so each is measured with a one-byte
     # filler (the character cap binds) and a four-byte one (the byte cap binds).
@@ -1536,10 +1544,10 @@ def _deliver_member(args, member, sender, mid, text, snapshot):
     member_args.result_sink = []
     member_args.channel_msg_id = mid
     member_args.channel_snapshot = snapshot
-    out, err = io.StringIO(), io.StringIO()
     rc = 1
+    out = err = None
     try:
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        with sp_runtime.capture_output() as (out, err):
             refused = sp_routes.check(member_args, "channel", "to")
             if refused is not None:
                 rc = refused
@@ -1613,7 +1621,8 @@ def _record_journal(plan):
 
     Takes the ``@all`` allowance first (a refused journal write gives it back).
     Raises ``sp_journal.JournalError`` when the journal refuses; ChannelError
-    when the allowance does. A crash point follows a successful write.
+    when the allowance does. Both are raised before anything is written; the
+    caller runs the ``send_after_journal`` crash point once this returns.
     """
     allowance = _Allowance(plan.sender) if plan.is_all else None
     try:
@@ -1626,7 +1635,6 @@ def _record_journal(plan):
     finally:
         if allowance is not None:
             allowance.release()
-    _failpoint("send_after_journal")
 
 
 def _append_send(plan, extra=None):
@@ -1694,6 +1702,7 @@ def _send(args):
             _record_journal(plan)
         except sp_journal.JournalError as exc:
             return sp_journal.presend_failed(exc, as_json)
+        _failpoint("send_after_journal")
 
     lock = _append_send(plan)
     try:
@@ -1817,26 +1826,31 @@ def _web_member_args(web_sender):
     )
 
 
-def send_as_web(key, web_sender, body, ack, mid, deliver_guard=None, expected_recipients=None):
+def send_as_web(key, web_sender, body, ack, mid, deliver_guard=None, expected_recipients=None,
+                resolve_guard=None, on_journaled=None):
     """Post ``body`` to stored channel ``key`` as the browser peer; a payload dict, never printed.
 
     ``web_sender`` is ``{"sid", "name", "socket"}``, set by the chat server,
     which has already authorised the browser: the membership test is skipped
     here and nowhere else (the CLI cannot reach this path). ``mid`` is the
-    caller's lowercase uuid4. ``deliver_guard`` is a context-manager factory
-    entered around each member's delivery (never across a pacing sleep), or
-    None. ``#general`` is refused unless ``expected_recipients`` (typed ids the
-    caller previewed) is given and ``body`` is an ``@all``; the live deliverable
-    set must then equal it.
+    caller's lowercase uuid4. ``deliver_guard`` and ``resolve_guard`` are
+    context-manager factories: the first is entered around each member's
+    delivery, the second around the resolution and the two writes (journal,
+    history); neither is held across a pacing sleep. ``on_journaled()`` is called
+    once the journal write has succeeded, so a caller that sees an exception
+    escape afterwards knows the message was recorded. ``#general`` is refused
+    unless ``expected_recipients`` (typed ids the caller previewed) is given and
+    ``body`` is an ``@all``; the live deliverable set must then equal it.
 
     Payload: ``state`` (``sent``, ``not sent`` or ``not sent (journaled)``),
     ``reason`` (None when sent), ``message_id``, ``outcomes`` ({recipient:
     outcome}), ``recipients``, ``excluded`` ([{member, reason}]); a sent post
     may add ``notes``, ``update_failed`` and ``outcome_problem``. Every refusal
-    before the first write has state ``not sent`` and leaves no journal or
+    before the journal write has state ``not sent`` and leaves no journal or
     history entry; a history failure after the journal write is ``not sent
-    (journaled)`` and is not retried. ``ack`` False omits the ACK pointer from
-    each delivery; an ``@all`` always asks for ACKs.
+    (journaled)`` and is not retried. Any other exception after the journal
+    write propagates. ``ack`` False omits the ACK pointer from each delivery;
+    an ``@all`` always asks for ACKs.
     """
     payload = {"state": WEB_NOT_SENT, "reason": None, "message_id": mid, "outcomes": {},
                "recipients": [], "excluded": []}
@@ -1845,25 +1859,34 @@ def send_as_web(key, web_sender, body, ack, mid, deliver_guard=None, expected_re
         payload["state"], payload["reason"] = state, _reason(reason)
         return payload
 
-    try:
-        sender = "web:%s" % sp_identity.parse_address("web:%s" % web_sender["sid"])["uuid"]
-        key = parse_name(key)
-        is_all = ALL_RE.match(body) is not None
-        if key == sp_constants.CHANNEL_GENERAL and not (expected_recipients is not None and is_all):
-            return refuse("#general is not open to browser posts")
-        ask = bool(ack) or is_all
-        plan = _prepare_send(key, sender, body, mid, True, authorised=True, pointer=ask)
-        payload["recipients"] = list(plan.snapshot)
-        payload["excluded"] = [{"member": m, "reason": r} for m, r in plan.excluded]
-        if expected_recipients is not None and sorted(plan.deliver) != sorted(expected_recipients):
-            return refuse("recipients changed, preview again")
-        _record_journal(plan)
-    except (ChannelError, sp_journal.JournalError, ValueError, KeyError, TypeError, OSError) as exc:
-        return refuse(exc)
-    try:
-        lock = _append_send(plan, {"ack_requested": ask})
-    except ChannelError as exc:
-        return refuse(exc, WEB_NOT_SENT_JOURNALED)
+    if not (isinstance(mid, str) and sp_constants.UUID_RE.fullmatch(mid) and mid == mid.lower()):
+        payload["message_id"] = None
+        return refuse("invalid message id")
+    guard = resolve_guard if resolve_guard is not None else contextlib.nullcontext
+    with guard():
+        # Only a failure before the journal write succeeds is `not sent`.
+        try:
+            sender = "web:%s" % sp_identity.parse_address("web:%s" % web_sender["sid"])["uuid"]
+            key = parse_name(key)
+            is_all = ALL_RE.match(body) is not None
+            if key == sp_constants.CHANNEL_GENERAL and not (expected_recipients is not None and is_all):
+                return refuse("#general is not open to browser posts")
+            ask = bool(ack) or is_all
+            plan = _prepare_send(key, sender, body, mid, True, authorised=True, pointer=ask)
+            payload["recipients"] = list(plan.snapshot)
+            payload["excluded"] = [{"member": m, "reason": r} for m, r in plan.excluded]
+            if expected_recipients is not None and sorted(plan.deliver) != sorted(expected_recipients):
+                return refuse("recipients changed, preview again")
+            _record_journal(plan)
+        except (ChannelError, sp_journal.JournalError, ValueError, KeyError, TypeError, OSError) as exc:
+            return refuse(exc)
+        if on_journaled is not None:
+            on_journaled()
+        _failpoint("send_after_journal")
+        try:
+            lock = _append_send(plan, {"ack_requested": ask})
+        except ChannelError as exc:
+            return refuse(exc, WEB_NOT_SENT_JOURNALED)
     try:
         if lock is None:
             payload["state"] = WEB_SENT

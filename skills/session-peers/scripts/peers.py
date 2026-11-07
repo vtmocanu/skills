@@ -46,7 +46,7 @@ Subcommands::
     peers.py topic list [--json]
     peers.py gc [--days 7] [--dry-run]
     peers.py doctor
-    peers.py web [--port N]
+    peers.py web [--port N] [--chat]
 
 Python 3.9+, stdlib only (D3).  macOS and Linux only.
 """

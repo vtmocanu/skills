@@ -106,6 +106,32 @@ class WebPeerBase(JournalCliBase):
         return [r for r in sp_claude.read_claude_records() if r.get("entrypoint") == "web"]
 
 
+class WebPeerStopDuringWriteTests(WebPeerBase):
+    def test_a_stop_during_the_record_write_unlinks_the_record_once(self):
+        peer = sp_webpeer.BrowserPeer()
+        real = sp_runtime.write_json_atomic
+
+        def write_then_stop(path, rec, *args, **kwargs):
+            real(path, rec, *args, **kwargs)
+            peer.request_stop()  # a signal lands after the record exists
+
+        unlinked = []
+        real_unlink = os.unlink
+
+        def counting_unlink(path, *args, **kwargs):
+            if path == peer.record_path:
+                unlinked.append(path)
+            return real_unlink(path, *args, **kwargs)
+
+        with mock.patch.object(sp_runtime, "write_json_atomic", write_then_stop), \
+                mock.patch.object(os, "unlink", counting_unlink):
+            with self.assertRaises(sp_webpeer.WebPeerError):
+                peer.start()
+        self.assertEqual(unlinked, [peer.record_path])
+        self.assertFalse(os.path.exists(peer.record_path))
+        peer.stop()
+
+
 class WebPeerRecordTests(WebPeerBase):
     def test_record_fields_mode_and_liveness(self):
         peer = self.start_peer()

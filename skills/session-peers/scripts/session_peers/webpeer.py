@@ -289,7 +289,10 @@ class BrowserPeer:
         sp_runtime.write_json_atomic(self.record_path, self.record(), mode=0o644)
         if self.stop_requested or self._cleaned:
             # A stop() on another thread may have run its cleanup before the
-            # record existed, so remove what the write just made.
+            # record existed, so remove what the write just made. Claim the
+            # record first so a forced cleanup does not unlink it a second time.
+            with self._mutex:
+                self._record_written = False
             for path in (self.record_path, "%s.tmp.%d" % (self.record_path, os.getpid())):
                 try:
                     os.unlink(path)

@@ -10,7 +10,7 @@ def _thread_from_args(args, required=False):
     explicit = getattr(args, "from_thread", None)
     # The chat server's own environment says nothing about the browser peer.
     env_value = None
-    if not getattr(args, "web_sender", None):
+    if getattr(args, "web_sender", None) is None:
         env_value = os.environ.get("CODEX_THREAD_ID") or os.environ.get("CODEX_SESSION_ID")
     value = explicit or env_value
     if value and not sp_runtime.is_uuid(value):

@@ -106,10 +106,13 @@ class WebBase(ChannelSendBase):
         for patch in (mock.patch.object(web, "ASSET_DIR", str(self.assets)), mock.patch.object(web, "DISCOVERY_TTL", 0.0)):
             patch.start()
             self.addCleanup(patch.stop)
-        self.server = web.Server(0)
+        self.server = self.make_server()
         self.serving = threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
         self.serving.start()
         self.addCleanup(self.stop_server)
+
+    def make_server(self):
+        return web.Server(0)
 
     def stop_server(self):
         self.server.shutdown()
@@ -1246,7 +1249,7 @@ class CommandTests(WebBase):
 
     def test_help_lists_the_command(self):
         text = sp_cli.build_parser().format_help()
-        self.assertRegex(text, r"web\s+local read-only dashboard")
+        self.assertRegex(text, r"web\s+local dashboard \(read-only; --chat")
 
 
 if __name__ == "__main__":
