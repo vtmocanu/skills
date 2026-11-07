@@ -719,7 +719,9 @@ class SendWorker:
                 outcome = outcomes.get(member)
                 if member in excluded:
                     outcome = sp_channels.OUTCOME_REFUSED + excluded[member]
-                no_ack = (not asked) or member in excluded or member in notes
+                # A member skipped as gone was never asked, so its ACK is not requested,
+                # as the channel entry and the journal already say.
+                no_ack = (not asked) or member in excluded or member in notes or outcome == sp_channels.OUTCOME_GONE
                 recipients[member] = {"outcome": outcome, "ack": ACK_NOT_REQUESTED if no_ack else ACK_PENDING}
             note = payload.get("outcome_problem")
             self.state.merge_recipients(mid, recipients)

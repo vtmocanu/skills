@@ -365,6 +365,16 @@ class ChatSendFlowTests(ChatBase):
         self.assertIsNone(kw.get("expected_recipients"))
         self.assertTrue(held and all(held), held)
 
+    def test_a_member_skipped_as_gone_is_not_left_ack_pending(self):
+        # Otherwise the Browser lane counts it as "1 ACK pending" for ever.
+        _listener, cc = self.peer_cc("claude-l")
+        gone = "cc:" + new_uuid()  # no live record: skipped as gone at send time
+        self.channel("ops", cc, gone, owner=cc)
+        row = self.wait_row(self.accepted("#ops", "status?"))
+        self.assertEqual(row["recipients"][gone]["outcome"], sp_channels.OUTCOME_GONE)
+        self.assertEqual(row["recipients"][gone]["ack"], "not requested")
+        self.assertEqual(row["recipients"][cc]["ack"], "pending")
+
     def test_a_non_member_browser_posts_and_does_not_join_the_channel(self):
         _listener, cc, codex = self.ops_with_claude()
         self.wait_row(self.accepted("#ops", "status?"))
