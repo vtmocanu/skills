@@ -5,6 +5,7 @@
 **Blocked by**: [#157](https://github.com/vtmocanu/skills/issues/157) (journal, per-recipient ACKs, same-user read-only reader) and [#160](https://github.com/vtmocanu/skills/issues/160) (channels). Do not start until both are merged; then re-read their merged interfaces before implementing.
 **Design mock**: `prds/mockups/161-session-peers-web/index.html` (a directory, because the mock is two files: open `index.html` in a browser; it loads `app.js` beside it, uses mock data, and fetches Google Fonts, so an offline render falls back to system fonts). The mock also shows the composer from #162; this PRD implements everything except sending.
 **Area**: `skills/session-peers/` (a `web` command, its static assets, `SKILL.md`, `references/`).
+**Status**: **Complete 2026-11-07**, M1 and M2 done. Implemented on branch `agent/issue-161`; interface in `skills/session-peers/references/web.md`. Moved to `prds/done/`. Visual parity with the mock is checked at landing per the Mock contract, and the landing session adds the `node --test` step for `session_peers/web/render.test.mjs` to CI.
 
 ## Problem
 
@@ -111,3 +112,15 @@ The All channels view, 2-second cursor polling, search (computed in `webdata.py`
 - **Blocked by #157 and #160**, because the page renders their records.
 - **Incremental journal reader with a caller budget** (2026-11-06, after #157 merged): `read_only_view()` reads everything; a budget-taking reader keeps one per-request byte limit across journal and topics. Rejected: polling `read_only_view()`; a separate journal budget on top of the 8 MiB.
 - **Per-recipient transport errors shown apart from ACKs**: #157 records them separately. Correlated requests and their settlement are deferred (no channel source). Rejected: a journal-backed request feed in this PRD.
+- **Implementation decisions (2026-11-07, branch `agent/issue-161`)**:
+  - **Send state from the snapshot**: the first `channel.outcome` after the send decides `complete`; otherwise the non-blocking lock probe, then a recheck of only the entries newer than the snapshot (same rules as `_send_state`, via a shared `send_state_from`). Sends still `in progress` ride in the poll cursor and are re-probed each poll.
+  - **Retention in memory**: the snapshot applies the topic TTL, entry count and byte limit in `_topic_state`'s order without rewriting anything, so gaps match `channel tail`.
+  - **Bounded alert badge**: the missing-ACK badge covers each channel's latest 25 entries (`unverified` when the read budget ran out); an older broadcast raises no badge. Rejected: scanning whole topics, which the bounded-read rules forbid.
+  - **Discovery worker**: one background thread, cached 5 s, run under `storage.no_create()` so it creates no session-peers directory; it starts no new checks after 8 s and checks at most 64 Codex/OpenCode sessions per pass, and requests wait at most 7 s. Codex homes for reply budgets come from discovery, never from the request path.
+  - **SQLite**: Codex's state DB is read with `mode=ro`, which may touch its WAL sidecars; no session-peers file changes. Rejected: `immutable=1`, which risks stale reads.
+  - **Cursor**: compact base64url JSON with per-channel seq and a 64-bit file fingerprint digest, the journal seq, fingerprint and anchor, and in-progress sends; at most 48 KiB; channels beyond 256 stored keys are not live-tracked.
+  - **Journal reader**: `journal.read_since` reads backward from the end within the caller's budget and continues toward the start while budget remains, so global seq semantics hold; it stops early only at the cursor's anchor record (seq plus line hash). When the start is unreached the result is partial.
+  - **Crash visibility**: process crashes only (an append fsynced before the meta write changes the file fingerprint); no power-loss claim.
+  - **One complete entry**: a channel's 1 MiB read cap extends to finish the first complete entry (up to 6.5 MiB) so a maximum-size message is always readable within the 8 MiB request budget.
+  - **State refresh**: the page re-reads `/api/state` every 5th poll (10 s).
+  - **Landing**: the CI step for `render.test.mjs` and the visual-parity comparison (isolated demo sessions, sanitized captures) are landing obligations; the worker branch cannot carry workflow files.

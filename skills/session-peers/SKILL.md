@@ -106,6 +106,18 @@ journals it for ACKs), and read with `channel tail NAME`.
 Read [references/channels.md](references/channels.md) before creating a
 channel, using `@all`, leaving or handing over, or relying on delivery state.
 
+## Web dashboard
+
+`peers.py web [--port N]` serves a local, read-only browser view of channels:
+members and their state, history, per-recipient delivery outcomes, verdicts and
+ACK state. It prints `http://127.0.0.1:<port>/#token=<t>` to open; the token is
+per start. It never sends, ACKs or changes anything, listens on loopback only,
+and bounds every read. It does not show native Claude-to-Claude messages unless
+their sender recorded them, and a `transport accepted` row is not an ACK.
+
+Read [references/web.md](references/web.md) before relying on what the
+dashboard shows or its limits.
+
 ## Buddy
 
 Bind when the user's own message names a buddy or says to ask one, or when a

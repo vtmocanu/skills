@@ -29,6 +29,8 @@ the reply command included in a request envelope.
 | hooks | Hook installation, trust metadata, and startup reconciliation |
 | topics | Pull-only shared logs, retention, identity, and cursor commands |
 | channels | Channel store under the user-wide root, membership-first history, member liveness, and the `channel` commands |
+| webdata | Dashboard read model: bounded, read-only snapshots of channel history, journal ACK state and discovery, the poll cursor and the per-view JSON |
+| web | Dashboard HTTP server (loopback, token, GET only), the discovery worker and the `web` command; serves the static assets in `web/` (`index.html`, `app.css`, `app.js`) |
 | maintenance | Owned bridge metadata and buddy garbage collection |
 | cli | Argument registration and command dispatch |
 

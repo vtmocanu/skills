@@ -365,7 +365,7 @@ test("membership, oversized and #general coverage entries; outcomes fold into th
   assert.ok(text.includes("Discovery incomplete: Claude registry: unreadable"))
   assert.ok(text.includes("to #general"))
   const notes = textOf(app.renderPageNotes(pageFixture("ops", [], { journal_partial: true })))
-  assert.ok(notes.includes("ACK state read from the latest 8 MiB of the journal"))
+  assert.ok(notes.includes("ACK state was read from the newest part of the journal only"))
   const banner = app.renderCoverage("channel", stateFixture().channels[0]).textContent
   assert.ok(banner.includes("Native Claude-to-Claude messages"))
   assert.ok(banner.includes("OpenCode was not enumerated: boom"))

@@ -24,7 +24,6 @@
   var PAGE_CAP = 500;
   var ALL_CAP = 500;
   var ALERT_WINDOW = 25;
-  var JOURNAL_MIB = 8;
   var QUERY_MAX = 256;
   // A typed address the page may copy: exactly identity.parse_typed's forms
   // (constants.UUID_RE for cc/codex, constants.OPENCODE_SESSION_ID_RE for oc).
@@ -498,7 +497,7 @@
     var out = [];
     if (!page) return out;
     (page.notes || []).forEach(function (text) { out.push(note(text, "warn")); });
-    if (page.journal_partial) out.push(note("ACK state read from the latest " + JOURNAL_MIB + " MiB of the journal; older ACKs show as unverified."));
+    if (page.journal_partial) out.push(note("ACK state was read from the newest part of the journal only; older ACKs show as unverified."));
     if (page.partial) out.push(note("Partial: something on this page lay beyond the per-request read budget and shows as unverified."));
     if (page.info && page.info.unreadable) out.push(note("This channel's membership record could not be read.", "warn"));
     if (page.info && page.info.omitted_members) out.push(note(page.info.omitted_members + " members beyond the member limit are not shown."));
