@@ -121,6 +121,26 @@ class WebAssetTests(unittest.TestCase):
         }
         for label, pattern in forbidden.items():
             self.assertIsNone(re.search(pattern, self.js), label)
+        # Handlers are attached with addEventListener (the CSP allows no inline handler); no handler
+        # property is assigned, and no text is parsed as markup by any other name.
+        self.assertIsNone(re.search(r"\.\s*on[a-z]+\s*=[^=]", self.js), "handler property")
+        self.assertIsNone(re.search(r"\b(?:innerText|outerText)\s*=", self.js), "innerText/outerText")
+        self.assertIsNone(re.search(r"\bparseFromString\b|\bsetHTML(?:Unsafe)?\b", self.js), "HTML parsing")
+
+    def test_el_allowlists_hold_no_active_tag_or_attribute(self):
+        tags = re.search(r"var HTML_TAGS = \[([^\]]*)\]", self.js).group(1)
+        attrs = re.search(r"var ATTRS = \[([^\]]*)\]", self.js).group(1)
+        tag_names = set(re.findall(r'"([a-z0-9]+)"', tags))
+        attr_names = set(re.findall(r'"([a-z-]+)"', attrs))
+        # The composer's form controls are allowed; nothing that loads, navigates, submits or runs is.
+        self.assertLessEqual({"label", "input", "textarea"}, tag_names)
+        for bad in ("script", "iframe", "frame", "object", "embed", "a", "img", "form", "style", "link", "meta",
+                    "base", "svg", "math", "template", "video", "audio", "source"):
+            self.assertNotIn(bad, tag_names, bad)
+        for name in attr_names:
+            self.assertFalse(name.startswith("on"), name)
+        for bad in ("href", "src", "action", "formaction", "style", "srcdoc", "value", "name", "form", "autofocus"):
+            self.assertNotIn(bad, attr_names, bad)
 
     def test_timers_take_functions_never_strings(self):
         calls = list(re.finditer(r"\bset(?:Timeout|Interval)\s*\(\s*", self.js))
@@ -163,7 +183,12 @@ class WebAssetTests(unittest.TestCase):
         self.assertIn('credentials: "omit"', self.js)
         self.assertIn('cache: "no-store"', self.js)
         self.assertIn('redirect: "error"', self.js)
-        self.assertIn('referrerPolicy: "no-referrer"', self.js)
+        # A GET sends no referrer; the chat-mode POST keeps a same-origin policy so the browser sends
+        # the real Origin the server checks (Fetch serializes it as "null" under no-referrer).
+        self.assertIn('referrerPolicy: post ? "same-origin" : "no-referrer"', self.js)
+        self.assertIn('method: post ? "POST" : "GET"', self.js)
+        self.assertIn('headers["Content-Type"] = "application/json"', self.js)
+        self.assertIn('var SEND_PATH = "/api/send";', self.js)
         for literal in re.findall(r'"(/[^"]*)"', self.js):
             self.assertTrue(literal == "/" or literal.startswith("/api/"), literal)
         self.assertNotRegex(self.js, r"\b(?:XMLHttpRequest|WebSocket|EventSource|sendBeacon)\b")
@@ -190,7 +215,9 @@ class WebAssetTests(unittest.TestCase):
     def test_light_theme_text_contrast_is_aa(self):
         tokens = light_tokens(self.css)
         pairs = [("ink-3", "line-2"), ("ink-3", "paper"), ("ink-3", "raised"), ("ink-3", "panel"),
-                 ("mention", "paper"), ("mention", "raised"), ("ink-2", "line-2")]
+                 ("mention", "paper"), ("mention", "raised"), ("ink-2", "line-2"),
+                 # chat mode: the browser peer's name, the authority line and the chat badge
+                 ("human", "paper"), ("human", "panel"), ("human", "raised"), ("human", "human-bg")]
         for fg, bg in pairs:
             ratio = contrast(tokens[fg], tokens[bg])
             self.assertGreaterEqual(ratio, 4.5, "--%s on --%s is %.2f:1" % (fg, bg, ratio))

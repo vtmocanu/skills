@@ -1255,3 +1255,388 @@ test("discovery.truncated adds a rail note that some session states were not che
   await env.app.pollOnce()
   assert.ok(!rail().includes("not checked"), "gone once a pass completes")
 })
+
+// ---------------------------------------------------------------- chat mode (#162: peers.py web --chat)
+
+const WEB = "web:7c0e0000-0000-4000-8000-0000000000aa"
+const MID1 = "11111111-1111-4111-8111-111111111111"
+const MID2 = "22222222-2222-4222-8222-222222222222"
+const MID3 = "33333333-3333-4333-8333-333333333333"
+const T0 = Date.parse("2026-11-07T12:41:00+00:00") / 1000
+
+function chatState() {
+  const state = stateFixture()
+  state.chat = { peer: WEB, name: "browser-7c0e", user: "alice" }
+  state.sessions.unshift({ member: WEB, address: WEB, runtime: "Browser", liveness: "live", state: "idle", name: "browser-7c0e" })
+  state.sessions[2].replies_left = 4
+  return state
+}
+
+// A fetch that answers /api/send from `send(init)` (a { status, body } or a thrown error) and every
+// other path from the route table.
+function chatBoot({ send, state, extraRoutes = {} } = {}) {
+  const calls = []
+  const routes = Object.assign({
+    "/api/state": state || chatState(),
+    "/api/channel/general": pageFixture("general", [sendEntry(1, "hello general")]),
+    "/api/channel/ops": pageFixture("ops", [sendEntry(1, "first in ops")]),
+  }, extraRoutes)
+  const base = makeFetch(routes, calls)
+  const sends = []
+  const fetch = async (url, init) => {
+    if (url !== "/api/send") return base(url, init)
+    calls.push({ url, init })
+    sends.push({ url, init, body: JSON.parse(init.body) })
+    const answer = await (send || (() => ({ status: 202, body: { message_id: MID1, state: "queued" } })))(init)
+    return { ok: answer.status >= 200 && answer.status < 300, status: answer.status, json: async () => structuredClone(answer.body || {}) }
+  }
+  const location = { hash: "#token=" + "ab".repeat(32), pathname: "/", search: "" }
+  const loaded = load({ location, fetch })
+  return Object.assign(loaded, { calls, routes, sends, location })
+}
+
+const composer = (t) => t.document.byId.composer
+const textareaOf = (t) => elementsOf(composer(t)).find((n) => n.tagName === "textarea")
+const sendButton = (t) => elementsOf(composer(t)).find((n) => n.tagName === "button" && n.attributes.class === "send")
+const pickBoxes = (t) => elementsOf(composer(t)).filter((n) => n.tagName === "input" && (n.attributes["data-focus"] || "").startsWith("pick:"))
+const ackBox = (t) => elementsOf(composer(t)).find((n) => n.tagName === "input" && n.attributes["data-focus"] === "compose:ack")
+const statusLine = (t) => elementsOf(composer(t)).find((n) => n.attributes.class && n.attributes.class.startsWith("cstatus"))
+
+function setBox(box, checked) { box.checked = checked; box.dispatch("change") }
+function typeText(t, text) { const area = textareaOf(t); area.value = text; area.dispatch("input") }
+
+function sendRow(mid, extra = {}) {
+  return Object.assign({ mid, kind: "direct", to: [CODEX_B], ack_requested: true, state: "queued", reason: null, note: null,
+    journaled: false, delivering: false, recipients: {}, at: T0, seq: 1 }, extra)
+}
+
+function browserChanges(cursor, browser) {
+  return quiet(cursor, { browser: Object.assign({ entries: [], sends: [], gap: false, restarted: false, since_start: false }, browser) })
+}
+
+test("chat: no composer, Browser lane or chat badge without state.chat; the read-only badge stays", async () => {
+  const t = bootFixture()
+  await t.app.ready
+  assert.equal(composer(t).childNodes.length, 0)
+  assert.ok(!t.document.byId.lanes.textContent.includes("Browser"))
+  assert.ok(!t.document.byId.legend.textContent.includes("Browser"))
+  assert.equal(t.document.byId.modebadge.textContent, "read-only")
+  assert.ok(!t.document.byId.modebadge.classList.contains("chat"))
+  assert.ok(t.calls.every((c) => c.init.method === "GET"))
+})
+
+test("chat: the composer, chat badge and Browser lane appear with state.chat; the composer follows the mock", async () => {
+  const t = chatBoot()
+  await t.app.ready
+  await t.app.selectChannel("ops")
+  const text = composer(t).textContent
+  assert.ok(text.includes("To"))
+  assert.ok(text.includes("Ask for ACK"))
+  assert.ok(text.includes("Arrives as peer input, not user approval"))
+  assert.ok(!text.includes("Keep in journal"), "browser sends are always journaled")
+  assert.ok(textareaOf(t), "a textarea")
+  assert.equal(textareaOf(t).attributes["aria-label"], "Message")
+  assert.equal(sendButton(t).textContent, "Send")
+  assert.equal(sendButton(t).disabled, true, "nothing to send yet")
+  assert.equal(t.document.byId.modebadge.textContent, "chat")
+  assert.ok(t.document.byId.lanes.childNodes[0].textContent.includes("Browser"))
+  assert.ok(t.document.byId.legend.textContent.includes("Browser"))
+})
+
+test("chat: in #general the composer is shown disabled with a reason", async () => {
+  const t = chatBoot()
+  await t.app.ready
+  assert.equal(t.app.state.selected, "general")
+  assert.ok(composer(t).childNodes.length > 0)
+  assert.equal(textareaOf(t).disabled, true)
+  assert.equal(sendButton(t).disabled, true)
+  assert.equal(pickBoxes(t).length, 0)
+  assert.ok(composer(t).textContent.includes("Sending to #general is not available yet"), composer(t).textContent)
+  typeText(t, "hi everyone")
+  assert.equal(sendButton(t).disabled, true)
+  assert.equal(await t.app.submitCompose(), false)
+  assert.equal(t.sends.length, 0)
+})
+
+test("chat: the picker lists the channel's members and a post-to-channel option, never the browser peer", async () => {
+  const state = chatState()
+  state.channels[1].members.push({ typed: WEB, state: "idle", name: "browser-7c0e" })
+  const t = chatBoot({ state })
+  await t.app.ready
+  await t.app.selectChannel("ops")
+  const boxes = pickBoxes(t)
+  assert.deepEqual(boxes.map((b) => b.attributes["data-focus"]), ["pick:#", "pick:" + CC_A, "pick:" + CODEX_B])
+  const text = composer(t).textContent
+  assert.ok(text.includes("Post to #ops"))
+  assert.ok(text.includes("landish8"))
+  // Browser lists every session that is not gone, never itself.
+  t.app.showBrowser()
+  assert.deepEqual(pickBoxes(t).map((b) => b.attributes["data-focus"]), ["pick:" + CC_A, "pick:" + CODEX_B])
+})
+
+test("chat: Ctrl+Enter POSTs /api/send with the token, JSON body and a same-origin referrer policy; a 202 shows a Queued row", async () => {
+  const t = chatBoot()
+  await t.app.ready
+  await t.app.selectChannel("ops")
+  setBox(pickBoxes(t)[2], true)
+  setBox(ackBox(t), true)
+  typeText(t, "please rebase")
+  assert.equal(sendButton(t).disabled, false)
+  textareaOf(t).dispatch("keydown", { key: "Enter", ctrlKey: true })
+  await settle()
+  assert.equal(t.sends.length, 1)
+  const { init, body } = t.sends[0]
+  assert.equal(init.method, "POST")
+  assert.equal(init.headers["X-Peers-Token"], "ab".repeat(32))
+  assert.equal(init.headers["Content-Type"], "application/json")
+  assert.equal(init.credentials, "omit")
+  assert.equal(init.cache, "no-store")
+  assert.equal(init.redirect, "error")
+  assert.equal(init.referrerPolicy, "same-origin", "the Origin the server checks is sent")
+  assert.deepEqual(body, { to: [CODEX_B], text: "please rebase", ack: true })
+  assert.deepEqual(Object.keys(body).sort(), ["ack", "text", "to"])
+  assert.equal(textareaOf(t).value, "", "a 202 clears the text")
+  assert.ok(statusLine(t).textContent.includes("Queued (not yet recorded)"))
+  t.app.showBrowser()
+  const stream = t.document.byId.stream.textContent
+  assert.ok(stream.includes("please rebase"))
+  assert.ok(stream.includes("Queued (not yet recorded)"))
+  // The server's row and log entry replace the page's own, keyed by message_id.
+  t.routes["/api/changes"] = browserChanges("C1", {
+    entries: [{ lseq: 1, dir: "out", message_id: MID1, to: [CODEX_B], text: "please rebase", ack_requested: true, at: T0 }],
+    sends: [sendRow(MID1, { state: "pending", journaled: true, delivering: true, recipients: { [CODEX_B]: { outcome: null, ack: "pending" } }, seq: 3 })],
+  })
+  await t.app.pollOnce()
+  const after = t.document.byId.stream.textContent
+  assert.equal(after.split("please rebase").length - 1, 1, "one message, not the stand-in as well")
+  assert.ok(after.includes("Recorded, delivering…"))
+  // A plain Enter does not send.
+  typeText(t, "again")
+  setBox(pickBoxes(t)[1], true)
+  textareaOf(t).dispatch("keydown", { key: "Enter" })
+  await settle()
+  assert.equal(t.sends.length, 1)
+})
+
+test("chat: a channel post's row shows in that channel until the history entry with its message id replaces it", async () => {
+  const t = chatBoot({ send: () => ({ status: 202, body: { message_id: MID2, state: "queued" } }) })
+  await t.app.ready
+  await t.app.selectChannel("ops")
+  setBox(pickBoxes(t)[0], true)
+  assert.equal(pickBoxes(t)[1].disabled, true, "members are not picked alongside the channel")
+  typeText(t, "status please")
+  sendButton(t).dispatch("click")
+  await settle()
+  assert.equal(t.sends[0].body.to, "#ops")
+  const stream = () => t.document.byId.stream.textContent
+  assert.ok(stream().includes("status please"))
+  assert.ok(stream().includes("Queued (not yet recorded)"))
+  t.routes["/api/changes"] = browserChanges("C1", {
+    sends: [sendRow(MID2, { kind: "channel", to: "#ops", channel: "ops", text: "status please", state: "pending", journaled: true,
+      delivering: true, recipients: { [CODEX_B]: { outcome: "transport accepted", ack: "pending" }, [CC_A]: { outcome: null, ack: "pending" } }, seq: 4 })],
+  })
+  await t.app.pollOnce()
+  assert.ok(stream().includes("Recorded, delivering…"))
+  assert.ok(!stream().includes("Queued (not yet recorded)"))
+  assert.equal(t.app.state.browser.entries.length, 0, "a channel post never enters the Browser log")
+  const posted = sendEntry(2, "status please", { message_id: MID2, sender: WEB, actor: WEB, ts: new Date((T0 + 5) * 1000).toISOString() })
+  t.routes["/api/changes"] = quiet("C2", { channels: { ops: { entries: [posted], gap: null } } })
+  await t.app.pollOnce()
+  assert.equal(stream().split("status please").length - 1, 1, "replaced, not shown twice")
+  assert.ok(!stream().includes("Recorded, delivering…"))
+  assert.ok(stream().includes("Delivery: complete"), "the history entry's own delivery row")
+})
+
+test("chat: every status-row state reads as the D2 contract says", () => {
+  const { app } = load()
+  app.setState(chatState())
+  const t = (r) => app.renderSendStatus(r).textContent
+  assert.ok(t(sendRow(MID1)).includes("Queued (not yet recorded)"))
+  assert.ok(t(sendRow(MID1, { state: "pending", delivering: true, recipients: { [CODEX_B]: { outcome: null, ack: "pending" } } })).includes("Recorded, delivering…"))
+  const pending = t(sendRow(MID1, { state: "pending", to: [CODEX_B, CC_A, OC_C, DISK4], recipients: {
+    [CODEX_B]: { outcome: "transport accepted", ack: "pending" },
+    [CC_A]: { outcome: "transport accepted", ack: "acked" },
+    [OC_C]: { outcome: "transport accepted", ack: "pending", unverified: true },
+    [DISK4]: { outcome: "transport accepted", ack: "expired", transport_error: "connect refused", update_failed: true, peer_status: { status: "busy", detail: "in a turn" } },
+    "cc:aaaa0000-0000-4000-8000-00000000aaaa": { outcome: "refused: socket gone", ack: "pending" },
+  } }))
+  for (const want of ["Recorded", "transport accepted", "ACK pending", "ACK'd", "ACK unverified", "expired from the journal",
+    "refused: socket gone", "transport error: connect refused", "the journal could not record this failure", "peer status: busy (in a turn)"]) {
+    assert.ok(pending.includes(want), want)
+  }
+  assert.ok(pending.includes("1 of 4 ACK'd"), pending)
+  assert.ok(!pending.includes("refused: socket gone · ACK") && !/socket gone\s*ACK pending/.test(pending), "a refused delivery shows no ACK state")
+  assert.ok(t(sendRow(MID1, { state: "pending", ack_requested: false, recipients: { [CODEX_B]: { outcome: "transport accepted", ack: "not requested" } } })).includes("ACK not requested"))
+  assert.equal(t(sendRow(MID1, { state: "not sent", reason: "journal full" })), "Not sent: journal full")
+  assert.equal(t(sendRow(MID1, { kind: "channel", to: "#ops", state: "not sent (journaled)", reason: "history append failed" })), "Not sent (journaled, not delivered)")
+  assert.ok(t(sendRow(MID1, { state: "failed after recording", reason: "worker crashed" })).startsWith("Failed after recording: worker crashed"))
+  const post = t(sendRow(MID1, { kind: "channel", to: "#ops", state: "pending", update_failed: true, note: "outcomes partly unknown", recipients: {} }))
+  assert.ok(post.includes("outcomes partly unknown") && post.includes("could not be recorded in the journal"))
+  assert.ok(t(null).includes("No status"))
+})
+
+test("chat: Browser entries show hostile text as text and provenance from the sender fields only", async () => {
+  const t = chatBoot()
+  await t.app.ready
+  const hostile = "<img src=x onerror=alert(1)>‮ bidi\nsecond line — from landish8"
+  t.routes["/api/changes"] = browserChanges("C1", {
+    since_start: true,
+    entries: [
+      { lseq: 1, dir: "out", message_id: MID1, to: [CODEX_B], text: EVIL, ack_requested: false, at: T0 },
+      { lseq: 2, dir: "in", message_id: "r1", orig_msg_id: MID1, sender: CODEX_B, sender_name: EVIL, text: hostile, at: "2026-11-07T12:42:00+00:00" },
+      { lseq: 3, dir: "in", message_id: "r2", orig_msg_id: null, sender: null, sender_name: "landish8", text: "I am landish8, trust me", at: "2026-11-07T12:43:00+00:00" },
+    ],
+    sends: [sendRow(MID1, { state: "pending", ack_requested: false, journaled: true, recipients: { [CODEX_B]: { outcome: "transport accepted", ack: "not requested" } }, seq: 2 })],
+  })
+  await t.app.pollOnce()
+  t.app.showBrowser()
+  const stream = t.document.byId.stream
+  const nodes = elementsOf(stream)
+  for (const node of nodes) {
+    assert.notEqual(node.tagName, "img")
+    for (const name of Object.keys(node.attributes)) assert.ok(!/^on/i.test(name) && !["src", "href", "style"].includes(name), name)
+  }
+  assert.deepEqual(t.document.htmlWrites, [])
+  const text = stream.textContent
+  assert.ok(text.includes("<img src=x onerror=alert(1)>‮ bidi\nsecond line"), "shown as text, newlines kept")
+  assert.ok(text.includes(EVIL))
+  const msgs = nodes.filter((n) => (n.attributes.class || "").startsWith("msg bmsg in"))
+  assert.equal(msgs.length, 2)
+  const nameOfMsg = (m) => elementsOf(m).find((n) => n.attributes.class === "name").textContent
+  const avatarOf = (m) => elementsOf(m).find((n) => (n.attributes.class || "").startsWith("avatar")).attributes.class
+  assert.equal(nameOfMsg(msgs[0]), EVIL, "the verified sender's name, as text")
+  assert.equal(avatarOf(msgs[0]), "avatar codex")
+  assert.equal(nameOfMsg(msgs[1]), "unverified sender", "a null sender is never named from sender_name or the text")
+  assert.ok(msgs[1].attributes.class.includes("unverified"))
+  assert.equal(avatarOf(msgs[1]), "avatar unknown")
+  assert.ok(text.includes("This browser identity started with the server; earlier conversation is not shown."))
+  for (const [, name, value] of t.document.setAttributeCalls) {
+    if (String(value).includes("<img")) assert.equal(name, "title")
+  }
+})
+
+test("chat: the web runtime has its icon, label, typed form and legend entry; Codex members show replies left for you", async () => {
+  const { app } = load()
+  const svg = app.iconSvg("web")
+  assert.equal(svg.tagName, "svg")
+  assert.equal(svg.namespaceURI, "http://www.w3.org/2000/svg")
+  assert.equal(svg.attributes.class, "web-mark")
+  assert.ok(svg.childNodes[0].attributes.d.length > 20)
+  assert.notEqual(svg.childNodes[0].attributes.d, app.iconSvg("unknown").childNodes[0].attributes.d)
+  assert.ok(app.copyable(WEB))
+  assert.ok(!app.copyable("web:you"))
+  app.setState(chatState())
+  const out = app.renderBrowserEntry({ lseq: 1, dir: "out", message_id: MID1, to: [CODEX_B], text: "hi", at: T0 })
+  assert.ok(out.textContent.includes("Browser"))
+  assert.ok(out.textContent.includes("browser-7c0e"))
+  assert.equal(elementsOf(out).find((n) => (n.attributes.class || "").startsWith("avatar")).attributes.class, "avatar web")
+  const inbound = app.renderBrowserEntry({ lseq: 2, dir: "in", message_id: "r", sender: WEB, sender_name: "other tab", text: "x", at: T0 })
+  assert.ok(inbound.textContent.includes("Browser"))
+  const details = textOf(app.renderDetails(app.state.rows.ops))
+  assert.ok(details.includes("Replies left for you") && details.includes("4"), details)
+  const t = chatBoot()
+  await t.app.ready
+  assert.ok(t.document.byId.legend.textContent.includes("Browser"))
+  assert.ok(t.document.byId.fleet.textContent.startsWith("3 sessions"), "the browser peer is not counted as a session")
+})
+
+test("chat: a repeated row or update leaves the tally as it was (state is set, never incremented)", async () => {
+  const t = chatBoot()
+  await t.app.ready
+  const changes = (cursor) => browserChanges(cursor, {
+    entries: [{ lseq: 1, dir: "out", message_id: MID1, to: [CODEX_B, CC_A], text: "ack me", ack_requested: true, at: T0 }],
+    sends: [sendRow(MID1, { to: [CODEX_B, CC_A], state: "pending", journaled: true, seq: 5,
+      recipients: { [CODEX_B]: { outcome: "transport accepted", ack: "acked" }, [CC_A]: { outcome: "transport accepted", ack: "pending" } } })],
+  })
+  t.routes["/api/changes"] = changes("C1")
+  await t.app.pollOnce()
+  t.app.showBrowser()
+  const once = t.document.byId.stream.textContent
+  assert.ok(once.includes("1 of 2 ACK'd"), once)
+  t.routes["/api/changes"] = changes("C2")
+  await t.app.pollOnce()
+  t.app.applyBrowser(changes("C3").browser)
+  t.app.showBrowser()
+  assert.equal(t.document.byId.stream.textContent, once)
+  assert.deepEqual(plain(t.app.rowTally(t.app.state.browser.sends[MID1])), { acked: 1, total: 2 })
+  assert.equal(t.app.state.browser.entries.length, 1, "the log entry is held once")
+  // An older copy of the row (a lower seq) never replaces a newer one.
+  t.app.applyBrowser({ entries: [], sends: [sendRow(MID1, { seq: 4 })], gap: false, restarted: false, since_start: false })
+  assert.equal(t.app.state.browser.sends[MID1].state, "pending")
+})
+
+test("chat: refusals and no response show a short message and keep the text", async () => {
+  for (const [status, want] of [[429, "Too fast or queue full — try again"], [403, "Refused (403)"], [400, "(400)"], [413, "Message too large (413)"],
+    [415, "(415)"], [503, "(503)"]]) {
+    const t = chatBoot({ send: () => ({ status }) })
+    await t.app.ready
+    await t.app.selectChannel("ops")
+    setBox(pickBoxes(t)[1], true)
+    typeText(t, "@all stop")
+    assert.equal(await t.app.submitCompose(), false)
+    assert.ok(statusLine(t).textContent.includes(want), status + ": " + statusLine(t).textContent)
+    assert.equal(statusLine(t).attributes.role, "status")
+    assert.equal(textareaOf(t).value, "@all stop", "the text stays for another try")
+    assert.equal(Object.keys(t.app.state.browser.sends).length, 0, "no row for a refusal")
+  }
+  const t = chatBoot({ send: () => { throw new TypeError("Failed to fetch") } })
+  await t.app.ready
+  await t.app.selectChannel("ops")
+  setBox(pickBoxes(t)[1], true)
+  typeText(t, "hello")
+  assert.equal(await t.app.submitCompose(), false)
+  assert.equal(statusLine(t).textContent, "No response — check the Browser feed")
+  typeText(t, "hello again")
+  assert.equal(statusLine(t).textContent, "", "a new message clears the last result")
+  assert.equal(t.app.sendErrorText(429), "Too fast or queue full — try again (429)")
+})
+
+test("chat: Browser notes for the start, an eviction gap and a restart; a restart drops the old identity's rows", async () => {
+  const t = chatBoot()
+  await t.app.ready
+  t.routes["/api/changes"] = browserChanges("C1", {
+    since_start: true, gap: true,
+    entries: [{ lseq: 5, dir: "out", message_id: MID1, to: [CODEX_B], text: "one", ack_requested: false, at: T0 }],
+    sends: [sendRow(MID1, { state: "pending", seq: 2, recipients: { [CODEX_B]: { outcome: "transport accepted", ack: "not requested" } } })],
+  })
+  await t.app.pollOnce()
+  t.app.showBrowser()
+  const stream = () => t.document.byId.stream.textContent
+  assert.ok(stream().includes("This browser identity started with the server; earlier conversation is not shown."))
+  assert.ok(stream().includes("Earlier messages expired or were not shown."))
+  t.routes["/api/changes"] = browserChanges("C2", { gap: true, entries: [{ lseq: 9, dir: "in", message_id: "r9", sender: CODEX_B, sender_name: "cx", text: "late reply", at: T0 + 60 }] })
+  await t.app.pollOnce()
+  assert.equal(stream().split("Earlier messages expired or were not shown.").length - 1, 2, "an eviction gap is marked where it fell")
+  t.routes["/api/changes"] = browserChanges("C3", { since_start: true, restarted: true,
+    entries: [{ lseq: 1, dir: "in", message_id: "n1", sender: CC_A, sender_name: "landish8", text: "new identity hello", at: T0 + 120 }] })
+  await t.app.pollOnce()
+  assert.ok(t.document.byId.notes.textContent.includes("The server restarted: new browser identity."))
+  assert.ok(!stream().includes("late reply") && stream().includes("new identity hello"))
+  assert.equal(Object.keys(t.app.state.browser.sends).length, 0)
+})
+
+test("chat: a direct send queued from a channel is followed in Browser; the lane counts pending ACKs", async () => {
+  const t = chatBoot({ send: () => ({ status: 202, body: { message_id: MID3, state: "queued" } }) })
+  await t.app.ready
+  await t.app.selectChannel("ops")
+  setBox(pickBoxes(t)[1], true)
+  setBox(ackBox(t), true)
+  typeText(t, "ping")
+  assert.equal(await t.app.submitCompose(), true)
+  assert.ok(statusLine(t).textContent.includes("Follow its status in Browser"))
+  t.routes["/api/changes"] = browserChanges("C1", {
+    entries: [{ lseq: 1, dir: "out", message_id: MID3, to: [CC_A], text: "ping", ack_requested: true, at: T0 }],
+    sends: [sendRow(MID3, { to: [CC_A], state: "pending", journaled: true, seq: 2, recipients: { [CC_A]: { outcome: "transport accepted", ack: "pending" } } }),
+      // A refused recipient, or one with a transport error, is not waiting for an ACK.
+      sendRow(MID2, { to: [CODEX_B, OC_C], state: "pending", journaled: true, seq: 3, recipients: {
+        [CODEX_B]: { outcome: "refused: codex is not on PATH", ack: "pending", transport_error: "codex is not on PATH" },
+        [OC_C]: { outcome: "transport accepted", ack: "pending", unverified: true } } })],
+  })
+  await t.app.pollOnce()
+  const lane = t.document.byId.lanes.childNodes[0]
+  assert.ok(lane.textContent.includes("1 ACK pending"), lane.textContent)
+  lane.dispatch("keydown", { key: "Enter" })
+  assert.equal(t.app.state.view, "browser")
+  assert.equal(t.document.byId.title.textContent, "Browser")
+  assert.ok(textOf(t.document.byId.info).includes(WEB), "details show the browser peer's address")
+})
