@@ -577,3 +577,190 @@ class WebSenderDeliveryTests(WebRoutingBase):
         with self.assertRaises(ValueError):
             sp_messaging._web_sender(argparse.Namespace(web_sender={"sid": "nope"}))
         self.assertIsNone(sp_messaging._web_sender(argparse.Namespace()))
+
+    def test_sender_kind_does_not_class_a_malformed_sid_as_a_web_sender(self):  # routes.sender_kind
+        for bad in ("nope", UPPER_WEB, WEB + "\n", 7):
+            args = argparse.Namespace(web_sender={"sid": bad, "name": "browser-peer", "socket": None})
+            self.assertEqual(sp_routes.sender_kind(args), sp_routes.Sender("shell", None), repr(bad))
+
+    def test_the_environment_thread_id_is_ignored_for_a_browser_sender(self):  # identity._thread_from_args
+        os.environ["CODEX_THREAD_ID"] = new_uuid()
+        self.assertTrue(sp_identity._thread_from_args(argparse.Namespace()))
+        web = {"sid": WEB, "name": "browser-peer", "socket": None}
+        self.assertIsNone(sp_identity._thread_from_args(argparse.Namespace(web_sender=web)))
+
+    def test_a_codex_shim_target_is_routed_by_the_browser_sender_not_the_server_env(self):  # messaging._codex_shim_thread
+        shim_sid = new_uuid()
+        _listener, rec = self.add_listener(name="shim-alias", session_id=shim_sid, pid=os.getpid())
+        self.write_record(os.getpid(), "shim-alias", shim_sid, rec["messagingSocketPath"], entrypoint="codex")
+        os.environ["CODEX_THREAD_ID"] = new_uuid()
+        # A Codex sender in the environment keeps the Claude-facing path.
+        self.assertIsNone(sp_messaging._codex_shim_thread(shim_sid, argparse.Namespace()))
+        # The server's environment is not the browser peer: the shim's thread is the route.
+        web = {"sid": WEB, "name": "browser-peer", "socket": None}
+        self.assertEqual(sp_messaging._codex_shim_thread(shim_sid, argparse.Namespace(web_sender=web)), shim_sid)
+
+
+class WebVerbOrderTests(WebRoutingBase):
+    """A verb a browser peer cannot take is refused before any offline advice."""
+
+    def test_ask_to_an_offline_web_target_names_send_not_record(self):
+        rc, _out, err = self.cli("ask", "--to", "web:" + WEB, "--message", "x", "--timeout", "1")
+        self.assertEqual(rc, 2)
+        self.assertIn("cannot reach the browser peer", err)
+        self.assertIn("Use send.", err)
+        self.assertNotIn("--record", err)
+
+    def test_dispatch_to_an_offline_web_target_names_send_not_record(self):
+        rc, _out, err = self.cli("dispatch", "--to", "web:" + WEB, "--message", "x", "--timeout", "1")
+        self.assertEqual(rc, 2)
+        self.assertIn("cannot reach the browser peer", err)
+        self.assertNotIn("--record", err)
+
+    def test_wait_for_a_web_target_is_refused_live_or_offline(self):
+        for live in (False, True):
+            if live:
+                self.add_web()
+            rc, _out, err = self.cli("wait", "--for", "web:" + WEB, "--state", "idle", "--timeout", "1")
+            self.assertEqual(rc, 2, live)
+            self.assertIn("cannot reach the browser peer", err)
+            self.assertNotIn("--record", err)
+
+    def test_send_to_an_offline_web_target_still_advises_record(self):
+        rc, _out, err = self.cli("send", "--to", "web:" + WEB, "--message", "x")
+        self.assertEqual(rc, 1)
+        self.assertIn("Use --record", err)
+
+
+class WebSendProvenanceTests(WebRoutingBase):
+    """`_send_web`: the origin line and the frame's `from` name one sender."""
+
+    def web_on_a_child_pid(self):
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        self._children.append(child)
+        return self.add_web(pid=child.pid)
+
+    def test_from_socket_names_both_the_origin_and_the_frame_from(self):
+        inbox, _rec = self.web_on_a_child_pid()
+        _la, rec_a = self.peer("cc-a", pid=os.getpid())
+        _lb, rec_b = self.peer("cc-b", pid=os.getppid())
+        self.as_cc(rec_a)
+        rc, _out, err = self.cli(
+            "send", "--to", "web:" + WEB, "--message", "hello",
+            "--from-socket", rec_b["messagingSocketPath"],
+        )
+        self.assertEqual(rc, 0, err)
+        [frame] = inbox.frames
+        self.assertEqual(frame["from"], "uds:" + rec_b["messagingSocketPath"])
+        content = frame["message"]["content"]
+        self.assertEqual(
+            content.splitlines()[0],
+            "[session-peers from Claude Code session cc-b (%s)]" % rec_b["sessionId"],
+        )
+        self.assertNotIn("cc-a", content)
+        self.assertNotIn(rec_a["sessionId"], content)
+
+    def test_a_from_socket_nobody_listens_on_is_refused_before_anything_is_sent(self):
+        inbox, _rec = self.web_on_a_child_pid()
+        _la, rec_a = self.peer("cc-a", pid=os.getpid())
+        self.as_cc(rec_a)
+        rc, _out, err = self.cli(
+            "send", "--to", "web:" + WEB, "--message", "hello",
+            "--from-socket", str(self.socks / "nobody.sock"),
+        )
+        self.assertEqual(rc, 1)
+        self.assertIn("no live Claude session listens", err)
+        self.assertEqual(inbox.frames, [])
+
+
+class WebCallerViewTests(WebRoutingBase):
+    """`messaging._caller_view` reads the browser peer's record as a browser peer."""
+
+    def test_a_session_id_naming_the_web_record_is_a_browser_peer(self):  # include_web=True
+        self.add_web()
+        os.environ["CLAUDE_CODE_SESSION_ID"] = WEB
+        runtime, name, address = sp_messaging._caller_view(argparse.Namespace())
+        self.assertEqual((runtime, name, address), ("web", "browser-peer", "web:" + WEB))
+        self.assertIn(
+            "browser peer browser-peer", sp_protocol.build_origin(runtime, name, address.partition(":")[2])
+        )
+
+    def test_a_messaging_socket_naming_the_web_record_is_a_browser_peer(self):  # by_socket path
+        inbox, _rec = self.add_web()
+        os.environ["CLAUDE_CODE_MESSAGING_SOCKET"] = inbox.path
+        runtime, name, address = sp_messaging._caller_view(argparse.Namespace())
+        self.assertEqual((runtime, name, address), ("web", "browser-peer", "web:" + WEB))
+
+
+class WebExcludedReaderTests(WebRoutingBase):
+    """The readers that must never take the browser peer's record for a cc session or a Codex shim."""
+
+    def test_wait_for_cc_ignores_a_web_record_sharing_the_session_id(self):  # messaging.cmd_wait_peer
+        sid = new_uuid()
+        _listener, rec = self.add_listener(name="cc-busy", session_id=sid, pid=os.getpid())
+        self.write_record(os.getpid(), "cc-busy", sid, rec["messagingSocketPath"], status="busy")
+        self.add_web(pid=os.getppid(), sid=sid)  # idle, same sessionId
+        rc, _out, err = self.cli("wait", "--for", "cc:" + sid, "--state", "idle", "--timeout", "1")
+        self.assertEqual(rc, 124, err)
+
+    def test_the_opencode_request_text_does_not_take_a_web_record_as_the_cc_requester(self):
+        self.add_web()
+        text = sp_messaging._opencode_request_text(
+            {"_runtime": "opencode"}, {"kind": "cc", "uuid": WEB}, None, new_uuid(), "question", 30
+        )
+        self.assertNotIn("browser", text)
+        self.assertIn("Claude Code session", text.splitlines()[0])
+
+    def test_a_web_record_is_not_a_running_codex_shim(self):  # routes._shim_running
+        self.add_web()
+        self.assertFalse(sp_routes._shim_running(WEB))
+
+    def test_a_shim_target_is_never_a_web_record(self):  # messaging._codex_shim_thread
+        self.add_web()
+        self.assertIsNone(sp_messaging._codex_shim_thread(WEB, argparse.Namespace()))
+
+    def test_a_web_record_at_a_shim_pid_is_not_a_shim_record(self):  # lifecycle.shim_pid
+        tid = new_uuid()
+        pid = self.hold_pidfile(tid, pid=os.getppid())
+        self.add_web(pid=pid)  # a web record, sessionId differing from the thread
+        self.assertEqual(sp_lifecycle.shim_pid(tid), pid)
+        # The same record as a shim of another thread is the mismatch shim_pid refuses.
+        self.write_record(pid, "shim", WEB, str(self.socks / "x.sock"), entrypoint="codex")
+        self.assertIsNone(sp_lifecycle.shim_pid(tid))
+
+    def test_a_web_record_contributes_no_codex_home(self):  # storage._recorded_shim_homes
+        self.write_record(os.getpid(), "browser-peer", WEB, str(self.socks / "w.sock"),
+                          entrypoint="web", codexHome="/somewhere/else")
+        self.assertEqual(sp_storage._recorded_shim_homes(), [])
+        self.write_record(os.getpid(), "shim", WEB, str(self.socks / "w.sock"),
+                          entrypoint="codex", codexHome="/somewhere/else")
+        self.assertEqual(sp_storage._recorded_shim_homes(), ["/somewhere/else"])
+
+
+class WebShimInclusionTests(ShimBase):
+    """shim.py addresses the browser peer's record on purpose; the U2 inbox ignores such notices."""
+
+    def web_inbox(self):
+        pid = os.getppid()
+        path = str(self.socks / ("%d.sock" % pid))
+        inbox = FakeInbox(path)
+        self._listeners.append(inbox)
+        self.write_record(pid, "browser-peer", WEB, path, entrypoint="web")
+        return inbox
+
+    def test_the_reply_budget_reads_the_web_record(self):  # shim.py ReplyBudget records
+        self.web_inbox()
+        shim, _tid, _rollout = self.make_shim()
+        self.assertIn(WEB, [r.get("sessionId") for r in shim.reply_budget._records()])
+
+    def test_an_idle_notice_can_target_a_web_socket(self):  # shim._fire_idle
+        inbox = self.web_inbox()
+        shim, _tid, _rollout = self.make_shim()
+        mid = new_uuid()
+        shim._fire_idle((mid, inbox.path), "the Codex thread is idle")
+        frames = wait_for(lambda: inbox.frames)
+        self.assertIsNotNone(frames, "no frame reached the browser peer")
+        self.assertEqual(
+            (frames[0]["type"], frames[0]["action"], frames[0]["orig_msg_id"]),
+            ("control", "peer_idle_notice", mid),
+        )

@@ -258,6 +258,24 @@ def _send_web(ident, args, oc_sender=None):
     except sp_routes._Refusal as exc:
         sys.stderr.write(exc.text + "\n")
         return exc.code
+    web = _web_sender(args)
+    if web:
+        sock = web["socket"]
+    else:
+        sock = getattr(args, "from_socket", None) or os.environ.get("CLAUDE_CODE_MESSAGING_SOCKET")
+    sender_rec = sp_claude.claude_record_by_socket(sock) if sock else None
+    if getattr(args, "from_socket", None) and not web and not oc_sender:
+        # As `_send_codex` does: an explicit --from-socket names the sender, so
+        # the origin line and the frame's `from` come from that one record.
+        if sender_rec is None or not sender_rec.get("sessionId"):
+            sys.stderr.write(
+                "error: no live Claude session listens on %s, so --from-socket "
+                "would name a reply address nothing answers\n" % args.from_socket
+            )
+            return 1
+        runtime = sp_protocol.sender_runtime(sender_rec)
+        from_name = sender_rec.get("name")
+        address = "%s:%s" % (_record_kind(sender_rec), sender_rec["sessionId"])
     msg_id = _new_msg_id(args)
     failed = _record_before_send(args, msg_id, "web:" + ident)
     if failed is not None:
@@ -267,8 +285,6 @@ def _send_web(ident, args, oc_sender=None):
         return _transport_failed(args, msg_id, "browser peer is not running")
     sender_ident = address.partition(":")[2] if address else None
     lines = [sp_protocol.build_origin(runtime, from_name, sender_ident)]
-    sock = getattr(args, "from_socket", None) or os.environ.get("CLAUDE_CODE_MESSAGING_SOCKET")
-    sender_rec = sp_claude.claude_record_by_socket(sock) if sock else None
     reply_socket = sender_rec.get("messagingSocketPath") if sender_rec else None
     if address and not reply_socket:
         lines.append(sp_protocol.reply_route_hint(address))

@@ -81,7 +81,13 @@ def sender_kind(args):
     if isinstance(web, dict) and web.get("sid"):
         # The chat server sends for the browser peer; its own environment (a
         # scrubbed copy of whatever launched it) says nothing about the sender.
-        return Sender("web", web["sid"])
+        # Only a sid `messaging._web_sender` would accept counts.
+        try:
+            sid = sp_identity.parse_address("web:%s" % web["sid"])["uuid"]
+        except ValueError:
+            sid = None
+        if sid:
+            return Sender("web", sid)
     claude = _claude_indicator()
     explicit = getattr(args, "from_thread", None)
     raw = explicit or os.environ.get("CODEX_THREAD_ID") or os.environ.get("CODEX_SESSION_ID")
@@ -385,11 +391,14 @@ def web_record(ident):
     return None
 
 
-def _resolve_web(args, rest):
+def _resolve_web(args, verb, rest):
     try:
         ident = sp_identity.parse_address("web:" + rest)["uuid"]
     except ValueError as exc:
         raise _Refusal(2, "error: %s" % exc)
+    if verb not in ("send", "channel"):
+        # `_verdict` refuses this verb; the offline advice below names --record, which it lacks.
+        return Target("web", ident, "web", None, None)
     rec = web_record(ident)
     if rec is None and not getattr(args, "record", False):
         # Without --record there is nothing to leave behind for a later page open.
@@ -404,7 +413,7 @@ def _resolve_web(args, rest):
 
 def _resolve_typed(args, verb, prefix, rest, sender):
     if prefix == "web":
-        return _resolve_web(args, rest)
+        return _resolve_web(args, verb, rest)
     if prefix == "cc":
         try:
             rec = sp_claude._resolve_claude_record(rest)

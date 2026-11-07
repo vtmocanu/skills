@@ -467,7 +467,7 @@ def _claude_liveness(sid, cache):
     # A browser peer's record is not a Claude session, whatever its sessionId.
     matches = [
         r for r in records
-        if r.get("entrypoint") != "web" and str(r.get("sessionId")).lower() == sid.lower()
+        if not sp_claude.is_web_record(r) and str(r.get("sessionId")).lower() == sid.lower()
     ]
     if not matches:
         return "gone"
@@ -608,7 +608,7 @@ def _discover_general():
         gaps.append("Claude registry: %s" % _reason(claude_error))
         records = sp_claude.read_claude_records()
     for record in records:
-        if record.get("entrypoint") == "web":
+        if sp_claude.is_web_record(record):
             continue  # the browser peer joins a channel by explicit membership, never by discovery
         if sp_claude.record_liveness(record) in ("live", "unverified"):
             kind = "codex" if record.get("entrypoint") == "codex" else "cc"
