@@ -1459,6 +1459,218 @@ def read_only_view():
     return {"entries": entries, "handovers": grants, "malformed_lines": malformed, "last_seq": last_seq}
 
 
+JOURNAL_LINE_MAX = 6 * sp_constants.MAX_TEXT_CHARS + 512 * 1024
+_READ_CHUNK = 64 * 1024
+_EVENT_TYPES = ("ack", "transport_error", "settled")
+
+
+def _fingerprint_of(st):
+    return "%d:%d:%d" % (st.st_size, st.st_ino, st.st_mtime_ns)
+
+
+def journal_fingerprint():
+    """``"<size>:<inode>:<mtime_ns>"`` of the journal file, or None when it cannot be statted.
+
+    Stat only: nothing is opened, locked, created or repaired.
+    """
+    try:
+        return _fingerprint_of(os.stat(os.path.join(journal_dir(), JOURNAL_NAME), follow_symlinks=False))
+    except OSError:
+        return None
+
+
+def _read_window(fd, size, budget):
+    """Read backward from ``size``; return ``(window, reached_start, bytes_read, oversized)``.
+
+    ``window`` holds only whole, newline-terminated lines. Reads are at most 64 KiB and
+    total at most ``budget``, except that the first whole line is read to the end
+    (up to JOURNAL_LINE_MAX) even when the budget is spent.
+    """
+    buf, pos, total, oversized = b"", size, 0, 0
+    while pos > 0:
+        newlines = buf.count(b"\n")
+        have_line = newlines >= 2 or (pos == 0 and newlines >= 1)
+        left = budget - total
+        if left <= 0 and have_line:
+            break
+        step = min(_READ_CHUNK, pos) if left <= 0 else min(_READ_CHUNK, pos, left)
+        chunk = os.pread(fd, step, pos - step)
+        if len(chunk) != step:
+            raise _unavailable("journal changed while it was being read")
+        pos -= step
+        total += step
+        buf = chunk + buf
+        first = buf.find(b"\n")
+        if pos > 0 and (len(buf) if first < 0 else first) > JOURNAL_LINE_MAX:
+            oversized += 1
+            break
+    reached = pos == 0 and not oversized
+    end = buf.rfind(b"\n")
+    if end < 0:
+        return b"", reached, total, oversized
+    buf = buf[:end + 1]
+    if pos > 0:
+        buf = buf[buf.find(b"\n") + 1:]
+    return buf, reached, total, oversized
+
+
+def _unchanged_result(cursor, fingerprint):
+    return {
+        "messages": [], "events": [], "context": {}, "bytes": 0,
+        "next": cursor if cursor is not None else 0, "complete": True,
+        "journal_prefix": "read", "window_regression": False, "oversized": 0, "gap": None,
+        "fingerprint": fingerprint, "unchanged": True,
+    }
+
+
+@_api
+def read_since(cursor, budget, want=None, known_fingerprint=None):
+    """Budgeted, incremental, read-only view of the journal tail after ``cursor``.
+
+    Same-OS-user trust exception like ``read_only_view``; never locks, repairs, creates
+    or writes anything, and unsafe modes or ownership raise JournalUnavailable.
+    Reads backward from the end in chunks of at most 64 KiB, at most ``budget`` bytes,
+    except that the first whole line is always read (up to JOURNAL_LINE_MAX); ``bytes``
+    reports what was really read. The window is replayed in file order with the
+    ``_parse`` and ``_Model`` rules. Returns ``messages`` and ``events`` after
+    ``cursor``, ``context`` (per referenced or wanted message id: ``found`` with its
+    recipients' ACKs and transport errors, ``unreached`` when its message lies before the
+    window, ``absent`` when the whole journal was read and has no such message),
+    ``bytes``, ``next``, ``complete``, ``journal_prefix`` ("read" when the window starts
+    at the file start, else "unread"), ``window_regression``, ``oversized``, ``gap``
+    (None, or ``{"from", "to", "reason"}``) and ``fingerprint``. When
+    ``known_fingerprint`` equals the current one, nothing is read and ``unchanged`` is true.
+    """
+    if cursor is not None and not (_is_int(cursor) and cursor >= 0):
+        raise ValueError("cursor must be None or an integer >= 0")
+    if not (_is_int(budget) and budget >= 0):
+        raise ValueError("budget must be an integer >= 0")
+    wanted = [w for w in (want or ()) if isinstance(w, str)]
+    if known_fingerprint is not None and known_fingerprint == journal_fingerprint():
+        return _unchanged_result(cursor, known_fingerprint)
+    now = _now()
+    empty = {
+        "messages": [], "events": [], "context": {}, "bytes": 0, "next": cursor or 0, "complete": True,
+        "journal_prefix": "read", "window_regression": False, "oversized": 0, "gap": None, "fingerprint": None,
+    }
+    try:
+        dfd = _open_dir(journal_dir(), False)
+    except FileNotFoundError:
+        dfd = None
+    if dfd is None:
+        data, fingerprint, reached, nbytes, oversized = b"", None, True, 0, 0
+    else:
+        try:
+            try:
+                fd, st = _open_file(dfd, JOURNAL_NAME, os.O_RDONLY, False)
+            except FileNotFoundError:
+                fd = None
+            if fd is None:
+                data, fingerprint, reached, nbytes, oversized = b"", None, True, 0, 0
+            else:
+                try:
+                    fingerprint = _fingerprint_of(st)
+                    data, reached, nbytes, oversized = _read_window(fd, st.st_size, budget)
+                finally:
+                    os.close(fd)
+        finally:
+            os.close(dfd)
+
+    recs, last_seq, low, regression, pos = [], 0, None, False, 0
+    while True:
+        nl = data.find(b"\n", pos)
+        if nl < 0:
+            break
+        raw = data[pos:nl]
+        pos = nl + 1
+        if len(raw) > JOURNAL_LINE_MAX:
+            oversized += 1
+            continue
+        parsed = _parse_line(raw, now)
+        if parsed is None:
+            loose = _loose_seq(raw)
+            last_seq = max(last_seq, loose)
+            if loose:
+                low = loose if low is None else min(low, loose)
+            continue
+        seq = parsed[0]["seq"]
+        low = seq if low is None else min(low, seq)
+        if seq <= last_seq:
+            regression = True
+            continue
+        last_seq = seq
+        recs.append(_Rec(parsed[0], raw, parsed[1]))
+    model = _Model(recs)
+
+    def fresh(seq):
+        return cursor is None or seq > cursor
+
+    messages = []
+    for entry in model.entries.values():
+        d = entry.d
+        if fresh(d["seq"]):
+            item = {"message_id": d["message_id"], "seq": d["seq"], "kind": d["kind"], "from": d["from"],
+                    "to": list(d["to"]), "at": d["at"], "body": d["body"]}
+            for key in ("request_id", "in_reply_to"):
+                if key in d:
+                    item[key] = d[key]
+            messages.append(item)
+    events = []
+    for entry in model.entries.values():
+        for rec in entry.events:
+            d = rec.d
+            if not fresh(d["seq"]):
+                continue
+            item = {"type": d["type"], "message_id": d["message_id"], "seq": d["seq"], "at": d["at"]}
+            if d["type"] == "ack":
+                item["for"], item["by"] = d["for"], d["by"]
+            elif d["type"] == "transport_error":
+                item["for"], item["detail"] = d["for"], d["detail"]
+            else:
+                item["state"], item["by"] = d["state"], d["by"]
+            events.append(item)
+    events.sort(key=lambda e: e["seq"])
+    referenced = [e["message_id"] for e in events]
+    unreached = []
+    if not reached:
+        for rec in recs:
+            d = rec.d
+            if (not rec.foreign and d["type"] in _EVENT_TYPES and fresh(d["seq"])
+                    and d["message_id"] not in model.entries):
+                unreached.append(d["message_id"])
+    context = {}
+    for mid in referenced + unreached + wanted:
+        if mid in context:
+            continue
+        entry = model.entries.get(mid)
+        if entry is not None:
+            context[mid] = {
+                "state": "found", "seq": entry.d["seq"], "to": list(entry.d["to"]),
+                "acked": list(entry.acks), "transport_errors": {s: r.d["detail"] for s, r in entry.transports.items()},
+            }
+        else:
+            context[mid] = {"state": "unreached" if not reached else "absent"}
+    gap = None
+    if cursor is not None:
+        if last_seq < cursor:
+            gap = {"from": cursor, "to": low, "reason": "regression"}
+        elif not reached and (low is None or low > cursor + 1):
+            gap = {"from": cursor, "to": low, "reason": "budget"}
+        elif reached and cursor > 0 and low is not None and low > cursor + 1:
+            gap = {"from": cursor, "to": low, "reason": "pruned"}
+    complete = reached or (cursor is not None and gap is None and not unreached and all(
+        v["state"] == "found" for v in context.values()))
+    out = empty
+    out.update({
+        "messages": messages, "events": events, "context": context, "bytes": nbytes,
+        "next": last_seq if last_seq > 0 else (cursor or 0), "complete": complete,
+        "journal_prefix": "read" if reached else "unread",
+        "window_regression": regression and not reached, "oversized": oversized, "gap": gap,
+        "fingerprint": fingerprint,
+    })
+    return out
+
+
 @_api
 def get(message_id, caller):
     """One entry with its body for a recipient (or covered successor) of it.

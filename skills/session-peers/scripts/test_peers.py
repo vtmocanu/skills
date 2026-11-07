@@ -36,6 +36,7 @@ MODULES = (
     "peer_tests.test_watches",
     "peer_tests.test_journal",
     "peer_tests.test_journal_cli",
+    "peer_tests.test_journal_reader",
     "peer_tests.test_routes",
     "peer_tests.test_channels",
     "peer_tests.test_channel_send",
