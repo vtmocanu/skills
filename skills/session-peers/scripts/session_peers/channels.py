@@ -23,6 +23,7 @@ import json
 import math
 import os
 import re
+import stat
 import sys
 import time
 import uuid as uuidlib
@@ -1760,15 +1761,19 @@ def _probe_send_lock(message_id):
     """``held``, ``free``, ``absent`` or ``error`` for a send's lock file.
 
     Acquiring the lock means its sender is gone, whatever its pid became; no
-    pid is read. The probe never keeps the lock.
+    pid is read. The probe never keeps the lock. A symlink or a file that is not
+    a regular file reads ``error``, as does any other failure to open or lock it.
     """
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0)
     try:
-        fd = os.open(send_lock_path(message_id), os.O_RDONLY)
+        fd = os.open(send_lock_path(message_id), flags)
     except FileNotFoundError:
         return "absent"
     except (OSError, ValueError):
         return "error"
     try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return "error"
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
@@ -1787,6 +1792,22 @@ def _outcomes_of(entry):
     return {str(k): str(v) for k, v in outcomes.items()}
 
 
+def send_state_from(found, probe, recheck_found):
+    """Pure send-state rule shared by ``_send_state`` and the web read model.
+
+    ``found`` is whether an outcome entry exists; ``probe`` the ``_probe_send_lock``
+    answer; ``recheck_found`` whether a second look after a free or absent lock found
+    one. Returns ``complete``, ``in progress``, ``unverified`` or ``unknown``.
+    """
+    if found:
+        return "complete"
+    if probe == "held":
+        return STATE_IN_PROGRESS
+    if probe == "error":
+        return STATE_UNVERIFIED
+    return "complete" if recheck_found else STATE_UNKNOWN
+
+
 def _send_state(key, entry, message_id):
     """``(state, outcomes)`` of a fan-out: ``complete`` with its outcomes, else ``in progress``, ``unknown`` or ``unverified``."""
     try:
@@ -1794,15 +1815,12 @@ def _send_state(key, entry, message_id):
         if found is not None:
             return "complete", _outcomes_of(found)
         probe = _probe_send_lock(message_id)
-        if probe == "held":
-            return STATE_IN_PROGRESS, None
-        if probe == "error":
-            return STATE_UNVERIFIED, None
+        if probe in ("held", "error"):
+            return send_state_from(False, probe, False), None
         # The lock was free or already removed: the outcome may have landed in between.
         found = _find_outcome(key, message_id, entry["seq"])
-        if found is not None:
-            return "complete", _outcomes_of(found)
-        return STATE_UNKNOWN, None
+        state = send_state_from(False, probe, found is not None)
+        return state, (_outcomes_of(found) if found is not None else None)
     except (OSError, sp_topics.TopicError, KeyError, TypeError, ValueError):
         return STATE_UNVERIFIED, None
 
@@ -1823,35 +1841,25 @@ def _ack_states(message_id, cache):
     return None
 
 
-def delivery_view(key, entry, journal_cache=None):
-    """The reader's view of one ``channel.send`` entry.
+def delivery_rows(data, state, outcomes, acks):
+    """Pure per-recipient rows of a ``channel.send`` entry's ``data``.
 
-    ``{"state", "recipients": [{"recipient", "state", "ack"?}]}``. ``state`` is
-    ``recorded`` (nothing to deliver), ``complete``, ``in progress``,
-    ``unknown`` or ``unverified``; a recipient's state is its recorded outcome
-    (or ``acked``), else the send's.
+    ``state`` is the send's state, ``outcomes`` the recorded ``{slot: outcome}`` (used
+    when ``complete``) and ``acks`` ``{slot: acked|pending}`` or None when the journal
+    could not be read. A refused recipient shows its refusal; an acked one overrides
+    the delivery state.
     """
-    journal_cache = {} if journal_cache is None else journal_cache
-    data = entry.get("data") if isinstance(entry.get("data"), dict) else {}
     recipients = [r for r in data.get("recipients") or [] if isinstance(r, str)]
     refused = {
         x.get("member"): str(x.get("reason"))
         for x in data.get("excluded") or [] if isinstance(x, dict)
     }
-    mid = data.get("message_id")
-    outcomes = {}
-    if data.get("delivery") == "none":
-        state = OUTCOME_RECORDED
-    else:
-        state, outcomes = _send_state(key, entry, mid)
-        outcomes = outcomes or {}
-    acks = _ack_states(mid, journal_cache) if data.get("journaled") else None
     rows = []
     for recipient in recipients:
         if recipient in refused:
             row_state = OUTCOME_REFUSED + refused[recipient]
         elif state == "complete":
-            row_state = outcomes.get(recipient, STATE_UNKNOWN)
+            row_state = (outcomes or {}).get(recipient, STATE_UNKNOWN)
         else:
             row_state = state
         row = {"recipient": recipient, "state": row_state}
@@ -1865,7 +1873,28 @@ def delivery_view(key, entry, journal_cache=None):
             if row["ack"] == STATE_ACKED:
                 row["state"] = STATE_ACKED
         rows.append(row)
-    return {"state": state, "recipients": rows}
+    return rows
+
+
+def delivery_view(key, entry, journal_cache=None):
+    """The reader's view of one ``channel.send`` entry.
+
+    ``{"state", "recipients": [{"recipient", "state", "ack"?}]}``. ``state`` is
+    ``recorded`` (nothing to deliver), ``complete``, ``in progress``,
+    ``unknown`` or ``unverified``; a recipient's state is its recorded outcome
+    (or ``acked``), else the send's.
+    """
+    journal_cache = {} if journal_cache is None else journal_cache
+    data = entry.get("data") if isinstance(entry.get("data"), dict) else {}
+    mid = data.get("message_id")
+    outcomes = {}
+    if data.get("delivery") == "none":
+        state = OUTCOME_RECORDED
+    else:
+        state, outcomes = _send_state(key, entry, mid)
+        outcomes = outcomes or {}
+    acks = _ack_states(mid, journal_cache) if data.get("journaled") else None
+    return {"state": state, "recipients": delivery_rows(data, state, outcomes, acks)}
 
 
 def describe_view(view):

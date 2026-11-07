@@ -29,6 +29,8 @@ the reply command included in a request envelope.
 | hooks | Hook installation, trust metadata, and startup reconciliation |
 | topics | Pull-only shared logs, retention, identity, and cursor commands |
 | channels | Channel store under the user-wide root, membership-first history, member liveness, and the `channel` commands |
+| webdata | Dashboard read model: bounded, read-only snapshots of channel history, journal ACK state and discovery, the poll cursor and the per-view JSON |
+| web | Dashboard HTTP server (loopback, token, GET only), the discovery worker and the `web` command; serves the static assets in `web/` (`index.html`, `app.css`, `app.js`); see Dashboard server below |
 | maintenance | Owned bridge metadata and buddy garbage collection |
 | cli | Argument registration and command dispatch |
 
@@ -70,3 +72,26 @@ ask owns unconditional cleanup, dispatch preserves it for await, and pending
 await retains an unexpired request. Keep those cleanup branches explicit.
 Doctor probes preserve report order; CLI registration helpers preserve parser
 insertion order and argument defaults.
+
+## Dashboard server
+
+User-facing behaviour is in `references/web.md`; the server's own guards are:
+
+- Host must be exactly `127.0.0.1:<port>` or `localhost:<port>` (403), as a
+  DNS-rebinding guard. Only GET is accepted (405); a request body is refused
+  (400). `/`, `/app.css` and `/app.js` load without the token; every `/api/*`
+  route needs `X-Peers-Token` (403).
+- At most 16 connections at once; extra connections are closed unanswered. The
+  request line and headers must arrive within 2 s and every connection's socket
+  is cut after 10 s; its slot is held until the handler returns. The 8 MiB
+  request budget bounds the file bytes each request reads, not decoded objects
+  or response buffers, so it is a read budget, not a memory ceiling.
+- Every response carries a `Content-Security-Policy` (`default-src 'none'`,
+  scripts and styles from `'self'` only, no framing, no forms),
+  `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`,
+  `Cache-Control: no-store` and same-origin resource/opener policies. Errors
+  have an empty `{}` body. No request is logged.
+- The loopback bind keeps the server off the network, but any local user or
+  process can reach the port; the per-start token alone guards `/api/*`, so
+  anyone who obtains it can read the API. Neither defends against a hostile
+  process of the same user.

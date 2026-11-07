@@ -1,11 +1,13 @@
 """Runtime for the session-peers CLI."""
 
 from __future__ import annotations
+import contextlib
 import hashlib
 import json
 import os
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from . import constants as sp_constants
@@ -48,8 +50,24 @@ def _float_env(name, default):
     except ValueError:
         return default
 
+_QUIET = threading.local()
+
+
+@contextlib.contextmanager
+def quiet():
+    """Mute ``log`` on the current thread only while the block runs; nests."""
+    depth = getattr(_QUIET, "depth", 0)
+    _QUIET.depth = depth + 1
+    try:
+        yield
+    finally:
+        _QUIET.depth = depth
+
+
 def log(msg: str) -> None:
     """One stderr line, timestamped. The shim's stderr is its log file."""
+    if getattr(_QUIET, "depth", 0):
+        return
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     sys.stderr.write("[session-peers %s] %s\n" % (stamp, msg))
     sys.stderr.flush()
