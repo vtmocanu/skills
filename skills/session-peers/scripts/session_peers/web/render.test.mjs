@@ -1165,6 +1165,58 @@ test("All channels: a live entry the initial batch already holds does not mark i
   assert.ok(!env.document.byId.sub.textContent.startsWith("Out of date"), env.document.byId.sub.textContent)
 })
 
+test("All channels: a superseded Load more never clears the guard of the same token on the new view", async () => {
+  let releaseOld, releaseNew
+  const oldGate = new Promise((r) => { releaseOld = r })
+  const newGate = new Promise((r) => { releaseNew = r })
+  let tokCalls = 0
+  const first = allBatch([Object.assign(sendEntry(1, "from general"), { channel: "general" })], { partial: true, omitted: 1, total: 2, shown: 1, next: "TOK", channels: ["general"] })
+  const last = allBatch([Object.assign(sendEntry(5, "ops batch"), { channel: "ops" })], { total: 2, shown: 2, next: null, channels: ["ops"] })
+  const env = bootFixture({ "/api/all": (url) => { if (url.includes("next=TOK")) { tokCalls += 1; return (tokCalls === 1 ? oldGate : newGate).then(() => last) } return first } })
+  await env.app.ready
+  await env.app.showAll()
+  const a = env.app.loadAll("TOK")
+  await env.app.loadAll(null)
+  const b = env.app.loadAll("TOK")
+  releaseOld()
+  await a
+  const c = env.app.loadAll("TOK")
+  releaseNew()
+  await Promise.all([b, c])
+  const text = env.document.byId.stream.textContent
+  assert.equal(text.split("ops batch").length - 1, 1, text)
+  assert.equal(tokCalls, 2)
+})
+
+test("All channels: a 409 from a superseded Load more leaves the new view alone", async () => {
+  let release
+  const gate = new Promise((r) => { release = r })
+  let fresh = 0
+  const first = allBatch([Object.assign(sendEntry(1, "from general"), { channel: "general" })], { partial: true, omitted: 1, total: 2, shown: 1, next: "TOK", channels: ["general"] })
+  const env = bootFixture({ "/api/all": (url) => { if (url.includes("next=TOK")) return gate.then(() => ({ __status: 409 })); fresh += 1; return first } })
+  await env.app.ready
+  await env.app.showAll()
+  const a = env.app.loadAll("TOK")
+  await env.app.loadAll(null)
+  release()
+  await a
+  assert.equal(fresh, 2)
+  assert.ok(!env.document.byId.notes.textContent.includes("The channel list changed"))
+})
+
+test("All channels: a new channel the in-flight batch read still marks the view out of date", async () => {
+  let release
+  const gate = new Promise((r) => { release = r })
+  const env = bootFixture({ "/api/all": () => gate.then(() => allBatch([Object.assign(sendEntry(1, "from general"), { channel: "general" })], { total: 2, shown: 2, next: null, channels: ["general", "fresh"] })) })
+  await env.app.ready
+  const showing = env.app.showAll()
+  env.routes["/api/changes"] = quiet("C1", { channels: { fresh: { new: true, entries: [], gap: null } } })
+  await env.app.pollOnce()
+  release()
+  await showing
+  assert.ok(env.document.byId.sub.textContent.startsWith("Out of date"), env.document.byId.sub.textContent)
+})
+
 test("a channel load error says updates stopped after the token was refused", async () => {
   const env = bootFixture({ "/api/channel/ops": { __status: 502 } })
   await env.app.ready

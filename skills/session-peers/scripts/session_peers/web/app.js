@@ -912,11 +912,13 @@
     // before that activity, so they are judged against the batch once it arrives.
     var inflight = table();
     S.allInflight = inflight;
-    var done = function () { if (S.allLoadingNext === next) { S.allLoadingNext = null; S.allLoadingPromise = null; } };
-    var promise = api(url).then(function (data) {
+    var promise = null;
+    var done = function () { if (promise && S.allLoadingPromise === promise) { S.allLoadingNext = null; S.allLoadingOwner = null; S.allLoadingPromise = null; } };
+    var superseded = function () { return gen !== S.allGen || (next && (!owner || S.all !== owner)); };
+    promise = api(url).then(function (data) {
       done();
       if (S.allInflight === inflight) S.allInflight = null;
-      if (gen !== S.allGen || (next && (!owner || S.all !== owner))) return;
+      if (superseded()) return;
       var entries = (Array.isArray(data.entries) ? data.entries : []).filter(function (e) { return e && typeof e === "object"; });
       if (!next || !S.all) S.all = newAll();
       var all = S.all;
@@ -956,6 +958,7 @@
     }, function (err) {
       done();
       if (S.allInflight === inflight) S.allInflight = null;
+      if (superseded()) return;
       if (err && err.status === 409) {
         S.all = null;
         return loadAll(null).then(function () { if (S.all) S.all.notes.push("The channel list changed; reloaded from the start."); if (S.view === "all") renderMain({}); });
