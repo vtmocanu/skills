@@ -16,7 +16,10 @@ it, else it stops ``partial``.
 """
 
 from __future__ import annotations
+import base64
+import binascii
 import errno
+import hashlib
 import json
 import os
 import re
@@ -34,6 +37,19 @@ META_MAX = 64 * 1024
 SHIM_STATE_MAX = 1024 * 1024
 _CHUNK = 64 * 1024
 _HEAD = 4096
+
+CURSOR_MAX = 48 * 1024
+CURSOR_KEYS_MAX = 256
+CURSOR_UPDATES_MAX = 64
+SEQ_LIMIT = 2 ** 53
+JOURNAL_TAIL_BUDGET = 2 * 1024 * 1024
+BASELINE_BUDGET = 256 * 1024
+BATCH_CHANNELS = 32
+BATCH_ENTRIES = 25
+ALERT_WINDOW = 25
+SEARCH_MATCHES_MAX = PAGE_MAX
+TOKEN_MAX = 16 * 1024
+QUERY_MAX = 256
 
 BUDGET_LABEL = "as last saved by the shim"
 
@@ -138,6 +154,30 @@ def _head_seq(head):
     """The seq of an oversized line when it sits in the line's own first bytes, else None."""
     match = _HEAD_SEQ_RE.match(head or b"")
     return int(match.group(1)) if match else None
+
+
+def _read_meta(meta_path, budget):
+    """The topic meta file as a dict (at most META_MAX bytes, charged to ``budget``), else None."""
+    try:
+        fd, st = _open_regular(meta_path)
+    except OSError:
+        return None
+    if fd is None:
+        return None
+    try:
+        if st.st_size > META_MAX or st.st_size > budget.remaining():
+            return None
+        data = os.read(fd, META_MAX + 1)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    budget.charge(len(data))
+    try:
+        meta = json.loads(data.decode("utf-8", "replace"))
+    except (ValueError, RecursionError):
+        return None
+    return meta if isinstance(meta, dict) else None
 
 
 class _BackReader:
@@ -311,28 +351,9 @@ class HistorySnapshot:
     # -- meta -------------------------------------------------------------
 
     def _read_meta_next(self):
-        try:
-            fd, st = _open_regular(self.meta_path)
-        except OSError:
-            return None
-        if fd is None:
-            return None
-        try:
-            if st.st_size > META_MAX or st.st_size > self.budget.remaining():
-                return None
-            data = os.read(fd, META_MAX + 1)
-        except OSError:
-            return None
-        finally:
-            os.close(fd)
-        self.budget.charge(len(data))
-        try:
-            meta = json.loads(data.decode("utf-8", "replace"))
-        except (ValueError, RecursionError):
-            return None
-        if isinstance(meta, dict) and isinstance(meta.get("next_seq"), int):
-            return meta["next_seq"]
-        return None
+        meta = _read_meta(self.meta_path, self.budget)
+        nxt = meta.get("next_seq") if meta is not None else None
+        return nxt if isinstance(nxt, int) else None
 
     # -- read -------------------------------------------------------------
 
@@ -624,7 +645,7 @@ def read_journal_context(budget, want):
     if budget.remaining() <= 0:
         return JournalContext(available=False, budget_skipped=True)
     try:
-        result = sp_journal.read_since(None, budget.remaining(), want=ids)
+        result = sp_journal.read_since(None, budget.remaining(), want=ids, strict=True)
     except Exception:  # an unreadable journal only makes ACK state unverified
         return JournalContext(available=False)
     budget.charge(result.get("bytes") or 0)
@@ -851,6 +872,36 @@ def _int_arg(value, name, low, high=None):
     return value
 
 
+def _build_views(groups, budget):
+    """``([(views, partial)], journal_ctx)`` for ``groups`` of ``(snapshot, entries, general)``.
+
+    Every send's state is resolved first (each may recheck its topic), then one bounded
+    journal read joins the ACKs of all journaled sends of all groups."""
+    states, want = [], []
+    for snapshot, entries, _general in groups:
+        found = {}
+        for entry in entries:
+            if entry.get("kind") == sp_channels.EVENT_SEND:
+                found[entry["seq"]] = send_state(snapshot, entry)
+                data = entry.get("data")
+                if isinstance(data, dict) and data.get("journaled"):
+                    want.append(data.get("message_id"))
+        states.append(found)
+    journal_ctx = read_journal_context(budget, want)
+    built = []
+    for (snapshot, entries, general), found in zip(groups, states):
+        views, partial = [], False
+        for entry in entries:
+            delivery = None
+            if entry.get("kind") == sp_channels.EVENT_SEND:
+                state, outcomes, send_partial = found[entry["seq"]]
+                delivery = _delivery(entry, state, outcomes, send_partial, journal_ctx)
+                partial = partial or bool(delivery.get("partial"))
+            views.append(entry_view(entry, delivery, general))
+        built.append((views, partial))
+    return built, journal_ctx
+
+
 def channel_page(key, before=None, limit=PAGE_MAX, budget=None, members=None, now=None):
     """One page of a channel's history, oldest entry first, as JSON-ready data.
 
@@ -867,23 +918,9 @@ def channel_page(key, before=None, limit=PAGE_MAX, budget=None, members=None, no
     general = key == sp_constants.CHANNEL_GENERAL
     snapshot = HistorySnapshot(key, budget, now=now).read(before=before, limit=limit)
     partial = snapshot.partial
-    states = {}
-    for entry in snapshot.page:
-        if entry.get("kind") == sp_channels.EVENT_SEND:
-            states[entry["seq"]] = send_state(snapshot, entry)
-    want = [
-        e["data"].get("message_id") for e in snapshot.page
-        if e.get("kind") == sp_channels.EVENT_SEND and isinstance(e.get("data"), dict) and e["data"].get("journaled")
-    ]
-    journal_ctx = read_journal_context(budget, want)
-    views = []
-    for entry in snapshot.page:
-        delivery = None
-        if entry.get("kind") == sp_channels.EVENT_SEND:
-            state, outcomes, send_partial = states[entry["seq"]]
-            delivery = _delivery(entry, state, outcomes, send_partial, journal_ctx)
-            partial = partial or bool(delivery.get("partial"))
-        views.append(entry_view(entry, delivery, general))
+    built, journal_ctx = _build_views([(snapshot, snapshot.page, general)], budget)
+    views, view_partial = built[0]
+    partial = partial or view_partial
     record = None if general else sp_channels.read_channel(key)
     if members is None and record is not None:
         members = record["members"]
@@ -964,6 +1001,14 @@ def codex_reply_budget(tid, now=None):
     }
 
 
+def _member_state(liveness, activity):
+    if isinstance(activity, dict):
+        activity = activity.get("state")
+    if liveness == "gone":
+        return "gone"
+    return activity if activity in ("working", "idle") else "unverified"
+
+
 def member_details(typed, liveness, activity=None, now=None):
     """The details panel data for one member; liveness and activity come from the caller (discovery is elsewhere).
 
@@ -971,18 +1016,672 @@ def member_details(typed, liveness, activity=None, now=None):
     ``activity``, else ``unverified``."""
     typed = typed if isinstance(typed, str) else str(typed)
     kind, _sep, ident = typed.partition(":")
-    if isinstance(activity, dict):
-        activity = activity.get("state")
-    if liveness == "gone":
-        state = "gone"
-    elif activity in ("working", "idle"):
-        state = activity
-    else:
-        state = "unverified"
     out = {
         "member": typed, "address": typed, "runtime": _RUNTIMES.get(kind, "unknown"),
-        "liveness": liveness if liveness in ("live", "gone") else "unverified", "state": state,
+        "liveness": liveness if liveness in ("live", "gone") else "unverified",
+        "state": _member_state(liveness, activity),
     }
     if kind == "codex":
         out["reply_budget"] = codex_reply_budget(ident, now)
     return _clean(out)
+
+
+# --------------------------------------------------------------------------
+# Cursor
+# --------------------------------------------------------------------------
+
+_B64_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+_FP_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
+_ANCHOR_RE = re.compile(r"^[0-9a-f]{16}$")
+_MID_HEX_RE = re.compile(r"^[0-9a-f]{32}$")
+_CURSOR_FIELDS = {"v", "c", "j", "u"}
+GENERAL = sp_constants.CHANNEL_GENERAL
+
+
+def _digest(text):
+    """First 64 bits of the sha256 of ``text`` as 11 base64url characters."""
+    raw = hashlib.sha256(text.encode("utf-8")).digest()[:8]
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _b64(text):
+    return base64.urlsafe_b64encode(text.encode("utf-8")).decode("ascii").rstrip("=")
+
+
+def _unb64(text):
+    if not isinstance(text, str) or not text or not _B64_RE.match(text):
+        raise ValueError("not base64url")
+    return base64.urlsafe_b64decode(text + "=" * (-len(text) % 4)).decode("utf-8")
+
+
+def _is_seq(value):
+    return isinstance(value, int) and not isinstance(value, bool) and 0 <= value < SEQ_LIMIT
+
+
+def encode_cursor(obj):
+    """The opaque cursor text of ``{"v":1,"c":[[key,seq,fp]],"j":[seq,fp,anchor],"u":[[ci,seq,mid]]}``."""
+    text = _b64(json.dumps(obj, separators=(",", ":"), sort_keys=True))
+    if len(text) > CURSOR_MAX:
+        raise WebDataError("cursor too large", 500)
+    return text
+
+
+def _validate_cursor(obj, keys):
+    if not isinstance(obj, dict) or set(obj) != _CURSOR_FIELDS or obj["v"] != 1 or isinstance(obj["v"], bool):
+        raise ValueError("shape")
+    c, j, u = obj["c"], obj["j"], obj["u"]
+    if not isinstance(c, list) or len(c) > CURSOR_KEYS_MAX + 1 or not isinstance(u, list) or len(u) > CURSOR_UPDATES_MAX:
+        raise ValueError("size")
+    known = set(sp_channels.list_keys() if keys is None else keys)
+    known.add(GENERAL)
+    kept, remap, previous = [], {}, None
+    for index, item in enumerate(c):
+        if not isinstance(item, list) or len(item) != 3:
+            raise ValueError("channel entry")
+        key, seq, fp = item
+        if not isinstance(key, str) or not sp_constants.CHANNEL_NAME_RE.fullmatch(key):
+            raise ValueError("channel key")
+        if not _is_seq(seq) or not isinstance(fp, str) or not _FP_RE.match(fp):
+            raise ValueError("channel position")
+        rank = (key != GENERAL, key)
+        if previous is not None and rank <= previous:
+            raise ValueError("channel order")
+        previous = rank
+        if key in known:
+            remap[index] = len(kept)
+            kept.append([key, seq, fp])
+    if sum(1 for item in c if item[0] != GENERAL) > CURSOR_KEYS_MAX:
+        raise ValueError("too many channels")
+    if not isinstance(j, list) or len(j) != 3 or not _is_seq(j[0]) or not isinstance(j[1], str) or not _FP_RE.match(j[1]):
+        raise ValueError("journal position")
+    if j[2] is not None and not (isinstance(j[2], str) and _ANCHOR_RE.match(j[2])):
+        raise ValueError("journal anchor")
+    pending = []
+    for item in u:
+        if not isinstance(item, list) or len(item) != 3:
+            raise ValueError("update entry")
+        ci, seq, mid = item
+        if isinstance(ci, bool) or not isinstance(ci, int) or not 0 <= ci < len(c):
+            raise ValueError("update channel")
+        if not _is_seq(seq) or not isinstance(mid, str) or not _MID_HEX_RE.match(mid):
+            raise ValueError("update send")
+        if ci in remap:
+            pending.append([remap[ci], seq, mid])
+    return {"v": 1, "c": kept, "j": [j[0], j[1], j[2]], "u": pending}
+
+
+def decode_cursor(text, keys=None):
+    """The validated cursor dict of ``text``; WebDataError 400 for anything malformed.
+
+    Keys that are no longer stored channels are dropped (and the update entries of
+    their sends with them); ``keys`` overrides ``channels.list_keys()`` for tests."""
+    if not isinstance(text, str) or not text or len(text) > CURSOR_MAX:
+        raise WebDataError("malformed cursor", 400)
+    try:
+        return _validate_cursor(json.loads(_unb64(text)), keys)
+    except (ValueError, RecursionError, TypeError, OverflowError, binascii.Error, UnicodeError, KeyError):
+        raise WebDataError("malformed cursor", 400)
+
+
+def _mid_hex(mid):
+    if isinstance(mid, str) and sp_constants.UUID_RE.fullmatch(mid):
+        return mid.replace("-", "").lower()
+    return None
+
+
+def _mid_text(hexed):
+    return "%s-%s-%s-%s-%s" % (hexed[:8], hexed[8:12], hexed[12:16], hexed[16:20], hexed[20:])
+
+
+# --------------------------------------------------------------------------
+# Channel positions
+# --------------------------------------------------------------------------
+
+
+def _stem(key):
+    return sp_topics.topic_stem(sp_channels.topic_name(key), sp_channels.history_dir())
+
+
+def _stat_text(key):
+    """``"<size>:<ino>:<mtime_ns>"`` of the key's history log by a no-follow stat, ``absent`` or ``error:<errno>``."""
+    try:
+        st = os.stat(_stem(key) + ".jsonl", follow_symlinks=False)
+    except FileNotFoundError:
+        return "absent"
+    except OSError as exc:
+        return "error:%s" % exc.errno
+    return "%d:%d:%d" % (st.st_size, st.st_ino, st.st_mtime_ns)
+
+
+def _snapshot_text(snapshot):
+    if snapshot.fingerprint is None:
+        return "absent"
+    return "%d:%d:%d" % snapshot.fingerprint
+
+
+def _clamp(seq):
+    return max(0, min(seq, SEQ_LIMIT - 1))
+
+
+def _meta_last(meta):
+    nxt = meta.get("next_seq") if meta is not None else None
+    if isinstance(nxt, int) and not isinstance(nxt, bool):
+        return max(0, nxt - 1)
+    return 0
+
+
+def _stat_position(key, budget):
+    """``(seq, fp digest)`` from the meta file and a stat only; meta first, so a racing append reads as newer."""
+    seq = _meta_last(_read_meta(_stem(key) + ".meta.json", budget))
+    return _clamp(seq), _digest(_stat_text(key))
+
+
+def _stored_keys():
+    return sorted(k for k in sp_channels.list_keys() if k != GENERAL)
+
+
+def _tracked_keys():
+    """``(keys, untracked)``: #general then at most CURSOR_KEYS_MAX stored keys, and the count left out."""
+    stored = _stored_keys()
+    return [GENERAL] + stored[:CURSOR_KEYS_MAX], max(0, len(stored) - CURSOR_KEYS_MAX)
+
+
+# --------------------------------------------------------------------------
+# Changes
+# --------------------------------------------------------------------------
+
+
+def _journal_digest(fingerprint):
+    return _digest(fingerprint if isinstance(fingerprint, str) else "absent")
+
+
+def _journal_position(res):
+    anchor = res.get("next_anchor")
+    if not (isinstance(anchor, str) and _ANCHOR_RE.match(anchor)):
+        anchor = None
+    return [_clamp(res.get("next") or 0), _journal_digest(res.get("fingerprint")), anchor]
+
+
+def _journal_tail(j, budget, updates):
+    """``(new j, gap, partial)``; appends ack and transport-error updates.
+
+    Skipped (0 bytes) when the journal fingerprint digest equals the cursor's. The read is
+    strict, so it never exceeds its allowance. The position advances when the read is
+    complete, or when it had its full allowance and still could not reach the anchor (else a
+    journal that grew past the allowance would be re-read forever); then the response says
+    so through ``gap`` or an ``unverified`` update. A read short of the full allowance
+    only because the request budget ran low keeps the old position."""
+    if _journal_digest(sp_journal.journal_fingerprint()) == j[1]:
+        return j, None, False
+    allowance = min(budget.remaining(), JOURNAL_TAIL_BUDGET)
+    if allowance <= 0:
+        return j, None, True
+    try:
+        res = sp_journal.read_since(j[0], allowance, cursor_anchor=j[2], strict=True)
+    except Exception:  # an unreadable journal only leaves the ACK state as it was
+        return j, None, True
+    budget.charge(res.get("bytes") or 0)
+    unverified = set()
+    partial = False
+    for event in res.get("events") or ():
+        mid, kind = event.get("message_id"), event.get("type")
+        if kind not in ("ack", "transport_error"):
+            continue
+        if event.get("unverified"):
+            partial = True
+            if mid not in unverified:
+                unverified.add(mid)
+                updates.append({"message_id": mid, "ack": "unverified"})
+        elif kind == "ack":
+            updates.append({"message_id": mid, "recipient": event.get("for"), "ack": "acked", "state": "acked"})
+        else:
+            updates.append({"message_id": mid, "recipient": event.get("for"), "transport_error": str(event.get("detail"))})
+    gap = res.get("gap")
+    complete = bool(res.get("complete"))
+    if complete or allowance >= JOURNAL_TAIL_BUDGET:
+        partial = partial or not complete
+        return _journal_position(res), gap, partial
+    return j, gap, True
+
+
+def _delivery_rows_of(outcomes):
+    return [{"recipient": slot, "state": text} for slot, text in outcomes.items()]
+
+
+def _change_update(key, mid, state, outcomes=None):
+    return {"channel": key, "message_id": mid, "delivery": {"state": state, "recipients": _delivery_rows_of(outcomes or {})}}
+
+
+def changes(cursor_text, budget=None, now=None):
+    """What changed since ``cursor_text``, bounded by one request budget.
+
+    ``{"channels": {key: {"entries", "gap", "new"?}}, "updates", "cursor", "partial", "untracked"?,
+    "journal_gap"?}``. A channel is read only when its meta ``next_seq`` is past the cursor's seq or
+    its stat fingerprint differs; otherwise a meta read and a stat are all it costs. A channel not
+    in the cursor is reported ``{"new": true, "entries": [], "gap": null}`` and entered at its current
+    position: the page loads its latest page. A channel whose retained entries start after the
+    cursor (pruned), whose seq went backwards, or that has more than PAGE_MAX new entries, or whose
+    read hit the 1 MiB topic cap, returns no entries and a ``gap`` (``pruned``, ``regression``,
+    ``limit``, ``budget``): the page reloads that channel's latest page. A channel the request
+    budget could not read keeps its old position and the response is ``partial``.
+
+    ``updates`` are, in order: ``{"message_id", "recipient", "ack": "acked", "state": "acked"}`` and
+    ``{"message_id", "recipient", "transport_error"}`` from the journal tail, ``{"message_id", "ack":
+    "unverified"}`` for an event whose message the bounded read could not reach, and ``{"channel",
+    "message_id", "delivery": {"state", "recipients": [{"recipient", "state"}]}}`` for a send that
+    was not among the new entries (its outcome arrived, or its in-progress state resolved to
+    ``unknown`` or ``unverified``). The rows carry the outcome only; the page merges them by
+    recipient into the delivery it has, and ACK state arrives through the journal updates. Sends in
+    progress are remembered in the cursor and re-probed on every call."""
+    budget = budget if budget is not None else Budget()
+    cursor = decode_cursor(cursor_text)
+    tracked, untracked = _tracked_keys()
+    old = {key: (seq, fp) for key, seq, fp in cursor["c"]}
+    old_u = [(cursor["c"][ci][0], seq, _mid_text(mid)) for ci, seq, mid in cursor["u"]]
+    partial = untracked > 0
+    updates = []
+    new_j, journal_gap, journal_partial = _journal_tail(cursor["j"], budget, updates)
+    partial = partial or journal_partial
+    positions, skipped, out, snaps = {}, set(), {}, {}
+    for key in tracked:
+        if key not in old:
+            if budget.remaining() <= 0:
+                partial = True
+                continue
+            positions[key] = _stat_position(key, budget)
+            out[key] = {"entries": [], "gap": None, "new": True}
+            continue
+        cseq, cfp = old[key]
+        meta = _read_meta(_stem(key) + ".meta.json", budget) if budget.remaining() > 0 else None
+        if _meta_last(meta) <= cseq and _digest(_stat_text(key)) == cfp:
+            positions[key] = old[key]
+            continue
+        if budget.remaining() <= 0:
+            positions[key], partial = old[key], True
+            skipped.add(key)
+            continue
+        request_limited = min(TOPIC_BUDGET, budget.remaining()) < TOPIC_BUDGET
+        snap = HistorySnapshot(key, budget, now=now).read(since=cseq)
+        gap = snap.gap
+        if snap.unavailable or (request_limited and gap is not None and gap.get("reason") == "budget"):
+            positions[key], partial = old[key], True
+            skipped.add(key)
+            continue
+        last = snap.next_seq - 1
+        entries = snap.page
+        if gap is None and last < cseq:
+            gap = {"from": cseq, "to": last, "reason": "regression"}
+        elif gap is None and len(entries) > PAGE_MAX:
+            gap = {"from": cseq + 1, "to": last, "reason": "limit"}
+        if gap is not None:
+            entries = []
+        positions[key] = (_clamp(last), _digest(_snapshot_text(snap)))
+        snaps[key] = snap
+        if entries or gap is not None:
+            out[key] = {"entries": entries, "gap": gap}
+    shown = [key for key in tracked if key in snaps and key in out]
+    groups = [(snaps[key], out[key]["entries"], key == GENERAL) for key in shown]
+    built, _ctx = _build_views(groups, budget)
+    sent, outcome_mids, new_u = {}, {}, []
+    for (_snap, entries, _general), (views, view_partial), key in zip(groups, built, shown):
+        partial = partial or view_partial
+        for entry, view in zip(entries, views):
+            data = entry.get("data") if isinstance(entry.get("data"), dict) else {}
+            if entry.get("kind") == sp_channels.EVENT_SEND:
+                sent.setdefault(key, set()).add(data.get("message_id"))
+                hexed = _mid_hex(data.get("message_id"))
+                if hexed and view.get("delivery", {}).get("state") == sp_channels.STATE_IN_PROGRESS:
+                    new_u.append((key, entry["seq"], data.get("message_id")))
+            elif entry.get("kind") == sp_channels.EVENT_OUTCOME:
+                outcome_mids.setdefault(key, {}).setdefault(data.get("message_id"), entry)
+        out[key]["entries"] = views
+    done = set()
+    for key, by_mid in outcome_mids.items():
+        for mid, entry in by_mid.items():
+            if mid not in sent.get(key, ()):
+                done.add((key, mid))
+                updates.append(_change_update(key, mid, "complete", sp_channels._outcomes_of(entry)))
+    survivors = []
+    for key, send_seq, mid in old_u:
+        if key not in positions and key not in skipped:
+            continue
+        if key in skipped:
+            survivors.append((key, send_seq, mid))
+            continue
+        if (key, mid) in done:
+            continue
+        if _probe(mid) == "held":
+            survivors.append((key, send_seq, mid))
+            continue
+        if budget.remaining() <= 0:
+            partial = True
+            survivors.append((key, send_seq, mid))
+            continue
+        cseq = old[key][0]
+        snap = snaps.get(key) or HistorySnapshot(key, budget, now=now).read(since=cseq)
+        state, outcomes, uncovered = send_state(snap, {"seq": cseq, "data": {"message_id": mid}})
+        if state == sp_channels.STATE_IN_PROGRESS:
+            survivors.append((key, send_seq, mid))
+            continue
+        if state == sp_channels.STATE_UNVERIFIED:
+            survivors.append((key, send_seq, mid))
+            partial = partial or uncovered or snap.unavailable is not None
+        updates.append(_change_update(key, mid, state, outcomes))
+    order = [key for key in tracked if key in positions]
+    index = {key: i for i, key in enumerate(order)}
+    pending, seen = [], set()
+    for key, send_seq, mid in new_u + survivors:
+        hexed = _mid_hex(mid)
+        if key in index and hexed and hexed not in seen:
+            seen.add(hexed)
+            pending.append([index[key], _clamp(send_seq), hexed])
+    if len(pending) > CURSOR_UPDATES_MAX:
+        pending, partial = pending[:CURSOR_UPDATES_MAX], True
+    cursor_out = encode_cursor({
+        "v": 1, "c": [[key, positions[key][0], positions[key][1]] for key in order], "j": new_j, "u": pending})
+    result = {"channels": out, "updates": updates, "cursor": cursor_out, "partial": partial}
+    if untracked:
+        result["untracked"] = untracked
+    if journal_gap is not None:
+        result["journal_gap"] = journal_gap
+    return _clean(result)
+
+
+# --------------------------------------------------------------------------
+# All channels and search
+# --------------------------------------------------------------------------
+
+
+def _all_keys():
+    return [GENERAL] + _stored_keys()
+
+
+def _activity_order(keys, budget):
+    rows = []
+    for key in keys:
+        meta = _read_meta(_stem(key) + ".meta.json", budget) if budget.remaining() > 0 else None
+        stamp = sp_runtime.parse_time(meta.get("last_ts")) if meta is not None and isinstance(meta.get("last_ts"), str) else None
+        rows.append((-(stamp or 0.0), -_meta_last(meta), key))
+    rows.sort()
+    return [row[2] for row in rows]
+
+
+def _plan(next_token, budget):
+    """``(remaining keys in order, total)``: a fresh activity order, or the rest of a ``next`` token's."""
+    base = _all_keys()
+    fingerprint = _digest("\n".join(base))
+    if next_token is None:
+        return _activity_order(base, budget), len(base)
+    try:
+        if len(next_token) > TOKEN_MAX:
+            raise ValueError("token size")
+        token = json.loads(_unb64(next_token))
+        if not isinstance(token, dict) or set(token) != {"v", "h", "r"} or token["v"] != 1:
+            raise ValueError("token shape")
+        picks = token["r"]
+        if (not isinstance(picks, list) or len(picks) > len(base) or len(set(picks)) != len(picks)
+                or not all(isinstance(i, int) and not isinstance(i, bool) and 0 <= i < len(base) for i in picks)):
+            raise ValueError("token order")
+        if token["h"] != fingerprint:
+            raise WebDataError("the channel list changed; start again", 409)
+    except WebDataError:
+        raise
+    except (ValueError, RecursionError, TypeError, OverflowError, binascii.Error, UnicodeError, KeyError):
+        raise WebDataError("malformed token", 400)
+    return [base[i] for i in picks], len(base)
+
+
+def _next_token(rest):
+    if not rest:
+        return None
+    base = _all_keys()
+    index = {key: i for i, key in enumerate(base)}
+    return _b64(json.dumps(
+        {"v": 1, "h": _digest("\n".join(base)), "r": [index[k] for k in rest if k in index]}, separators=(",", ":")))
+
+
+def _read_batch(remaining, budget, now, limit):
+    """Snapshots of the next channels (at most BATCH_CHANNELS) until the budget runs out; ``[(key, snapshot)]``."""
+    batch = []
+    for key in remaining[:BATCH_CHANNELS]:
+        if budget.remaining() <= 0:
+            break
+        snap = HistorySnapshot(key, budget, now=now).read(limit=limit)
+        if snap.partial and not snap.page and budget.remaining() <= 0:
+            break  # the budget ended the read before anything was in: not covered
+        batch.append((key, snap))
+    return batch
+
+
+def _sort_stamp(view):
+    return (sp_runtime.parse_time(view.get("ts")) or 0.0, view.get("channel", ""), view.get("seq") or 0)
+
+
+def all_channels(next_token=None, budget=None, now=None):
+    """The next batch of channels' newest entries merged by time, each tagged with its ``channel``.
+
+    Channels are ordered by recent activity (meta ``last_ts``, then last seq); a batch is at most
+    BATCH_CHANNELS channels with at most BATCH_ENTRIES entries each, merged to the newest PAGE_MAX
+    (``trimmed`` counts the older ones left out), oldest first. ``{"entries", "partial", "omitted",
+    "total", "shown", "next", "trimmed"}``: ``shown`` channels so far plus ``omitted`` still to come
+    equal ``total``; ``partial`` is true when any are omitted or any read was cut short; ``next``
+    continues with the omitted channels (WebDataError 409 when the channel list changed
+    meanwhile). Never presents a subset as all channels."""
+    budget = budget if budget is not None else Budget()
+    remaining, total = _plan(next_token, budget)
+    batch = _read_batch(remaining, budget, now, BATCH_ENTRIES)
+    built, _ctx = _build_views([(snap, snap.page, key == GENERAL) for key, snap in batch], budget)
+    partial, merged = False, []
+    for (key, snap), (views, view_partial) in zip(batch, built):
+        partial = partial or snap.partial or view_partial
+        for view in views:
+            view["channel"] = key
+            merged.append(view)
+    merged.sort(key=_sort_stamp)
+    trimmed = max(0, len(merged) - PAGE_MAX)
+    rest = remaining[len(batch):]
+    return _clean({
+        "entries": merged[trimmed:], "partial": partial or bool(rest), "omitted": len(rest),
+        "total": total, "shown": total - len(rest), "next": _next_token(rest), "trimmed": trimmed,
+    })
+
+
+def _haystack(view):
+    parts = [view.get(name) for name in ("body", "actor", "text", "member", "sender")]
+    return "\n".join(p for p in parts if isinstance(p, str)).casefold()
+
+
+def search(q, scope="all", next_token=None, budget=None, now=None):
+    """Case-insensitive substring search of body, actor and member text in each channel's newest PAGE_MAX entries.
+
+    ``q`` is 1..QUERY_MAX characters (else WebDataError 400). ``scope`` is ``all`` (batched exactly as
+    ``all_channels``, with a ``next`` token) or one channel key. ``{"matches", "partial",
+    "searched_channels", "total_channels", "next", "window"}``, matches newest first and tagged with
+    their ``channel``, at most SEARCH_MATCHES_MAX; ``partial`` is true when channels are left for
+    ``next``, a channel has older entries than the window or its read was cut short, or matches were
+    cut. A match carries the entry's facts without its delivery rows."""
+    if not isinstance(q, str) or not 1 <= len(q) <= QUERY_MAX:
+        raise WebDataError("q must be 1 to %d characters" % QUERY_MAX)
+    budget = budget if budget is not None else Budget()
+    if scope == "all":
+        remaining, total = _plan(next_token, budget)
+    else:
+        _check_key(scope)
+        if next_token is not None:
+            raise WebDataError("a single channel search has no next token")
+        remaining, total = [scope], 1
+    needle = q.casefold()
+    batch = _read_batch(remaining, budget, now, PAGE_MAX)
+    partial, matches = False, []
+    for key, snap in batch:
+        partial = partial or snap.partial or snap.next_before is not None
+        for entry in snap.page:
+            if entry.get("oversized"):
+                continue
+            view = entry_view(entry, None, key == GENERAL)
+            if needle in _haystack(view):
+                view["channel"] = key
+                matches.append(view)
+    matches.sort(key=_sort_stamp, reverse=True)
+    cut = len(matches) > SEARCH_MATCHES_MAX
+    rest = remaining[len(batch):]
+    return _clean({
+        "matches": matches[:SEARCH_MATCHES_MAX], "partial": partial or cut or bool(rest),
+        "searched_channels": total - len(rest), "total_channels": total,
+        "next": _next_token(rest) if scope == "all" else None, "window": PAGE_MAX,
+    })
+
+
+# --------------------------------------------------------------------------
+# State view
+# --------------------------------------------------------------------------
+
+
+def _members_of(members, liveness, activity, names):
+    rows = []
+    for typed in members:
+        if not isinstance(typed, str):
+            continue
+        kind = typed.partition(":")[0]
+        row = {"typed": typed, "runtime": _RUNTIMES.get(kind, "unknown"),
+               "state": _member_state(liveness.get(typed), activity.get(typed))}
+        if isinstance(names.get(typed), str):
+            row["name"] = names[typed]
+        rows.append(row)
+    return rows
+
+
+def _alert(snap, rows_of):
+    """``missing_acks``, ``unverified`` or None from one channel's latest page.
+
+    ``rows_of`` maps a send's seq to its delivery view. A definite missing ACK of an ``@all``
+    send wins; an ACK that could not be checked, or a page the budget cut short, is
+    ``unverified``. Covers the latest ALERT_WINDOW entries only."""
+    unverified = snap.partial
+    for entry in snap.page:
+        if entry.get("kind") != sp_channels.EVENT_SEND:
+            continue
+        data = entry.get("data") if isinstance(entry.get("data"), dict) else {}
+        body = data.get("body")
+        if not (data.get("journaled") and isinstance(body, str) and sp_channels.ALL_RE.match(body)):
+            continue
+        delivery = rows_of[entry["seq"]]
+        tally = ack_tally(delivery["recipients"])
+        if len(tally["missing"]) - tally["unverified"] > 0:
+            return "missing_acks"
+        unverified = unverified or tally["unverified"] > 0 or bool(delivery.get("partial"))
+    return "unverified" if unverified else None
+
+
+def _handover_chain(snap):
+    chain = []
+    for entry in snap.page:
+        if entry.get("kind") == sp_channels.EVENT_HANDOVER and isinstance(entry.get("data"), dict):
+            data = entry["data"]
+            chain.append({"member": data.get("member"), "to": data.get("to"), "seq": entry.get("seq")})
+    return chain
+
+
+def state_view(discovery, budget=None, now=None):
+    """Metadata for the page's first load: sessions, channels (#general first), the starting cursor.
+
+    ``discovery`` is supplied by the caller: ``general`` = ``(members, opencode_coverage, gaps)`` from
+    ``channels.general_members()``, ``liveness`` {typed: live|gone|unverified}, ``activity`` {typed:
+    working|idle|unknown}, ``stale`` and ``pending`` flags, and optionally ``names`` {typed: name}.
+    No history entries are returned. Each channel's ``alert`` comes from its latest ALERT_WINDOW
+    entries (``missing_acks`` when an ``@all`` send there lacks ACKs, ``unverified`` when that could
+    not be established, e.g. the budget ran out); older entries are not examined. ``handover_chain``
+    of a buddy channel is the ``member -> to`` sequence of the handover entries in that same page.
+    The cursor starts every tracked channel at its current seq and fingerprint, the journal at its
+    newest record and anchor, and remembers the sends in progress in those pages."""
+    budget = budget if budget is not None else Budget()
+    members, coverage, gaps = (tuple(discovery.get("general") or ((), None, ())) + ((), None, ()))[:3]
+    liveness = discovery.get("liveness") or {}
+    activity = discovery.get("activity") or {}
+    names = discovery.get("names") or {}
+    tracked, untracked = _tracked_keys()
+    records = {key: sp_channels.read_channel(key) for key in tracked if key != GENERAL}
+    positions = [(key,) + _stat_position(key, budget) for key in tracked]
+    reads = {}
+    for key in tracked:
+        if budget.remaining() > 0:
+            reads[key] = HistorySnapshot(key, budget, now=now).read(limit=ALERT_WINDOW)
+    states, want = {}, []
+    for key, snap in reads.items():
+        found = {}
+        for entry in snap.page:
+            if entry.get("kind") != sp_channels.EVENT_SEND:
+                continue
+            found[entry["seq"]] = send_state(snap, entry)
+            data = entry.get("data") if isinstance(entry.get("data"), dict) else {}
+            if data.get("journaled") and isinstance(data.get("body"), str) and sp_channels.ALL_RE.match(data["body"]):
+                want.append(data.get("message_id"))
+        states[key] = found
+    journal_ctx = read_journal_context(budget, want)
+    partial = untracked > 0 or len(reads) < len(tracked)
+    rows, pending = [], []
+    index = {key: i for i, key in enumerate(tracked)}
+    for key in tracked:
+        if key == GENERAL:
+            record = {"display": "#general", "kind": "general", "owner": None}
+            roster = [m for m in members if isinstance(m, str)]
+        else:
+            record = records[key]
+            if record is None:
+                continue
+            roster = list(record["members"])
+        snap = reads.get(key)
+        alert, chain = "unverified", []
+        if snap is not None:
+            deliveries = {}
+            for entry in snap.page:
+                if entry.get("kind") == sp_channels.EVENT_SEND:
+                    state, outcomes, send_partial = states[key][entry["seq"]]
+                    deliveries[entry["seq"]] = _delivery(entry, state, outcomes, send_partial, journal_ctx)
+                    mid = (entry.get("data") or {}).get("message_id") if isinstance(entry.get("data"), dict) else None
+                    if state == sp_channels.STATE_IN_PROGRESS and _mid_hex(mid):
+                        pending.append([index[key], _clamp(entry["seq"]), _mid_hex(mid)])
+            alert = _alert(snap, deliveries)
+            chain = _handover_chain(snap) if record["kind"] == "buddy" else []
+        else:
+            partial = True
+        cover = channel_coverage(roster)
+        if key == GENERAL:
+            cover.update(opencode=coverage, discovery_incomplete=[g if isinstance(g, str) else str(g) for g in gaps or ()])
+        rows.append({
+            "key": key, "name": key, "display": record["display"], "kind": record["kind"], "owner": record["owner"],
+            "members": _members_of(roster, liveness, activity, names), "handover_chain": chain,
+            "alert": alert, "coverage": cover,
+        })
+    seen_members, sessions = set(), []
+    for row in rows:
+        for member in row["members"]:
+            if member["typed"] not in seen_members:
+                seen_members.add(member["typed"])
+                sessions.append(member_details(
+                    member["typed"], liveness.get(member["typed"]), activity.get(member["typed"]), now))
+    pending = pending[::-1]
+    if len(pending) > CURSOR_UPDATES_MAX:
+        pending, partial = pending[:CURSOR_UPDATES_MAX], True
+    jpos = [0, _digest("unread"), None]
+    allowance = min(budget.remaining(), BASELINE_BUDGET)
+    if allowance > 0:
+        try:
+            res = sp_journal.read_since(None, allowance, strict=True)
+            budget.charge(res.get("bytes") or 0)
+            jpos = _journal_position(res)
+            if res.get("oversized") or res.get("window_regression"):
+                jpos[2] = None
+        except Exception:  # an unreadable journal starts the cursor where the first poll reads it whole
+            partial = True
+    else:
+        partial = True
+    cursor = encode_cursor({
+        "v": 1, "c": [[key, seq, fp] for key, seq, fp in positions], "j": jpos, "u": pending})
+    result = {
+        "sessions": sessions, "channels": rows, "cursor": cursor, "partial": partial,
+        "discovery": {"stale": bool(discovery.get("stale")), "pending": bool(discovery.get("pending"))},
+    }
+    if untracked:
+        result["untracked"] = untracked
+    return _clean(result)

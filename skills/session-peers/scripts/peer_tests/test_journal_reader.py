@@ -893,5 +893,49 @@ class NearCapTests(ReaderBase):
         self.assertEqual(res["journal_prefix"], "read")
 
 
+class StrictTests(ReaderBase):
+    def test_strict_never_reads_past_the_budget_for_a_big_line(self):
+        body = "\x01" * sp_constants.MAX_TEXT_CHARS
+        self.put(self.mrec(1), self.mrec(2, body=body))
+        res = journal.read_since(None, 1024 * 1024, strict=True)
+        self.assertLessEqual(res["bytes"], 1024 * 1024)
+        self.assertEqual(sum(self.preads), res["bytes"])
+        self.assertEqual(res["messages"], [])
+        self.assertFalse(res["complete"])
+        self.assertEqual(res["journal_prefix"], "unread")
+
+    def test_strict_zero_budget_reads_nothing(self):
+        self.put(self.mrec(1))
+        res = journal.read_since(None, 0, strict=True)
+        self.assertEqual((res["bytes"], sum(self.preads), res["messages"]), (0, 0, []))
+        self.assertFalse(res["complete"])
+
+    def test_strict_with_cursor_reports_budget_gap_and_unreached_event(self):
+        mid = str(uuid.uuid4())
+        body = "\x01" * sp_constants.MAX_TEXT_CHARS
+        self.put(self.mrec(1, mid=mid), self.mrec(2, body=body), self.ev(3, "ack", mid, **{"for": self.A, "by": self.A}))
+        res = journal.read_since(1, 100 * 1024, strict=True)
+        self.assertLessEqual(res["bytes"], 100 * 1024)
+        self.assertFalse(res["complete"])
+        self.assertEqual(res["next"], 3)
+        self.assertEqual([e["message_id"] for e in res["events"]], [mid])
+        self.assertTrue(res["events"][0].get("unverified"))
+        self.assertEqual(res["context"][mid]["state"], "unreached")
+        self.assertEqual(res["gap"]["reason"], "budget")
+
+    def test_strict_matches_default_when_everything_fits(self):
+        self.put(self.mrec(1), self.mrec(2))
+        a = journal.read_since(None, BIG)
+        b = journal.read_since(None, BIG, strict=True)
+        self.assertEqual(a, b)
+
+    def test_strict_keeps_whole_lines_that_fit(self):
+        self.put(self.mrec(1), self.mrec(2))
+        one = len(self.mrec(2))
+        res = journal.read_since(None, one + 5, strict=True)
+        self.assertLessEqual(res["bytes"], one + 5)
+        self.assertEqual([m["seq"] for m in res["messages"]], [2])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1536,7 +1536,7 @@ class _Scan:
                 and self.wanted <= self.messages)
 
 
-def _read_window(fd, size, budget, scan):
+def _read_window(fd, size, budget, scan, strict=False):
     """Read backward from ``size`` into ``scan``; return ``(reached_start, bytes_read)``.
 
     Reads are at most 64 KiB and total at most ``budget``. Once the budget is spent it
@@ -1546,6 +1546,8 @@ def _read_window(fd, size, budget, scan):
     as soon as ``scan.satisfied()``. A final line
     without its newline is a torn or in-flight write and is ignored. A partial first line
     longer than JOURNAL_LINE_MAX ends the read and is counted in ``scan.oversized``.
+    With ``strict`` it never reads more than ``budget`` bytes: it stops with the whole
+    lines it has (possibly none).
     """
     pos, total, finish = size, 0, _FINISH_STEP
     partial, partial_len, seen_end = [], 0, False  # older pieces appended; file order is reversed
@@ -1553,7 +1555,7 @@ def _read_window(fd, size, budget, scan):
         left = budget - total
         if left > 0:
             step = min(_READ_CHUNK, pos, left)
-        elif scan.lines:
+        elif strict or scan.lines:
             break
         else:
             step = min(finish, pos)
@@ -1608,7 +1610,7 @@ def _unchanged_result(cursor, fingerprint, cursor_anchor=None):
 
 
 @_api
-def read_since(cursor, budget, want=None, known_fingerprint=None, cursor_anchor=None):
+def read_since(cursor, budget, want=None, known_fingerprint=None, cursor_anchor=None, strict=False):
     """Budgeted, incremental, read-only view of the journal tail after ``cursor``.
 
     Same-OS-user trust exception like ``read_only_view``; never locks, repairs, creates
@@ -1652,6 +1654,10 @@ def read_since(cursor, budget, want=None, known_fingerprint=None, cursor_anchor=
     a corrupt unread prefix (``journal_prefix`` "unread"), and a duplicate ``message_id``
     whose original lies outside the window (only a foreign or corrupt journal) are not
     detected.
+
+    With ``strict`` True the read never exceeds ``budget`` bytes, even to finish one line:
+    when no whole line fits, the result carries what it has (no records, ``complete``
+    False, the messages of any referenced events unreached, the usual ``gap``).
     """
     if cursor is not None and not (_is_int(cursor) and cursor >= 0):
         raise ValueError("cursor must be None or an integer >= 0")
@@ -1677,7 +1683,7 @@ def read_since(cursor, budget, want=None, known_fingerprint=None, cursor_anchor=
             if fd is not None:
                 try:
                     fingerprint = _fingerprint_of(st, os.fstat(dfd))
-                    reached, nbytes = _read_window(fd, st.st_size, budget, scan)
+                    reached, nbytes = _read_window(fd, st.st_size, budget, scan, strict)
                 finally:
                     os.close(fd)
         finally:
