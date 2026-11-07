@@ -6,9 +6,10 @@ it writes to no store and refuses every method but GET. Started with ``--chat`` 
 browser peer (``webpeer``) and accepts one write, ``POST /api/send``, whose checks run in this order:
 host, method and target, token, ``Origin`` equal to the page's own origin, a single JSON
 ``Content-Type``, body framing (no ``Transfer-Encoding``, one digits-only ``Content-Length`` of 1 to
-BODY_MAX), the body read inside the connection deadline, strict ``{to, text, ack}`` JSON, the M1
-refusals (``#general`` and ``@all``), and the send gate (``webchat.SendGate``). A passed send is
-answered ``202 {"message_id", "state": "queued"}``: accepted in memory only, committed later by the
+BODY_MAX), the body read inside the connection deadline, strict ``{to, text, ack}`` JSON (plus ``confirm`` for an ``@all`` to ``#general``), the refusals
+(``#general`` unless an ``@all``, and an ``@all`` anywhere else; an ``@all`` to ``#general`` is a
+preview answered ``200`` with a confirm nonce, then a confirm), and the send gate
+(``webchat.SendGate``). A passed send is answered ``202 {"message_id", "state": "queued"}``: accepted in memory only, committed later by the
 single worker in ``webchat``. Every refusal body is ``{}``.
 
 Defences, in the order every request meets them: a connection slot (at most MAX_CONNECTIONS held
@@ -71,6 +72,7 @@ BODY_MAX = 1024 * 1024  # largest POST body (Content-Length) a chat-mode send ac
 BODY_GRACE = 0.5  # the body read gives up this long before the connection cut, so the 408 can still be written
 SEND_PATH = "/api/send"
 SEND_RECIPIENTS_MAX = 64
+CONFIRM_MAX = 128  # longest confirm nonce a send body may carry (a token_urlsafe(32) is 43 characters)
 NUMERAL_MAX = 32  # longest JSON numeral a send body may carry (it has no numeric field)
 ASSET_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
 
@@ -557,9 +559,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self._check_content_type()
         length = self._content_length()
         body = self._read_body(length)
-        to, text, ack = self._parse_send(body)
-        if to == sp_constants.CHANNEL_GENERAL or sp_channels.ALL_RE.match(text):
-            raise _Refused(403)  # M1: nothing is posted to everyone
+        to, text, ack, confirm = self._parse_send(body)
+        is_all = sp_channels.ALL_RE.match(text) is not None
+        if to == sp_constants.CHANNEL_GENERAL or is_all:
+            # Only an `@all` to #general is open (preview, then confirm); a plain #general post and an
+            # `@all` anywhere else stay refused.
+            if not (to == sp_constants.CHANNEL_GENERAL and is_all):
+                raise _Refused(403)
+            return self._post_all(text, confirm)
         chat = self.server.chat
         if not chat.ready:
             raise _Refused(503)
@@ -567,6 +574,41 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if mid is None:
             raise _Refused(429)
         self._send_json(202, {"message_id": mid, "state": "queued"})
+
+    def _post_all(self, text, confirm):
+        """An `@all` to #general. ACK is always requested, so the request's ``ack`` is not consulted."""
+        chat = self.server.chat
+        if not chat.ready:
+            raise _Refused(503)
+        if confirm is not None:
+            status, mid = chat.confirm_all(confirm, text)
+            if status == sp_webchat.CONFIRM_STALE:
+                raise _Refused(409)
+            if status == sp_webchat.CONFIRM_LIMITED:
+                raise _Refused(429)
+            return self._send_json(202, {"message_id": mid, "state": "queued"})
+        # Preview: the cached discovery only, no resolution; nothing is accepted, charged or queued.
+        found = self.server.discovery.get()
+        if found.get("pending"):
+            raise _Refused(409)
+        typed = chat.state.typed
+        liveness = found.get("liveness") or {}
+        recipients, excluded = [], []
+        for member in dict.fromkeys(found["general"][0]):
+            if member == typed:
+                continue
+            if liveness.get(member) == "gone":
+                excluded.append({"member": member, "reason": "gone"})
+            else:
+                recipients.append(member)
+        if not recipients or len(recipients) > sp_channels.ALL_MAX_RECIPIENTS:
+            raise _Refused(409)
+        recipients.sort()
+        nonce = chat.preview_all(text, recipients)
+        self._send_json(200, {
+            "confirm": nonce, "expires_in": sp_webchat.NONCE_TTL, "recipients": recipients,
+            "excluded": sorted(excluded, key=lambda x: x["member"]),
+        })
 
     def _check_origin(self):
         origin = self._single("Origin")
@@ -612,7 +654,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     @staticmethod
     def _parse_send(body):
-        """``(to, text, ack)`` of a strict ``{to, text, ack}`` JSON body; 400 for anything else."""
+        """``(to, text, ack, confirm)`` of a strict ``{to, text, ack}`` JSON body, or one that also carries
+        ``confirm`` (a bounded string, allowed only for an `@all` to #general; None when absent). 400 for anything else."""
         def no_duplicates(pairs):
             keys = [k for k, _v in pairs]
             if len(set(keys)) != len(keys):
@@ -638,11 +681,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
                              parse_int=no_long_number, parse_float=no_long_float)
         except (ValueError, RecursionError):  # includes UnicodeDecodeError
             raise _Refused(400)
-        if not isinstance(obj, dict) or set(obj) != {"to", "text", "ack"}:
+        if not isinstance(obj, dict) or set(obj) not in ({"to", "text", "ack"}, {"to", "text", "ack", "confirm"}):
             raise _Refused(400)
-        to, text, ack = obj["to"], obj["text"], obj["ack"]
+        to, text, ack, confirm = obj["to"], obj["text"], obj["ack"], obj.get("confirm")
         if type(text) is not str or not 1 <= len(text) <= sp_constants.MAX_TEXT_CHARS or type(ack) is not bool:
             raise _Refused(400)
+        if "confirm" in obj:
+            # A nonce belongs to an `@all` to #general and to nothing else.
+            if (type(confirm) is not str or not 1 <= len(confirm) <= CONFIRM_MAX or to != "#general"
+                    or sp_channels.ALL_RE.match(text) is None):
+                raise _Refused(400)
         try:
             text.encode("utf-8")
         except UnicodeEncodeError:  # a lone surrogate (a JSON ud800 escape) can be neither journaled nor delivered
@@ -650,7 +698,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if type(to) is str:
             if not to.startswith("#") or not sp_constants.CHANNEL_NAME_RE.fullmatch(to[1:]):
                 raise _Refused(400)
-            return to[1:], text, ack
+            return to[1:], text, ack, confirm
         if type(to) is not list or not 1 <= len(to) <= SEND_RECIPIENTS_MAX or len(set(map(str, to))) != len(to):
             raise _Refused(400)
         for address in to:
@@ -662,7 +710,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 raise _Refused(400)
             if kind == "web":
                 raise _Refused(400)
-        return to, text, ack
+        return to, text, ack, confirm
 
     # -- static ------------------------------------------------------------
 

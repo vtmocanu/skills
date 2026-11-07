@@ -26,7 +26,9 @@ import contextlib
 import copy
 import json
 import os
+import hashlib
 import queue
+import secrets
 import sys
 import threading
 import time
@@ -45,6 +47,11 @@ ROWS_MAX = 1000
 ROW_TEXT_MAX = 2000  # chars of a channel post's text kept in its status row
 DETAIL_MAX = 500
 JOIN_TIMEOUT = 3.0
+NONCE_TTL = 60  # seconds a preview's confirm nonce stays valid
+NONCE_MAX = 32  # outstanding nonces; at the cap the oldest is evicted
+CONFIRM_OK = "ok"
+CONFIRM_STALE = "stale"  # missing, expired or not bound to this request
+CONFIRM_LIMITED = "limited"  # a rate limit or the queue is full; the nonce stays usable
 
 # The browser's own session identity: a copy inherited from the shell that started the server says
 # nothing about the browser peer and must not become the sender of a delivery.
@@ -477,24 +484,77 @@ class SendGate:
         self._lock = threading.Lock()
         self._charges = collections.deque()
         self._held = 0
+        self._nonces = collections.OrderedDict()  # nonce -> binding dict, oldest first; memory only
+
+    def _limits_open_locked(self, now):
+        while self._charges and now - self._charges[0] >= RATE_WINDOW:
+            self._charges.popleft()
+        if self._charges and now - self._charges[-1] < RATE_MIN_GAP:
+            return False
+        return len(self._charges) < RATE_PER_MINUTE and self._held < SEND_QUEUE_MAX
+
+    def _charge_and_build_locked(self, now, build):
+        self._charges.append(now)
+        self._held += 1
+        try:
+            return build()
+        except BaseException:
+            self._charges.pop()  # nothing was accepted: give the charge and the slot back
+            self._held -= 1
+            raise
 
     def accept(self, build):
         with self._lock:
             now = self._clock()
-            while self._charges and now - self._charges[0] >= RATE_WINDOW:
-                self._charges.popleft()
-            if self._charges and now - self._charges[-1] < RATE_MIN_GAP:
+            if not self._limits_open_locked(now):
                 return None
-            if len(self._charges) >= RATE_PER_MINUTE or self._held >= SEND_QUEUE_MAX:
-                return None
-            self._charges.append(now)
-            self._held += 1
-            try:
-                return build()
-            except BaseException:
-                self._charges.pop()  # nothing was accepted: give the charge and the slot back
-                self._held -= 1
-                raise
+            return self._charge_and_build_locked(now, build)
+
+    def _prune_nonces_locked(self, now):
+        for nonce in [n for n, b in self._nonces.items() if b["expires_at"] <= now]:
+            del self._nonces[nonce]
+
+    def issue_nonce(self, route, sender, recipients, text_sha256, ack):
+        """Record a preview's binding and return its single-use nonce (valid NONCE_TTL seconds).
+
+        Nothing is charged. At most NONCE_MAX are outstanding; the oldest is evicted for a new one."""
+        with self._lock:
+            now = self._clock()
+            self._prune_nonces_locked(now)
+            while len(self._nonces) >= NONCE_MAX:
+                self._nonces.popitem(last=False)
+            nonce = secrets.token_urlsafe(32)
+            self._nonces[nonce] = {
+                "route": route, "sender": sender, "recipients": tuple(sorted(recipients)),
+                "text_sha256": text_sha256, "ack": bool(ack), "expires_at": now + NONCE_TTL,
+            }
+            return nonce
+
+    def confirm(self, nonce, route, sender, text_sha256, ack, build):
+        """Consume ``nonce`` for a send, atomically with the limit check and the charge.
+
+        Returns ``(CONFIRM_OK, build(recipients))``, ``(CONFIRM_STALE, None)`` for a missing, expired
+        or mismatched nonce (a mismatch leaves it in place, an expired one is pruned), or
+        ``(CONFIRM_LIMITED, None)`` when a limit is hit (the nonce stays usable, nothing is charged)."""
+        with self._lock:
+            now = self._clock()
+            self._prune_nonces_locked(now)
+            binding = self._nonces.get(nonce)
+            if binding is None:
+                return CONFIRM_STALE, None
+            if (binding["route"], binding["sender"], binding["text_sha256"], binding["ack"]) != (
+                    route, sender, text_sha256, bool(ack)):
+                return CONFIRM_STALE, None
+            if not self._limits_open_locked(now):
+                return CONFIRM_LIMITED, None
+            result = self._charge_and_build_locked(now, lambda: build(binding["recipients"]))
+            del self._nonces[nonce]  # consumed only once the send was accepted
+            return CONFIRM_OK, result
+
+    @property
+    def nonces_outstanding(self):
+        with self._lock:
+            return len(self._nonces)
 
     def release(self):
         """Free one slot: the job ended (the rate charge stays)."""
@@ -624,11 +684,14 @@ class SendWorker:
             seeded = {t: {"outcome": None, "ack": ACK_PENDING if ack else ACK_NOT_REQUESTED} for t in deliver}
             self.state.update(mid, state=STATE_PENDING, journaled=True, delivering=True, recipients=seeded)
 
-        # `expected_recipients` is never passed in M1: a channel post addresses the channel's roster.
-        # An exception escaping after the journal write reaches `_run`, which reads the row's `journaled`.
+        # `expected_recipients` is set only by a confirmed `@all` to #general (the nonce's recipients);
+        # `send_as_web` then refuses when the live deliverable set differs. A stored channel's post
+        # addresses its roster and passes None. An exception escaping after the journal write reaches
+        # `_run`, which reads the row's `journaled`.
         payload = sp_channels.send_as_web(
             job["key"], self.web_sender(), job["text"], ack, mid,
-            deliver_guard=self._guard, resolve_guard=self._guard, on_journaled=on_journaled)
+            deliver_guard=self._guard, resolve_guard=self._guard, on_journaled=on_journaled,
+            expected_recipients=job.get("expected_recipients"))
         state = payload.get("state")
         if state == sp_channels.WEB_SENT:
             asked = bool(job["ack"])
@@ -759,3 +822,34 @@ class Chat:
             return mid
 
         return self.gate.accept(build)
+
+    # -- confirmed @all to #general ------------------------------------------
+
+    @staticmethod
+    def _digest(text):
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+    def preview_all(self, text, recipients):
+        """The confirm nonce for an `@all` to #general addressed to ``recipients``. Accepts and charges nothing.
+
+        The ACK request is part of the binding and is always true for an `@all`."""
+        return self.gate.issue_nonce(
+            sp_constants.CHANNEL_GENERAL, self.state.typed, recipients, self._digest(text), True)
+
+    def confirm_all(self, nonce, text):
+        """Accept a confirmed `@all`: ``(CONFIRM_OK, mid)``, ``(CONFIRM_STALE, None)`` or ``(CONFIRM_LIMITED, None)``."""
+        key = sp_constants.CHANNEL_GENERAL
+
+        def build(recipients):
+            mid = str(uuid.uuid4())
+            self.state.accept_channel(mid, key, text, True)
+            job = {"kind": "channel", "mid": mid, "key": key, "text": text, "ack": True,
+                   "expected_recipients": list(recipients)}
+            try:
+                self.worker.submit(job)
+            except BaseException:
+                self.state.discard(mid)
+                raise
+            return mid
+
+        return self.gate.confirm(nonce, key, self.state.typed, self._digest(text), True, build)
