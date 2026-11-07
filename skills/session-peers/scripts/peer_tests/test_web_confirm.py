@@ -360,8 +360,38 @@ class ConfirmLimitTests(ConfirmBase):
         self.assert_refused(self.confirm(nonce), 429)
         self.assertEqual(self.chat.gate.nonces_outstanding, 1)
 
+    def test_concurrent_confirms_while_rate_limited_are_all_429_and_the_nonce_survives(self):
+        nonce = self.nonce()
+        ops = self.accepted("#ops", "heads up", tick=False)  # takes this second's rate slot
+        count = 4
+        barrier = threading.Barrier(count)
+        results = []
+
+        def go():
+            barrier.wait(10)
+            results.append(self.confirm(nonce))
+
+        threads = [threading.Thread(target=go) for _ in range(count)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(20)
+        self.assertEqual([r.status for r in results], [429] * count)
+        self.wait_row(ops)
+        self.assertEqual([r["mid"] for r in self.state.rows()], [ops])
+        self.assertEqual(self.general_sends(), [])
+        self.assertEqual(self.chat.gate.nonces_outstanding, 1)
+        self.assertEqual(self.chat.gate.held, 0)
+        # Past the window, within the nonce's life: the one nonce still makes exactly one send.
+        mid = self.confirmed(nonce, tick=True)
+        self.assertEqual(self.wait_row(mid)["state"], "pending")
+        self.assertEqual(len(self.state.rows()), 2)
+
     def test_a_full_queue_is_429_keeps_the_nonce_and_a_later_confirm_succeeds(self):
         nonce = self.nonce()
+        patch = mock.patch.object(webchat, "RATE_PER_MINUTE", webchat.SEND_QUEUE_MAX + 1)  # one more than the eight
+        patch.start()
+        self.addCleanup(patch.stop)
         self.block_worker()
         for index in range(webchat.SEND_QUEUE_MAX):
             self.accepted("#ops", "heads up %d" % index)
@@ -372,7 +402,9 @@ class ConfirmLimitTests(ConfirmBase):
         self.assertEqual(len(self.state.rows()), webchat.SEND_QUEUE_MAX)
         self.release.set()
         wait_until(lambda: self.chat.gate.held == 0, "the queue to drain")
-        mid = self.confirmed(nonce, tick=True)
+        # The 429 charged nothing: at the refusal's own clock the one-second gap is open and the minute
+        # holds exactly one more send, which a charged 429 would have used up.
+        mid = self.confirmed(nonce, tick=False)
         self.assertEqual(self.wait_row(mid)["state"], "pending")
 
 

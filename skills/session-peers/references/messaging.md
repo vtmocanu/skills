@@ -213,8 +213,10 @@ known:
 
 - **Offline:** with no running browser peer, `send` is refused (exit 1) and
   nothing is sent. With `--record` it journals the message, reports the
-  transport failure and exits 1 (76 if that failure could not be journaled), so
-  the page can show it once it starts.
+  transport failure and exits 1 (76 if that failure could not be journaled). The
+  message stays readable only through the journal (`peers.py inbox journal`),
+  not in the page's Browser feed: a started page has a new browser identity
+  and an empty feed, and never imports earlier journal records.
 - **Duplicate record:** with `--record` a delivered message leaves two journal
   records, the sender's own and the browser peer's inbox record. Both count
   against retention. The sender's own record counts against its quota; the

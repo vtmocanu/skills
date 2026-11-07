@@ -573,7 +573,8 @@ class ChatRowTests(ChatBase):
 
     def test_a_full_journal_is_not_sent_and_leaves_no_entry(self):
         full = sp_journal.JournalFull("the journal is full")
-        with mock.patch.object(sp_journal, "record_message", side_effect=full):
+        with mock.patch.object(sp_journal, "record_message", side_effect=full), \
+                mock.patch.object(sp_journal, "_add_message", side_effect=full):  # a direct send's own write
             direct = self.wait_row(self.accepted([self.cc], "hello"))
             post = self.wait_row(self.accepted("#ops", "hello"))
         for row in (direct, post):
@@ -588,6 +589,14 @@ class ChatRowTests(ChatBase):
         self.assertIn(ghost, row["reason"])
         self.assertEqual(row["recipients"][self.cc]["outcome"], None)
         self.assert_nothing_written()
+
+    def test_a_direct_send_resolves_its_recipients_exactly_once(self):
+        real = sp_journal._resolve_recipients
+        with mock.patch.object(sp_journal, "_resolve_recipients", side_effect=real) as resolve:
+            row = self.wait_row(self.accepted([self.cc, self.codex], "hello"))
+        self.assertEqual(resolve.call_count, 1)
+        self.assertEqual((row["state"], row["journaled"]), ("pending", True))
+        self.assertEqual(sorted(row["recipients"]), sorted([self.cc, self.codex]))
 
     def test_oversized_text_is_not_sent_before_anything_is_written(self):
         with mock.patch.object(sp_constants, "MAX_TEXT_CHARS", 2000):
@@ -727,6 +736,9 @@ class ChatGateTests(ChatBase):
         self.assertEqual(len(self.state.rows()), 31)
 
     def test_a_full_queue_gives_eight_accepted_and_one_429_and_charges_nothing(self):
+        patch = mock.patch.object(webchat, "RATE_PER_MINUTE", webchat.SEND_QUEUE_MAX + 1)  # one more than the eight
+        patch.start()
+        self.addCleanup(patch.stop)
         self.block_worker()
         mids = [self.accepted("#ops", "m%d" % n) for n in range(webchat.SEND_QUEUE_MAX)]
         self.assertTrue(self.started.acquire(timeout=10))  # one of the eight is running, seven queued
@@ -737,8 +749,9 @@ class ChatGateTests(ChatBase):
         for mid in mids:
             self.wait_row(mid)
         wait_until(lambda: self.chat.gate.held == 0, "the slots to free")
-        # The 429 did not charge: the minute still has 22 left, and a slot is free again.
-        self.assertEqual(self.post("#ops", "tenth").status, 202)
+        # The 429 charged nothing. At the refusal's own clock the one-second gap is open (it would be closed
+        # by a charge at that instant) and the minute holds exactly one more send (a ninth charge would fill it).
+        self.assertEqual(self.post("#ops", "tenth", tick=False).status, 202)
         self.assertEqual([e["message_id"] for e in self.journal_entries()][:8], mids)  # FIFO
 
     def test_concurrent_posts_accept_exactly_one_inside_the_rate_gap(self):
@@ -1462,6 +1475,24 @@ class ChatReworkTests(ChatFeedBase):
         reload = self.raw_changes(self.start_cursor())
         self.assertLessEqual(len(reload.body), webchat.FEED_MAX_BYTES)
         self.assertTrue(reload.json()["browser"]["entries"])
+
+    def feed_of_escaped_controls(self, filler):
+        cursor = self.start_cursor()
+        for _ in range(7):
+            self.inbound("x" + filler * 250000 + "x")
+        resp = self.raw_changes(cursor)
+        self.assertLessEqual(len(resp.body), webdata.REQUEST_BUDGET)
+        self.assertLessEqual(len(resp.body), webchat.FEED_MAX_BYTES)
+        reload = self.raw_changes(self.start_cursor())
+        self.assertLessEqual(len(reload.body), webchat.FEED_MAX_BYTES)
+        self.assertTrue(reload.json()["browser"]["entries"])
+
+    def test_feed_entries_are_budgeted_as_the_display_escape_makes_them(self):
+        # JSON's short escape for a carriage return is 2 bytes; webdata shows it as 6 characters of text, 7 on the wire.
+        self.feed_of_escaped_controls("\r")
+
+    def test_feed_entries_with_nul_are_budgeted_as_the_display_escape_makes_them(self):
+        self.feed_of_escaped_controls("\x00")
 
     # -- starvation (B2) ------------------------------------------------------
 

@@ -34,7 +34,7 @@ import threading
 import time
 import uuid
 from . import channels as sp_channels, constants as sp_constants, journal as sp_journal
-from . import runtime as sp_runtime, webpeer as sp_webpeer
+from . import runtime as sp_runtime, webdata as sp_webdata, webpeer as sp_webpeer
 
 SEND_QUEUE_MAX = 8  # queued plus running jobs
 RATE_MIN_GAP = 1.0  # seconds between two accepted sends
@@ -86,9 +86,11 @@ def _bounded(value, limit=DETAIL_MAX):
 
 
 def _size(entry):
-    """Bytes of ``entry`` as ``web`` serves it: ``ensure_ascii=True``, which escapes a non-ASCII character
-    to up to 12 bytes and never raises on a lone surrogate."""
-    return len(json.dumps(entry, ensure_ascii=True, separators=(",", ":")).encode("ascii"))
+    """Bytes of ``entry`` as ``web`` serves it: display-escaped by ``webdata._clean`` first (a control
+    character becomes a ``\\uXXXX`` text, longer than JSON's own short escape), then ``ensure_ascii=True``,
+    which escapes a non-ASCII character to up to 12 bytes and never raises on a lone surrogate."""
+    cleaned = sp_webdata._clean(entry)
+    return len(json.dumps(cleaned, ensure_ascii=True, separators=(",", ":")).encode("ascii"))
 
 
 def _clip_text(text):
@@ -572,6 +574,16 @@ class SendGate:
 # --------------------------------------------------------------------------
 
 
+@sp_journal._api
+def _record_resolved(sender, to, text, mid):
+    """``record_message`` for a caller that needs the resolved recipients: the same steps (one
+    resolution, a caller-supplied id, the ``_api`` OSError mapping), returning the canonical list."""
+    resolved = sp_journal._resolve_recipients(to)
+    rec = sp_journal._message_record(sender, resolved, text, "message", mid, {}, sp_journal._now())
+    sp_journal._add_message(rec, check_id=True)
+    return resolved
+
+
 class SendWorker:
     """One daemon thread that commits and delivers accepted sends in order."""
 
@@ -651,8 +663,7 @@ class SendWorker:
             return self._refuse(mid, exc)
         try:
             with self._guard():
-                resolved = sp_journal._resolve_recipients(to)
-                sp_journal.record_message(sender, resolved, text, message_id=mid)
+                resolved = _record_resolved(sender, to, text, mid)
         except (sp_journal.JournalError, ValueError, OSError) as exc:
             return self._refuse(mid, exc)
         recipients = {t: {"outcome": None, "ack": ACK_PENDING if ack else ACK_NOT_REQUESTED} for t in resolved}
