@@ -61,13 +61,15 @@ class StubElement {
   }
   setAttribute(name, value) {
     this.ownerDocument.setAttributeCalls.push([this.tagName, name, value])
+    // A freshly built dialog panel is as if scrolled, so "opens at its top" has something to undo.
+    if (name === "role" && value === "dialog") this.scrollTop = 50
     this.attributes[name] = String(value)
   }
   removeAttribute(name) { delete this.attributes[name] }
   getAttribute(name) { return Object.prototype.hasOwnProperty.call(this.attributes, name) ? this.attributes[name] : null }
   addEventListener(type, fn) { (this.listeners[type] = this.listeners[type] || []).push(fn) }
   dispatch(type, event = {}) { for (const fn of this.listeners[type] || []) fn(Object.assign({ type, preventDefault() {} }, event)) }
-  focus() { this.ownerDocument.activeElement = this }
+  focus(options) { this.focusOptions = options; this.ownerDocument.activeElement = this }
   get textContent() { return this.childNodes.map((c) => c.textContent).join("") }
   set textContent(value) {
     for (const c of this.childNodes) c.parentNode = null
@@ -1977,10 +1979,41 @@ test("chat @all: a 409 after an unanswered confirm warns it may already have bee
   assert.ok(statusLine(t).classList.contains("bad"))
 })
 
+const MAYBE_SENT = "It may already have been sent: check #general before previewing again."
+const noResponse = () => { throw new TypeError("Failed to fetch") }
+
+test("chat @all: Cancel or Esc after an unanswered confirm warns it may already have been sent", async () => {
+  for (const close of [(t) => dialogButton(t, "Cancel").dispatch("click"), (t) => dialogOf(t).dispatch("keydown", { key: "Escape" })]) {
+    const t = allBoot({ confirm: noResponse })
+    await previewed(t)
+    okButton(t).dispatch("click")
+    await settle()
+    assert.ok(dialogOf(t), "still open after no response")
+    close(t)
+    assert.equal(dialogOf(t), null)
+    assert.equal(statusLine(t).textContent, MAYBE_SENT)
+    assert.ok(statusLine(t).classList.contains("bad"))
+  }
+})
+
+test("chat @all: an expiry after an unanswered confirm warns it may already have been sent", async () => {
+  const t = allBoot({ confirm: noResponse })
+  const base = Date.parse("2026-11-07T12:00:00Z")
+  setNow(t, base)
+  await previewed(t)
+  okButton(t).dispatch("click")
+  await settle()
+  setNow(t, base + 60000)
+  tickDialog(t)
+  assert.equal(okButton(t).disabled, true)
+  assert.equal(dialogMsg(t).textContent, "This preview expired, and an earlier confirm got no response: it may already have been sent. Check #general before previewing again.")
+})
+
 test("chat @all: the dialog opens at its top, and a click on the scrim keeps focus in the dialog for Esc", async () => {
   const t = allBoot()
   await previewed(t)
-  assert.equal(dialogOf(t).scrollTop, 0)
+  assert.equal(dialogOf(t).scrollTop, 0, "the panel is reset to its top")
+  assert.ok(dialogButton(t, "Cancel").focusOptions && dialogButton(t, "Cancel").focusOptions.preventScroll === true, "Cancel is focused without scrolling to it")
   const scrim = dialogOf(t).parentNode
   textareaOf(t).focus()
   let prevented = false
@@ -1992,7 +2025,7 @@ test("chat @all: the dialog opens at its top, and a click on the scrim keeps foc
 })
 
 test("chat @all: a preview 409, 429 or 403 says why and opens no dialog", async () => {
-  for (const [status, want] of [[409, "Couldn't list the recipients (discovery pending or incomplete, or none or too many). Trying again may help, but not if #general has more than 64 members."],
+  for (const [status, want] of [[409, "Couldn't list the recipients (discovery pending or incomplete, or none or too many). Trying again may help, but a #general with more than 64 members is normally refused."],
     [429, "Too fast or queue full — try again (429)"], [403, "(403)"]]) {
     const t = allBoot({ preview: () => ({ status }) })
     await previewed(t)
@@ -2070,14 +2103,22 @@ test("chat @all: Esc cancels and returns focus to the textarea; Tab stays inside
   const lists = elementsOf(dialogOf(t)).filter((n) => (n.attributes.class || "").startsWith("dlglist"))
   assert.equal(lists.length, 2)
   for (const l of lists) assert.equal(l.attributes.tabindex, "0", "a capped list is keyboard-scrollable")
+  const quote = elementsOf(dialogOf(t)).find((n) => n.attributes.class === "dlgquote")
+  assert.ok(quote, "the quoted message")
+  assert.equal(quote.attributes.tabindex, "0", "a capped quote is keyboard-scrollable")
+  assert.equal(quote.attributes["aria-label"], "Message")
+  const order = elementsOf(dialogOf(t))
+  assert.ok(order.indexOf(quote) < order.indexOf(lists[0]), "the quote comes before the lists")
   ok.focus()
   dialogOf(t).dispatch("keydown", { key: "Tab" })
-  assert.ok(t.document.activeElement === lists[0], "Tab from the last button wraps to the first stop, the recipient list")
+  assert.ok(t.document.activeElement === quote, "Tab from the last button wraps to the first stop, the quote")
   dialogOf(t).dispatch("keydown", { key: "Tab", shiftKey: true })
   assert.ok(t.document.activeElement === ok, "Shift+Tab from the first stop wraps to the last")
   cancel.focus()
-  dialogOf(t).dispatch("keydown", { key: "Tab", shiftKey: true })
-  assert.ok(t.document.activeElement === cancel, "Shift+Tab from Cancel is left to the browser, which lands on the lists before it")
+  let prevented = false
+  dialogOf(t).dispatch("keydown", { key: "Tab", shiftKey: true, preventDefault() { prevented = true } })
+  assert.equal(prevented, false, "Shift+Tab from Cancel is left to the browser, which lands on the lists before it")
+  assert.ok(t.document.activeElement === cancel)
   dialogOf(t).dispatch("keydown", { key: "Escape" })
   assert.equal(dialogOf(t), null)
   assert.equal(t.document.activeElement, textareaOf(t))
@@ -2112,6 +2153,7 @@ test("chat @all: #general's details hold the corrected 'How @all works' card", a
   const info = textOf(t.document.byId.info)
   assert.ok(info.includes("How @all works"))
   for (const want of ["The post goes to the #general members discovery found.",
+    "Preview recipients lists them; nothing is sent until you confirm that list.",
     "Gone or refused members, idle OpenCode sessions (not woken) and discovery gaps show as their recorded outcomes.",
     "If membership changes between your preview and the send, nothing is sent and you are asked to preview again."]) {
     assert.ok(info.includes(want), want)

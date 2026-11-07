@@ -45,12 +45,13 @@
   var ALL_WARN = "@all only works in #general: open #general to post it to every member";
   var ALL_GENERAL = " reaches every #general member after you confirm the recipient list";
   var GENERAL_ONLY_ALL = "In #general you can only post @all, which asks for a confirmation";
-  var PREVIEW_409 = "Couldn't list the recipients (discovery pending or incomplete, or none or too many). Trying again may help, but not if #general has more than 64 members.";
+  var PREVIEW_409 = "Couldn't list the recipients (discovery pending or incomplete, or none or too many). Trying again may help, but a #general with more than 64 members is normally refused.";
   var CONFIRM_409 = "The preview expired or was used; preview again";
   var CONFIRM_429 = "Rate limited, try again";
   var CONFIRM_NONE = "No response from the server. Confirm again: this preview can be used only once, so a retry never sends it twice.";
   var CONFIRM_MAYBE_SENT = "It may already have been sent: check #general before previewing again.";
-  var CONFIRM_EXPIRED = "This preview expired. Preview again for a fresh recipient list.";
+  var CONFIRM_EXPIRED_MAYBE_SENT = "This preview expired, and an earlier confirm got no response: it may already have been sent. Check #general before previewing again.";
+  var CONFIRM_EXPIRED ="This preview expired. Preview again for a fresh recipient list.";
   // The confirm dialog: its host (index.html, outside #app so #app can be made inert) and ids.
   var DIALOG_HOST = "dialoghost";
   var CONFIRM_MAX = 128;
@@ -1497,21 +1498,21 @@
     var cancel = el("button", { type: "button", class: "dlgcancel" }, "Cancel");
     var confirmBtn = el("button", { type: "button", class: "send dlgok" }, "Send to " + n);
     var acts = el("div", { class: "dlgacts" }, cancel, confirmBtn);
-    // Focusable so a keyboard user can scroll a capped list.
+    // The quote and the lists are focusable so a keyboard user can scroll them when capped.
+    var quote = el("div", { class: "dlgquote", "aria-label": "Message", tabindex: "0" }, el("p", { class: "text" }, bodyNodes(cf.text.length > 600 ? cf.text.slice(0, 599) + "…" : cf.text)));
     var recList = el("ul", { class: "dlglist", "aria-label": "Recipients", tabindex: "0" }, cf.recipients.map(function (t) { return personItem(t); }));
     var exclList = cf.excluded.length ? el("ul", { class: "dlglist excl", "aria-label": "Not included", tabindex: "0" },
       cf.excluded.map(function (x) { return personItem(x.member, excludedText(x.reason)); })) : null;
-    var shown = cf.text.length > 600 ? cf.text.slice(0, 599) + "…" : cf.text;
     var panel = el("div", { class: "dialog", role: "dialog", "aria-modal": "true", "aria-labelledby": "dlgtitle", "aria-describedby": "dlgdesc dlgmsg", tabindex: "-1" },
       title, desc,
-      el("div", { class: "dlgquote" }, el("p", { class: "text" }, bodyNodes(shown))),
+      quote,
       cf.stale ? el("div", { class: "note warn", role: "note" }, "Discovery may be stale: this list comes from the last completed check.") : null,
       el("div", { class: "dlgsec" }, el("b", null, "Recipients (" + n + ")"),
         recList),
       exclList ? el("div", { class: "dlgsec" }, el("b", null, "Not included (" + cf.excluded.length + ")"), exclList) : null,
       el("div", { class: "dlgfoot" }, clockNode, msg),
       acts);
-    on(cancel, "click", function () { if (!cf.busy) closeConfirm(null, null); });
+    on(cancel, "click", function () { if (!cf.busy) cancelConfirm(cf); });
     on(confirmBtn, "click", function () { confirmAll(cf); });
     on(panel, "keydown", function (event) { confirmKey(cf, event); });
     var scrim = el("div", { class: "scrim" }, panel);
@@ -1521,7 +1522,7 @@
       if (event.preventDefault) event.preventDefault();
       panel.focus();
     });
-    return { root: scrim, panel: panel, lists: [recList, exclList].filter(Boolean), cancel: cancel, confirm: confirmBtn, acts: acts, msg: msg, clock: clockNode, again: null };
+    return { root: scrim, panel: panel, lists: [quote, recList, exclList].filter(Boolean), cancel: cancel, confirm: confirmBtn, acts: acts, msg: msg, clock: clockNode, again: null };
   }
 
   function openConfirm(text, preview, sentAt) {
@@ -1555,7 +1556,7 @@
   function expireConfirm(cf) {
     cf.expired = true;
     fill(cf.nodes.clock, "Expired");
-    setConfirmMsg(cf, CONFIRM_EXPIRED);
+    setConfirmMsg(cf, cf.unanswered ? CONFIRM_EXPIRED_MAYBE_SENT : CONFIRM_EXPIRED);
     if (!cf.nodes.again) {
       cf.nodes.again = on(el("button", { type: "button", class: "send dlgagain" }, "Preview again"), "click", function () {
         if (cf.busy) return;
@@ -1589,7 +1590,7 @@
   function confirmKey(cf, event) {
     if (event.key === "Escape" || event.key === "Esc") {
       if (event.preventDefault) event.preventDefault();
-      if (!cf.busy) closeConfirm(null, null);
+      if (!cf.busy) cancelConfirm(cf);
       return;
     }
     if (event.key !== "Tab") return;
@@ -1606,6 +1607,11 @@
       if (event.preventDefault) event.preventDefault();
       next.focus();
     }
+  }
+
+  // Cancel/Esc: after an unanswered confirm the post may already be out, so say so.
+  function cancelConfirm(cf) {
+    closeConfirm(cf.unanswered ? CONFIRM_MAYBE_SENT : null, cf.unanswered ? "bad" : null);
   }
 
   // Close the dialog (dropping its nonce); msg/tone go to the composer's status line.

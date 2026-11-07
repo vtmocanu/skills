@@ -188,9 +188,10 @@ the request's `ack` is accepted but ignored.
   marked gone. A preview accepts, charges, queues and delivers nothing.
 - **409 for a preview.** Discovery is pending; a `#general` member was left
   unchecked or has no liveness entry (a budget clip can be retried, but
-  discovery keeps only the first 64 `#general` members, so a `#general` with more
-  than 64 members is always refused); no recipient remains; or more than 64 remain. An incomplete check of other
-  channels alone does not refuse.
+  discovery checks only the first 64 `#general` members, and more only if they
+  also belong to another stored channel, so a larger `#general` is normally
+  refused); no recipient remains; or more than 64 remain. An incomplete check
+  of other channels alone does not refuse.
 - **`stale`.** The preview adds `"stale": true` when the discovery result it
   used is stale (the key is absent otherwise), so the page can say so.
 - **Confirm.** The same body plus `"confirm": "<nonce>"` (exactly these four
@@ -206,8 +207,8 @@ the request's `ack` is accepted but ignored.
   charged; confirm again with the same body.
 - **202 queued.** `202 {"message_id", "state": "queued"}` consumes the nonce
   and charges the send, as for any accepted send. The worker then sends to
-  exactly the previewed set. If the live members (the #general members not marked gone) differ from it, the
-  row reads `not sent: recipients changed, preview again` and the person
+  exactly the previewed set. If the live members (the `#general` members not
+  marked gone) differ from it, the row reads `not sent: recipients changed, preview again` and the person
   previews again. A live member the journal cannot record becomes a recorded
   `refused: <reason>` outcome with ACK not requested, not a "recipients
   changed" failure. A worker failure still spends the attempt and the charge.
