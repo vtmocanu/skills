@@ -1996,6 +1996,17 @@ test("chat @all: Cancel or Esc after an unanswered confirm warns it may already 
   }
 })
 
+test("chat @all: any other refusal after an unanswered confirm still warns it may already have been sent", async () => {
+  const t = allBoot({ confirm: (_b, n) => (n === 1 ? noResponse() : { status: 403 }) })
+  await previewed(t)
+  okButton(t).dispatch("click")
+  await settle()
+  okButton(t).dispatch("click")
+  await settle()
+  assert.equal(dialogOf(t), null)
+  assert.equal(statusLine(t).textContent, MAYBE_SENT)
+})
+
 test("chat @all: an expiry after an unanswered confirm warns it may already have been sent", async () => {
   const t = allBoot({ confirm: noResponse })
   const base = Date.parse("2026-11-07T12:00:00Z")
@@ -2117,10 +2128,11 @@ test("chat @all: Esc cancels and returns focus to the textarea; Tab stays inside
   cancel.focus()
   let prevented = false
   dialogOf(t).dispatch("keydown", { key: "Tab", shiftKey: true, preventDefault() { prevented = true } })
-  assert.equal(prevented, false, "Shift+Tab from Cancel is left to the browser, which lands on the lists before it")
+  assert.equal(prevented, false, "Shift+Tab from Cancel is left to the browser, which lands on the last list or the quote before it")
   assert.ok(t.document.activeElement === cancel)
   dialogOf(t).dispatch("keydown", { key: "Escape" })
   assert.equal(dialogOf(t), null)
+  assert.equal(statusLine(t).textContent, "", "a plain Esc (no unanswered confirm) leaves no warning")
   assert.equal(t.document.activeElement, textareaOf(t))
   assert.equal(t.document.byId.app.inert, false)
   assert.equal(textareaOf(t).value, "@all freeze main", "the text stays")

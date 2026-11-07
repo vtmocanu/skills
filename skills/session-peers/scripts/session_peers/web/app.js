@@ -51,7 +51,7 @@
   var CONFIRM_NONE = "No response from the server. Confirm again: this preview can be used only once, so a retry never sends it twice.";
   var CONFIRM_MAYBE_SENT = "It may already have been sent: check #general before previewing again.";
   var CONFIRM_EXPIRED_MAYBE_SENT = "This preview expired, and an earlier confirm got no response: it may already have been sent. Check #general before previewing again.";
-  var CONFIRM_EXPIRED ="This preview expired. Preview again for a fresh recipient list.";
+  var CONFIRM_EXPIRED = "This preview expired. Preview again for a fresh recipient list.";
   // The confirm dialog: its host (index.html, outside #app so #app can be made inert) and ids.
   var DIALOG_HOST = "dialoghost";
   var CONFIRM_MAX = 128;
@@ -1659,7 +1659,8 @@
         if (!cf.expired && document.activeElement !== cf.nodes.confirm) cf.nodes.confirm.focus();
         return false;
       }
-      closeConfirm(status === 409 ? (cf.unanswered ? CONFIRM_MAYBE_SENT : CONFIRM_409) : sendErrorText(status), "bad");
+      // After an unanswered confirm the first may have landed, whatever this refusal says.
+      closeConfirm(cf.unanswered ? CONFIRM_MAYBE_SENT : status === 409 ? CONFIRM_409 : sendErrorText(status), "bad");
       return false;
     });
   }
