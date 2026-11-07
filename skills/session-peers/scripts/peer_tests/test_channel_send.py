@@ -1076,3 +1076,239 @@ class ChannelRecordTrustTests(ChannelSendBase):
         self.assertEqual(self.journal_entries(), [])
         self.assertEqual(self.send_entries(), [])
         self.nothing_delivered()
+
+
+BROWSER_SID = "7c1e5a90-2b3d-4f6a-8c9e-0d1f2a3b4c5d"
+
+
+class BrowserPostHelpers:
+    """A live browser-peer record and `send_as_web` calls; mixed into a ChannelSendBase test."""
+
+    def setup_browser(self):
+        path = str(self.socks / ("%d.sock" % os.getppid()))
+        self.browser_listener = Listener(path)
+        self._listeners.append(self.browser_listener)
+        self.write_record(os.getppid(), "browser-peer", BROWSER_SID, path, entrypoint="web")
+        self.browser = {"sid": BROWSER_SID, "name": "browser-peer", "socket": path}
+
+    def post(self, key="ops", body="deploy now", ack=True, mid=None, **kw):
+        return sp_channels.send_as_web(key, self.browser, body, ack, mid or new_uuid(), **kw)
+
+    def assert_nothing_written(self, kinds=("channel.created",)):
+        self.assertEqual(self.journal_entries(), [])
+        self.assertEqual([e["kind"] for e in self.history()], list(kinds))
+        self.assertFalse(list(pathlib.Path(sp_channels.channels_root()).glob("sends/*.lock")))
+        self.nothing_delivered()
+
+
+class BrowserPostTests(BrowserPostHelpers, ChannelSendBase):
+    def setUp(self):
+        super().setUp()
+        self.sender_cc()
+        self.tid, _rollout = self.one_thread()
+        self.channel("ops", "codex:" + self.tid)
+        self.setup_browser()
+        # The channel's owner is a member too: both are recipients of a browser post.
+        self.owner = self.me
+        self.members = sorted([self.owner, "codex:" + self.tid])
+
+    def test_a_non_member_browser_posts_through_send_as_web_with_browser_provenance(self):
+        mid = new_uuid()
+        result = self.post(mid=mid)
+        self.assertEqual((result["state"], result["reason"], result["message_id"]), ("sent", None, mid))
+        self.assertEqual(result["outcomes"], {m: "transport accepted" for m in self.members})
+        self.assertEqual(sorted(result["recipients"]), self.members)
+        self.assertEqual(result["excluded"], [])
+        [call] = self.queue_calls()
+        tag, body = sp_protocol.parse_tag(call[4])
+        self.assertEqual((tag["from"], tag["sid"]), ("browser-peer", BROWSER_SID))
+        self.assertIn("browser peer browser-peer", body)
+        self.assertIn("[channel #ops message %s from web:%s to codex:%s]" % (mid, BROWSER_SID, self.tid), body)
+        self.assertIn("peers.py ack %s" % mid, body)
+        [send] = self.send_entries()
+        self.assertEqual(send["data"]["sender"], "web:" + BROWSER_SID)
+        self.assertEqual((send["data"]["journaled"], send["data"]["ack_requested"]), (True, True))
+        self.assertEqual(self.journal_entries()[0]["from"], "web:" + BROWSER_SID)
+        self.assertEqual(self.view_of()["state"], "complete")
+
+    def test_the_cli_still_refuses_a_sender_that_is_not_a_member_even_when_it_names_the_browser(self):
+        self.as_cc()  # an environment sender that is not a member
+        rc, _out, err = self.cli("send", "--to", "#ops", "--message", "x")
+        self.assertEqual(rc, 2)
+        self.assertIn("is not a member of #ops", err)
+        with mock.patch.object(sp_journal, "caller", return_value="web:" + BROWSER_SID):
+            rc, _out, err = self.cli("send", "--to", "#ops", "--message", "x")
+        self.assertEqual(rc, 2)
+        self.assertIn("is not a member of #ops", err)
+        self.assert_nothing_written()
+
+    def test_send_as_web_prints_nothing(self):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            self.assertEqual(self.post()["state"], "sent")
+            self.assertEqual(self.post(body="y" * (sp_constants.MAX_TEXT_CHARS - 10))["state"], "not sent")
+        self.assertEqual((out.getvalue(), err.getvalue()), ("", ""))
+
+    def test_a_reader_sees_in_progress_while_the_fan_out_holds_the_lock_and_complete_after(self):
+        entered, release, seen = threading.Event(), threading.Event(), []
+        real = sp_channels._deliver_member
+
+        def blocked(*args, **kwargs):
+            entered.set()
+            self.assertTrue(release.wait(30))
+            return real(*args, **kwargs)
+
+        result = []
+        with mock.patch.object(sp_channels, "_deliver_member", blocked):
+            worker = threading.Thread(target=lambda: result.append(self.post()))
+            worker.start()
+            try:
+                self.assertTrue(entered.wait(30))
+                seen.append(self.view_of()["state"])
+            finally:
+                release.set()
+                worker.join(30)
+        self.assertEqual(seen, ["in progress"])
+        self.assertEqual(result[0]["state"], "sent")
+        self.assertEqual(self.view_of()["state"], "complete")
+
+    def test_an_abandoned_lock_reads_unknown_and_nothing_is_redelivered(self):
+        def hook(name):
+            if name == "send_before_outcome":
+                raise RuntimeError("killed at " + name)
+
+        with mock.patch.object(sp_channels, "_failpoint", hook):
+            with self.assertRaisesRegex(RuntimeError, "killed at"):
+                self.post()
+        mid = self.send_entries()[0]["data"]["message_id"]
+        self.assertTrue(pathlib.Path(sp_channels.send_lock_path(mid)).exists())
+        for _ in range(2):
+            self.assertEqual(self.view_of()["state"], "unknown")
+        self.assertEqual(len(self.queue_calls()), 1)
+
+    def test_ack_false_omits_the_pointer_and_notes_every_recipient(self):
+        mid = new_uuid()
+        result = self.post(ack=False, mid=mid)
+        self.assertEqual(result["state"], "sent")
+        [call] = self.queue_calls()
+        self.assertNotIn("peers.py ack", call[4])
+        self.assertNotIn("critical message", call[4])
+        self.assertIn("deploy now", call[4])
+        self.assertEqual(result["notes"], {m: "ACK not requested" for m in self.members})
+        [send] = self.send_entries()
+        self.assertIs(send["data"]["ack_requested"], False)
+        self.assertEqual(len(self.journal_entries()), 1)
+        outcome = [e for e in self.history() if e["kind"] == "channel.outcome"][0]["data"]
+        self.assertEqual(outcome["notes"], result["notes"])
+        rows = self.view_of()["recipients"]
+        self.assertEqual(sorted(r["recipient"] for r in rows), self.members)
+        self.assertEqual({(r["state"], r["ack"]) for r in rows}, {("transport accepted", "not requested")})
+
+    def test_an_at_all_post_always_asks_for_acks(self):
+        self.assertEqual(sp_channels.delivery_rows(
+            {"recipients": ["cc:a"], "journaled": True, "ack_requested": True}, "complete",
+            {"cc:a": "transport accepted"}, {"cc:a": "pending"})[0]["ack"], "pending")
+        result = self.post(body="@all heads up", ack=False)
+        self.assertEqual(result["state"], "sent")
+        self.assertIn("peers.py ack", self.queue_calls()[0][4])
+        self.assertIs(self.send_entries()[0]["data"]["ack_requested"], True)
+
+    def test_general_without_confirmed_recipients_is_refused_with_nothing_written(self):
+        for body, expected in (("hello", None), ("@all hello", None), ("hello", [])):
+            with self.subTest(body=body, expected=expected):
+                result = self.post(key="general", body=body, expected_recipients=expected)
+                self.assertEqual(result["state"], "not sent")
+                self.assertEqual(result["reason"], "#general is not open to browser posts")
+        self.assert_nothing_written()
+
+    def test_refusals_before_any_write_leave_no_journal_or_history(self):
+        cases = {
+            "oversized": (lambda: self.post(body="x" * (sp_constants.MAX_TEXT_CHARS - 10)), "peer cap"),
+            "unknown channel": (lambda: self.post(key="nope"), "no channel named #nope"),
+            "bad sender": (lambda: sp_channels.send_as_web(
+                "ops", {"sid": "nope"}, "x", True, new_uuid()), "web:nope"),
+        }
+        for label, (run, text) in cases.items():
+            with self.subTest(label):
+                result = run()
+                self.assertEqual(result["state"], "not sent")
+                self.assertIn(text, result["reason"])
+        with self.subTest("every member unresolvable"):
+            with mock.patch.object(sp_journal, "_resolve_recipients", side_effect=sp_journal.JournalError("nope")):
+                result = self.post()
+            self.assertEqual(result["state"], "not sent")
+            self.assertIn("no recipient of this message can be recorded", result["reason"])
+        for exc in (sp_journal.JournalFull("journal is full"), sp_journal.JournalUnavailable("journal down")):
+            with self.subTest(exc=str(exc)):
+                with mock.patch.object(sp_journal, "record_message", side_effect=exc):
+                    result = self.post()
+                self.assertEqual((result["state"], result["reason"]), ("not sent", str(exc)))
+        self.assert_nothing_written()
+
+    def test_a_refused_at_all_journal_write_gives_the_allowance_back(self):
+        with mock.patch.object(sp_journal, "record_message", side_effect=sp_journal.JournalFull("full")):
+            self.assertEqual(self.post(body="@all hi")["state"], "not sent")
+        self.assertEqual(self.post(body="@all hi")["state"], "sent")
+
+    def test_a_history_failure_after_the_journal_write_is_journaled_not_sent_and_not_retried(self):
+        real = sp_channels.append_history
+        attempts = []
+
+        def fail_send(key, kind, actor, data=None):
+            if kind == "channel.send":
+                attempts.append(data["message_id"])
+                raise sp_channels.ChannelError("could not append to the history of #ops: disk gone", 1)
+            return real(key, kind, actor, data)
+
+        mid = new_uuid()
+        with mock.patch.object(sp_channels, "append_history", fail_send):
+            result = self.post(mid=mid)
+        self.assertEqual(result["state"], "not sent (journaled)")
+        self.assertIn("disk gone", result["reason"])
+        self.assertEqual(result["message_id"], mid)
+        self.assertEqual(attempts, [mid])
+        self.assertEqual([e["message_id"] for e in self.journal_entries()], [mid])
+        self.assertEqual([e["kind"] for e in self.history()], ["channel.created"])
+        self.assertFalse(list(pathlib.Path(sp_channels.sends_dir()).glob("*.lock")))
+        self.nothing_delivered()
+
+    def test_expected_recipients_must_equal_the_live_deliverable_set(self):
+        result = self.post(expected_recipients=["codex:" + new_uuid()])
+        self.assertEqual((result["state"], result["reason"]), ("not sent", "recipients changed, preview again"))
+        self.assertEqual(self.post(expected_recipients=[])["reason"], "recipients changed, preview again")
+        self.assertEqual(
+            self.post(expected_recipients=["codex:" + self.tid])["reason"], "recipients changed, preview again")
+        self.assert_nothing_written()
+        result = self.post(expected_recipients=list(reversed(self.members)))
+        self.assertEqual(result["state"], "sent")
+
+
+class BrowserPostGuardTests(BrowserPostHelpers, ChannelSendBase):
+    def test_deliver_guard_is_entered_once_per_member_and_not_across_the_pacing_sleep(self):
+        self.sender_cc()
+        _l1, first = self.peer_cc("one")
+        _l2, second = self.peer_cc("two")
+        self.channel("ops", first, second)
+        self.setup_browser()
+        held, log = [], []
+
+        @contextlib.contextmanager
+        def guard():
+            held.append(True)
+            log.append("enter")
+            try:
+                yield
+            finally:
+                held.pop()
+                log.append("exit")
+
+        def fake_sleep(seconds):
+            log.append("sleep held=%s" % bool(held))
+            self.now[0] += seconds
+
+        with mock.patch.object(sp_channels, "_sleep", fake_sleep):
+            result = self.post(deliver_guard=guard)
+        self.assertEqual(result["state"], "sent", result)
+        self.assertEqual(sorted(result["outcomes"]), sorted([self.me, first, second]))
+        self.assertEqual(
+            log, ["enter", "exit", "sleep held=False", "enter", "exit", "sleep held=False", "enter", "exit"])

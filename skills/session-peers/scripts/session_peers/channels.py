@@ -14,6 +14,7 @@ so history never describes a change that did not happen.
 """
 
 from __future__ import annotations
+import argparse
 import contextlib
 import copy
 import fcntl
@@ -26,6 +27,7 @@ import re
 import stat
 import sys
 import time
+import types
 import uuid as uuidlib
 from . import constants as sp_constants, protocol as sp_protocol, runtime as sp_runtime
 from . import claude as sp_claude, codex as sp_codex, identity as sp_identity
@@ -51,6 +53,7 @@ STATE_UNKNOWN = "unknown"
 STATE_UNVERIFIED = "unverified"
 STATE_ACKED = "acked"
 ACK_NOT_REQUESTED = "ACK not requested (unverified)"
+ACK_NOT_REQUESTED_ASKED = "ACK not requested"
 
 # Deliveries to Claude targets are at least this far apart (seconds). Tests
 # patch ``_clock`` and ``_sleep``; nothing else sleeps.
@@ -1346,8 +1349,12 @@ def require_target(value):
     return name
 
 
-def _members_for(key, sender):
+def _members_for(key, sender, authorised=False):
     """``(members, opencode_coverage, discovery_gaps)`` a send by ``sender`` to ``key`` addresses.
+
+    ``authorised`` is set only by ``send_as_web``, whose server has already
+    decided the browser may post: it skips the membership and discovery tests
+    below. Nothing on the CLI path can set it.
 
     A stored channel needs the sender among its members. Derived ``#general``
     has no member cap, but its sender must be a session the #general discovery
@@ -1358,7 +1365,7 @@ def _members_for(key, sender):
     """
     if key == sp_constants.CHANNEL_GENERAL:
         discovered, coverage, gaps = _discover_general()
-        if sender not in discovered:
+        if sender not in discovered and not authorised:
             if sender.startswith("oc:") and coverage.get("enumerated") is False:
                 raise ChannelError(
                     "%s cannot be checked: OpenCode discovery failed (%s); only discovered "
@@ -1371,7 +1378,7 @@ def _members_for(key, sender):
     rec = read_channel(key)
     if rec is None:
         raise ChannelError("no channel named #%s; run `peers.py channel list`" % key)
-    if sender not in rec["members"]:
+    if sender not in rec["members"] and not authorised:
         raise ChannelError(
             "%s is not a member of #%s; only members can send to it (`peers.py channel join %s`)"
             % (sp_journal._human(sender), key, key)
@@ -1556,6 +1563,110 @@ def send_channel(args):
         return exc.code
 
 
+def _prepare_send(key, sender, body, mid, record, authorised=False, pointer=None):
+    """Everything a send decides before it writes: members, liveness, caps, size and the journal preflight.
+
+    Shared by the CLI ``_send`` and ``send_as_web``. Raises ChannelError and
+    writes nothing. ``record`` asks for a journal entry; an ``@all`` is always
+    journaled. ``pointer`` says whether each delivery carries the ACK pointer
+    text (default: whenever the message is journaled).
+    """
+    members, coverage, gaps = _members_for(key, sender, authorised)
+    general = key == sp_constants.CHANNEL_GENERAL
+    is_all = ALL_RE.match(body) is not None
+    journaled = record or is_all
+    pointer = journaled if pointer is None else bool(pointer)
+    # A plain #general post is only recorded; everything else is delivered.
+    delivers = is_all or not general
+    others = [m for m in members if m != sender]
+
+    cache = {}
+    if general and not journaled:
+        gone, live = [], []
+    else:
+        gone = [m for m in others if member_liveness(m, cache) == "gone"]
+        live = [m for m in others if m not in gone]
+    if (is_all or (general and record)) and len(live) > ALL_MAX_RECIPIENTS:
+        raise ChannelError(
+            "#%s would address %d recipients; at most %d are allowed per post "
+            "(limit ALL_MAX_RECIPIENTS); nothing was journaled or sent"
+            % (key, len(live), ALL_MAX_RECIPIENTS))
+    snapshot = others if delivers else list(live)
+    _check_size(key, mid, sender, live if delivers else [], body, pointer)
+
+    deliver, excluded = list(live), []
+    if journaled:
+        deliver, excluded = _journal_preflight(live)
+        if not deliver:
+            detail = "; ".join("%s: %s" % (m, r) for m, r in excluded[:3])
+            raise ChannelError(
+                "no recipient of this message can be recorded for ACK%s; nothing was recorded or sent"
+                % (" (%s)" % detail if detail else ""), 1)
+    return types.SimpleNamespace(
+        key=key, sender=sender, body=body, mid=mid, coverage=coverage, gaps=gaps, general=general,
+        is_all=is_all, journaled=journaled, pointer=pointer, delivers=delivers, snapshot=snapshot,
+        gone=gone, deliver=deliver, excluded=excluded)
+
+
+def _record_journal(plan):
+    """Journal the prepared message for its resolvable recipients.
+
+    Takes the ``@all`` allowance first (a refused journal write gives it back).
+    Raises ``sp_journal.JournalError`` when the journal refuses; ChannelError
+    when the allowance does. A crash point follows a successful write.
+    """
+    allowance = _Allowance(plan.sender) if plan.is_all else None
+    try:
+        try:
+            sp_journal.record_message(plan.sender, plan.deliver, plan.body, message_id=plan.mid)
+        except sp_journal.JournalError:
+            if allowance is not None:
+                allowance.restore()  # a refused send does not spend the allowance
+            raise
+    finally:
+        if allowance is not None:
+            allowance.release()
+    _failpoint("send_after_journal")
+
+
+def _append_send(plan, extra=None):
+    """Append the ``channel.send`` entry, holding the message's send lock first when it fans out.
+
+    Returns the held ``_SendLock`` (None when nothing is delivered). A failure
+    releases the lock and raises ChannelError naming the message and whether it
+    was journaled; no retry.
+    """
+    delivery = "fanout" if plan.delivers and plan.snapshot else "none"
+    data = {
+        "sender": plan.sender, "body": plan.body, "message_id": plan.mid, "journaled": plan.journaled,
+        "delivery": delivery, "recipients": list(plan.snapshot),
+        "excluded": [{"member": m, "reason": r} for m, r in plan.excluded],
+        "opencode_coverage": plan.coverage,
+        **({"discovery_incomplete": plan.gaps} if plan.gaps else {}),
+        **(extra or {}),
+    }
+    lock = None
+    try:
+        try:
+            if delivery == "fanout":
+                # The lock is held before the history entry is published, so a reader
+                # that sees the entry finds the sender holding it.
+                lock = _SendLock(plan.mid)
+                _failpoint("send_after_lock")
+            append_history(plan.key, EVENT_SEND, plan.sender, data)
+        except (ChannelError, OSError) as exc:
+            if lock is not None:
+                lock.release()
+            raise ChannelError(
+                "%s; message %s was %s" % (
+                    exc, plan.mid, "journaled, not delivered" if plan.journaled else "not delivered"), 1)
+    except BaseException:
+        if lock is not None:
+            lock.abandon()  # a crash or unexpected exception leaves the file, as a dead sender would
+        raise
+    return lock
+
+
 def _send(args):
     from . import routes as sp_routes
 
@@ -1576,95 +1687,36 @@ def _send(args):
         sender = sp_journal.caller()
     except sp_journal.JournalError as exc:
         raise ChannelError(_reason(exc))
-    members, coverage, gaps = _members_for(key, sender)
-    body = args.message
-    general = key == sp_constants.CHANNEL_GENERAL
-    is_all = ALL_RE.match(body) is not None
-    record = bool(getattr(args, "record", False))
-    journaled = record or is_all
-    # A plain #general post is only recorded; everything else is delivered.
-    delivers = is_all or not general
-    others = [m for m in members if m != sender]
-
-    cache = {}
-    if general and not journaled:
-        gone, live = [], []
-    else:
-        gone = [m for m in others if member_liveness(m, cache) == "gone"]
-        live = [m for m in others if m not in gone]
-    if (is_all or (general and record)) and len(live) > ALL_MAX_RECIPIENTS:
-        raise ChannelError(
-            "#%s would address %d recipients; at most %d are allowed per post "
-            "(limit ALL_MAX_RECIPIENTS); nothing was journaled or sent"
-            % (key, len(live), ALL_MAX_RECIPIENTS))
-    snapshot = others if delivers else list(live)
     mid = str(uuidlib.uuid4())
-    _check_size(key, mid, sender, live if delivers else [], body, journaled)
-
-    deliver, excluded = list(live), []
-    if journaled:
-        deliver, excluded = _journal_preflight(live)
-        if not deliver:
-            detail = "; ".join("%s: %s" % (m, r) for m, r in excluded[:3])
-            raise ChannelError(
-                "no recipient of this message can be recorded for ACK%s; nothing was recorded or sent"
-                % (" (%s)" % detail if detail else ""), 1)
-        allowance = _Allowance(sender) if is_all else None
+    plan = _prepare_send(key, sender, args.message, mid, bool(getattr(args, "record", False)))
+    if plan.journaled:
         try:
-            try:
-                sp_journal.record_message(sender, deliver, body, message_id=mid)
-            except sp_journal.JournalError as exc:
-                if allowance is not None:
-                    allowance.restore()  # a refused send does not spend the allowance
-                return sp_journal.presend_failed(exc, as_json)
-        finally:
-            if allowance is not None:
-                allowance.release()
-        _failpoint("send_after_journal")
+            _record_journal(plan)
+        except sp_journal.JournalError as exc:
+            return sp_journal.presend_failed(exc, as_json)
 
-    delivery = "fanout" if delivers and snapshot else "none"
-    data = {
-        "sender": sender, "body": body, "message_id": mid, "journaled": journaled,
-        "delivery": delivery, "recipients": list(snapshot),
-        "excluded": [{"member": m, "reason": r} for m, r in excluded],
-        "opencode_coverage": coverage,
-        **({"discovery_incomplete": gaps} if gaps else {}),
-    }
-    lock = None
+    lock = _append_send(plan)
     try:
-        try:
-            if delivery == "fanout":
-                # The lock is held before the history entry is published, so a reader
-                # that sees the entry finds the sender holding it.
-                lock = _SendLock(mid)
-                _failpoint("send_after_lock")
-            append_history(key, EVENT_SEND, sender, data)
-        except (ChannelError, OSError) as exc:
-            if lock is not None:
-                lock.release()
-            raise ChannelError(
-                "%s; message %s was %s" % (
-                    exc, mid, "journaled, not delivered" if journaled else "not delivered"), 1)
         payload = {"status": "recorded", "channel": key, "message_id": mid, "outcomes": {}}
-        if journaled:
+        if plan.journaled:
             payload["journal"] = {"message_id": mid, "recorded": True}
-        if coverage is not None:
-            payload["opencode_coverage"] = coverage
-        if gaps:
-            payload["discovery_incomplete"] = gaps
-        if delivery == "none":
-            if not delivers:
+        if plan.coverage is not None:
+            payload["opencode_coverage"] = plan.coverage
+        if plan.gaps:
+            payload["discovery_incomplete"] = plan.gaps
+        if lock is None:
+            if not plan.delivers:
                 # Journaled for the resolvable members, delivered to none.
-                payload["outcomes"] = {m: OUTCOME_RECORDED for m in deliver}
-                for member, reason in excluded:
+                payload["outcomes"] = {m: OUTCOME_RECORDED for m in plan.deliver}
+                for member, reason in plan.excluded:
                     payload["outcomes"][member] = OUTCOME_REFUSED + reason
                     payload.setdefault("notes", {})[member] = ACK_NOT_REQUESTED
-                if excluded:
+                if plan.excluded:
                     payload["status"] = "partial"  # as _fan_out reports a mixed result
-            return _report(payload, 1 if excluded else 0, as_json, journaled, "recorded in #%s (nothing delivered)" % key
-                           if not delivers else "recorded in #%s (no other members)" % key)
-        return _fan_out(args, lock, payload, as_json, (key, sender, mid, body, journaled),
-                        (snapshot, gone, deliver, excluded))
+            return _report(payload, 1 if plan.excluded else 0, as_json, plan.journaled, "recorded in #%s (nothing delivered)" % key
+                           if not plan.delivers else "recorded in #%s (no other members)" % key)
+        return _fan_out(args, lock, payload, as_json, (key, plan.sender, mid, plan.body, plan.journaled),
+                        (plan.snapshot, plan.gone, plan.deliver, plan.excluded))
     finally:
         if lock is not None:
             # Only a crash or an unexpected exception gets here with the lock
@@ -1672,10 +1724,19 @@ def _send(args):
             lock.abandon()
 
 
-def _fan_out(args, lock, payload, as_json, send, members):
-    """Deliver serially, record failures per member, append the one outcome entry, then release the lock."""
+def _deliver_all(args, lock, send, members, guard=None, pointer=None, ack=True):
+    """Deliver serially, append the one outcome entry, then release the lock.
+
+    ``(outcomes, notes, update_failed, problem)``; ``problem`` is the ChannelError
+    when the outcome entry could not be appended. Prints nothing. ``guard`` is a
+    context-manager factory entered around each member's delivery and never
+    across a pacing sleep; ``pointer`` says whether the text carries the ACK
+    pointer (default: whenever ``journaled``); ``ack`` False notes every member
+    as ACK not requested.
+    """
     key, sender, mid, body, journaled = send
     snapshot, gone, deliver, excluded = members
+    pointer = journaled if pointer is None else pointer
     _failpoint("send_after_history")
     outcomes = {m: None for m in snapshot}
     notes = {}
@@ -1693,14 +1754,18 @@ def _fan_out(args, lock, payload, as_json, send, members):
             wait = PACE_SECONDS - (_clock() - last_claude)
             if wait > 0:
                 _sleep(wait)
-        text = _delivery_text(key, mid, sender, member, body, journaled)
-        outcomes[member] = _deliver_member(args, member, sender, mid, text, snap)
+        text = _delivery_text(key, mid, sender, member, body, pointer)
+        with (guard() if guard is not None else contextlib.nullcontext()):
+            outcomes[member] = _deliver_member(args, member, sender, mid, text, snap)
         if is_claude:
             last_claude = _clock()
         if journaled and outcomes[member].startswith(OUTCOME_REFUSED):
             # transport_failed returns its ``rc`` (0 here) only when the append worked.
             if sp_journal.transport_failed(mid, member, outcomes[member][len(OUTCOME_REFUSED):], rc=0):
                 update_failed = True
+    if not ack:
+        for member in snapshot:
+            notes.setdefault(member, ACK_NOT_REQUESTED_ASKED)
 
     _failpoint("send_before_outcome")
     record = {"message_id": mid, "outcomes": outcomes}
@@ -1712,6 +1777,13 @@ def _fan_out(args, lock, payload, as_json, send, members):
     except ChannelError as exc:
         problem = exc
     lock.release()
+    return outcomes, notes, update_failed, problem
+
+
+def _fan_out(args, lock, payload, as_json, send, members):
+    """`_deliver_all` for the CLI: fold the result into ``payload`` and report it."""
+    key, _sender, mid, _body, journaled = send
+    outcomes, notes, update_failed, problem = _deliver_all(args, lock, send, members)
     payload["outcomes"] = outcomes
     if notes:
         payload["notes"] = notes
@@ -1722,6 +1794,96 @@ def _fan_out(args, lock, payload, as_json, send, members):
     if problem is not None:
         _err("%s; the delivery was made but its outcome is not recorded and reads as unknown" % problem)
     return _report(payload, rc, as_json, journaled, "sent to #%s, message %s" % (key, mid))
+
+
+WEB_NOT_SENT = "not sent"
+WEB_NOT_SENT_JOURNALED = "not sent (journaled)"
+WEB_SENT = "sent"
+
+
+def _web_member_args(web_sender):
+    """The minimal ``Namespace`` a browser channel post hands ``_deliver_member``.
+
+    Carries every attribute ``routes.check`` and ``messaging._dispatch_send``
+    read, so no member delivery depends on the process's own argv or environment
+    for who is sending. ``web_sender`` ({"sid", "name", "socket"}) attributes the
+    delivery to the browser peer.
+    """
+    return argparse.Namespace(
+        to=None, message=None, message_file=None, json=False, record=False, wake=False,
+        never_wake=True, allow_reply_wake=None, in_reply_to=None, from_thread=None,
+        from_name=None, from_sid=None, from_socket=None, timeout=None,
+        web_sender=dict(web_sender), result_sink=[],
+    )
+
+
+def send_as_web(key, web_sender, body, ack, mid, deliver_guard=None, expected_recipients=None):
+    """Post ``body`` to stored channel ``key`` as the browser peer; a payload dict, never printed.
+
+    ``web_sender`` is ``{"sid", "name", "socket"}``, set by the chat server,
+    which has already authorised the browser: the membership test is skipped
+    here and nowhere else (the CLI cannot reach this path). ``mid`` is the
+    caller's lowercase uuid4. ``deliver_guard`` is a context-manager factory
+    entered around each member's delivery (never across a pacing sleep), or
+    None. ``#general`` is refused unless ``expected_recipients`` (typed ids the
+    caller previewed) is given and ``body`` is an ``@all``; the live deliverable
+    set must then equal it.
+
+    Payload: ``state`` (``sent``, ``not sent`` or ``not sent (journaled)``),
+    ``reason`` (None when sent), ``message_id``, ``outcomes`` ({recipient:
+    outcome}), ``recipients``, ``excluded`` ([{member, reason}]); a sent post
+    may add ``notes``, ``update_failed`` and ``outcome_problem``. Every refusal
+    before the first write has state ``not sent`` and leaves no journal or
+    history entry; a history failure after the journal write is ``not sent
+    (journaled)`` and is not retried. ``ack`` False omits the ACK pointer from
+    each delivery; an ``@all`` always asks for ACKs.
+    """
+    payload = {"state": WEB_NOT_SENT, "reason": None, "message_id": mid, "outcomes": {},
+               "recipients": [], "excluded": []}
+
+    def refuse(reason, state=WEB_NOT_SENT):
+        payload["state"], payload["reason"] = state, _reason(reason)
+        return payload
+
+    try:
+        sender = "web:%s" % sp_identity.parse_address("web:%s" % web_sender["sid"])["uuid"]
+        key = parse_name(key)
+        is_all = ALL_RE.match(body) is not None
+        if key == sp_constants.CHANNEL_GENERAL and not (expected_recipients is not None and is_all):
+            return refuse("#general is not open to browser posts")
+        ask = bool(ack) or is_all
+        plan = _prepare_send(key, sender, body, mid, True, authorised=True, pointer=ask)
+        payload["recipients"] = list(plan.snapshot)
+        payload["excluded"] = [{"member": m, "reason": r} for m, r in plan.excluded]
+        if expected_recipients is not None and sorted(plan.deliver) != sorted(expected_recipients):
+            return refuse("recipients changed, preview again")
+        _record_journal(plan)
+    except (ChannelError, sp_journal.JournalError, ValueError, KeyError, TypeError, OSError) as exc:
+        return refuse(exc)
+    try:
+        lock = _append_send(plan, {"ack_requested": ask})
+    except ChannelError as exc:
+        return refuse(exc, WEB_NOT_SENT_JOURNALED)
+    try:
+        if lock is None:
+            payload["state"] = WEB_SENT
+            return payload
+        outcomes, notes, update_failed, problem = _deliver_all(
+            _web_member_args(web_sender), lock, (key, sender, mid, body, True),
+            (plan.snapshot, plan.gone, plan.deliver, plan.excluded), guard=deliver_guard,
+            pointer=ask, ack=ask)
+    finally:
+        if lock is not None:
+            lock.abandon()  # a no-op after a normal release; after a crash the file stays, as for a dead sender
+    payload["state"] = WEB_SENT
+    payload["outcomes"] = outcomes
+    if notes:
+        payload["notes"] = notes
+    if update_failed:
+        payload["update_failed"] = True
+    if problem is not None:
+        payload["outcome_problem"] = _reason(problem)
+    return payload
 
 
 def _report(payload, rc, as_json, journaled, headline):
@@ -1876,6 +2038,10 @@ def delivery_rows(data, state, outcomes, acks):
                 row["ack"] = STATE_UNVERIFIED
             else:
                 row["ack"] = acks.get(recipient, "not requested")
+            if data.get("ack_requested") is False and row["ack"] != STATE_ACKED \
+                    and recipient not in refused:
+                # The post asked for no ACK: the journal's pending reads "not requested".
+                row["ack"] = "not requested"
             if row["ack"] == STATE_ACKED:
                 row["state"] = STATE_ACKED
         rows.append(row)

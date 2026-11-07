@@ -18,7 +18,7 @@ import unittest
 from unittest import mock
 
 from peer_tests.support import *  # noqa: F401,F403
-from peer_tests.test_channel_send import MISSING_OC, ChannelSendBase, HOLDER
+from peer_tests.test_channel_send import MISSING_OC, BrowserPostHelpers, ChannelSendBase, HOLDER
 from peer_tests.test_opencode import OC_B
 from session_peers import channels as sp_channels, journal as sp_journal, storage as sp_storage, topics as sp_topics, webdata
 
@@ -2668,3 +2668,41 @@ class WebdataContextEscapeTests(WebdataBase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WebdataBrowserPostAckTests(BrowserPostHelpers, WebdataBase):
+    """A browser post that asked for no ACK reads `not requested` after a reload and stays out of the tally."""
+
+    def setUp(self):
+        super().setUp()
+        self.tid, _rollout = self.one_thread()
+        self.channel("ops", "codex:" + self.tid)
+        self.setup_browser()
+
+    def test_ack_false_rows_read_not_requested_after_a_reload_and_leave_the_tally(self):
+        asked, unasked = new_uuid(), new_uuid()
+        self.assertEqual(self.post(mid=asked, ack=True)["state"], "sent")
+        self.assertEqual(self.post(mid=unasked, ack=False)["state"], "sent")
+        sends = [e for e in webdata.channel_page("ops")["entries"] if e["kind"] == "send"]
+        self.assertEqual(len(sends), 2)
+        first, second = (e["delivery"] for e in sends)
+        self.assertEqual({r["ack"] for r in first["recipients"]}, {"pending"})
+        self.assertEqual(webdata.ack_tally(first["recipients"])["total"], 2)
+        self.assertEqual(second["state"], "complete")
+        self.assertEqual({r["ack"] for r in second["recipients"]}, {"not requested"})
+        self.assertEqual(webdata.ack_tally(second["recipients"]),
+                         {"acked": 0, "total": 0, "missing": [], "unverified": 0})
+        # The CLI reader agrees.
+        self.assertEqual({r["ack"] for r in self.view_of("ops", -1)["recipients"]}, {"not requested"})
+
+    def test_an_entry_without_the_field_and_an_acked_row_render_as_before(self):
+        data = {"journaled": True, "recipients": ["cc:a", "cc:b"]}
+        rows = sp_channels.delivery_rows(data, "complete", {}, {"cc:a": "acked", "cc:b": "pending"})
+        self.assertEqual([(r["state"], r["ack"]) for r in rows], [("acked", "acked"), ("unknown", "pending")])
+        rows = sp_channels.delivery_rows(
+            dict(data, ack_requested=False), "complete", {}, {"cc:a": "acked", "cc:b": "pending"})
+        self.assertEqual([r["ack"] for r in rows], ["acked", "not requested"])
+        rows = sp_channels.delivery_rows(dict(data, ack_requested=False), "complete", {}, None)
+        self.assertEqual({r["ack"] for r in rows}, {"not requested"})
+        rows = sp_channels.delivery_rows(dict(data, ack_requested=True), "complete", {}, None)
+        self.assertEqual({r["ack"] for r in rows}, {"unverified"})
