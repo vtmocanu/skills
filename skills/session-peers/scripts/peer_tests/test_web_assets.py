@@ -130,17 +130,18 @@ class WebAssetTests(unittest.TestCase):
     def test_el_allowlists_hold_no_active_tag_or_attribute(self):
         tags = re.search(r"var HTML_TAGS = \[([^\]]*)\]", self.js).group(1)
         attrs = re.search(r"var ATTRS = \[([^\]]*)\]", self.js).group(1)
-        tag_names = set(re.findall(r'"([a-z0-9]+)"', tags))
-        attr_names = set(re.findall(r'"([a-z-]+)"', attrs))
-        # The composer's form controls are allowed; nothing that loads, navigates, submits or runs is.
-        self.assertLessEqual({"label", "input", "textarea"}, tag_names)
-        for bad in ("script", "iframe", "frame", "object", "embed", "a", "img", "form", "style", "link", "meta",
-                    "base", "svg", "math", "template", "video", "audio", "source"):
-            self.assertNotIn(bad, tag_names, bad)
-        for name in attr_names:
-            self.assertFalse(name.startswith("on"), name)
-        for bad in ("href", "src", "action", "formaction", "style", "srcdoc", "value", "name", "form", "autofocus"):
-            self.assertNotIn(bad, attr_names, bad)
+        tag_names = re.findall(r'"([^"]*)"', tags)
+        attr_names = re.findall(r'"([^"]*)"', attrs)
+        # Exact sets: any addition is a deliberate edit here. The composer's form controls are allowed;
+        # nothing that loads, navigates, submits or runs is (no script, iframe, a, img, form, style...;
+        # no on*, href, src, action, formaction, style, srcdoc, value, name, form, autofocus).
+        self.assertEqual(sorted(tag_names), sorted({
+            "div", "span", "p", "b", "i", "code", "button", "ul", "li", "dl", "dt", "dd", "h1", "h2", "small",
+            "strong", "label", "input", "textarea"}))
+        self.assertEqual(len(tag_names), len(set(tag_names)))
+        self.assertEqual(sorted(attr_names), sorted({
+            "class", "role", "title", "type", "tabindex", "checked", "disabled", "placeholder", "rows", "maxlength"}))
+        self.assertEqual(len(attr_names), len(set(attr_names)))
 
     def test_timers_take_functions_never_strings(self):
         calls = list(re.finditer(r"\bset(?:Timeout|Interval)\s*\(\s*", self.js))
@@ -152,10 +153,13 @@ class WebAssetTests(unittest.TestCase):
 
     def test_set_attribute_is_called_only_inside_el(self):
         start, end = function_body(self.js, "el")
+        # describedBy() is the one other setter: it links the composer's reason, and names nothing else.
+        d_start, d_end = function_body(self.js, "describedBy")
+        self.assertEqual(re.findall(r'setAttribute\(\s*("[^"]*"|[^,]*)', self.js[d_start:d_end]), ['"aria-describedby"'])
         uses = [m.start() for m in re.finditer(r"setAttribute(?:NS)?\b", self.js)]
         self.assertTrue(uses, "el() sets attributes")
         for pos in uses:
-            self.assertTrue(start <= pos < end, "setAttribute outside el() at offset %d" % pos)
+            self.assertTrue(start <= pos < end or d_start <= pos < d_end, "setAttribute outside el() at offset %d" % pos)
         self.assertIsNone(re.search(r"\.\s*attributes\s*\[|\bsetAttributeNode\b|\.\s*(?:href|src|style)\s*=", self.js))
 
     def test_el_enforces_an_attribute_allowlist(self):
@@ -183,8 +187,8 @@ class WebAssetTests(unittest.TestCase):
         self.assertIn('credentials: "omit"', self.js)
         self.assertIn('cache: "no-store"', self.js)
         self.assertIn('redirect: "error"', self.js)
-        # A GET sends no referrer; the chat-mode POST keeps a same-origin policy so the browser sends
-        # the real Origin the server checks (Fetch serializes it as "null" under no-referrer).
+        # A GET sends no referrer; the chat-mode POST keeps a same-origin policy, a defence against
+        # browsers that have sent "Origin: null" under no-referrer, so the server sees the real Origin.
         self.assertIn('referrerPolicy: post ? "same-origin" : "no-referrer"', self.js)
         self.assertIn('method: post ? "POST" : "GET"', self.js)
         self.assertIn('headers["Content-Type"] = "application/json"', self.js)

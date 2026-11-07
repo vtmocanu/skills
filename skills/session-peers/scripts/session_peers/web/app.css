@@ -36,7 +36,7 @@ button,input,select,textarea{font:inherit;color:inherit}
 .muted{color:var(--ink-3);font-size:13px}
 /* visually hidden, still read; the positioned ancestors below keep it from stretching the page */
 .sr{position:absolute;width:1px;height:1px;padding:0;margin:-1px;border:0;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap}
-.lane,.card,.who,.drow,.msg,.sysline,.cwrap{position:relative}
+.lane,.card,.who,.drow,.msg,.sysline,.cwrap,main{position:relative}
 
 /* shell */
 .app{display:grid;grid-template-columns:288px minmax(0,1fr) 320px;grid-template-rows:56px minmax(0,1fr);height:100vh}
@@ -272,6 +272,6 @@ aside h2{font-size:15px;margin:0 0 10px;font-weight:700;overflow-wrap:anywhere}
   .tabs{margin-left:0}
   .coverage,.notes{margin-left:14px;margin-right:14px}
   .sysline{margin-left:0}
-  .ro{display:none}
+  .ro{font-size:11px;padding:1px 7px}
 }
 @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}

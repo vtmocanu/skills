@@ -38,6 +38,9 @@
   var SEND_TO_MAX = 64;
   var TEXT_MAX = 1048576;
   var MID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+  // The composer's reason line (aria-describedby target) and the M1 @all note shown in it.
+  var REASON_ID = "creason";
+  var ALL_WARN = "@all is not available yet: it needs a confirmation step that a later release adds";
   // The Browser feed held in memory: at most the server's own log cap, and as many status rows.
   var FEED_CAP = 1000;
   var ROWS_CAP = 1000;
@@ -720,7 +723,7 @@
   }
 
   function newCompose() {
-    return { targets: table(), channel: false, busy: false, msg: null, msgTone: null, sig: null, ctxKey: null, nodes: null, boxes: [] };
+    return { targets: table(), channel: false, busy: false, msg: null, msgTone: null, sig: null, ctxKey: null, reasonKey: null, nodes: null, boxes: [] };
   }
 
   function plainTable(value) {
@@ -981,12 +984,15 @@
         B.entries.push({ gapMarker: true, at: entries.length ? entries[0].at : null });
         changed = true;
       }
+      var replies = [];
       entries.forEach(function (e) {
         if (e.lseq <= B.lastLseq) return;
         B.entries.push(Object.assign(table(), e));
         B.lastLseq = e.lseq;
         changed = true;
+        if (e.dir === "in") replies.push(e);
       });
+      if (replies.length && S.view === "browser") announceReplies(replies);
     }
     if (B.entries.length > FEED_CAP) {
       B.entries = B.entries.slice(B.entries.length - FEED_CAP);
@@ -998,6 +1004,18 @@
     (Array.isArray(section.sends) ? section.sends : []).forEach(function (row) { if (mergeRow(B, row)) changed = true; });
     capRows(B);
     return changed;
+  }
+
+  // The Browser view's live announcement (#announce, aria-live="polite" in index.html). The stream
+  // itself is rebuilt on every render, so a live region there would read the whole conversation
+  // again on each status change; only replies that just arrived are spoken.
+  function announceReplies(replies) {
+    var last = replies[replies.length - 1];
+    var who = typeof last.sender === "string" && last.sender
+      ? (typeof last.sender_name === "string" && last.sender_name ? last.sender_name : nameOf(last.sender)) : "unverified sender";
+    var line = str(last.text).replace(/\s+/g, " ").trim();
+    if (line.length > 140) line = line.slice(0, 139) + "…";
+    fill($("announce"), (replies.length > 1 ? replies.length + " new replies; latest from " : "Reply from ") + who + ": " + line);
   }
 
   // A row replaces the page's copy unless the copy is newer (a higher seq); a repeat changes nothing.
@@ -1090,7 +1108,8 @@
 
   // -- composer ------------------------------------------------------------
 
-  var SEND_ERRORS = { 400: "The server could not accept this message", 403: "Refused", 408: "The message reached the server too slowly",
+  // M1: the server refuses #general and any @all text with 403 (the page blocks both before sending).
+  var SEND_ERRORS = { 400: "The server could not accept this message", 403: "Refused by the server (token, origin, #general or @all)", 408: "The message reached the server too slowly",
     413: "Message too large", 415: "Refused: wrong content type", 429: "Too fast or queue full — try again", 503: "Chat is not running on the server" };
 
   function sendErrorText(status) {
@@ -1155,6 +1174,7 @@
     var ack = el("input", { type: "checkbox", "data-focus": "compose:ack" });
     var status = el("div", { class: "cstatus", role: "status" });
     var reason = el("div", { class: "creason" });
+    reason.id = REASON_ID;
     var box = el("div", { class: "cwrap", role: "group", "aria-label": "Send a message" },
       el("div", { class: "toline" }, el("span", { class: "tolabel" }, "To"), targets),
       reason,
@@ -1227,22 +1247,37 @@
     withFocus(function () { fill(C.nodes.targets, pickerNodes(ctx, cands)); });
   }
 
+  // The one attribute set outside el(): the composer's reason, linked while it applies.
+  function describedBy(node, id) {
+    if (!node) return;
+    if (id) node.setAttribute("aria-describedby", id);
+    else if (node.removeAttribute) node.removeAttribute("aria-describedby");
+  }
+
   function updateComposerState() {
     var C = S.compose;
     if (!C || !C.nodes) return;
     var n = C.nodes;
     var ctx = composeContext();
     var blocked = blockedReason(ctx);
+    // M1 form of the @all gate: the text stays editable, Send waits until it no longer starts with @all.
+    var allText = !blocked && ALL_RE.test(str(n.text.value));
     n.text.disabled = !!blocked;
     n.ack.disabled = !!blocked;
     if (n.root.classList) {
       if (blocked) n.root.classList.add("is-blocked"); else n.root.classList.remove("is-blocked");
     }
-    fill(n.reason, blocked);
+    var reasonKey = blocked || (allText ? ALL_WARN : "");
+    if (C.reasonKey !== reasonKey) {
+      C.reasonKey = reasonKey;
+      fill(n.reason, blocked || (allText ? el("span", { class: "allwarn" }, ALL_WARN) : null));
+    }
+    describedBy(n.text, reasonKey ? REASON_ID : null);
+    describedBy(n.send, reasonKey ? REASON_ID : null);
     C.boxes.forEach(function (b) { b.box.disabled = b.gone || !!blocked || (ctx.kind === "channel" && C.channel); });
     var to = blocked ? null : composeTo(ctx);
     var tooMany = Array.isArray(to) && to.length > SEND_TO_MAX;
-    n.send.disabled = !!blocked || C.busy || to === null || tooMany || !str(n.text.value).trim();
+    n.send.disabled = !!blocked || allText || C.busy || to === null || tooMany || !str(n.text.value).trim();
     var label = C.busy ? "Sending…" : "Send";
     if (n.send.textContent !== label) n.send.textContent = label;
     var msg = tooMany ? "At most " + SEND_TO_MAX + " recipients per send." : C.msg;
@@ -1278,7 +1313,7 @@
     var ctx = composeContext();
     var text = str(C.nodes.text.value);
     var to = blockedReason(ctx) ? null : composeTo(ctx);
-    if (to === null || !text.trim() || (Array.isArray(to) && to.length > SEND_TO_MAX)) return Promise.resolve(false);
+    if (to === null || !text.trim() || ALL_RE.test(text) || (Array.isArray(to) && to.length > SEND_TO_MAX)) return Promise.resolve(false);
     var ack = !!C.nodes.ack.checked;
     C.busy = true;
     C.msg = null;
@@ -1291,7 +1326,8 @@
         var mid = typeof data.message_id === "string" && MID_RE.test(data.message_id) ? data.message_id : null;
         if (mid) addLocalSend(mid, to, text, ack);
         if (C.nodes.text.value === text) C.nodes.text.value = "";
-        C.msg = "Queued (not yet recorded). Follow its status in " + (typeof to === "string" ? chanText(ctx.key) : "Browser") + ".";
+        // A past event, so it stays true however the row moves on (or a restart drops it).
+        C.msg = "Accepted " + clock(Date.now() / 1000) + " — status in " + (typeof to === "string" ? chanText(ctx.key) : "Browser");
         C.msgTone = "ok";
         renderLanes();
         renderMain({ toBottom: true });
@@ -1300,6 +1336,11 @@
         C.msgTone = "bad";
       }
       updateComposerState();
+      if (result.status === 202) {
+        // The text is cleared and Send disabled: keep focus in the composer, not on <body>.
+        var active = document.activeElement;
+        if (!active || active === document.body || active === C.nodes.send || active === C.nodes.text) C.nodes.text.focus();
+      }
       return result.status === 202;
     });
   }
@@ -1322,10 +1363,11 @@
   // ------------------------------------------------------------------------
 
   // The one request site. A GET sends no referrer. A POST (chat mode, payload given) carries a JSON
-  // body and a same-origin referrer policy: the server requires an Origin equal to its own, and the
-  // Fetch standard serializes Origin as "null" on a non-GET request whose policy is no-referrer (the
-  // page's <meta name="referrer"> default). same-origin keeps the Origin and never sends a referrer
-  // anywhere else; the token is in memory and the hash is already gone, so a Referer holds only "/".
+  // body and a same-origin referrer policy: the server requires an Origin equal to its own. The
+  // current Fetch standard nulls Origin only for a request whose mode is not "cors" (the default mode
+  // of the request below), but browsers have sent "Origin: null" on a POST under no-referrer (the page's
+  // <meta name="referrer"> default), so same-origin is a defence against that. It never sends a
+  // referrer anywhere else; the token is in memory and the hash is already gone, so a Referer holds only "/".
   function request(path, payload) {
     var post = payload !== undefined;
     var headers = { "X-Peers-Token": S.token };
@@ -1868,8 +1910,8 @@
         return true;
       }, function (err) {
         S.failures += 1;
-        if (err && (err.status === 401 || err.status === 403)) S.stopped = true;
-        S.live = S.stopped ? { mode: "stopped" } : { mode: "retry", delay: delay() };
+        if (err && (err.status === 401 || err.status === 403)) stopUpdates();
+        else S.live = { mode: "retry", delay: delay() };
         renderLive();
         if (S.view === "conv") renderMain({});
         return false;
@@ -1891,8 +1933,7 @@
     }).catch(function (err) {
       S.failures += 1;
       if (err && (err.status === 401 || err.status === 403)) {
-        S.stopped = true;
-        S.live = { mode: "stopped" };
+        stopUpdates();
       } else if (err && err.status === 400) {
         // The cursor no longer decodes: start again from a fresh state.
         S.cursor = null;
@@ -1909,6 +1950,13 @@
       S.polling = false;
       return result;
     });
+  }
+
+  // The token was refused: polling ends, and the composer (chat mode) disables with its reason.
+  function stopUpdates() {
+    S.stopped = true;
+    S.live = { mode: "stopped" };
+    renderComposer();
   }
 
   function delay() {
@@ -2168,8 +2216,7 @@
   function showError(err) {
     var status = err && err.status;
     if (status === 401 || status === 403) {
-      S.stopped = true;
-      S.live = { mode: "stopped" };
+      stopUpdates();
       renderLive();
     }
     fill($("notes"), note(status ? "The server refused the request (HTTP " + status + ")." : "The server could not be reached.", "bad"));
