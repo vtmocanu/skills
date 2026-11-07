@@ -83,9 +83,9 @@ User-facing behaviour is in `references/web.md`; the server's own guards are:
   route needs `X-Peers-Token` (403).
 - At most 16 connections at once; extra connections are closed unanswered. The
   request line and headers must arrive within 2 s and every connection's socket
-  is cut after 10 s; its slot is held until the handler returns. The 8 MiB request budget bounds the file bytes each request
-  reads, not decoded objects or response buffers, so it is a read budget, not a
-  memory ceiling.
+  is cut after 10 s; its slot is held until the handler returns. The 8 MiB
+  request budget bounds the file bytes each request reads, not decoded objects
+  or response buffers, so it is a read budget, not a memory ceiling.
 - Every response carries a `Content-Security-Policy` (`default-src 'none'`,
   scripts and styles from `'self'` only, no framing, no forms),
   `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`,
