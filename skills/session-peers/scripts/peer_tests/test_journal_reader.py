@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 import unittest
 import uuid
 from unittest import mock
@@ -88,7 +89,7 @@ class BudgetTests(ReaderBase):
     def test_unchanged_poll_reads_nothing(self):
         self.msg()
         first = journal.read_since(None, BIG)
-        self.assertRegex(first["fingerprint"], r"^\d+(:\d+){5}$")
+        self.assertRegex(first["fingerprint"], r"^\d+(:\d+){7}$")
         self.assertFalse(first["unchanged"])
         self.assertEqual(first["fingerprint"], journal.journal_fingerprint())
         self.reset_preads()
@@ -115,6 +116,32 @@ class BudgetTests(ReaderBase):
             journal.read_only_view()
         with self.assertRaises(journal.JournalUnavailable):
             journal.read_since(None, BIG, known_fingerprint=fp)
+
+    def test_dir_chmod_invalidates_fingerprint(self):
+        self.msg()
+        fp = journal.read_since(None, BIG)["fingerprint"]
+        os.chmod(self.dir, 0o777)
+        self.assertNotEqual(journal.journal_fingerprint(), fp)
+        with self.assertRaises(journal.JournalUnavailable):
+            journal.read_only_view()
+        with self.assertRaises(journal.JournalUnavailable):
+            journal.read_since(None, BIG, known_fingerprint=fp)
+
+    def test_same_size_rewrite_with_restored_mtime_changes_fingerprint(self):
+        self.put(self.mrec(1, body="aaaa"))
+        old = os.stat(self.jpath)
+        fp = journal.read_since(None, BIG)["fingerprint"]
+        time.sleep(0.05)
+        data = self.read().replace(b"aaaa", b"bbbb")
+        with open(self.jpath, "r+b") as fh:
+            fh.write(data)
+        os.utime(self.jpath, ns=(old.st_atime_ns, old.st_mtime_ns))
+        self.assertEqual(os.stat(self.jpath).st_size, old.st_size)
+        self.assertEqual(os.stat(self.jpath).st_mtime_ns, old.st_mtime_ns)
+        self.assertNotEqual(journal.journal_fingerprint(), fp)
+        res = journal.read_since(None, BIG, known_fingerprint=fp)
+        self.assertFalse(res["unchanged"])
+        self.assertEqual([m["body"] for m in res["messages"]], ["bbbb"])
 
     def test_inode_change_invalidates_fingerprint(self):
         self.put(self.mrec(1), self.mrec(2))
@@ -249,6 +276,13 @@ class GapTests(ReaderBase):
         self.assertIsNone(journal.read_since(9, BIG)["gap"])
         self.assertIsNone(journal.read_since(None, BIG)["gap"])
         self.assertIsNone(journal.read_since(0, BIG)["gap"])
+
+    def test_fully_read_journal_without_seq_below_cursor_is_a_regression(self):
+        expected = {"from": 5, "to": None, "reason": "regression"}
+        self.put()
+        self.assertEqual(journal.read_since(5, BIG)["gap"], expected)
+        self.put(b"garbage\n")
+        self.assertEqual(journal.read_since(5, BIG)["gap"], expected)
 
     def test_no_gap_when_caught_up(self):
         self.put(self.mrec(1), self.mrec(2))
@@ -484,6 +518,86 @@ class PrefixTests(ReaderBase):
         ghost = str(uuid.uuid4())
         res = journal.read_since(None, BIG, want=[ghost])
         self.assertEqual(res["context"][ghost], {"state": "absent"})
+
+
+class EarlyStopTests(ReaderBase):
+    def stale_journal(self, stale):
+        lines = [self.mrec(i, body="x" * 3000) for i in range(1, 101)]
+        lines.append(stale)
+        lines += [self.mrec(i, body="x" * 3000) for i in range(101, 111)]
+        self.put(*lines)
+
+    def test_stale_low_seq_line_does_not_stop_the_read(self):
+        for stale in (self.mrec(5, body="x" * 3000), self.line({"seq": 5, "junk": True})):
+            self.stale_journal(stale)
+            res = journal.read_since(50, BIG)
+            viewed = [e["message_id"] for e in journal.read_only_view()["entries"] if e["seq"] > 50]
+            self.assertEqual(len(viewed), 60)
+            self.assertEqual([m["message_id"] for m in res["messages"]], viewed)
+            self.assertIsNone(res["gap"])
+            if res["window_regression"]:
+                self.assertFalse(res["complete"])
+
+    def test_stale_line_with_budget_stop_is_not_complete(self):
+        self.stale_journal(self.mrec(5, body="x" * 3000))
+        res = journal.read_since(50, 20000)
+        self.assertEqual(res["journal_prefix"], "unread")
+        self.assertFalse(res["complete"])
+
+    def test_regression_in_unread_window_is_not_complete(self):
+        # Stale seq 105 after 109: newest first the reader sees 110, 109, 105, 106 ...
+        lines = [self.mrec(i, body="x" * 3000) for i in range(1, 111)]
+        lines.insert(105, self.mrec(5, body="x" * 3000))
+        self.put(*lines)
+        res = journal.read_since(105, 12000)
+        self.assertFalse(res["complete"])
+
+    def test_foreign_ack_beyond_window_is_not_returned(self):
+        mid = str(uuid.uuid4())
+        foreign = self.line({"seq": 60, "schema": 2, "type": "ack", "message_id": mid,
+                             "for": self.A, "by": self.A})
+        self.put(self.mrec(1, mid), *[self.mrec(i, body="f" * 50) for i in range(2, 60)], foreign)
+        res = journal.read_since(59, len(foreign) + 5)
+        self.assertEqual(res["journal_prefix"], "unread")
+        self.assertEqual((res["events"], res["context"]), ([], {}))
+
+    def test_cursor_with_want_reads_on_to_the_wanted_message(self):
+        mid = str(uuid.uuid4())
+        self.put(self.mrec(1, mid), *[self.mrec(i, body="x" * 300) for i in range(2, 1000)])
+        res = journal.read_since(990, BIG, want=[mid])
+        self.assertEqual(res["context"][mid]["state"], "found")
+        self.assertEqual(res["context"][mid]["seq"], 1)
+
+    def test_seqless_garbage_does_not_stop_the_read(self):
+        lines = [self.mrec(i, body="x" * 300) for i in range(1, 101)]
+        lines.insert(70, b"garbage\n")
+        self.put(*lines)
+        res = journal.read_since(60, BIG)
+        self.assertEqual([m["seq"] for m in res["messages"]], list(range(61, 101)))
+        self.assertIsNone(res["gap"])
+
+    def test_two_wants_without_cursor_are_both_found(self):
+        old, recent = str(uuid.uuid4()), str(uuid.uuid4())
+        self.put(self.mrec(1, old), *[self.mrec(i, body="x" * 300) for i in range(2, 999)], self.mrec(999, recent))
+        res = journal.read_since(None, BIG, want=[old, recent])
+        self.assertEqual(res["context"][old]["state"], "found")
+        self.assertEqual(res["context"][recent]["state"], "found")
+
+    def test_events_across_messages_are_in_seq_order(self):
+        m1, m2 = str(uuid.uuid4()), str(uuid.uuid4())
+        self.put(self.mrec(1, m1), self.mrec(2, m2),
+                 self.ev(3, "ack", m2, **{"for": self.A, "by": self.A}),
+                 self.ev(4, "ack", m1, **{"for": self.A, "by": self.A}))
+        res = journal.read_since(None, BIG)
+        self.assertEqual([(e["seq"], e["message_id"]) for e in res["events"]], [(3, m2), (4, m1)])
+
+    def test_foreign_record_sharing_a_wanted_id_does_not_end_the_read(self):
+        mid = str(uuid.uuid4())
+        foreign = self.line({"seq": 999, "schema": 2, "type": "message", "message_id": mid})
+        self.put(self.mrec(1, mid), *[self.mrec(i, body="x" * 300) for i in range(2, 999)], foreign)
+        res = journal.read_since(None, BIG, want=[mid])
+        self.assertEqual(res["context"][mid]["state"], "found")
+        self.assertEqual(res["context"][mid]["seq"], 1)
 
 
 class NearCapTests(ReaderBase):

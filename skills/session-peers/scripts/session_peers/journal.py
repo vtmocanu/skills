@@ -1467,18 +1467,22 @@ _EVENT_TYPES = ("ack", "transport_error", "settled")
 _FINISH_STEP = 4 * 1024
 
 
-def _fingerprint_of(st):
-    return "%d:%d:%d:%d:%d:%d" % (st.st_size, st.st_ino, st.st_mtime_ns, st.st_mode, st.st_uid, st.st_ctime_ns)
+def _fingerprint_of(st, dst):
+    return "%d:%d:%d:%d:%d:%d:%d:%d" % (
+        st.st_size, st.st_ino, st.st_mtime_ns, st.st_mode, st.st_uid, st.st_ctime_ns, dst.st_mode, dst.st_uid)
 
 
 def journal_fingerprint():
-    """``"<size>:<inode>:<mtime_ns>:<mode>:<uid>:<ctime_ns>"`` of the journal file, or None.
+    """``"<size>:<inode>:<mtime_ns>:<mode>:<uid>:<ctime_ns>:<dir_mode>:<dir_uid>"``, or None.
 
-    None when it cannot be statted. Mode, owner and ctime are part of it so a chmod or chown
-    never short-circuits ``read_since``. Stat only: nothing is opened, locked, created or repaired.
+    None when the journal file cannot be statted. The file's mode, owner and ctime and the
+    journal directory's mode and owner are part of it so a chmod or chown of either never
+    short-circuits ``read_since``. Stat only: nothing is opened, locked, created or repaired.
     """
     try:
-        return _fingerprint_of(os.stat(os.path.join(journal_dir(), JOURNAL_NAME), follow_symlinks=False))
+        d = journal_dir()
+        return _fingerprint_of(os.stat(os.path.join(d, JOURNAL_NAME), follow_symlinks=False),
+                               os.stat(d, follow_symlinks=False))
     except OSError:
         return None
 
@@ -1490,7 +1494,8 @@ class _Scan:
         self.now, self.cursor, self.wanted = now, cursor, set(wanted)
         self.items = []  # newest first: (parsed or None, loose seq of an unusable line)
         self.lines = self.oversized = 0
-        self.passed = False  # a seq-bearing line at or below the cursor was seen
+        self.passed = False  # two consecutive valid records, the newer at or below the cursor, strictly decreasing
+        self.prev = None  # seq of the previous valid, non-foreign record fed
         self.messages, self.referenced = set(), set()
 
     def add(self, raw):
@@ -1503,17 +1508,19 @@ class _Scan:
         parsed = _parse_line(raw, self.now)
         loose = 0 if parsed is not None else _loose_seq(raw)
         self.items.append((parsed, loose))
-        seq = loose
-        if parsed is not None:
+        if parsed is not None and not parsed[1]:
             d = parsed[0]
             seq = d["seq"]
-            if not parsed[1]:
-                if d["type"] == "message":
-                    self.messages.add(d["message_id"])
-                elif d["type"] in _EVENT_TYPES and self.cursor is not None and seq > self.cursor:
-                    self.referenced.add(d["message_id"])
-        if self.cursor is not None and 0 < seq <= self.cursor:
-            self.passed = True
+            if d["type"] == "message":
+                self.messages.add(d["message_id"])
+            elif d["type"] in _EVENT_TYPES and self.cursor is not None and seq > self.cursor:
+                self.referenced.add(d["message_id"])
+            # Newest first, a consistent journal has strictly decreasing seqs. The cursor counts
+            # as passed only when a valid record at or below it is confirmed by the next older
+            # valid record being lower still; a stale or regressed line fails that and reading goes on.
+            if self.cursor is not None and self.prev is not None and seq < self.prev <= self.cursor:
+                self.passed = True
+            self.prev = seq
 
     def satisfied(self):
         """True when nothing more is needed: wanted messages (and, after a cursor, its reach) are in."""
@@ -1527,7 +1534,9 @@ def _read_window(fd, size, budget, scan):
 
     Reads are at most 64 KiB and total at most ``budget``. Once the budget is spent it
     reads on only until one whole line is in (up to JOURNAL_LINE_MAX), in steps from 4 KiB
-    doubling to 64 KiB. It also stops as soon as ``scan.satisfied()``. A final line
+    doubling to 64 KiB, so a torn final line (up to JOURNAL_LINE_MAX, then dropped) followed
+    by one complete line can take about 2 * JOURNAL_LINE_MAX past the budget. It also stops
+    as soon as ``scan.satisfied()``. A final line
     without its newline is a torn or in-flight write and is ignored. A partial first line
     longer than JOURNAL_LINE_MAX ends the read and is counted in ``scan.oversized``.
     """
@@ -1582,7 +1591,7 @@ def _unchanged_result(cursor, fingerprint):
     return {
         "messages": [], "events": [], "context": {}, "bytes": 0,
         "next": cursor if cursor is not None else 0, "complete": None,
-        "journal_prefix": None, "window_regression": False, "oversized": 0, "gap": None,
+        "journal_prefix": None, "window_regression": None, "oversized": None, "gap": None,
         "fingerprint": fingerprint, "unchanged": True,
     }
 
@@ -1608,7 +1617,8 @@ def read_since(cursor, budget, want=None, known_fingerprint=None):
     at the file start, else "unread"), ``window_regression``, ``oversized``, ``gap``
     (None, or ``{"from", "to", "reason"}``), ``fingerprint`` and ``unchanged``. When
     ``known_fingerprint`` equals the current one, nothing is read: ``unchanged`` is true,
-    ``bytes`` 0 and ``complete``, ``journal_prefix`` and ``gap`` are None (unknown).
+    ``bytes`` 0 and ``complete``, ``journal_prefix``, ``window_regression``, ``oversized``
+    and ``gap`` are None (unknown).
     """
     if cursor is not None and not (_is_int(cursor) and cursor >= 0):
         raise ValueError("cursor must be None or an integer >= 0")
@@ -1632,7 +1642,7 @@ def read_since(cursor, budget, want=None, known_fingerprint=None):
                 fd = None
             if fd is not None:
                 try:
-                    fingerprint = _fingerprint_of(st)
+                    fingerprint = _fingerprint_of(st, os.fstat(dfd))
                     reached, nbytes = _read_window(fd, st.st_size, budget, scan)
                 finally:
                     os.close(fd)
@@ -1721,7 +1731,7 @@ def read_since(cursor, budget, want=None, known_fingerprint=None):
             gap = {"from": cursor, "to": low, "reason": "budget"}
         elif reached and cursor > 0 and low is not None and low > cursor + 1:
             gap = {"from": cursor, "to": low, "reason": "pruned"}
-    complete = reached or (cursor is not None and gap is None and not unreached and all(
+    complete = reached or (cursor is not None and gap is None and not regression and not unreached and all(
         v["state"] == "found" for v in context.values()))
     return {
         "messages": messages, "events": events, "context": context, "bytes": nbytes,
