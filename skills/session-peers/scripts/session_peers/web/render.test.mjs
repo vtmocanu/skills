@@ -1964,8 +1964,35 @@ test("chat @all: a 409 on confirm (expired or used) closes the dialog with the m
   assert.ok(statusLine(u).textContent.includes("(403)"))
 })
 
+test("chat @all: a 409 after an unanswered confirm warns it may already have been sent", async () => {
+  const t = allBoot({ confirm: (_b, n) => (n === 1 ? (() => { throw new TypeError("Failed to fetch") })() : { status: 409 }) })
+  await previewed(t)
+  okButton(t).dispatch("click")
+  await settle()
+  assert.ok(dialogOf(t), "still open after no response")
+  okButton(t).dispatch("click")
+  await settle()
+  assert.equal(dialogOf(t), null)
+  assert.equal(statusLine(t).textContent, "It may already have been sent: check #general before previewing again.")
+  assert.ok(statusLine(t).classList.contains("bad"))
+})
+
+test("chat @all: the dialog opens at its top, and a click on the scrim keeps focus in the dialog for Esc", async () => {
+  const t = allBoot()
+  await previewed(t)
+  assert.equal(dialogOf(t).scrollTop, 0)
+  const scrim = dialogOf(t).parentNode
+  textareaOf(t).focus()
+  let prevented = false
+  scrim.dispatch("mousedown", { target: dialogOf(t), preventDefault() { prevented = true } })
+  assert.equal(prevented, false, "a click inside the panel is left alone")
+  scrim.dispatch("mousedown", { target: scrim, preventDefault() { prevented = true } })
+  assert.equal(prevented, true)
+  assert.equal(t.document.activeElement, dialogOf(t))
+})
+
 test("chat @all: a preview 409, 429 or 403 says why and opens no dialog", async () => {
-  for (const [status, want] of [[409, "Couldn't list the recipients yet (discovery pending or incomplete, or none or too many). Try again in a moment."],
+  for (const [status, want] of [[409, "Couldn't list the recipients (discovery pending or incomplete, or none or too many). Trying again may help, but not if #general has more than 64 members."],
     [429, "Too fast or queue full — try again (429)"], [403, "(403)"]]) {
     const t = allBoot({ preview: () => ({ status }) })
     await previewed(t)
@@ -2040,11 +2067,17 @@ test("chat @all: Esc cancels and returns focus to the textarea; Tab stays inside
   await previewed(t)
   const cancel = dialogButton(t, "Cancel")
   const ok = okButton(t)
+  const lists = elementsOf(dialogOf(t)).filter((n) => (n.attributes.class || "").startsWith("dlglist"))
+  assert.equal(lists.length, 2)
+  for (const l of lists) assert.equal(l.attributes.tabindex, "0", "a capped list is keyboard-scrollable")
   ok.focus()
   dialogOf(t).dispatch("keydown", { key: "Tab" })
-  assert.equal(t.document.activeElement, cancel, "Tab from the last button wraps to the first")
+  assert.ok(t.document.activeElement === lists[0], "Tab from the last button wraps to the first stop, the recipient list")
   dialogOf(t).dispatch("keydown", { key: "Tab", shiftKey: true })
-  assert.equal(t.document.activeElement, ok, "Shift+Tab from the first wraps to the last")
+  assert.ok(t.document.activeElement === ok, "Shift+Tab from the first stop wraps to the last")
+  cancel.focus()
+  dialogOf(t).dispatch("keydown", { key: "Tab", shiftKey: true })
+  assert.ok(t.document.activeElement === cancel, "Shift+Tab from Cancel is left to the browser, which lands on the lists before it")
   dialogOf(t).dispatch("keydown", { key: "Escape" })
   assert.equal(dialogOf(t), null)
   assert.equal(t.document.activeElement, textareaOf(t))

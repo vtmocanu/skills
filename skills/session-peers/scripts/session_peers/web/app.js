@@ -45,14 +45,15 @@
   var ALL_WARN = "@all only works in #general: open #general to post it to every member";
   var ALL_GENERAL = " reaches every #general member after you confirm the recipient list";
   var GENERAL_ONLY_ALL = "In #general you can only post @all, which asks for a confirmation";
-  var PREVIEW_409 = "Couldn't list the recipients yet (discovery pending or incomplete, or none or too many). Try again in a moment.";
+  var PREVIEW_409 = "Couldn't list the recipients (discovery pending or incomplete, or none or too many). Trying again may help, but not if #general has more than 64 members.";
   var CONFIRM_409 = "The preview expired or was used; preview again";
   var CONFIRM_429 = "Rate limited, try again";
-  var CONFIRM_NONE = "No response from the server. Try again: a preview that was already used is refused, so nothing is sent twice.";
+  var CONFIRM_NONE = "No response from the server. Confirm again: this preview can be used only once, so a retry never sends it twice.";
+  var CONFIRM_MAYBE_SENT = "It may already have been sent: check #general before previewing again.";
   var CONFIRM_EXPIRED = "This preview expired. Preview again for a fresh recipient list.";
   // The confirm dialog: its host (index.html, outside #app so #app can be made inert) and ids.
   var DIALOG_HOST = "dialoghost";
-  var NONCE_MAX = 128;
+  var CONFIRM_MAX = 128;
   var EXPIRES_MAX = 600;
   // The Browser feed held in memory: at most the server's own log cap, and as many status rows.
   var FEED_CAP = 1000;
@@ -705,7 +706,7 @@
     "Every recipient is asked for an ACK; the tally shows who has not answered."
   ];
   var ALL_CARD_CHAT = [
-    "Send first lists the recipients; nothing is sent until you confirm that list.",
+    "Preview recipients lists them; nothing is sent until you confirm that list.",
     "If membership changes between your preview and the send, nothing is sent and you are asked to preview again."
   ];
 
@@ -1437,7 +1438,7 @@
   function readPreview(data) {
     if (!data || typeof data !== "object") return null;
     var nonce = data.confirm;
-    if (typeof nonce !== "string" || !nonce || nonce.length > NONCE_MAX) return null;
+    if (typeof nonce !== "string" || !nonce || nonce.length > CONFIRM_MAX) return null;
     var recipients = (Array.isArray(data.recipients) ? data.recipients : []).filter(function (t) { return typeof t === "string" && t; });
     if (!recipients.length) return null;
     var excluded = (Array.isArray(data.excluded) ? data.excluded : []).filter(function (x) {
@@ -1496,21 +1497,31 @@
     var cancel = el("button", { type: "button", class: "dlgcancel" }, "Cancel");
     var confirmBtn = el("button", { type: "button", class: "send dlgok" }, "Send to " + n);
     var acts = el("div", { class: "dlgacts" }, cancel, confirmBtn);
+    // Focusable so a keyboard user can scroll a capped list.
+    var recList = el("ul", { class: "dlglist", "aria-label": "Recipients", tabindex: "0" }, cf.recipients.map(function (t) { return personItem(t); }));
+    var exclList = cf.excluded.length ? el("ul", { class: "dlglist excl", "aria-label": "Not included", tabindex: "0" },
+      cf.excluded.map(function (x) { return personItem(x.member, excludedText(x.reason)); })) : null;
     var shown = cf.text.length > 600 ? cf.text.slice(0, 599) + "…" : cf.text;
     var panel = el("div", { class: "dialog", role: "dialog", "aria-modal": "true", "aria-labelledby": "dlgtitle", "aria-describedby": "dlgdesc dlgmsg", tabindex: "-1" },
       title, desc,
       el("div", { class: "dlgquote" }, el("p", { class: "text" }, bodyNodes(shown))),
       cf.stale ? el("div", { class: "note warn", role: "note" }, "Discovery may be stale: this list comes from the last completed check.") : null,
       el("div", { class: "dlgsec" }, el("b", null, "Recipients (" + n + ")"),
-        el("ul", { class: "dlglist", "aria-label": "Recipients" }, cf.recipients.map(function (t) { return personItem(t); }))),
-      cf.excluded.length ? el("div", { class: "dlgsec" }, el("b", null, "Not included (" + cf.excluded.length + ")"),
-        el("ul", { class: "dlglist excl", "aria-label": "Not included" }, cf.excluded.map(function (x) { return personItem(x.member, excludedText(x.reason)); }))) : null,
+        recList),
+      exclList ? el("div", { class: "dlgsec" }, el("b", null, "Not included (" + cf.excluded.length + ")"), exclList) : null,
       el("div", { class: "dlgfoot" }, clockNode, msg),
       acts);
     on(cancel, "click", function () { if (!cf.busy) closeConfirm(null, null); });
     on(confirmBtn, "click", function () { confirmAll(cf); });
     on(panel, "keydown", function (event) { confirmKey(cf, event); });
-    return { root: el("div", { class: "scrim" }, panel), panel: panel, cancel: cancel, confirm: confirmBtn, acts: acts, msg: msg, clock: clockNode, again: null };
+    var scrim = el("div", { class: "scrim" }, panel);
+    // A click on the scrim must not leave focus on <body>, where Esc would do nothing.
+    on(scrim, "mousedown", function (event) {
+      if (event.target !== scrim) return;
+      if (event.preventDefault) event.preventDefault();
+      panel.focus();
+    });
+    return { root: scrim, panel: panel, lists: [recList, exclList].filter(Boolean), cancel: cancel, confirm: confirmBtn, acts: acts, msg: msg, clock: clockNode, again: null };
   }
 
   function openConfirm(text, preview, sentAt) {
@@ -1524,7 +1535,9 @@
     if (app) app.inert = true;
     tickConfirm(cf);
     updateConfirm(cf);
-    cf.nodes.cancel.focus();
+    // Not scrolling to the button: on a phone the dialog opens at its top.
+    cf.nodes.cancel.focus({ preventScroll: true });
+    cf.nodes.panel.scrollTop = 0;
   }
 
   // The countdown, from the clock (a background tab's timers are throttled, so never counted ticks).
@@ -1581,7 +1594,7 @@
     }
     if (event.key !== "Tab") return;
     var n = cf.nodes;
-    var stops = [n.cancel, n.again, n.confirm].filter(function (b) { return b && !b.disabled; });
+    var stops = n.lists.concat([n.cancel, n.again, n.confirm]).filter(function (b) { return b && !b.disabled; });
     if (!stops.length) {
       if (event.preventDefault) event.preventDefault();
       n.panel.focus();
@@ -1634,12 +1647,13 @@
       }
       if (status === 429 || status === 0) {
         // The nonce stays usable (the server charged nothing, or never answered): Confirm again.
+        if (status === 0) cf.unanswered = true;
         setConfirmMsg(cf, status === 429 ? CONFIRM_429 : CONFIRM_NONE);
         updateConfirm(cf);
         if (!cf.expired && document.activeElement !== cf.nodes.confirm) cf.nodes.confirm.focus();
         return false;
       }
-      closeConfirm(status === 409 ? CONFIRM_409 : sendErrorText(status), "bad");
+      closeConfirm(status === 409 ? (cf.unanswered ? CONFIRM_MAYBE_SENT : CONFIRM_409) : sendErrorText(status), "bad");
       return false;
     });
   }

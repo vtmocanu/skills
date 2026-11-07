@@ -187,8 +187,9 @@ the request's `ack` is accepted but ignored.
   discovery: the `#general` members minus the browser peer and minus the members
   marked gone. A preview accepts, charges, queues and delivers nothing.
 - **409 for a preview.** Discovery is pending; a `#general` member was left
-  unchecked or has no liveness entry (a budget or per-channel clip: retry);
-  no recipient remains; or more than 64 remain. An incomplete check of other
+  unchecked or has no liveness entry (a budget clip can be retried, but
+  discovery keeps only the first 64 `#general` members, so a `#general` with more
+  than 64 members is always refused); no recipient remains; or more than 64 remain. An incomplete check of other
   channels alone does not refuse.
 - **`stale`.** The preview adds `"stale": true` when the discovery result it
   used is stale (the key is absent otherwise), so the page can say so.
@@ -205,7 +206,7 @@ the request's `ack` is accepted but ignored.
   charged; confirm again with the same body.
 - **202 queued.** `202 {"message_id", "state": "queued"}` consumes the nonce
   and charges the send, as for any accepted send. The worker then sends to
-  exactly the previewed set. If the live deliverable members differ from it, the
+  exactly the previewed set. If the live members (the #general members not marked gone) differ from it, the
   row reads `not sent: recipients changed, preview again` and the person
   previews again. A live member the journal cannot record becomes a recorded
   `refused: <reason>` outcome with ACK not requested, not a "recipients
@@ -266,8 +267,8 @@ A 429 accepts and charges nothing. Every refusal has an empty `{}` body:
 | 403 | Host, token or `Origin` rejected (`Origin` must be `http://` plus the Host), a plain `#general` post, or an `@all` to any route but `#general`. |
 | 404 | A GET to an unknown path, or a malformed request target. |
 | 405 | A POST to a path other than `/api/send`, a method other than GET or POST, or any POST when `--chat` is off. |
-| 409 | Only for `@all` in `#general`. A preview: discovery pending, a `#general` member unchecked or without a liveness entry, no recipients, or more than 64. A confirm: the nonce is unknown, expired, used or bound to different text. |
 | 408 | The body was short or arrived too slowly. |
+| 409 | Only for `@all` in `#general`. A preview: discovery pending, a `#general` member unchecked or without a liveness entry, no recipients, or more than 64. A confirm: the nonce is unknown, expired, used or bound to different text. |
 | 413 | `Content-Length` over 1 MiB. |
 | 415 | `Content-Type` is not a single `application/json` (charset utf-8 allowed). |
 | 429 | Rate limit hit or queue full (on a confirm the nonce stays usable). |

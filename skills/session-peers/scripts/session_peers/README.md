@@ -131,7 +131,9 @@ checks in order, and each refusal has an empty `{}` body:
     A preview (200, nothing accepted or charged) reads the cached discovery and
     is 409 when discovery is pending, a `#general` member is unchecked or has
     no liveness entry, no recipient remains or more than
-    `channels.ALL_MAX_RECIPIENTS` (64) do. A confirm calls
+    `channels.ALL_MAX_RECIPIENTS` (64) do. A budget clip can be retried, but
+    discovery keeps only the first 64 `#general` members, so a `#general` with
+    more than 64 members is always refused. A confirm calls
     `SendGate.confirm`, which under the same lock checks the nonce binding
     (route, browser peer, recipient set, text hash, ACK, `NONCE_TTL` = 60 s;
     409 when unknown, expired, used or mismatched, a mismatch leaving it
