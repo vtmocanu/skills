@@ -105,8 +105,8 @@ User-facing behaviour is in `references/web.md#chat-mode---chat`. Without
 With it, `POST /api/send` is the one write route; a request passes these
 checks in order, and each refusal has an empty `{}` body:
 
-1. Path is `/api/send` (405 otherwise), after the Host check (403) and the
-   query check (400).
+1. Host (403), then a malformed request target (404), then the path being
+   `/api/send` (405 otherwise), then no query string (400).
 2. `X-Peers-Token` (403).
 3. `Origin` appears once and equals `http://` plus the Host (403).
 4. One `Content-Type` of `application/json`, optionally `; charset=utf-8`

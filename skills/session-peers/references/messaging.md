@@ -194,16 +194,22 @@ writes to it with `send`:
 <this skill's directory>/scripts/peers.py send --to web:<uuid> --message-file <path>
 ```
 
-The message arrives in the page's Browser feed under your verified identity.
+The message arrives in the page's Browser feed. It shows your verified identity only when
+the call comes from a Claude Code session or a Codex shim, because the frame's
+`from` is set only from a Claude-registry record at the caller's socket; from
+OpenCode, a shell or a Codex thread calling `send` directly it appears as an
+unverified sender and the journal records `from: null`.
 `send` waits for the browser peer's own acknowledgement, which it gives only
 after the message is in the [journal](journal.md); the exit code says what is
 known:
 
-| Exit | Meaning |
+| Exit / outcome | Meaning |
 | --- | --- |
 | 0 | Delivered: the browser peer journaled the message and acknowledged it. |
-| 1 | Not delivered: the browser peer refused it (for example journal full) or could not be reached. |
-| 1 | Outcome unknown: no acknowledgement within 15 s, or the connection closed first. The message may or may not have been kept; check before resending. |
+| 1, not delivered | The browser peer refused it (for example journal full) or could not be reached. |
+| 1, outcome unknown | No acknowledgement within 15 s, or the connection closed first. The message may or may not have been kept; check before resending: the page's Browser feed, or `inbox journal` for a `--record` send. |
+| 75 | `--record` with a full journal: nothing was sent. |
+| 76 | With `--record`, a refused or unknown outcome whose transport error could not be journaled. |
 
 - **Offline:** with no running browser peer, `send` is refused (exit 1) and
   nothing is sent. With `--record` it journals the message, reports the
@@ -211,7 +217,9 @@ known:
   the page can show it once it starts.
 - **Duplicate record:** with `--record` a delivered message leaves two journal
   records, the sender's own and the browser peer's inbox record. Both count
-  against retention and the sender's quota.
+  against retention. The sender's own record counts against its quota; the
+  inbox record counts against the sender's quota only for a verified sender,
+  and against the journal's unattributed (`null`) bucket for an unverified one.
 - **No correlation:** `ask`, `dispatch` and `wait` refuse a `web:` target
   (rc 2): a person answers by hand, with no request id or await. Use `send`.
 - A direct `send` is not an approval: the recipient is a person at a page, and

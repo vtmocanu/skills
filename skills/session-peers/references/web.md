@@ -180,7 +180,7 @@ state shows in the page's status row for that `message_id`:
 | State | Meaning |
 | --- | --- |
 | `queued` | Accepted in memory; nothing written yet. |
-| `pending` | Journaled and delivered or attempted. Each recipient shows its outcome; the row stays `pending` until the ACKs arrive (or `ACK not requested`). `delivering` is true while the worker is still delivering. |
+| `pending` | Journaled and delivered or attempted. Each recipient shows its outcome; each recipient's ACK reads pending until acked (or `ACK not requested`). `delivering` is true while the worker is still delivering. |
 | `not sent: <reason>` | Refused before any write (journal full or unavailable, an unresolvable recipient, oversized text, an unusable channel). The id never gets a journal entry. |
 | `not sent (journaled)` | A channel post was journaled but its history append failed; nothing was delivered or asked of anyone. |
 | `failed after recording` | The worker hit an unexpected error after the message was journaled. Check the recipients before resending. |
@@ -204,9 +204,10 @@ A 429 accepts and charges nothing. Every refusal has an empty `{}` body:
 
 | Code | Refused because |
 | --- | --- |
-| 400 | Bad JSON or fields (duplicate keys, extra fields, a numeral over 32 characters, text that is not valid UTF-8 such as a lone surrogate, a `web:` recipient), any `Transfer-Encoding`, or a missing, repeated or non-numeric `Content-Length`. |
+| 400 | Bad JSON or fields (duplicate keys, extra fields, a numeral over 32 characters, text that is not valid UTF-8 such as a lone surrogate, a `web:` recipient), any `Transfer-Encoding`, a query string on `/api/send`, or a missing, repeated, non-numeric or zero `Content-Length`. |
 | 403 | Host, token or `Origin` rejected (`Origin` must be `http://` plus the Host), or `#general` / `@all`. |
-| 405 | Any other method or path, or a POST when `--chat` is off. |
+| 404 | A GET to an unknown path, or a malformed request target. |
+| 405 | A POST to a path other than `/api/send`, a method other than GET or POST, or any POST when `--chat` is off. |
 | 408 | The body was short or arrived too slowly. |
 | 413 | `Content-Length` over 1 MiB. |
 | 415 | `Content-Type` is not a single `application/json` (charset utf-8 allowed). |
@@ -217,7 +218,7 @@ A 429 accepts and charges nothing. Every refusal has an empty `{}` body:
 
 The composer's "Ask for ACK" sets `ack`. The message is journaled either way.
 
-- **On:** the recipient is told how to ACK and the row stays `pending` until
+- **On:** the recipient is told how to ACK and its ACK reads pending until
   `inbox acks` shows it.
 - **Off:** the recipient gets no ACK instruction and the row reads `ACK not
   requested`, also after a reload (a channel post keeps the choice in its
@@ -227,7 +228,9 @@ The composer's "Ask for ACK" sets `ack`. The message is journaled either way.
 ### Replies
 
 A reply comes back to the browser peer's socket and lands in the Browser feed
-with its verified sender and name:
+with its sender and name, verified when the sender is a Claude Code session
+or a Codex shim (an OpenCode, shell or direct Codex `peers.py send` shows as
+an unverified sender):
 
 - **Claude Code:** native `SendMessage` to `web-<user>`.
 - **Codex:** the shim routes the thread's final answer. It counts against the
@@ -246,19 +249,20 @@ never from the body; an unverified sender shows as such.
 The Browser conversation is an in-memory log in the server: inbound messages
 (after the journal write) and direct sends from the moment they are accepted.
 Channel posts never enter it; they show in their channel. It holds at most
-1000 entries and 4 MiB, oldest evicted first; an entry's text is clipped to
+1000 entries and 4 MiB, oldest evicted first (the newest single entry is
+always kept); an entry's text is clipped to
 262144 characters for display (the journal keeps the whole message).
 
 - **Reload:** the page gets the newest retained entries since this server
   started, with a note that the conversation starts at server start.
 - **Gap note:** a poll or page that fell behind the oldest retained entry,
-  or lost entries for want of budget, shows a gap ("earlier messages
-  expired").
+  or lost entries for want of budget, shows a gap ("Earlier messages expired or were not shown.").
 - **Hydration:** on a reload, outbound entries re-read their ACK state from
   the journal. A pruned message reads "expired from the journal". An
   unreadable journal or exhausted budget leaves a still-`pending` ACK
   flagged "ACK unverified" until a later definite fact (acked, expired or a
-  transport error) clears it. A recorded ACK is never lost.
+  transport error) or a later read that reaches the message and finds it still
+  pending clears it. A recorded ACK is never lost.
 - **Restart:** a new UUID, so a new identity, an empty feed and `restarted`.
   Status rows and queued sends do not survive; journaled ACKs and transport
   errors stay readable from the journal.
@@ -268,13 +272,15 @@ Channel posts never enter it; they show in their channel. It holds at most
 Browser messages and replies are ordinary [journal](journal.md#retention)
 records. A browser peer does not ACK what it receives, so they stay until
 pruned by the 14-day age cap, and count against their sender's quota like any
-other recorded message. A sender that used `peers.py send --record --to web:...`
-leaves two records, its own and the inbox's.
+other recorded message, except that an unverified sender's inbox record counts
+against the journal's unattributed (`null`) bucket. A delivered
+`peers.py send --record --to web:...` message leaves two records, the sender's
+own and the inbox's.
 
 ### While the server is down
 
 There is no socket. A Claude `SendMessage` to the browser peer fails at the
-sender; a Codex shim logs "requester gone". Those replies are not delivered
+sender; a Codex shim logs that the session that queued the turn is gone. Those replies are not delivered
 to the page. `peers.py send --record --to web:<uuid>` is still journaled, with
 a transport error. Without `--record` it is refused.
 
