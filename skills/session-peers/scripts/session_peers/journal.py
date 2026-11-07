@@ -1501,7 +1501,7 @@ class _Scan:
         self.cursor_anchor = cursor_anchor
         self.items = []  # newest first: (parsed or None, loose seq of an unusable line, raw line)
         self.lines = self.oversized = 0
-        self.anchor_idx = None  # index in items of the newest line that is the anchor record
+        self.anchor_found = False  # the anchor record (see add) is in the window
         self.messages, self.referenced = set(), set()
 
     def add(self, raw):
@@ -1524,15 +1524,15 @@ class _Scan:
             # The cursor counts as reached only at the anchor record: a valid line at seq == cursor
             # whose bytes hash to the anchor the caller got from its previous read. A stale or
             # regressed line cannot fake that, so seq order alone never ends the read.
-            if (self.anchor_idx is None and self.cursor_anchor is not None and seq == self.cursor
+            if (not self.anchor_found and self.cursor_anchor is not None and seq == self.cursor
                     and _line_anchor(raw) == self.cursor_anchor):
-                self.anchor_idx = len(self.items) - 1
+                self.anchor_found = True
 
     def satisfied(self):
         """True when nothing more is needed: wanted messages (and, after a cursor, its anchor) are in."""
         if self.cursor is None:
             return bool(self.wanted) and self.wanted <= self.messages
-        return (self.anchor_idx is not None and self.referenced <= self.messages
+        return (self.anchor_found and self.referenced <= self.messages
                 and self.wanted <= self.messages)
 
 
@@ -1593,11 +1593,15 @@ def _read_window(fd, size, budget, scan):
     return pos == 0, total
 
 
-def _unchanged_result(cursor, fingerprint):
-    """Nothing was read, so completeness, prefix and gap are unknown (None), never claimed."""
+def _unchanged_result(cursor, fingerprint, cursor_anchor=None):
+    """Nothing was read, so completeness, prefix and gap are unknown (None), never claimed.
+
+    ``next`` stays at the cursor, so the caller's own anchor still names the record there.
+    """
     return {
         "messages": [], "events": [], "context": {}, "bytes": 0,
-        "next": cursor if cursor is not None else 0, "next_anchor": None, "complete": None,
+        "next": cursor if cursor is not None else 0,
+        "next_anchor": cursor_anchor if cursor is not None else None, "complete": None,
         "journal_prefix": None, "window_regression": None, "oversized": None, "gap": None,
         "fingerprint": fingerprint, "unchanged": True,
     }
@@ -1632,23 +1636,33 @@ def read_since(cursor, budget, want=None, known_fingerprint=None, cursor_anchor=
     ``journal_prefix`` ("read" when the window starts at the file start, else "unread"),
     ``window_regression``, ``oversized``, ``gap`` (None, or ``{"from", "to", "reason"}``),
     ``fingerprint`` and ``unchanged``. When ``known_fingerprint`` equals the current one,
-    nothing is read: ``unchanged`` is true, ``bytes`` 0, ``next_anchor`` None and
+    nothing is read: ``unchanged`` is true, ``bytes`` 0, ``next_anchor`` is the caller's
+    ``cursor_anchor`` (``next`` stays at the cursor; it is also kept whenever ``next``
+    falls back to the cursor because the window held no seq-bearing line) and
     ``complete``, ``journal_prefix``, ``window_regression``, ``oversized`` and ``gap`` are
     None (unknown).
 
-    Residual risks: an exact byte-duplicate of the anchor line inserted later in the file
-    (a corrupt journal) can still end the read early, and a corrupt unread prefix is not
-    detected (``journal_prefix`` "unread").
+    How to chain: store ``next`` and ``next_anchor`` from each result and pass them as
+    ``cursor`` and ``cursor_anchor`` to the next call. ``complete`` True after an anchored
+    read means nothing was lost since the read that produced the anchor; it is absolute
+    only when the chain's root read reached the file start. ``complete`` can be True while
+    ``gap`` is set (regression or pruned), so check ``gap`` separately.
+
+    Residual risks: an exact byte-duplicate of the anchor line inserted later in the file,
+    a corrupt unread prefix (``journal_prefix`` "unread"), and a duplicate ``message_id``
+    whose original lies outside the window (only a foreign or corrupt journal) are not
+    detected.
     """
     if cursor is not None and not (_is_int(cursor) and cursor >= 0):
         raise ValueError("cursor must be None or an integer >= 0")
     if not (_is_int(budget) and budget >= 0):
         raise ValueError("budget must be an integer >= 0")
     wanted = [w for w in (want or ()) if isinstance(w, str)]
+    anchor_in = cursor_anchor if isinstance(cursor_anchor, str) else None
     if known_fingerprint is not None and known_fingerprint == journal_fingerprint():
-        return _unchanged_result(cursor, known_fingerprint)
+        return _unchanged_result(cursor, known_fingerprint, anchor_in)
     now = _now()
-    scan = _Scan(now, cursor, wanted, cursor_anchor if isinstance(cursor_anchor, str) else None)
+    scan = _Scan(now, cursor, wanted, anchor_in)
     fingerprint, reached, nbytes = None, True, 0
     try:
         dfd = _open_dir(journal_dir(), False)
@@ -1674,6 +1688,8 @@ def read_since(cursor, budget, want=None, known_fingerprint=None, cursor_anchor=
     next_anchor = None
     for parsed, loose, raw in reversed(scan.items):
         if parsed is None:
+            if loose > last_seq:
+                next_anchor = None  # next now comes from a line that is no valid record
             last_seq = max(last_seq, loose)
             if loose:
                 low = loose if low is None else min(low, loose)
@@ -1757,12 +1773,14 @@ def read_since(cursor, budget, want=None, known_fingerprint=None, cursor_anchor=
     # replays backwards and every referenced or wanted message is in. Without the anchor a
     # partial window is never complete, whatever its seqs look like.
     complete = reached or (
-        cursor is not None and scan.anchor_idx is not None and gap is None and not regression
-        and not unreached and all(v["state"] == "found" for v in context.values()))
+        cursor is not None and scan.anchor_found and gap is None and not regression
+        and oversized == 0 and not unreached and all(v["state"] == "found" for v in context.values()))
     return {
         "messages": messages, "events": events, "context": context, "bytes": nbytes,
         "next": last_seq if last_seq > 0 else (cursor or 0),
-        "next_anchor": _line_anchor(next_anchor) if next_anchor is not None else None, "complete": complete,
+        "next_anchor": (_line_anchor(next_anchor) if next_anchor is not None
+                        else anchor_in if last_seq <= 0 and cursor is not None else None),
+        "complete": complete,
         "journal_prefix": "read" if reached else "unread",
         "window_regression": regression and not reached, "oversized": oversized, "gap": gap,
         "fingerprint": fingerprint, "unchanged": False,

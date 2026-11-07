@@ -764,6 +764,77 @@ class AnchorTests(ReaderBase):
         self.put(self.mrec(1), self.line({"seq": 2, "schema": 2, "type": "zzz"}))
         self.assertIsNone(journal.read_since(None, BIG)["next_anchor"])
 
+    def test_next_anchor_is_none_when_a_malformed_line_sets_next(self):
+        self.put(self.mrec(1), self.mrec(2), self.line({"seq": 3, "junk": True}))
+        res = journal.read_since(None, BIG)
+        self.assertEqual(res["next"], 3)
+        self.assertIsNone(res["next_anchor"])
+
+    def test_unchanged_poll_keeps_the_callers_anchor(self):
+        self.put(self.mrec(1), self.mrec(2))
+        first = journal.read_since(None, BIG)
+        res = journal.read_since(2, BIG, known_fingerprint=first["fingerprint"],
+                                 cursor_anchor=first["next_anchor"])
+        self.assertTrue(res["unchanged"])
+        self.assertEqual(res["next"], 2)
+        self.assertEqual(res["next_anchor"], first["next_anchor"])
+
+    def test_next_falling_back_to_the_cursor_keeps_the_callers_anchor(self):
+        self.put(b"garbage\n", b"more garbage\n")
+        res = journal.read_since(3, BIG, cursor_anchor="a" * 16)
+        self.assertEqual(res["next"], 3)
+        self.assertEqual(res["next_anchor"], "a" * 16)
+
+    def anchored_tail(self, extra=(), mids=None):
+        """50 records, the anchor read, then 10 more records and ``extra`` lines."""
+        self.mids = {i: str(uuid.uuid4()) for i in range(1, 61)}
+        self.mids.update(mids or {})
+        prefix = [self.mrec(i, mid=self.mids[i], body=self.BODY) for i in range(1, 51)]
+        rest = [self.mrec(i, mid=self.mids[i], body=self.BODY) for i in range(51, 61)] + list(extra)
+        prev = self.anchored(prefix, rest)
+        return prefix, rest, prev["next_anchor"]
+
+    def test_anchor_in_window_but_wanted_message_not_is_not_complete(self):
+        prefix, rest, anchor = self.anchored_tail()
+        lines = prefix + rest
+        budget = sum(len(l) for l in lines[-11:]) + 10
+        with mock.patch.object(journal, "_READ_CHUNK", 512):
+            res = journal.read_since(50, budget, want=[self.mids[10]], cursor_anchor=anchor)
+        self.assertFalse(res["complete"])
+        self.assertEqual(res["context"][self.mids[10]]["state"], "unreached")
+
+    def test_wanted_old_message_is_found_with_a_big_budget_after_the_anchor(self):
+        prefix, rest, anchor = self.anchored_tail()
+        with mock.patch.object(journal, "_READ_CHUNK", 512):
+            res = journal.read_since(50, BIG, want=[self.mids[10]], cursor_anchor=anchor)
+        self.assertTrue(res["complete"])
+        self.assertEqual(res["context"][self.mids[10]]["state"], "found")
+
+    def test_ack_for_an_old_message_after_the_anchor_is_verified(self):
+        m5 = str(uuid.uuid4())
+        ack = self.ev(61, "ack", m5, **{"for": self.A, "by": self.A})
+        prefix, rest, anchor = self.anchored_tail([ack], {5: m5})
+        with mock.patch.object(journal, "_READ_CHUNK", 512):
+            res = journal.read_since(50, BIG, cursor_anchor=anchor)
+        self.assertTrue(res["complete"])
+        self.assertEqual(res["context"][m5]["state"], "found")
+        self.assertEqual([e.get("unverified") for e in res["events"]], [None])
+
+    def test_cursor_beyond_the_anchor_record_does_not_stop_early(self):
+        prefix, rest, anchor = self.anchored_tail()
+        size = os.path.getsize(self.jpath)
+        with mock.patch.object(journal, "_READ_CHUNK", 512):
+            res = journal.read_since(55, BIG, cursor_anchor=anchor)
+        self.assertEqual(res["journal_prefix"], "read")
+        self.assertEqual(res["bytes"], size)
+
+    def test_anchor_with_oversized_line_in_window_is_not_complete(self):
+        big = b'{"seq":99,"pad":"' + b"x" * (journal.JOURNAL_LINE_MAX + 10) + b'"}\n'
+        prefix, rest, anchor = self.anchored_tail([big])
+        res = journal.read_since(50, BIG, cursor_anchor=anchor)
+        self.assertEqual(res["oversized"], 1)
+        self.assertFalse(res["complete"])
+
     def test_anchor_with_a_missing_cursor_record_falls_back_to_reading_on(self):
         lines = [self.mrec(i, body="x" * 300) for i in range(1, 301)]
         self.put(*lines)
