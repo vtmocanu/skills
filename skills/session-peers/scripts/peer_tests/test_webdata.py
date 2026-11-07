@@ -1626,6 +1626,19 @@ def deep_list(depth):
     return "[" * depth + "]" * depth
 
 
+def json_parses(depth):
+    """Whether this interpreter's json parses ``depth`` nested lists.
+
+    Python 3.9-3.11 raise RecursionError near the recursion limit, so the reader skips such a
+    line; 3.12+ parses it and the view must flatten it instead.
+    """
+    try:
+        json.loads(deep_list(depth))
+    except RecursionError:
+        return False
+    return True
+
+
 def run_bounded(case, fn, unblock=None, timeout=10):
     """The result of ``fn()`` run in a thread; fails the test (instead of hanging it) when it blocks."""
     box = {}
@@ -1819,8 +1832,15 @@ class WebdataHostileHistoryTests(WebdataBase):
         self.assertEqual([e["seq"] for e in webdata.changes(cursor)["channels"]["general"]["entries"]], [1, 3])
 
     def test_deeply_nested_identifiers_never_break_a_view(self):
-        key = self.new_channel("nest")
-        deep = deep_list(2000)
+        # 500 parses on every supported Python, so it always exercises the flattening; 2000 also
+        # crosses the recursion limit, where 3.9-3.11 skip the lines instead (json_parses).
+        for depth in (500, 2000):
+            with self.subTest(depth=depth):
+                self.check_deeply_nested_identifiers(depth)
+
+    def check_deeply_nested_identifiers(self, depth):
+        key = self.new_channel("nest%d" % depth)
+        deep = deep_list(depth)
         lines = [
             encode(make_entry(key, 1, "channel.joined", {"member": "@@"})),
             encode(make_entry(key, 2, "channel.handover", {"member": "@@", "to": "@@"})),
@@ -1831,21 +1851,25 @@ class WebdataHostileHistoryTests(WebdataBase):
         ]
         write_topic(key, [line.replace('"@@"', deep) for line in lines])
         page = webdata.channel_page(key)
-        self.assertEqual([e["seq"] for e in page["entries"]], [1, 2, 3, 4, 5])
-        self.assertIsNone(page["entries"][0]["member"])
+        parsed = json_parses(depth)
+        self.assertEqual([e["seq"] for e in page["entries"]], [1, 2, 3, 4, 5] if parsed else [])
+        if parsed:
+            self.assertIsNone(page["entries"][0]["member"])
         webdata.all_channels()
-        self.assertEqual(len(webdata.search("needle", scope=key)["matches"]), 1)
+        self.assertEqual(len(webdata.search("needle", scope=key)["matches"]), 1 if parsed else 0)
         webdata.state_view(EMPTY)
         webdata.changes(webdata.encode_cursor({"v": 1, "c": [[key, 0, "A" * 11]], "j": [0, "A" * 11, None], "u": []}))
 
     def test_a_deep_buddy_handover_is_flat_in_the_chain(self):
-        key = "buddy-" + "b2" * 6
-        sp_channels.create_channel(key, self.me, [], kind="buddy", display="buddy", reserved_ok=True)
-        line = encode(make_entry(key, 2, "channel.handover", {"member": "@@", "to": "@@"}))
-        with open(str(log_path(key)), "ab") as fh:
-            fh.write(line.replace('"@@"', deep_list(2000)).encode("utf-8"))
-        row = [c for c in webdata.state_view(EMPTY)["channels"] if c["key"] == key][0]
-        self.assertEqual(row["handover_chain"], [{"member": None, "to": None, "seq": 2}])
+        for depth, key in ((500, "buddy-" + "b2" * 6), (2000, "buddy-" + "b3" * 6)):
+            with self.subTest(depth=depth):
+                sp_channels.create_channel(key, self.me, [], kind="buddy", display="buddy", reserved_ok=True)
+                line = encode(make_entry(key, 2, "channel.handover", {"member": "@@", "to": "@@"}))
+                with open(str(log_path(key)), "ab") as fh:
+                    fh.write(line.replace('"@@"', deep_list(depth)).encode("utf-8"))
+                row = [c for c in webdata.state_view(EMPTY)["channels"] if c["key"] == key][0]
+                want = [{"member": None, "to": None, "seq": 2}] if json_parses(depth) else []
+                self.assertEqual(row["handover_chain"], want)
 
     def test_clean_bounds_its_depth(self):
         value = json.loads(deep_list(500))
