@@ -155,7 +155,7 @@
     selected: "general", view: "conv", pages: table(), pendingNotes: table(), loading: table(), pageErrors: table(),
     all: null, search: null, cursor: null, polls: 0, failures: 0, polling: false, stopped: false, timer: null,
     needState: false, live: { mode: "starting" }, liveText: null, untracked: 0, journalGap: false, pane: "main",
-    focusables: table(), wired: false, waiting: false, allInflight: null, allLoadingNext: null, allLoadingPromise: null
+    focusables: table(), wired: false, waiting: false, allInflight: null, allLoadingNext: null, allLoadingOwner: null, allLoadingPromise: null, allGen: 0
   };
 
   var RT_LABEL = { claude: "Claude Code", codex: "Codex", oc: "OpenCode", unknown: "Unknown runtime" };
@@ -903,7 +903,10 @@
 
   function loadAll(next) {
     // A second Load more with the same token while the first is in flight would add the batch twice.
-    if (next && S.allLoadingNext === next && S.allLoadingPromise) return S.allLoadingPromise;
+    if (next && S.allLoadingNext === next && S.allLoadingOwner === S.all && S.allLoadingPromise) return S.allLoadingPromise;
+    // A Load more belongs to the view it started on; a fresh load supersedes any earlier one.
+    var owner = next ? S.all : null;
+    var gen = next ? S.allGen : (S.allGen += 1);
     var url = "/api/all" + (next ? "?next=" + encodeURIComponent(next) : "");
     // Channels with live activity while this request is in flight: the batch may have been read
     // before that activity, so they are judged against the batch once it arrives.
@@ -913,6 +916,7 @@
     var promise = api(url).then(function (data) {
       done();
       if (S.allInflight === inflight) S.allInflight = null;
+      if (gen !== S.allGen || (next && (!owner || S.all !== owner))) return;
       var entries = (Array.isArray(data.entries) ? data.entries : []).filter(function (e) { return e && typeof e === "object"; });
       if (!next || !S.all) S.all = newAll();
       var all = S.all;
@@ -941,10 +945,10 @@
       capAll(all);
       Object.keys(inflight).forEach(function (k) {
         if (inflight[k] === "new") {
-          // The server enters a new channel at its current position: unless this batch read it,
-          // its first entries never stream into this view.
-          if (!all.read[k]) markAllStale("A new channel exists (" + chanText(k) + "); this view does not include it.");
-        } else if (all.read[k] || !all.next) {
+          // The server enters a new channel at its current position, so entries it got between
+          // this batch's read and that entry point never stream into this view.
+          markAllStale("A new channel exists (" + chanText(k) + "); this view does not include it.");
+        } else if ((all.read[k] || !all.next) && !(all.last[k] >= inflight[k])) {
           markAllStale("New entries arrived in " + chanText(k) + " while this view was loading; it may not include them.");
         }
       });
@@ -958,7 +962,7 @@
       }
       showError(err);
     });
-    if (next) { S.allLoadingNext = next; S.allLoadingPromise = promise; }
+    if (next) { S.allLoadingNext = next; S.allLoadingOwner = owner; S.allLoadingPromise = promise; }
     return promise;
   }
 
@@ -1001,7 +1005,11 @@
     if (page && appendToPage(page, entries)) changed = true;
     var all = S.all;
     // Channels already read are judged live below; only the ones this request may read are recorded.
-    if (S.allInflight && entries.length && !(all && all.read[key]) && !S.allInflight[key]) S.allInflight[key] = "entry";
+    if (S.allInflight && entries.length && !(all && all.read[key]) && S.allInflight[key] !== "new") {
+      // The highest seq seen live: the view is only stale if the batch does not hold it.
+      var top = entries.reduce(function (m, e) { return e && typeof e.seq === "number" && e.seq > m ? e.seq : (e && typeof e.seq !== "number" ? Infinity : m); }, 0);
+      S.allInflight[key] = Math.max(typeof S.allInflight[key] === "number" ? S.allInflight[key] : 0, top);
+    }
     if (all && all.covered[key]) {
       entries.forEach(function (e) {
         if (!e || typeof e !== "object") return;
@@ -1108,7 +1116,7 @@
       }
       if (c.gap) {
         reloads.push([key, c.gap]);
-        if (S.allInflight && !(S.all && S.all.read[key]) && !S.allInflight[key]) S.allInflight[key] = "entry";
+        if (S.allInflight && !(S.all && S.all.read[key]) && S.allInflight[key] !== "new") S.allInflight[key] = Infinity;
         if (S.all && (S.all.covered[key] || S.all.read[key] || !S.all.next) && markAllStale(chanText(key) + " has entries this view could not stream; it may be incomplete.")) changed = true;
         return;
       }

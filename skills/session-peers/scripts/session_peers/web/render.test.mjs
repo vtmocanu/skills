@@ -1132,6 +1132,39 @@ test("All channels: a double Load more with the same token adds the batch once",
   assert.equal(calls, 1)
 })
 
+test("All channels: a late Load more response from a replaced view is dropped", async () => {
+  let release
+  const gate = new Promise((r) => { release = r })
+  let reloads = 0
+  const first = allBatch([Object.assign(sendEntry(1, "from general"), { channel: "general" })], { partial: true, omitted: 1, total: 2, shown: 1, next: "TOK", channels: ["general"] })
+  const fresh = allBatch([Object.assign(sendEntry(1, "from general"), { channel: "general" })], { partial: true, omitted: 2, total: 3, shown: 1, next: "TOK2", channels: ["general"] })
+  const late = allBatch([Object.assign(sendEntry(5, "old batch"), { channel: "ops" })], { total: 2, shown: 2, next: null, channels: ["ops"] })
+  const env = bootFixture({ "/api/all": (url) => { if (url.includes("next=TOK2")) return fresh; if (url.includes("next=TOK")) return gate.then(() => late); reloads += 1; return reloads === 1 ? first : fresh } })
+  await env.app.ready
+  await env.app.showAll()
+  const loading = env.app.loadAll("TOK")
+  await env.app.loadAll(null)
+  release()
+  await loading
+  const sub = env.document.byId.sub.textContent
+  assert.ok(sub.includes("Showing 1 of 3"), sub)
+  assert.ok(!env.document.byId.stream.textContent.includes("old batch"))
+  assert.ok(buttonNamed(env.document.byId.notes, "Load more"))
+})
+
+test("All channels: a live entry the initial batch already holds does not mark it out of date", async () => {
+  let release
+  const gate = new Promise((r) => { release = r })
+  const env = bootFixture({ "/api/all": () => gate.then(() => allBatch([Object.assign(sendEntry(4, "held"), { channel: "general" })], { total: 1, shown: 1, next: null, channels: ["general"] })) })
+  await env.app.ready
+  const showing = env.app.showAll()
+  env.routes["/api/changes"] = quiet("C1", { channels: { general: { entries: [sendEntry(4, "held")], gap: null } } })
+  await env.app.pollOnce()
+  release()
+  await showing
+  assert.ok(!env.document.byId.sub.textContent.startsWith("Out of date"), env.document.byId.sub.textContent)
+})
+
 test("a channel load error says updates stopped after the token was refused", async () => {
   const env = bootFixture({ "/api/channel/ops": { __status: 502 } })
   await env.app.ready
