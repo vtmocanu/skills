@@ -1,0 +1,196 @@
+"""Static checks of the web dashboard's assets: rendering safety, CSP fit, no external requests, notices.
+
+The behaviour of ``app.js`` is covered by ``session_peers/web/render.test.mjs`` (``node --test``);
+these checks guard the source text itself, so a later edit cannot slip an HTML sink, an inline
+script or style, a stored token or an external fetch past review.
+"""
+
+from __future__ import annotations
+
+import html.parser
+import pathlib
+import re
+import unittest
+
+SCRIPTS = pathlib.Path(__file__).resolve().parents[1]
+WEB = SCRIPTS / "session_peers" / "web"
+SKILL = SCRIPTS.parent
+REPO = SKILL.parent.parent
+MOCK_JS = REPO / "prds" / "mockups" / "161-session-peers-web" / "app.js"
+NOTICES = SKILL / "THIRD_PARTY_NOTICES.md"
+
+# The SVG namespace is a name, never fetched; it is the only URL an asset may contain.
+SVG_NS = "http://www.w3.org/2000/svg"
+
+
+def read(name):
+    return (WEB / name).read_text(encoding="utf-8")
+
+
+def function_body(source, name):
+    """The text of ``function <name>(...) { ... }`` by brace matching (the helper holds no braces in strings)."""
+    match = re.search(r"\bfunction\s+%s\s*\(" % re.escape(name), source)
+    if match is None:
+        raise AssertionError("function %s not found" % name)
+    start = source.index("{", match.end())
+    depth = 0
+    for index in range(start, len(source)):
+        if source[index] == "{":
+            depth += 1
+        elif source[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return match.start(), index + 1
+    raise AssertionError("function %s is not closed" % name)
+
+
+class _Shell(html.parser.HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.tags = []
+        self.script_open = False
+        self.script_text = []
+        self.style_tags = 0
+
+    def handle_starttag(self, tag, attrs):
+        self.tags.append((tag, attrs))
+        if tag == "script":
+            self.script_open = True
+        if tag == "style":
+            self.style_tags += 1
+
+    handle_startendtag = handle_starttag
+
+    def handle_endtag(self, tag):
+        if tag == "script":
+            self.script_open = False
+
+    def handle_data(self, data):
+        if self.script_open:
+            self.script_text.append(data)
+
+
+class WebAssetTests(unittest.TestCase):
+    def setUp(self):
+        self.js = read("app.js")
+        self.css = read("app.css")
+        self.html = read("index.html")
+
+    # -- app.js -------------------------------------------------------------
+
+    def test_app_js_has_no_html_sinks_or_code_from_strings(self):
+        forbidden = {
+            "innerHTML": r"innerHTML",
+            "outerHTML": r"outerHTML",
+            "insertAdjacentHTML": r"insertAdjacentHTML",
+            "document.write": r"document\s*\.\s*write",
+            "eval(": r"\beval\s*\(",
+            "Function(": r"\bFunction\s*\(",
+            "createContextualFragment": r"createContextualFragment",
+            "DOMParser": r"\bDOMParser\b",
+            "srcdoc": r"srcdoc\s*=",
+            "document.cookie": r"document\s*\.\s*cookie",
+            "sessionStorage": r"sessionStorage",
+            "indexedDB": r"indexedDB",
+            "import(": r"\bimport\s*\(",
+        }
+        for label, pattern in forbidden.items():
+            self.assertIsNone(re.search(pattern, self.js), label)
+
+    def test_timers_take_functions_never_strings(self):
+        calls = list(re.finditer(r"\bset(?:Timeout|Interval)\s*\(\s*", self.js))
+        self.assertTrue(calls, "the page polls with setTimeout")
+        for call in calls:
+            rest = self.js[call.end():call.end() + 40]
+            self.assertRegex(rest, r"^(?:function\b|\(|[A-Za-z_$][\w$]*\s*[,)])", rest)
+            self.assertNotRegex(rest, r"^[\"'`]")
+
+    def test_set_attribute_is_called_only_inside_el(self):
+        start, end = function_body(self.js, "el")
+        uses = [m.start() for m in re.finditer(r"setAttribute(?:NS)?\b", self.js)]
+        self.assertTrue(uses, "el() sets attributes")
+        for pos in uses:
+            self.assertTrue(start <= pos < end, "setAttribute outside el() at offset %d" % pos)
+        self.assertIsNone(re.search(r"\.\s*attributes\s*\[|\bsetAttributeNode\b|\.\s*(?:href|src|style)\s*=", self.js))
+
+    def test_el_enforces_an_attribute_allowlist(self):
+        start, end = function_body(self.js, "el")
+        body = self.js[start:end]
+        self.assertIn("attrAllowed", body)
+        self.assertIn("throw new Error", body)
+        for name in ("onclick", "href", "src", "style", "srcdoc", "xlink:href"):
+            self.assertNotIn('"%s"' % name, self.js.split("function attrAllowed")[0].split("var ATTRS")[1])
+
+    def test_storage_holds_only_the_theme(self):
+        key = re.search(r'var THEME_KEY = "([^"]+)";', self.js)
+        self.assertIsNotNone(key)
+        self.assertNotIn("token", key.group(1).lower())
+        for match in re.finditer(r"localStorage(\s*\.\s*(\w+)|\s*\[)?", self.js):
+            member = match.group(2)
+            if match.group(1) is None:
+                continue  # a bare presence check
+            self.assertIn(member, ("getItem", "setItem", "removeItem"), match.group(0))
+            self.assertRegex(self.js[match.end():match.end() + 12], r"^\(THEME_KEY\b")
+
+    def test_requests_go_only_to_the_api_with_the_header(self):
+        self.assertEqual(len(re.findall(r"\bfetch\s*\(", self.js)), 1)
+        self.assertIn('"X-Peers-Token": S.token', self.js)
+        self.assertIn('credentials: "omit"', self.js)
+        self.assertIn('cache: "no-store"', self.js)
+        for literal in re.findall(r'"(/[^"]*)"', self.js):
+            self.assertTrue(literal == "/" or literal.startswith("/api/"), literal)
+        self.assertNotRegex(self.js, r"\b(?:XMLHttpRequest|WebSocket|EventSource|sendBeacon)\b")
+
+    def test_icon_path_data_matches_the_mock(self):
+        if not MOCK_JS.exists():
+            self.skipTest("design mock not present")
+        mock = MOCK_JS.read_text(encoding="utf-8")
+        paths = re.findall(r' d="([^"]+)"', mock)[:3]  # Claude, OpenAI (Codex), OpenCode placeholder
+        self.assertEqual(len(paths), 3)
+        for d in paths:
+            self.assertIn('"%s"' % d, self.js)
+
+    # -- index.html ---------------------------------------------------------
+
+    def test_index_html_has_no_inline_code_and_references_only_the_two_assets(self):
+        shell = _Shell()
+        shell.feed(self.html)
+        self.assertEqual(shell.style_tags, 0)
+        self.assertEqual("".join(shell.script_text).strip(), "")
+        scripts = [dict(attrs) for tag, attrs in shell.tags if tag == "script"]
+        self.assertEqual([s.get("src") for s in scripts], ["/app.js"])
+        links = [dict(attrs) for tag, attrs in shell.tags if tag == "link"]
+        self.assertEqual([(l.get("rel"), l.get("href")) for l in links], [("stylesheet", "/app.css")])
+        for tag, attrs in shell.tags:
+            for name, value in attrs:
+                self.assertFalse(name.lower().startswith("on"), "%s %s" % (tag, name))
+                self.assertNotEqual(name.lower(), "style", tag)
+                if name.lower() in ("src", "href", "action", "formaction", "srcset", "poster", "data", "xlink:href"):
+                    self.assertIn((tag, value), [("script", "/app.js"), ("link", "/app.css")])
+        self.assertNotIn("<form", self.html.lower())
+        self.assertNotRegex(self.html, r"(?i)javascript:")
+
+    # -- every asset --------------------------------------------------------
+
+    def test_no_external_urls_in_any_asset(self):
+        for name, text in (("app.js", self.js), ("app.css", self.css), ("index.html", self.html)):
+            stripped = text.replace(SVG_NS, "")
+            self.assertNotRegex(stripped, r"(?i)\bhttps?:", name)
+            self.assertNotRegex(stripped, r"(?i)fonts\.(?:googleapis|gstatic)", name)
+            self.assertNotRegex(stripped, r"(?i)[\"'(=]\s*//[a-z0-9]", name)  # protocol-relative
+        self.assertNotRegex(self.css, r"(?i)@import|url\s*\(")
+        self.assertNotRegex(self.css, r"(?i)expression\s*\(")
+
+    # -- notices ------------------------------------------------------------
+
+    def test_third_party_notices(self):
+        self.assertTrue(NOTICES.is_file())
+        text = NOTICES.read_text(encoding="utf-8")
+        for want in ("Bootstrap Icons 1.13.1", "openai.svg", "The MIT License (MIT)",
+                     "Copyright (c) 2019-2024 The Bootstrap Authors", "Permission is hereby granted",
+                     'THE SOFTWARE IS PROVIDED "AS IS"', "simple-icons", "claude.svg", "CC0"):
+            self.assertIn(want, text)
+
+
+if __name__ == "__main__":
+    unittest.main()
