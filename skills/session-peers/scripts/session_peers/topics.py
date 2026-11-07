@@ -44,19 +44,25 @@ def validate_topic(topic):
     return topic
 
 
+def topic_stem(topic, base):
+    """The path stem of ``topic`` under ``base`` (a digest, never the topic).
+
+    Pure: creates and chmods nothing, so a read-only reader can name the files."""
+    return os.path.join(base, hashlib.sha256(topic.encode("utf-8")).hexdigest()[:40])
+
+
 def _topic_paths(topic, base=None):
     """(log, meta, lock) paths. The file name is a digest, never the topic,
     so no topic string can name a path outside the topics directory.
 
     ``base`` roots the files elsewhere (channel history lives under a
     user-wide directory); it defaults to the CODEX_HOME-scoped topics dir."""
-    digest = hashlib.sha256(topic.encode("utf-8")).hexdigest()[:40]
     if base is None:
         base = topics_dir()
     else:
         os.makedirs(base, mode=0o700, exist_ok=True)
         os.chmod(base, 0o700)
-    stem = os.path.join(base, digest)
+    stem = topic_stem(topic, base)
     return stem + ".jsonl", stem + ".meta.json", stem + ".lock"
 
 
