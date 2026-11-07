@@ -618,6 +618,16 @@ class ChatRowTests(ChatBase):
         time.sleep(0.3)  # nothing is retried
         self.assertEqual(len(self.journal_entries()), 1)
         self.assertEqual(self.state.row(mid)["state"], "not sent (journaled)")
+        self.assertEqual(row["recipients"], {})  # nothing was delivered, so no recipient waits for an ACK
+
+    def test_a_channel_posts_unrecorded_transport_failure_is_flagged_on_its_row(self):
+        with mock.patch.object(sp_channels, "_deliver_member", return_value="refused: no route"), \
+                mock.patch.object(sp_journal, "transport_failed", return_value=76) as failed:
+            row = self.wait_row(self.accepted("#ops", "status?"))
+        self.assertTrue(failed.called)
+        self.assertIs(row["update_failed"], True)
+        clean = self.wait_row(self.accepted("#ops", "again"))
+        self.assertNotIn("update_failed", clean)
 
     def test_an_exception_after_the_journal_write_reads_failed_after_recording_never_not_sent(self):
         with mock.patch.object(sp_channels, "_deliver_all", side_effect=RuntimeError("boom")):
@@ -1481,7 +1491,41 @@ class ChatReworkTests(ChatFeedBase):
             self.assertEqual(three["browser"]["entries"], [])
             self.assertEqual(self.b_of(three), self.b_of(two))
         self.assertEqual(len(asked), 1)
-        self.assertLessEqual(asked[0], webdata.REQUEST_BUDGET // 4)
+        # The read gets what the first page does not need, not a fixed share.
+        self.assertLess(asked[0], webdata.REQUEST_BUDGET)
+        self.assertGreaterEqual(webdata.REQUEST_BUDGET - asked[0], self.state.first_page_bytes())
+
+    def test_a_long_newer_message_does_not_leave_a_verifiable_ack_unverified(self):
+        mid, cc, _listener = self.direct_send()
+        sp_journal.ack(mid, cc)
+        # Newer than the ACK, and over the old quarter-of-the-budget hydration read when escaped.
+        sp_journal.record_message("cc:" + new_uuid(), [cc], "中" * 400000)
+        first = self.first_page()
+        self.assertEqual(self.state.row(mid)["recipients"][cc]["ack"], "acked")
+        second = self.changes(first["cursor"])
+        third = self.changes(second["cursor"])
+        self.assertEqual(self.state.row(mid)["recipients"][cc]["ack"], "acked")
+        for page in (first, second, third):
+            for row in page["browser"]["sends"]:
+                self.assertNotEqual(row["recipients"][cc]["ack"], "unverified")
+
+    def test_an_unverified_hint_never_covers_a_fact_the_row_holds(self):
+        mid, cc, _listener = self.direct_send()
+        self.state.apply_journal(mid, cc, transport_error="no route")
+        self.state.apply_journal(mid, cc, ack="unverified")
+        self.assertEqual(self.state.row(mid)["recipients"][cc]["ack"], "pending")
+        self.state.update(mid, recipients={cc: {"outcome": None, "ack": "not requested"}})
+        self.state.apply_journal(mid, cc, ack="unverified")
+        self.assertEqual(self.state.row(mid)["recipients"][cc]["ack"], "not requested")
+
+    def test_a_first_page_that_leaves_an_entry_out_for_want_of_budget_flags_a_gap(self):
+        self.inbound("\U0001F600" * 250000)  # about 3 MiB on the wire
+        self.inbound("small")
+        cursor = self.start_cursor()
+        page = webdata.changes(cursor, budget=webdata.Budget(2 * 1024 * 1024), browser=self.state)["browser"]
+        texts = [e["text"] for e in page["entries"]]
+        self.assertEqual(texts, ["small"])
+        self.assertTrue(page["gap"])  # the cursor moves past the big one, so it must not be silent
 
     # -- lone surrogates (3) ----------------------------------------------------
 
@@ -1642,8 +1686,27 @@ class ChatReworkTests(ChatFeedBase):
             captured["parse_int"]("9" * (web.NUMERAL_MAX + 1))
         with self.assertRaises(ValueError):
             captured["parse_float"]("1." + "0" * web.NUMERAL_MAX)
-        body = b'{"to":"#ops","text":"x","ack":true,"n":' + b"9" * 5000 + b"}"
-        self.assert_refused(self.raw_post(body), 400)
+        # Over HTTP: the long numeral sits in an allowed field, so only the parser's own hook can be
+        # what refuses it (a wrong type would also be a 400, which is why the hook is watched).
+        raised = []
+
+        def watching(text, **kw):
+            hook = kw["parse_int"]
+
+            def watched(numeral):
+                try:
+                    return hook(numeral)
+                except ValueError as exc:
+                    raised.append(exc)
+                    raise
+
+            return real(text, **dict(kw, parse_int=watched))
+
+        body = b'{"to":"#ops","text":"x","ack":' + b"1" + b"0" * 40 + b"}"
+        with mock.patch.object(web.json, "loads", watching):
+            self.assert_refused(self.raw_post(body), 400)
+        self.assertEqual(len(raised), 1)
+        self.assertIn("numeral too long", str(raised[0]))
 
     # -- oversized entries (11) --------------------------------------------------------
 

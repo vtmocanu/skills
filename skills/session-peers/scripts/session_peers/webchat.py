@@ -245,8 +245,12 @@ class BrowserState:
         with self._lock:
             return [copy.deepcopy(e) for e, _size in self._log]
 
-    def update(self, mid, state=None, reason=None, journaled=None, delivering=None, recipients=None, note=None):
-        """Change fields of a row; the row's seq rises only when something differs."""
+    def update(self, mid, state=None, reason=None, journaled=None, delivering=None, recipients=None, note=None,
+               update_failed=None):
+        """Change fields of a row; the row's seq rises only when something differs.
+
+        ``update_failed`` True sets the row-level flag: the journal could not record a transport failure
+        of this channel post (the fan-out reports it once, not per recipient)."""
         with self._lock:
             row = self._sends.get(mid)
             if row is None:
@@ -263,6 +267,8 @@ class BrowserState:
                 row["recipients"] = recipients
             if note is not None:
                 row["note"] = _bounded(note, 600)
+            if update_failed:
+                row["update_failed"] = True
             if row != before:
                 self._touch_locked(row)
 
@@ -316,8 +322,9 @@ class BrowserState:
         """Fold one journal fact into a row, idempotently per ``(mid, recipient)``.
 
         ``recipient`` None means every recipient of the row. ``acked`` always lands, even on a slot
-        that was ``not requested``; ``pending``, ``unverified`` and ``expired`` replace only a
-        still-open state (one of those three). An unknown message or recipient is ignored."""
+        that was ``not requested``; ``pending`` and ``expired`` replace only a still-open state
+        (``pending``, ``unverified`` or ``expired``); ``unverified`` lands only on a ``pending`` slot
+        with no transport error. An unknown message or recipient is ignored."""
         with self._lock:
             row = self._sends.get(mid) if isinstance(mid, str) else None
             if row is None:
@@ -329,7 +336,12 @@ class BrowserState:
                 if slot is None:
                     continue
                 if ack is not None and ack != slot["ack"]:
-                    if ack == ACK_ACKED or (slot["ack"] in _ACK_SOFT and ack in _ACK_SOFT):
+                    if ack == ACK_UNVERIFIED:
+                        # Only a guess: it never covers a slot that already holds a fact.
+                        land = slot["ack"] == ACK_PENDING and "transport_error" not in slot
+                    else:
+                        land = ack == ACK_ACKED or (slot["ack"] in _ACK_SOFT and ack in _ACK_SOFT)
+                    if land:
                         slot["ack"] = ack
                         changed = True
                 if transport_error is not None:
@@ -372,6 +384,11 @@ class BrowserState:
                     out.append(entry["message_id"])
             return out
 
+    def first_page_bytes(self):
+        """The bytes a first page of everything now retained would take (entries and rows)."""
+        with self._lock:
+            return sum(size for _entry, size in self._log) + sum(_size(row) for row in self._sends.values())
+
     def page(self, after_log, after_rows, first, max_bytes):
         """The log entries and status rows past a position, within ``max_bytes``.
 
@@ -389,7 +406,8 @@ class BrowserState:
                 for entry, size in reversed(items):
                     if used + size > max_bytes:
                         cut = True
-                        break
+                        gap = True  # the cursor is set past it, so an entry left out is flagged lost
+                        continue
                     entries.append(entry)
                     used += size
                 entries.reverse()
@@ -614,10 +632,12 @@ class SendWorker:
                 recipients[member] = {"outcome": outcome, "ack": ACK_NOT_REQUESTED if no_ack else ACK_PENDING}
             note = payload.get("outcome_problem")
             self.state.merge_recipients(mid, recipients)
-            self.state.update(mid, state=STATE_PENDING, journaled=True, delivering=False, note=note)
+            self.state.update(mid, state=STATE_PENDING, journaled=True, delivering=False, note=note,
+                              update_failed=bool(payload.get("update_failed")))
         elif state == sp_channels.WEB_NOT_SENT_JOURNALED:
+            # Nothing was delivered: the recipients `on_journaled` seeded would read as ACK pending forever.
             self.state.update(mid, state=STATE_NOT_SENT_JOURNALED, reason=payload.get("reason"), journaled=True,
-                              delivering=False)
+                              delivering=False, recipients={})
         else:
             self.state.update(mid, state=STATE_NOT_SENT, reason=payload.get("reason"), delivering=False)
 

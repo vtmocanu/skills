@@ -36,7 +36,7 @@ from . import budgets as sp_budgets, channels as sp_channels, constants as sp_co
 from . import journal as sp_journal, runtime as sp_runtime, topics as sp_topics
 
 REQUEST_BUDGET = 8 * 1024 * 1024
-HYDRATION_SHARE = 4  # a first page's hydration read takes at most 1/HYDRATION_SHARE of the budget
+HYDRATION_MARGIN = 8  # a first page's reserved bytes: its size plus 1/HYDRATION_MARGIN
 TOPIC_BUDGET = 1024 * 1024
 ENTRY_LINE_MAX = 6 * sp_constants.MAX_TEXT_CHARS + 512 * 1024
 PAGE_MAX = 200
@@ -1647,6 +1647,7 @@ def changes(cursor_text, budget=None, now=None, browser=None):
     updates = []
     first_page = restarted = False
     hydrated_at = None
+    reserved = 0
     if browser is not None:
         position = cursor.get("b")
         restarted = position is not None and position[0] != browser.uuid
@@ -1654,12 +1655,16 @@ def changes(cursor_text, budget=None, now=None, browser=None):
         if first_page:
             # Hydrate before the tail read: `pre` is the position before it, `pos` the position of
             # the hydration read itself. An event written after either is re-read by a later poll.
+            # The page's own bytes (plus a margin for rows that hydration changes) are set aside until
+            # the section is built: hydration, the tail and the channels take everything else, so a
+            # journal that never reaches every wanted id cannot starve the feed on every poll.
+            need = browser.first_page_bytes()
+            reserved = min(budget.remaining(), need + need // HYDRATION_MARGIN)
+            budget.total -= reserved
             mids = browser.restorable_mids()
             if mids:
                 pre, _skipped = _journal_baseline(budget)
-                # A quarter of the budget at most: the log section and the tail keep the rest, so a
-                # journal that never reaches every wanted id cannot starve the feed on every poll.
-                ctx, pos = read_journal_context(budget, mids, with_position=True, limit=budget.remaining() // HYDRATION_SHARE)
+                ctx, pos = read_journal_context(budget, mids, with_position=True)
                 partial = partial or ctx.prefix_unread or not ctx.available
                 _hydrate_browser(browser, ctx, mids)
                 _after_first_page_hydration()
@@ -1777,6 +1782,7 @@ def changes(cursor_text, budget=None, now=None, browser=None):
     result = {"channels": out, "updates": updates, "partial": partial}
     if browser is not None:
         _apply_browser_updates(browser, updates)
+        budget.total += reserved
         section, b_position, b_partial = _browser_section(browser, cursor.get("b"), first_page, restarted, budget)
         result["browser"] = section
         result["partial"] = partial or b_partial
