@@ -31,6 +31,9 @@ python3 -m unittest peer_tests.test_messaging
 | test_journal_cli | Journal command line: `send --record`, recorded requests and replies, exit codes 75 and 76, `record`, `inbox` journal commands and `ack` |
 | test_upgrade | Source digests and replacing an installed copy under a running shim |
 | test_inbox | Own-session queued peer reads, handled sender/message pairs, safe display and read-only request states |
+| test_journal_reader | Budgeted incremental journal reader: anchors, prefix semantics, gaps and parity with the read-only view |
+| test_webdata | Dashboard read model: history snapshot, send state, cursor, changes, All channels, search, hygiene, bounds |
+| test_web_server | Dashboard server: token, Host and method checks, headers, connection cap, deadline, discovery, read-only |
 
 Keep shared fixture roots, fake binaries, listeners, builders, and base classes
 in `support.py`. `HERE` points to the scripts directory, so fixtures invoke the

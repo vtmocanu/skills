@@ -5,6 +5,7 @@ import contextlib
 import errno
 import fcntl
 import os
+import threading
 import time
 from . import config as sp_config, constants as sp_constants, protocol as sp_protocol, runtime as sp_runtime
 
@@ -46,9 +47,32 @@ def codex_sqlite_home():
     return codex_home()
 
 
+_NO_CREATE = threading.local()
+
+
+@contextlib.contextmanager
+def no_create():
+    """While active in this thread, ``state_dir``, ``buddies_dir`` and ``request_dir`` only name their paths.
+
+    A read-only caller (the web dashboard's discovery) must not create or chmod the state
+    directories it merely looks at. Other threads are unaffected; nesting is allowed."""
+    depth = getattr(_NO_CREATE, "depth", 0)
+    _NO_CREATE.depth = depth + 1
+    try:
+        yield
+    finally:
+        _NO_CREATE.depth = depth
+
+
+def _creating():
+    return not getattr(_NO_CREATE, "depth", 0)
+
+
 def state_dir():
     """Where registration, per-thread state, pidfiles and logs live."""
     path = os.path.join(codex_home(), "session-peers")
+    if not _creating():
+        return path
     os.makedirs(path, exist_ok=True)
     try:
         os.chmod(path, 0o700)
@@ -297,6 +321,8 @@ def _binding_locks(*thread_ids):
 
 def buddies_dir():
     path = os.path.join(state_dir(), "buddies")
+    if not _creating():
+        return path
     os.makedirs(path, mode=0o700, exist_ok=True)
     try:
         os.chmod(path, 0o700)
@@ -322,6 +348,8 @@ def version_warning_path():
 
 def request_dir():
     path = os.path.join(state_dir(), "requests")
+    if not _creating():
+        return path
     os.makedirs(path, mode=0o700, exist_ok=True)
     try:
         os.chmod(path, 0o700)
