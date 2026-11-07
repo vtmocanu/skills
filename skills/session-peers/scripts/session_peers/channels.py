@@ -596,10 +596,13 @@ def _discover_general():
         if typed not in members:
             members.append(typed)
 
-    _records, claude_error = sp_claude.read_claude_records_checked()
+    # One registry scan: the complete snapshot when it succeeds, the best-effort
+    # read (with the gap named) only when it does not.
+    records, claude_error = sp_claude.read_claude_records_checked()
     if claude_error is not None:
         gaps.append("Claude registry: %s" % _reason(claude_error))
-    for record in sp_claude.read_claude_records():
+        records = sp_claude.read_claude_records()
+    for record in records:
         if sp_claude.record_liveness(record) in ("live", "unverified"):
             kind = "codex" if record.get("entrypoint") == "codex" else "cc"
             add("%s:%s" % (kind, record.get("sessionId")))

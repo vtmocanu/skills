@@ -271,6 +271,26 @@ class GeneralDiscoveryGapTests(GeneralBase):
         self.assertEqual(len(result["discovery_incomplete"]), 1)
         self.assertTrue(result["discovery_incomplete"][0].startswith("Codex: "), result)
 
+    def test_a_complete_claude_read_is_used_without_a_second_scan(self):
+        # A record that vanishes right after the complete read is still addressed
+        # (its delivery outcome tells what happened), never dropped silently.
+        _peer, peer_typed = self.peer_cc("bravo")
+        checked = sp_channels.sp_claude.read_claude_records_checked
+        sid = peer_typed.partition(":")[2]
+
+        def checked_then_vanish():
+            result = checked()
+            for path in self.sessions.glob("*.json"):
+                if sid in path.read_text():
+                    path.unlink()
+            return result
+
+        with mock.patch.object(sp_channels.sp_claude, "read_claude_records_checked", checked_then_vanish):
+            _rc, result, err = self.post()
+        self.assertIsNotNone(result, err)
+        self.assertIn(peer_typed, result["outcomes"])
+        self.assertNotIn("discovery_incomplete", result)
+
     def test_a_complete_discovery_reports_no_gap(self):
         rc, result, err = self.post()
         self.assertEqual(rc, 0, err)
