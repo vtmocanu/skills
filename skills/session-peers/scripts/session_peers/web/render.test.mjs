@@ -1087,6 +1087,51 @@ test("All channels: a live entry that arrives while Load more is in flight is no
   assert.ok(sub.startsWith("Out of date"), sub)
 })
 
+test("All channels: a new channel seen during the initial load marks the view out of date", async () => {
+  let release
+  const gate = new Promise((r) => { release = r })
+  const env = bootFixture({ "/api/all": () => gate.then(() => allBatch([Object.assign(sendEntry(1, "from general"), { channel: "general" })], { total: 1, shown: 1, next: null, channels: ["general"] })) })
+  await env.app.ready
+  const showing = env.app.showAll()
+  env.routes["/api/changes"] = quiet("C1", { channels: { fresh: { new: true, entries: [], gap: null } } })
+  await env.app.pollOnce()
+  release()
+  await showing
+  const sub = env.document.byId.sub.textContent
+  assert.ok(sub.startsWith("Out of date"), sub)
+})
+
+test("All channels: a live entry in an already-read channel during Load more keeps the view current", async () => {
+  let release
+  const gate = new Promise((r) => { release = r })
+  const first = allBatch([Object.assign(sendEntry(1, "from general"), { channel: "general" })], { partial: true, omitted: 1, total: 2, shown: 1, next: "TOK", channels: ["general"] })
+  const last = allBatch([], { total: 2, shown: 2, next: null, channels: ["ops"] })
+  const env = bootFixture({ "/api/all": (url) => (url.includes("next=TOK") ? gate.then(() => last) : first) })
+  await env.app.ready
+  await env.app.showAll()
+  const loading = env.app.loadAll("TOK")
+  env.routes["/api/changes"] = quiet("C1", { channels: { general: { entries: [sendEntry(2, "live general")], gap: null } } })
+  await env.app.pollOnce()
+  release()
+  await loading
+  const sub = env.document.byId.sub.textContent
+  assert.ok(env.document.byId.stream.textContent.includes("live general"))
+  assert.ok(!sub.startsWith("Out of date"), sub)
+})
+
+test("All channels: a double Load more with the same token adds the batch once", async () => {
+  let calls = 0
+  const first = allBatch([Object.assign(sendEntry(1, "from general"), { channel: "general" })], { partial: true, omitted: 1, total: 2, shown: 1, next: "TOK", channels: ["general"] })
+  const last = allBatch([Object.assign(sendEntry(5, "from ops once"), { channel: "ops" })], { total: 2, shown: 2, next: null, channels: ["ops"] })
+  const env = bootFixture({ "/api/all": (url) => { if (url.includes("next=TOK")) { calls += 1; return last } return first } })
+  await env.app.ready
+  await env.app.showAll()
+  await Promise.all([env.app.loadAll("TOK"), env.app.loadAll("TOK")])
+  const text = env.document.byId.stream.textContent
+  assert.equal(text.split("from ops once").length - 1, 1, text)
+  assert.equal(calls, 1)
+})
+
 test("a channel load error says updates stopped after the token was refused", async () => {
   const env = bootFixture({ "/api/channel/ops": { __status: 502 } })
   await env.app.ready

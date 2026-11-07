@@ -155,7 +155,7 @@
     selected: "general", view: "conv", pages: table(), pendingNotes: table(), loading: table(), pageErrors: table(),
     all: null, search: null, cursor: null, polls: 0, failures: 0, polling: false, stopped: false, timer: null,
     needState: false, live: { mode: "starting" }, liveText: null, untracked: 0, journalGap: false, pane: "main",
-    focusables: table(), wired: false, waiting: false, allInflight: null
+    focusables: table(), wired: false, waiting: false, allInflight: null, allLoadingNext: null, allLoadingPromise: null
   };
 
   var RT_LABEL = { claude: "Claude Code", codex: "Codex", oc: "OpenCode", unknown: "Unknown runtime" };
@@ -902,12 +902,16 @@
   }
 
   function loadAll(next) {
+    // A second Load more with the same token while the first is in flight would add the batch twice.
+    if (next && S.allLoadingNext === next && S.allLoadingPromise) return S.allLoadingPromise;
     var url = "/api/all" + (next ? "?next=" + encodeURIComponent(next) : "");
     // Channels with live activity while this request is in flight: the batch may have been read
     // before that activity, so they are judged against the batch once it arrives.
     var inflight = table();
     S.allInflight = inflight;
-    return api(url).then(function (data) {
+    var done = function () { if (S.allLoadingNext === next) { S.allLoadingNext = null; S.allLoadingPromise = null; } };
+    var promise = api(url).then(function (data) {
+      done();
       if (S.allInflight === inflight) S.allInflight = null;
       var entries = (Array.isArray(data.entries) ? data.entries : []).filter(function (e) { return e && typeof e === "object"; });
       if (!next || !S.all) S.all = newAll();
@@ -936,10 +940,17 @@
       all.next = data.next || null; all.partial = !!data.partial; all.trimmed += data.trimmed || 0;
       capAll(all);
       Object.keys(inflight).forEach(function (k) {
-        if (all.read[k] || !all.next) markAllStale("New entries arrived in " + chanText(k) + " while this view was loading; it may not include them.");
+        if (inflight[k] === "new") {
+          // The server enters a new channel at its current position: unless this batch read it,
+          // its first entries never stream into this view.
+          if (!all.read[k]) markAllStale("A new channel exists (" + chanText(k) + "); this view does not include it.");
+        } else if (all.read[k] || !all.next) {
+          markAllStale("New entries arrived in " + chanText(k) + " while this view was loading; it may not include them.");
+        }
       });
       if (S.view === "all") renderMain(next ? { focusMore: "more:all", focusSet: entries } : { toBottom: true });
     }, function (err) {
+      done();
       if (S.allInflight === inflight) S.allInflight = null;
       if (err && err.status === 409) {
         S.all = null;
@@ -947,6 +958,8 @@
       }
       showError(err);
     });
+    if (next) { S.allLoadingNext = next; S.allLoadingPromise = promise; }
+    return promise;
   }
 
   function showAll() {
@@ -987,7 +1000,8 @@
     var page = S.pages[key];
     if (page && appendToPage(page, entries)) changed = true;
     var all = S.all;
-    if (S.allInflight && entries.length) S.allInflight[key] = true;
+    // Channels already read are judged live below; only the ones this request may read are recorded.
+    if (S.allInflight && entries.length && !(all && all.read[key]) && !S.allInflight[key]) S.allInflight[key] = "entry";
     if (all && all.covered[key]) {
       entries.forEach(function (e) {
         if (!e || typeof e !== "object") return;
@@ -1088,12 +1102,13 @@
       var c = chans[key] && typeof chans[key] === "object" ? chans[key] : {};
       if (c.new) {
         S.needState = true;
+        if (S.allInflight) S.allInflight[key] = "new";
         if (markAllStale("A new channel exists (" + chanText(key) + "); this view does not include it.")) changed = true;
         return;
       }
       if (c.gap) {
         reloads.push([key, c.gap]);
-        if (S.allInflight) S.allInflight[key] = true;
+        if (S.allInflight && !(S.all && S.all.read[key]) && !S.allInflight[key]) S.allInflight[key] = "entry";
         if (S.all && (S.all.covered[key] || S.all.read[key] || !S.all.next) && markAllStale(chanText(key) + " has entries this view could not stream; it may be incomplete.")) changed = true;
         return;
       }
