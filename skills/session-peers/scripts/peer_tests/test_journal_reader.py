@@ -100,7 +100,8 @@ class BudgetTests(ReaderBase):
         self.assertEqual(again["messages"] + again["events"], [])
         self.assertEqual(again["next"], first["next"])
         self.assertEqual(again["context"], {})
-        for key in ("complete", "journal_prefix", "gap"):
+        for key in ("complete", "journal_prefix", "gap", "window_regression", "oversized", "next_anchor"):
+            self.assertIn(key, again)
             self.assertIsNone(again[key])
         self.msg()
         changed = journal.read_since(first["next"], BIG, known_fingerprint=first["fingerprint"])
@@ -124,6 +125,16 @@ class BudgetTests(ReaderBase):
         self.assertNotEqual(journal.journal_fingerprint(), fp)
         with self.assertRaises(journal.JournalUnavailable):
             journal.read_only_view()
+        with self.assertRaises(journal.JournalUnavailable):
+            journal.read_since(None, BIG, known_fingerprint=fp)
+
+    def test_dir_replaced_by_symlink_invalidates_fingerprint(self):
+        self.msg()
+        fp = journal.read_since(None, BIG)["fingerprint"]
+        real = self.dir + ".real"
+        os.rename(self.dir, real)
+        os.symlink(real, self.dir)
+        self.assertNotEqual(journal.journal_fingerprint(), fp)
         with self.assertRaises(journal.JournalUnavailable):
             journal.read_since(None, BIG, known_fingerprint=fp)
 
@@ -459,9 +470,14 @@ class PrefixTests(ReaderBase):
         self.assertEqual(res["context"][self.mid]["acked"], [self.A])
         self.assertEqual([e["type"] for e in res["events"]], ["ack"])
 
-    def test_cursor_stops_reading_once_passed(self):
-        size = self.filler_journal()
-        res = journal.read_since(990, BIG)
+    def test_cursor_stops_reading_at_the_anchor(self):
+        lines = [self.mrec(i, body="x" * 300) for i in range(1, 1001)]
+        self.put(*lines[:990])
+        prev = journal.read_since(None, BIG)
+        self.assertEqual(prev["next"], 990)
+        self.put(*lines)
+        size = os.path.getsize(self.jpath)
+        res = journal.read_since(990, BIG, cursor_anchor=prev["next_anchor"])
         self.assertLess(res["bytes"], size // 4)
         self.assertEqual(res["journal_prefix"], "unread")
         self.assertIsNone(res["gap"])
@@ -545,11 +561,18 @@ class EarlyStopTests(ReaderBase):
         self.assertFalse(res["complete"])
 
     def test_regression_in_unread_window_is_not_complete(self):
-        # Stale seq 105 after 109: newest first the reader sees 110, 109, 105, 106 ...
+        # File order 1..105, stale 5, 106..110. The window holds 105 (the anchor), the stale
+        # line and 106..110, so the replay sees 105 then 5: a regression after the anchor.
         lines = [self.mrec(i, body="x" * 3000) for i in range(1, 111)]
-        lines.insert(105, self.mrec(5, body="x" * 3000))
+        self.put(*lines[:105])
+        prev = journal.read_since(None, BIG)
+        stale = self.mrec(5, body="x" * 3000)
+        lines.insert(105, stale)
         self.put(*lines)
-        res = journal.read_since(105, 12000)
+        budget = sum(len(l) for l in lines[104:]) + 10
+        res = journal.read_since(105, budget, cursor_anchor=prev["next_anchor"])
+        self.assertEqual(res["journal_prefix"], "unread")
+        self.assertTrue(res["window_regression"])
         self.assertFalse(res["complete"])
 
     def test_foreign_ack_beyond_window_is_not_returned(self):
@@ -598,6 +621,156 @@ class EarlyStopTests(ReaderBase):
         res = journal.read_since(None, BIG, want=[mid])
         self.assertEqual(res["context"][mid]["state"], "found")
         self.assertEqual(res["context"][mid]["seq"], 1)
+
+
+class AnchorTests(ReaderBase):
+    BODY = "x" * 3000
+
+    def mr(self, seq):
+        return self.mrec(seq, body=self.BODY)
+
+    def anchored(self, prefix, rest, cursor=None):
+        """Write ``prefix``, read it to get the anchor at its last seq, then write the whole journal."""
+        self.put(*prefix)
+        prev = journal.read_since(None, BIG)
+        self.assertEqual(prev["next"], cursor if cursor is not None else len(prefix))
+        self.put(*prefix, *rest)
+        return prev
+
+    def assert_no_silent_loss(self, cursor, budget, anchor, label):
+        expected = [e["seq"] for e in journal.read_only_view()["entries"] if e["seq"] > cursor]
+        res = journal.read_since(cursor, budget, cursor_anchor=anchor)
+        got = [m["seq"] for m in res["messages"]]
+        if res["complete"]:
+            self.assertEqual(got, expected, "%s budget=%s: complete with loss" % (label, budget))
+        return res
+
+    def check_variant(self, label, prefix, rest, budgets=(BIG,)):
+        cursor = len(prefix)
+        prev = self.anchored(prefix, rest)
+        for chunk in (4096, 512):
+            with mock.patch.object(journal, "_READ_CHUNK", chunk):
+                for budget in budgets:
+                    for anchor in (prev["next_anchor"], None):
+                        self.assert_no_silent_loss(cursor, budget, anchor, "%s chunk=%d" % (label, chunk))
+
+    def variant(self, stale, n=100, tail=10, cursor=50):
+        lines = [self.mr(i) for i in range(1, n + 1)]
+        lines += stale + [self.mr(i) for i in range(n + 1, n + tail + 1)]
+        return lines[:cursor], lines[cursor:]
+
+    def test_stale_runs_never_lose_records_silently(self):
+        mr = self.mr
+        cases = {
+            "V3 stale 4,5": [mr(4), mr(5)],
+            "V5 stale 3,4,5": [mr(3), mr(4), mr(5)],
+            "V9 stale 49,50": [mr(49), mr(50)],
+            "V1 one stale": [mr(5)],
+        }
+        for label, stale in cases.items():
+            self.check_variant(label, *self.variant(stale))
+
+    def test_budget_ending_next_to_a_stale_line_is_not_complete_with_loss(self):
+        mr = self.mr
+        for label, stale in (("V16", [mr(5)]), ("V17", [mr(4), mr(5)])):
+            prefix, rest = self.variant(stale)
+            lines = prefix + rest
+            for extra in (0, 1, 2):
+                size = sum(len(l) for l in lines[-(10 + len(stale) + extra):])
+                self.check_variant("%s+%d" % (label, extra), prefix, rest, budgets=(size - 1, size, size + 1))
+
+    def test_stale_run_in_the_middle_of_the_window(self):
+        mr = self.mr
+        lines = [mr(i) for i in range(1, 81)] + [mr(4), mr(5)] + [mr(i) for i in range(81, 111)]
+        self.check_variant("V18", lines[:50], lines[50:])
+
+    def test_stale_run_after_105(self):
+        mr = self.mr
+        lines = [mr(i) for i in range(1, 106)] + [mr(9), mr(10)] + [mr(i) for i in range(106, 111)]
+        self.check_variant("V19", lines[:60], lines[60:])
+
+    def test_stale_run_is_reported_not_complete_with_anchor(self):
+        # With a matching anchor the read ends at it, and the stale run after it is a regression.
+        prefix, rest = self.variant([self.mr(4), self.mr(5)])
+        prev = self.anchored(prefix, rest)
+        with mock.patch.object(journal, "_READ_CHUNK", 4096):
+            res = journal.read_since(50, BIG, cursor_anchor=prev["next_anchor"])
+        self.assertEqual(res["journal_prefix"], "unread")
+        self.assertTrue(res["window_regression"])
+        self.assertFalse(res["complete"])
+
+    def well_formed(self, count=300, cursor=290):
+        lines = [self.mrec(i, body="x" * 300) for i in range(1, count + 1)]
+        prev = self.anchored(lines[:cursor], lines[cursor:])
+        return prev, os.path.getsize(self.jpath)
+
+    def test_matching_anchor_stops_early_and_is_complete(self):
+        prev, size = self.well_formed()
+        with mock.patch.object(journal, "_READ_CHUNK", 4096):
+            res = journal.read_since(290, BIG, cursor_anchor=prev["next_anchor"])
+        self.assertLess(res["bytes"], size // 4)
+        self.assertTrue(res["complete"])
+        self.assertEqual(res["journal_prefix"], "unread")
+        self.assertIsNone(res["gap"])
+        expected = [e["seq"] for e in journal.read_only_view()["entries"] if e["seq"] > 290]
+        self.assertEqual([m["seq"] for m in res["messages"]], expected)
+        self.assertEqual(res["next"], 300)
+
+    def test_without_anchor_the_read_does_not_stop_early(self):
+        prev, size = self.well_formed()
+        with mock.patch.object(journal, "_READ_CHUNK", 4096):
+            res = journal.read_since(290, BIG)
+            self.assertEqual(res["bytes"], size)
+            self.assertEqual(res["journal_prefix"], "read")
+            budget = size // 4
+            self.reset_preads()
+            part = journal.read_since(290, budget)
+        self.assertGreaterEqual(part["bytes"], budget)
+        self.assertFalse(part["complete"])
+        self.assertEqual(part["journal_prefix"], "unread")
+
+    def test_wrong_anchor_does_not_stop_early(self):
+        prev, size = self.well_formed()
+        # Rewrite so the record at seq 290 differs from the one the anchor was taken from.
+        lines = [self.mrec(i, body="y" * 300) for i in range(1, 301)]
+        self.put(*lines)
+        size = os.path.getsize(self.jpath)
+        with mock.patch.object(journal, "_READ_CHUNK", 4096):
+            for anchor in (prev["next_anchor"], "0" * 16, "", 5):
+                res = journal.read_since(290, BIG, cursor_anchor=anchor)
+                self.assertEqual(res["bytes"], size)
+                self.assertEqual(res["journal_prefix"], "read")
+
+    def test_anchor_is_for_the_record_at_cursor_only(self):
+        prev, size = self.well_formed()
+        with mock.patch.object(journal, "_READ_CHUNK", 4096):
+            res = journal.read_since(289, BIG, cursor_anchor=prev["next_anchor"])
+        self.assertEqual(res["bytes"], size)
+
+    def test_next_anchor_is_the_hash_of_the_record_at_next(self):
+        import hashlib
+        lines = [self.mrec(i) for i in range(1, 4)]
+        self.put(*lines)
+        res = journal.read_since(None, BIG)
+        self.assertEqual(res["next"], 3)
+        self.assertEqual(res["next_anchor"], hashlib.sha256(lines[2][:-1]).hexdigest()[:16])
+        self.assertEqual(len(res["next_anchor"]), 16)
+
+    def test_next_anchor_is_none_without_a_valid_record_at_next(self):
+        self.assertIsNone(journal.read_since(None, BIG)["next_anchor"])
+        self.put(b"garbage\n", self.line({"seq": 7, "junk": True}))
+        res = journal.read_since(3, BIG)
+        self.assertIsNone(res["next_anchor"])
+        self.put(self.mrec(1), self.line({"seq": 2, "schema": 2, "type": "zzz"}))
+        self.assertIsNone(journal.read_since(None, BIG)["next_anchor"])
+
+    def test_anchor_with_a_missing_cursor_record_falls_back_to_reading_on(self):
+        lines = [self.mrec(i, body="x" * 300) for i in range(1, 301)]
+        self.put(*lines)
+        size = os.path.getsize(self.jpath)
+        res = journal.read_since(500, BIG, cursor_anchor="a" * 16)
+        self.assertEqual(res["bytes"], size)
+        self.assertEqual(res["gap"]["reason"], "regression")
 
 
 class NearCapTests(ReaderBase):

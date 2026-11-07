@@ -49,6 +49,7 @@ from __future__ import annotations
 import errno
 import fcntl
 import functools
+import hashlib
 import json
 import math
 import os
@@ -1487,15 +1488,20 @@ def journal_fingerprint():
         return None
 
 
+def _line_anchor(raw):
+    """First 16 hex chars of the sha256 of a journal line's bytes (no newline)."""
+    return hashlib.sha256(raw).hexdigest()[:16]
+
+
 class _Scan:
     """Whole lines of the window, fed newest first, and what they say about stopping early."""
 
-    def __init__(self, now, cursor, wanted):
+    def __init__(self, now, cursor, wanted, cursor_anchor=None):
         self.now, self.cursor, self.wanted = now, cursor, set(wanted)
-        self.items = []  # newest first: (parsed or None, loose seq of an unusable line)
+        self.cursor_anchor = cursor_anchor
+        self.items = []  # newest first: (parsed or None, loose seq of an unusable line, raw line)
         self.lines = self.oversized = 0
-        self.passed = False  # two consecutive valid records, the newer at or below the cursor, strictly decreasing
-        self.prev = None  # seq of the previous valid, non-foreign record fed
+        self.anchor_idx = None  # index in items of the newest line that is the anchor record
         self.messages, self.referenced = set(), set()
 
     def add(self, raw):
@@ -1507,7 +1513,7 @@ class _Scan:
             return
         parsed = _parse_line(raw, self.now)
         loose = 0 if parsed is not None else _loose_seq(raw)
-        self.items.append((parsed, loose))
+        self.items.append((parsed, loose, raw))
         if parsed is not None and not parsed[1]:
             d = parsed[0]
             seq = d["seq"]
@@ -1515,18 +1521,19 @@ class _Scan:
                 self.messages.add(d["message_id"])
             elif d["type"] in _EVENT_TYPES and self.cursor is not None and seq > self.cursor:
                 self.referenced.add(d["message_id"])
-            # Newest first, a consistent journal has strictly decreasing seqs. The cursor counts
-            # as passed only when a valid record at or below it is confirmed by the next older
-            # valid record being lower still; a stale or regressed line fails that and reading goes on.
-            if self.cursor is not None and self.prev is not None and seq < self.prev <= self.cursor:
-                self.passed = True
-            self.prev = seq
+            # The cursor counts as reached only at the anchor record: a valid line at seq == cursor
+            # whose bytes hash to the anchor the caller got from its previous read. A stale or
+            # regressed line cannot fake that, so seq order alone never ends the read.
+            if (self.anchor_idx is None and self.cursor_anchor is not None and seq == self.cursor
+                    and _line_anchor(raw) == self.cursor_anchor):
+                self.anchor_idx = len(self.items) - 1
 
     def satisfied(self):
-        """True when nothing more is needed: wanted messages (and, after a cursor, its reach) are in."""
+        """True when nothing more is needed: wanted messages (and, after a cursor, its anchor) are in."""
         if self.cursor is None:
             return bool(self.wanted) and self.wanted <= self.messages
-        return self.passed and self.referenced <= self.messages and self.wanted <= self.messages
+        return (self.anchor_idx is not None and self.referenced <= self.messages
+                and self.wanted <= self.messages)
 
 
 def _read_window(fd, size, budget, scan):
@@ -1590,35 +1597,48 @@ def _unchanged_result(cursor, fingerprint):
     """Nothing was read, so completeness, prefix and gap are unknown (None), never claimed."""
     return {
         "messages": [], "events": [], "context": {}, "bytes": 0,
-        "next": cursor if cursor is not None else 0, "complete": None,
+        "next": cursor if cursor is not None else 0, "next_anchor": None, "complete": None,
         "journal_prefix": None, "window_regression": None, "oversized": None, "gap": None,
         "fingerprint": fingerprint, "unchanged": True,
     }
 
 
 @_api
-def read_since(cursor, budget, want=None, known_fingerprint=None):
+def read_since(cursor, budget, want=None, known_fingerprint=None, cursor_anchor=None):
     """Budgeted, incremental, read-only view of the journal tail after ``cursor``.
 
     Same-OS-user trust exception like ``read_only_view``; never locks, repairs, creates
     or writes anything, and unsafe modes or ownership raise JournalUnavailable.
     Reads backward from the end in chunks of at most 64 KiB, at most ``budget`` bytes,
     except that when no whole line fits (budget 0 included) it reads on until the first
-    whole line is in (up to JOURNAL_LINE_MAX); ``bytes`` reports what was really read. It
-    stops early once every ``want`` id (and, with a cursor, the cursor and the messages of
-    the events after it) is reached, so ``journal_prefix`` may then be "unread". The window
+    whole line is in (up to JOURNAL_LINE_MAX); ``bytes`` reports what was really read.
+    With ``cursor`` the read stops early only at the anchor record: a valid, non-foreign
+    line at seq == ``cursor`` whose bytes hash (sha256, first 16 hex chars, no newline) to
+    ``cursor_anchor``, the ``next_anchor`` of the read that produced the cursor, and only
+    once the messages of the events after it are in too. Without a matching
+    ``cursor_anchor`` it reads until the budget is spent or the file start, never
+    stopping on seq order, which a stale line can fake. With ``cursor`` None it stops once
+    every ``want`` id is reached. ``journal_prefix`` may then be "unread". The window
     is replayed in file order with the ``_parse`` and ``_Model`` rules. Returns ``messages``
     and ``events`` after ``cursor`` (an event whose message lies before the window carries
     ``"unverified": True``; it is dropped only when the whole journal was read),
     ``context`` (per referenced or wanted message id: ``found`` with its
     recipients' ACKs and transport errors, ``unreached`` when its message lies before the
     window, ``absent`` when the whole journal was read and has no such message),
-    ``bytes``, ``next``, ``complete``, ``journal_prefix`` ("read" when the window starts
-    at the file start, else "unread"), ``window_regression``, ``oversized``, ``gap``
-    (None, or ``{"from", "to", "reason"}``), ``fingerprint`` and ``unchanged``. When
-    ``known_fingerprint`` equals the current one, nothing is read: ``unchanged`` is true,
-    ``bytes`` 0 and ``complete``, ``journal_prefix``, ``window_regression``, ``oversized``
-    and ``gap`` are None (unknown).
+    ``bytes``, ``next``, ``next_anchor`` (the anchor hash of the valid record at seq
+    ``next``, None when ``next`` came from no valid record in the window), ``complete``
+    (true when the window reached the file start, or the anchor record was found, the
+    window shows no seq regression and every referenced or wanted message was reached),
+    ``journal_prefix`` ("read" when the window starts at the file start, else "unread"),
+    ``window_regression``, ``oversized``, ``gap`` (None, or ``{"from", "to", "reason"}``),
+    ``fingerprint`` and ``unchanged``. When ``known_fingerprint`` equals the current one,
+    nothing is read: ``unchanged`` is true, ``bytes`` 0, ``next_anchor`` None and
+    ``complete``, ``journal_prefix``, ``window_regression``, ``oversized`` and ``gap`` are
+    None (unknown).
+
+    Residual risks: an exact byte-duplicate of the anchor line inserted later in the file
+    (a corrupt journal) can still end the read early, and a corrupt unread prefix is not
+    detected (``journal_prefix`` "unread").
     """
     if cursor is not None and not (_is_int(cursor) and cursor >= 0):
         raise ValueError("cursor must be None or an integer >= 0")
@@ -1628,7 +1648,7 @@ def read_since(cursor, budget, want=None, known_fingerprint=None):
     if known_fingerprint is not None and known_fingerprint == journal_fingerprint():
         return _unchanged_result(cursor, known_fingerprint)
     now = _now()
-    scan = _Scan(now, cursor, wanted)
+    scan = _Scan(now, cursor, wanted, cursor_anchor if isinstance(cursor_anchor, str) else None)
     fingerprint, reached, nbytes = None, True, 0
     try:
         dfd = _open_dir(journal_dir(), False)
@@ -1651,7 +1671,8 @@ def read_since(cursor, budget, want=None, known_fingerprint=None):
     oversized = scan.oversized
 
     recs, last_seq, low, regression = [], 0, None, False
-    for parsed, loose in reversed(scan.items):
+    next_anchor = None
+    for parsed, loose, raw in reversed(scan.items):
         if parsed is None:
             last_seq = max(last_seq, loose)
             if loose:
@@ -1663,6 +1684,7 @@ def read_since(cursor, budget, want=None, known_fingerprint=None):
             regression = True
             continue
         last_seq = seq
+        next_anchor = None if parsed[1] else raw
         recs.append(_Rec(parsed[0], b"", parsed[1]))  # the line bytes only feed byte totals the reader never uses
     model = _Model(recs)
 
@@ -1731,11 +1753,16 @@ def read_since(cursor, budget, want=None, known_fingerprint=None):
             gap = {"from": cursor, "to": low, "reason": "budget"}
         elif reached and cursor > 0 and low is not None and low > cursor + 1:
             gap = {"from": cursor, "to": low, "reason": "pruned"}
-    complete = reached or (cursor is not None and gap is None and not regression and not unreached and all(
-        v["state"] == "found" for v in context.values()))
+    # Complete: the whole file was read, or the anchor record was met, nothing in the window
+    # replays backwards and every referenced or wanted message is in. Without the anchor a
+    # partial window is never complete, whatever its seqs look like.
+    complete = reached or (
+        cursor is not None and scan.anchor_idx is not None and gap is None and not regression
+        and not unreached and all(v["state"] == "found" for v in context.values()))
     return {
         "messages": messages, "events": events, "context": context, "bytes": nbytes,
-        "next": last_seq if last_seq > 0 else (cursor or 0), "complete": complete,
+        "next": last_seq if last_seq > 0 else (cursor or 0),
+        "next_anchor": _line_anchor(next_anchor) if next_anchor is not None else None, "complete": complete,
         "journal_prefix": "read" if reached else "unread",
         "window_regression": regression and not reached, "oversized": oversized, "gap": gap,
         "fingerprint": fingerprint, "unchanged": False,
