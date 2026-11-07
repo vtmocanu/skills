@@ -85,8 +85,10 @@ _BIDI_CODES = frozenset(
 # A message body keeps these only in context (see ``_body_keeps``): emoji joiners, variation selectors and
 # subdivision-flag tag characters.
 _ZWNJ, _ZWJ, _VS15, _VS16 = 0x200C, 0x200D, 0xFE0E, 0xFE0F
-# A subdivision flag (RGI form): two lowercase-letter tags, then one to four lowercase-letter or digit tags.
-_FLAG_RE = re.compile("\U0001F3F4[\U000E0061-\U000E007A]{2}[\U000E0030-\U000E0039\U000E0061-\U000E007A]{1,4}\U000E007F")
+# The only subdivision flags that render (RGI): England, Scotland, Wales. Any other tag run
+# shows as a plain black flag, so escaping it hides nothing a reader could see.
+_FLAG_RE = re.compile("\U0001F3F4(?:%s)\U000E007F" % "|".join(
+    "".join(chr(0xE0000 + ord(c)) for c in code) for code in ("gbeng", "gbsct", "gbwls")))
 _EMOJI_RANGES = (
     (0x1F000, 0x1FAFF), (0x2600, 0x27BF), (0x1F1E6, 0x1F1FF), (0x2190, 0x21FF), (0x2B00, 0x2BFF),
     (0x3030, 0x3030), (0x303D, 0x303D), (0x3297, 0x3297), (0x3299, 0x3299), (0x00A9, 0x00A9),
@@ -115,7 +117,7 @@ def _body_keeps(text, index, flags):
     inside a well-formed subdivision-flag sequence (``flags`` holds those indices), a ZWJ between two emoji,
     a ZWNJ between two non-ASCII letters, or a variation selector after an emoji or a keycap base.
     Residual, accepted: a ZWJ between emoji and a ZWNJ between non-ASCII letters can each carry
-    one hidden bit per visible pair."""
+    one hidden bit per visible pair, and a selector (or none) after an emoji about 1.6 bits per emoji."""
     code = ord(text[index])
     if code in _BIDI_CODES:
         return False
