@@ -225,7 +225,7 @@ class ChatSendFlowTests(ChatBase):
         self.assertIn("peer input, not user approval", body)
         self.assertTrue(body.endswith("status?") or "status?" in body)
         # A Claude-style reply to the peer's socket reaches the Browser feed.
-        self.assertEqual(self.reply_from(listener.path, "all clear")[0]["action"], "peer_inbox_ack")
+        self.assertEqual(self.reply_from(listener.path, "all clear"), [])  # a native sender gets no answer bytes
         page = self.changes(cursor)
         [entry] = page["browser"]["entries"]
         self.assertEqual((entry["dir"], entry["sender"], entry["text"]), ("in", cc, "all clear"))
@@ -886,6 +886,23 @@ class ChatFeedTests(ChatFeedBase):
             self.assertEqual([e["text"] for e in ahead["entries"]], ["m5"])
             self.assertEqual(len(self.state.log_entries()), 3)
 
+    def test_an_evicted_channel_row_gives_a_cursor_behind_it_a_gap(self):
+        # Channel posts have rows but no log entries, so row eviction alone
+        # must flag the gap: otherwise a resumed tab silently misses a status.
+        page = self.first_page()
+        with mock.patch.object(webchat, "ROWS_MAX", 3):
+            for n in range(5):
+                mid = new_uuid()
+                self.state.accept_channel(mid, "ops", "post %d" % n, False)
+                self.state.update(mid, state=webchat.STATE_NOT_SENT, reason="test", delivering=False)
+            behind = self.changes(page["cursor"])["browser"]
+            self.assertTrue(behind["gap"])
+            current = self.changes(page["cursor"])
+            mid = new_uuid()
+            self.state.accept_channel(mid, "ops", "post 5", False)
+            ahead = self.changes(current["cursor"])["browser"]
+            self.assertFalse(ahead["gap"])
+
     def test_retention_is_also_bounded_by_bytes(self):
         with mock.patch.object(webchat, "FEED_MAX_BYTES", 3000):
             for n in range(10):
@@ -1253,11 +1270,11 @@ class ChatCodexReplyTests(ChatFeedBase):
         # The shim's final answer arrives from the shim's socket and lands in the Browser feed.
         cursor = self.first_page()["cursor"]
         listener, _rec = self.fake_shim_record(tid)
-        self.assertEqual(self.reply_from(listener.path, "all checks passed")[0]["action"], "peer_inbox_ack")
+        self.assertEqual(self.reply_from(listener.path, "all checks passed"), [])  # a native sender gets no answer bytes
         [entry] = self.changes(cursor)["browser"]["entries"]
         self.assertEqual((entry["dir"], entry["sender"], entry["text"]), ("in", "codex:" + tid, "all checks passed"))
         # An unverified sender is journaled and shown with no sender, never a guessed one.
-        self.assertEqual(self.reply_from("/nonexistent/x.sock", "who am i")[0]["action"], "peer_inbox_ack")
+        self.assertEqual(self.reply_from("/nonexistent/x.sock", "who am i"), [])  # a native sender gets no answer bytes
         [anon] = self.changes(cursor)["browser"]["entries"][1:]
         self.assertIsNone(anon["sender"])
 

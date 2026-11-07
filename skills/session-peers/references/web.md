@@ -300,10 +300,20 @@ an unverified sender):
 - **OpenCode:** `peers.py send --to web:<uuid>` (see
   [messaging](messaging.md#sending-to-the-browser-peer)).
 
-A reply is shown only after the server journaled it. If the journal refuses
-it (full or unavailable), the sender's delivery fails, the sender is told, and
-nothing is shown. The feed takes its provenance from the verified sender,
-never from the body; an unverified sender shows as such.
+A reply is shown only after the server journaled it. The browser peer writes
+nothing back on a native sender's connection (Claude Code fails a send that
+gets any answer), so native `SendMessage` reports success once the frame is
+written, before the journal write. If the journal then refuses it (full or
+unavailable), nothing is shown and the sender is told afterwards: a
+`peer_message_status` of `refused` and a one-time notice. Only
+`peers.py send --to web:` waits for an answer line on its connection.
+
+The feed takes its provenance from the verified sender, never from the body;
+an unverified sender shows as such. "Verified" means the frame's claimed
+reply socket belongs to a live registry record; the sending process is not
+authenticated to that record. Any process of the same OS user can claim
+another live session's socket, the same trust boundary as the rest of
+session-peers (the socket's peer UID).
 
 ### The Browser feed
 
@@ -316,8 +326,10 @@ always kept); an entry's text is clipped to
 
 - **Reload:** the page gets the newest retained entries since this server
   started, with a note that the conversation starts at server start.
-- **Gap note:** a poll or page that fell behind the oldest retained entry,
-  or lost entries for want of budget, shows a gap ("Earlier messages expired or were not shown.").
+- **Gap note:** a poll or page that fell behind the oldest retained entry or
+  an evicted status row (at most 1000 are kept; a send still in flight is
+  never evicted), or lost
+  entries for want of budget, shows a gap ("Earlier messages expired or were not shown.").
 - **Hydration:** on a reload, outbound entries re-read their ACK state from
   the journal. A pruned message reads "expired from the journal". An
   unreadable journal or exhausted budget leaves a still-`pending` ACK

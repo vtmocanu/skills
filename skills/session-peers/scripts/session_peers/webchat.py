@@ -128,6 +128,9 @@ class BrowserState:
         self._lseq = 0
         self._sends = collections.OrderedDict()  # mid -> row, ordered by last change
         self._seq = 0
+        # The newest seq an evicted row carried: a reader whose row cursor is
+        # below it missed that row's last change, which is a retention gap.
+        self._rows_evicted_seq = 0
 
     # -- log ---------------------------------------------------------------
 
@@ -200,6 +203,7 @@ class BrowserState:
             row = self._sends[mid]
             if row["state"] == STATE_QUEUED or row["delivering"]:
                 continue  # a send the worker still owns
+            self._rows_evicted_seq = max(self._rows_evicted_seq, row["seq"])
             del self._sends[mid]
 
     def accept_direct(self, mid, to, text, ack):
@@ -414,11 +418,12 @@ class BrowserState:
         ``first`` takes the newest retained entries (a reload); otherwise the entries after
         ``after_log`` oldest first. Rows are those whose seq is past ``after_rows``. A cut leaves the
         returned positions at the last item sent. Returns ``{entries, sends, bytes, gap, cut, log_seq,
-        rows_seq}``; ``gap`` is true when entries after ``after_log`` were already evicted."""
+        rows_seq}``; ``gap`` is true when entries after ``after_log``, or a row change after
+        ``after_rows``, were already evicted."""
         with self._lock:
             items = list(self._log)
             oldest = items[0][0]["lseq"] if items else self._lseq + 1
-            gap = not first and after_log + 1 < oldest
+            gap = not first and (after_log + 1 < oldest or after_rows < self._rows_evicted_seq)
             used, cut = 0, False
             entries = []
             if first:

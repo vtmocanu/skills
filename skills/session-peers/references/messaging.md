@@ -199,9 +199,11 @@ the call comes from a Claude Code session or a Codex shim, because the frame's
 `from` is set only from a Claude-registry record at the caller's socket; from
 OpenCode, a shell or a Codex thread calling `send` directly it appears as an
 unverified sender and the journal records `from: null`.
-`send` waits for the browser peer's own acknowledgement, which it gives only
-after the message is in the [journal](journal.md); the exit code says what is
-known:
+`send` asks for the browser peer's own acknowledgement (the frame carries
+`want_peer_inbox_ack: 1`; native frames get no answer) and waits for it. It is
+given only after the message is in the [journal](journal.md). A message whose
+wrapped frame exceeds the peer cap is refused before anything is recorded.
+The exit code says what is known:
 
 | Exit / outcome | Meaning |
 | --- | --- |
