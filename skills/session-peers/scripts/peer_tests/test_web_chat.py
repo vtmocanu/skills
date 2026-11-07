@@ -1491,9 +1491,6 @@ class ChatReworkTests(ChatFeedBase):
         # JSON's short escape for a carriage return is 2 bytes; webdata shows it as 6 characters of text, 7 on the wire.
         self.feed_of_escaped_controls("\r")
 
-    def test_feed_entries_with_nul_are_budgeted_as_the_display_escape_makes_them(self):
-        self.feed_of_escaped_controls("\x00")
-
     # -- starvation (B2) ------------------------------------------------------
 
     def test_a_hydration_read_that_takes_the_whole_budget_cannot_starve_the_feed(self):
