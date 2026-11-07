@@ -5,7 +5,7 @@
 **Blocked by**: [#161](https://github.com/vtmocanu/skills/issues/161) (read-only dashboard), merged as PR #169 (3cafa8b). This PRD names the merged interfaces; re-read them before implementing.
 **Design mock**: `prds/mockups/161-session-peers-web/index.html` (the composer, recipient picker, `@all` warning and confirm).
 **Area**: `skills/session-peers/` (`web.py`, `webdata.py`, `web/`, a browser peer, identity, routing and provenance, `SKILL.md`, `references/web.md`).
-**Status**: M1 and M2 implemented on branch `agent/issue-162`: `--chat`, the browser peer, `POST /api/send` (`202 queued`, one worker), the Browser feed, the `@all` preview and confirm. Evidence: one integration-gate run over the final code (commit `43ee66c`) passed the full `skills/session-peers/scripts/test_peers.py` suite (1714 tests), the web `render.test.mjs` (93 tests), `validate_skills.py` and `check_bundle_coverage.py`. The first two "Landing obligations" (the real-machine Claude Code `ListAgents`/`SendMessage` check and visual parity with the mock) are owner acceptance, pending and not verified.
+**Status**: M1 and M2 implemented on branch `agent/issue-162`: `--chat`, the browser peer, `POST /api/send` (`202 queued`, one worker), the Browser feed, the `@all` preview and confirm. Evidence: one integration-gate run at commit `42a8cc4` passed the full `skills/session-peers/scripts/test_peers.py` suite (1718 tests), the web `render.test.mjs` (93 tests), `validate_skills.py` and `check_bundle_coverage.py`; the later commits change docs and remove one redundant test. The first two "Landing obligations" (the real-machine Claude Code `ListAgents`/`SendMessage` check and visual parity with the mock) are owner acceptance, pending and not verified.
 
 ## Problem
 
