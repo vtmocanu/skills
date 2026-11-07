@@ -106,4 +106,5 @@ Everything is bounded; a request that hits a bound says so in the page
   directories, rewrite a topic log, or take a store or journal lock.
 
 Peer-written names, addresses and message bodies are shown with control,
-bidirectional and hidden characters escaped (`\uXXXX`).
+bidirectional and hidden characters escaped (`\uXXXX`, or `\UXXXXXXXX` beyond
+U+FFFF); bodies keep newlines, tabs and real emoji sequences.

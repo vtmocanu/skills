@@ -62,26 +62,6 @@ by `Shim`. It owns no transport and adds no lock. Keep the existing shim and
 cross-process binding locks at their original call sites. The shim remains the
 only serializer, using the same persisted keys and lifecycle points.
 
-## Dashboard server
-
-User-facing behaviour is in `references/web.md`; the server's own guards are:
-
-- Host must be exactly `127.0.0.1:<port>` or `localhost:<port>` (403), as a
-  DNS-rebinding guard. Only GET is accepted (405); a request body is refused
-  (400). `/`, `/app.css` and `/app.js` load without the token; every `/api/*`
-  route needs `X-Peers-Token` (403).
-- At most 16 connections at once; extra connections are closed unanswered. The
-  request line and headers must arrive within 2 s and every connection is cut
-  after 10 s. Memory worst case is about 16 connections times the 8 MiB request
-  read budget.
-- Every response carries a `Content-Security-Policy` (`default-src 'none'`,
-  scripts and styles from `'self'` only, no framing, no forms),
-  `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`,
-  `Cache-Control: no-store` and same-origin resource/opener policies. Errors
-  have an empty `{}` body. No request is logged.
-- The token and the loopback bind limit access to one OS user's processes; they
-  are not a defence against a hostile process of the same user.
-
 Use the public `ReplyBudget` operations at the shim boundary; its validators
 and implementation-only release helpers remain private.
 
@@ -92,3 +72,24 @@ ask owns unconditional cleanup, dispatch preserves it for await, and pending
 await retains an unexpired request. Keep those cleanup branches explicit.
 Doctor probes preserve report order; CLI registration helpers preserve parser
 insertion order and argument defaults.
+
+## Dashboard server
+
+User-facing behaviour is in `references/web.md`; the server's own guards are:
+
+- Host must be exactly `127.0.0.1:<port>` or `localhost:<port>` (403), as a
+  DNS-rebinding guard. Only GET is accepted (405); a request body is refused
+  (400). `/`, `/app.css` and `/app.js` load without the token; every `/api/*`
+  route needs `X-Peers-Token` (403).
+- At most 16 connections at once; extra connections are closed unanswered. The
+  request line and headers must arrive within 2 s and every connection's socket
+  is cut after 10 s; its slot is held until the handler returns, which the read
+  budget bounds. Memory worst case is about 16 connections times the 8 MiB request
+  read budget.
+- Every response carries a `Content-Security-Policy` (`default-src 'none'`,
+  scripts and styles from `'self'` only, no framing, no forms),
+  `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`,
+  `Cache-Control: no-store` and same-origin resource/opener policies. Errors
+  have an empty `{}` body. No request is logged.
+- The token and the loopback bind limit access to one OS user's processes; they
+  are not a defence against a hostile process of the same user.
