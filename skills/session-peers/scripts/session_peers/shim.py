@@ -55,20 +55,7 @@ class Shim:
         )
 
         state = sp_runtime.read_json(sp_storage.own_thread_state_path(self.thread_id), {}) or {}
-        self.tail = sp_rollout.RolloutTail.from_state(self.rollout_path, state.get("tail"))
-        # This is an at-most-once processing ledger, including dropped replies,
-        # not evidence of delivery. Read the legacy name when upgrading.
-        self.processed_turns = collections.deque(
-            state.get("processed_turns", state.get("delivered")) or [],
-            maxlen=sp_constants.PROCESSED_TURN_HISTORY,
-        )
-        self.reply_budget = sp_budgets.ReplyBudget(
-            self, state,
-            records=lambda: sp_claude.live_claude_records(),
-            socket_valid=lambda path: sp_claude.socket_path_ok(path),
-            deliver_reply=lambda rec, text, entry: self._route_reply(rec, text, entry),
-        )
-        self.contacts = dict(state.get("contacts") or {})
+        self._load_state(state)
         self.fresh = not state
         if self.fresh:
             # A SessionStart hook can launch us AFTER the tagged request was
@@ -115,6 +102,41 @@ class Shim:
 
     # -- lifecycle ---------------------------------------------------------
 
+    def _load_state(self, state, keep_tail=False):
+        """Take the tail, processed turns, reply accounting and contacts from ``state``."""
+        if not keep_tail:
+            self.tail = sp_rollout.RolloutTail.from_state(self.rollout_path, state.get("tail"))
+        # This is an at-most-once processing ledger, including dropped replies,
+        # not evidence of delivery. Read the legacy name when upgrading.
+        self.processed_turns = collections.deque(
+            state.get("processed_turns", state.get("delivered")) or [],
+            maxlen=sp_constants.PROCESSED_TURN_HISTORY,
+        )
+        self.reply_budget = sp_budgets.ReplyBudget(
+            self, state,
+            records=lambda: sp_claude.live_claude_records(),
+            socket_valid=lambda path: sp_claude.socket_path_ok(path),
+            deliver_reply=lambda rec, text, entry: self._route_reply(rec, text, entry),
+        )
+        self.contacts = dict(state.get("contacts") or {})
+
+    def _reload_state(self):
+        """Re-read the state file now that this process owns the thread.
+
+        The constructor read it before ownership, so another process may have
+        saved since. An empty file keeps the constructor's tail, which a fresh
+        shim polled without emitting events.
+        """
+        state = sp_runtime.read_json(sp_storage.own_thread_state_path(self.thread_id), {}) or {}
+        if not isinstance(state, dict):
+            state = {}
+        self._load_state(state, keep_tail=not state)
+        if state:
+            if self.tail.last_boundary is None and self.rollout_path:
+                self.tail.last_boundary = sp_rollout.last_boundary(self.rollout_path)
+            self.status = "busy" if self.tail.last_boundary == "started" else "idle"
+        self.reply_budget.configure_window()
+
     def run(self):
         if not self.rollout_path:
             sp_runtime.log("thread %s has no rollout path; nothing to tail" % self.thread_id)
@@ -154,6 +176,8 @@ class Shim:
         signal.signal(signal.SIGTERM, self._on_signal)
         signal.signal(signal.SIGINT, self._on_signal)
         try:
+            self._reload_state()
+            self._recover_held()
             self.reply_budget.consume_reset(initial=True)
             self.reply_budget.consume_binding(initial=True)
             # Save recovered requests only after taking ownership, but before
@@ -302,6 +326,14 @@ class Shim:
             mapping.pop(next(iter(mapping)))
         return mapping
 
+    def _bound_held(self, cap=sp_constants.CONTACT_HISTORY):
+        """Bound the held replies; a frozen one (unknown fate) is never evicted."""
+        held = self.reply_budget.held
+        loose = [sid for sid in held if not self.reply_budget.frozen(sid)]
+        for sid in loose[: max(0, len(loose) - cap)]:
+            self.reply_budget._discard(sid, "evicted")
+        return held
+
     def _save_state(self):
         sp_runtime.write_json_atomic(
             sp_storage.thread_state_path(self.thread_id),
@@ -319,7 +351,7 @@ class Shim:
                 "budget_sender_sid": self.reply_budget.budget_sender_sid,
                 "budget_last_at": self.reply_budget.budget_last_at,
                 "budget_notified": sorted(self.reply_budget.budget_notified),
-                "held": self._bound(self.reply_budget.held),
+                "held": self._bound_held(),
                 "allowance": self.reply_budget.allowance,
                 "binding": self.reply_budget.binding,
                 "contacts": self._bound(self.contacts),
@@ -979,6 +1011,7 @@ class Shim:
         sid = rec.get("sessionId")
         if self.reply_budget.frozen(sid):
             sp_runtime.log("a held reply for %s is unsettled; skipping this reply" % sid)
+            self._notify_frozen(rec, tag if sid == tag.get("sid") else {})
             return "continue"
         spent = self.reply_budget.budgets.get(sid, 0)
         cap = self.reply_budget.cap_for(sid)
@@ -1003,6 +1036,7 @@ class Shim:
             # stops the loop, and an explicit reset (the supervision signal)
             # releases it. Only the requester's own reply is held.
             if sid == tag.get("sid"):
+                self.reply_budget._discard(sid, "replaced by a newer reply")
                 self.reply_budget.held[sid] = {
                     "text": text,
                     "mid": tag.get("mid"),
@@ -1065,6 +1099,7 @@ class Shim:
             # The channel write failed before anything was sent: hold the
             # answer under its channel mid so a retry publishes it once.
             info = getattr(result, "info", None) or {}
+            self.reply_budget._discard(sid, "replaced by a newer reply")
             self.reply_budget.held[sid] = {
                 "text": text,
                 "mid": tag.get("mid"),
@@ -1074,6 +1109,9 @@ class Shim:
                 "channel_mid": info.get("mid"),
                 "channel": info.get("key"),
                 "channel_floor": info.get("floor"),
+                "channel_sender": info.get("sender"),
+                "channel_recipient": info.get("recipient"),
+                "phase": "fresh",
             }
             sp_runtime.log("holding the reply of turn %s for %s: the channel write failed"
                 % (turn.turn_id, rec.get("name") or sid))
@@ -1116,9 +1154,12 @@ class Shim:
         Returns delivered, failed, unknown, discarded, kept, dropped,
         route_failed or stop. An ordinary answer (``entry`` None) that reaches
         its lead through the pair's buddy channel is published to the channel
-        history before the frame is sent and gets an outcome after; without a
-        route it goes direct, as before.
+        history before the frame is sent and gets an outcome after, at most
+        once; without a route it goes direct, as before. A held reply (``entry``)
+        follows the phases of ``_route_held``.
         """
+        if entry is not None:
+            return self._route_held(rec, text, entry)
         lead = self._lead_for(rec)
         if lead is None:
             return self._direct_reply(rec, text, entry)
@@ -1130,22 +1171,15 @@ class Shim:
         if key is None:
             return self._direct_reply(rec, text, entry)
         sid = rec.get("sessionId")
-        held = entry is not None
-        if not held and self.reply_budget.frozen(sid):
+        if self.reply_budget.frozen(sid):
             sp_runtime.log("a held reply for %s is unsettled; not sending a new answer" % sid)
             return "kept"
-        had_mid = held and bool(entry.get("channel_mid"))
-        mid = entry["channel_mid"] if had_mid else str(uuid.uuid4())
+        mid = str(uuid.uuid4())
         try:
-            if held and entry.get("channel") == key and entry.get("channel_floor") is not None:
-                floor = entry["channel_floor"]
-            else:
-                floor = sp_channels.history_floor(key)
+            floor = sp_channels.history_floor(key)
         except sp_channels.ChannelError as exc:
             sp_runtime.log("cannot read the history of #%s (%s); sending directly" % (key, exc))
             return self._direct_reply(rec, text, entry)
-        if held:
-            entry["channel"], entry["channel_mid"], entry["channel_floor"] = key, mid, floor
         try:
             plan = sp_channels.prepare_targeted(key, sender, lead, text, mid, False)
         except sp_channels.TargetedTooLarge as exc:
@@ -1154,39 +1188,23 @@ class Shim:
         except sp_channels.ChannelError as exc:
             sp_runtime.log("cannot route a reply through #%s: %s" % (key, exc))
             return "failed"
-        lock = None
-        publish = True
-        if had_mid:
-            # A retry: an earlier attempt may already have written the send.
+        try:
+            lock = sp_channels.publish_targeted(plan)
+        except (sp_channels.ChannelError, OSError) as exc:
+            sp_runtime.log("channel write for message %s in #%s failed: %s" % (mid, key, exc))
             try:
                 status, _found = sp_channels.find_send(key, mid, floor)
-            except sp_channels.ChannelError as exc:
-                sp_runtime.log("cannot read #%s for message %s: %s" % (key, mid, exc))
-                return "failed"
-            if status == "evidence missing":
-                sp_runtime.log("evidence for message %s in #%s is missing; keeping the reply" % (mid, key))
-                return "failed"
-            publish = status == "absent"
-        if publish:
-            try:
-                lock = sp_channels.publish_targeted(plan)
-            except (sp_channels.ChannelError, OSError) as exc:
-                sp_runtime.log("channel write for message %s in #%s failed: %s" % (mid, key, exc))
-                try:
-                    status, _found = sp_channels.find_send(key, mid, floor)
-                except sp_channels.ChannelError as err:
-                    sp_runtime.log("cannot read #%s for message %s: %s" % (key, mid, err))
-                    return "failed" if held else "dropped"
-                if status == "absent":
-                    if held:
-                        return "failed"
-                    result = RouteResult("route_failed")
-                    result.info = {"mid": mid, "key": key, "floor": floor}
-                    return result
-                if status != "found":
-                    sp_runtime.log("evidence for message %s in #%s is missing; not delivering" % (mid, key))
-                    return "failed" if held else "dropped"
-                lock = None
+            except sp_channels.ChannelError as err:
+                sp_runtime.log("cannot read #%s for message %s: %s" % (key, mid, err))
+                return "dropped"
+            if status == "absent":
+                result = RouteResult("route_failed")
+                result.info = {"mid": mid, "key": key, "floor": floor, "sender": sender, "recipient": lead}
+                return result
+            if status != "found":
+                sp_runtime.log("evidence for message %s in #%s is missing; not delivering" % (mid, key))
+                return "dropped"
+            lock = None
         try:
             body = sp_protocol.build_cc_body(
                 sp_channels._delivery_text(key, mid, sender, lead, text, False),
@@ -1194,7 +1212,7 @@ class Shim:
         except ValueError as exc:
             sp_runtime.log("cannot build a reply for %s: %s" % (sid, exc))
             self._finish_route(key, sender, mid, lead, sp_channels.OUTCOME_REFUSED + "reply could not be built", floor, lock)
-            return "discarded" if held else "failed"
+            return "failed"
         frame = sp_protocol.build_user_frame(body, self.sock_path, mid)
         delivery = sp_claude.deliver_to_record_outcome(rec, frame)
         if delivery == "delivered":
@@ -1211,6 +1229,235 @@ class Shim:
             sp_channels.finish_targeted(key, sender, mid, lead, outcome, floor, lock)
         except sp_channels.ChannelError as exc:
             sp_runtime.log("could not record the outcome of message %s in #%s: %s" % (mid, key, exc))
+
+    # -- held replies ------------------------------------------------------
+
+    def _set_phase(self, entry, phase):
+        entry["phase"] = phase
+        self._save_state()
+
+    def _held_send_status(self, key, mid, floor):
+        """find_send's status, or "unreadable" when the history cannot be read."""
+        try:
+            return sp_channels.find_send(key, mid, floor)[0]
+        except sp_channels.ChannelError as exc:
+            sp_runtime.log("cannot read #%s for message %s: %s" % (key, mid, exc))
+            return "unreadable"
+
+    def _route_held(self, rec, text, entry):
+        """Deliver one held reply, one phase at a time, each saved when it changes.
+
+        ``fresh`` (not yet published) -> ``publishing`` (route saved before the
+        append) -> ``published`` (the append is confirmed) -> ``sending`` (saved
+        before the transport) and then delivered (outcome accepted), back to
+        ``published`` (refused, retried) or ``unknown`` (frozen). ``unresolved``
+        means publication cannot be established yet. Transport starts only from
+        ``published``, and a stored route is never recomputed.
+        """
+        sid = rec.get("sessionId")
+        if self.reply_budget.frozen(sid):
+            return "kept"
+        try:
+            sender = sp_journal._norm("codex:" + self.thread_id)
+        except ValueError:
+            return self._direct_reply(rec, text, entry)
+        stored = bool(entry.get("channel"))
+        lead = (entry.get("channel_recipient") if stored else None) or self._lead_for(rec)
+        if lead is None:
+            return self._direct_reply(rec, text, entry)
+        if stored:
+            key = entry["channel"]
+            sender = entry.get("channel_sender") or sender
+            floor = entry.get("channel_floor")
+            floor = 0 if floor is None else floor
+        else:
+            key, _reason = sp_channels.buddy_route(lead, sender)
+            if key is None:
+                return self._direct_reply(rec, text, entry)
+            try:
+                floor = sp_channels.history_floor(key)
+            except sp_channels.ChannelError as exc:
+                sp_runtime.log("cannot read the history of #%s (%s); sending directly" % (key, exc))
+                return self._direct_reply(rec, text, entry)
+        mid = entry.get("channel_mid") or str(uuid.uuid4())
+        phase = entry.get("phase") or "fresh"
+        if phase in ("publishing", "unresolved"):
+            status = self._held_send_status(key, mid, floor)
+            if status == "found":
+                self._set_phase(entry, "published")
+            elif status == "absent":
+                self._set_phase(entry, "fresh")
+            else:
+                if phase != "unresolved":
+                    self._set_phase(entry, "unresolved")
+                return "kept"
+            phase = entry["phase"]
+        lock = None
+        if phase == "fresh":
+            try:
+                plan = sp_channels.prepare_targeted(key, sender, lead, text, mid, False)
+            except sp_channels.TargetedTooLarge as exc:
+                sp_runtime.log("reply too large for #%s (%s); sending directly" % (key, exc))
+                return self._direct_reply(rec, text, entry)
+            except sp_channels.ChannelError as exc:
+                sp_runtime.log("cannot route a reply through #%s: %s" % (key, exc))
+                return "failed"
+            entry["channel"], entry["channel_mid"], entry["channel_floor"] = key, mid, floor
+            entry["channel_sender"], entry["channel_recipient"] = sender, lead
+            self._set_phase(entry, "publishing")
+            try:
+                lock = sp_channels.publish_targeted(plan)
+            except (sp_channels.ChannelError, OSError) as exc:
+                sp_runtime.log("channel write for message %s in #%s failed: %s" % (mid, key, exc))
+                status = self._held_send_status(key, mid, floor)
+                if status == "absent":
+                    self._set_phase(entry, "fresh")
+                    return "failed"
+                if status != "found":
+                    self._set_phase(entry, "unresolved")
+                    return "kept"
+                lock = None
+            self._set_phase(entry, "published")
+        try:
+            body = sp_protocol.build_cc_body(
+                sp_channels._delivery_text(key, mid, sender, lead, text, False),
+                self.thread_id, self.name, self.sock_path)
+        except ValueError as exc:
+            sp_runtime.log("cannot build a reply for %s: %s" % (sid, exc))
+            self._finish_route(key, sender, mid, lead, sp_channels.OUTCOME_REFUSED + "reply could not be built", floor, lock)
+            return "discarded"
+        frame = sp_protocol.build_user_frame(body, self.sock_path, mid)
+        self._set_phase(entry, "sending")
+        delivery = sp_claude.deliver_to_record_outcome(rec, frame)
+        if delivery == "delivered":
+            self._finish_route(key, sender, mid, lead, sp_channels.OUTCOME_ACCEPTED, floor, lock)
+            return "delivered"
+        if delivery == "failed":
+            if lock is not None:
+                sp_channels.release_unfinished(lock)
+            self._set_phase(entry, "published")
+            return "failed"
+        # The frame may have landed: record it unknown and freeze the entry.
+        entry["outcome_pending"] = True
+        self._set_phase(entry, "unknown")
+        if self._append_held_outcome(entry, sp_channels.STATE_UNKNOWN, lock):
+            entry.pop("outcome_pending", None)
+            self._save_state()
+        return "unknown"
+
+    def _append_held_outcome(self, entry, outcome, lock=None):
+        """Best-effort outcome for a held entry's message; True once none is left to write.
+
+        ``lock`` (the send lock a publish still holds) is released on every path.
+        """
+        key, mid = entry.get("channel"), entry.get("channel_mid")
+        sender, lead = entry.get("channel_sender"), entry.get("channel_recipient")
+        if not (key and mid and sender and lead):
+            if lock is not None:
+                sp_channels.release_unfinished(lock)
+            return False
+        floor = entry.get("channel_floor")
+        try:
+            sp_channels.finish_targeted(key, sender, mid, lead, outcome, 0 if floor is None else floor, lock)
+        except (sp_channels.ChannelError, OSError) as exc:
+            sp_runtime.log("could not record the outcome of message %s in #%s: %s" % (mid, key, exc))
+            return False
+        return True
+
+    def _held_outcome(self, sid, entry):
+        """Owner hook: append the unknown outcome a frozen entry still owes."""
+        return self._append_held_outcome(entry, sp_channels.STATE_UNKNOWN)
+
+    def _held_discarded(self, sid, entry, why):
+        """Owner hook: a held reply is leaving; settle what it left in its channel. Never re-sends."""
+        key, mid = entry.get("channel"), entry.get("channel_mid")
+        if not (key and mid):
+            return
+        phase = entry.get("phase")
+        sp_runtime.log("discarding the held reply for %s (#%s message %s, %s): %s" % (sid, key, mid, phase, why))
+        if phase == "published":
+            self._append_held_outcome(
+                entry, sp_channels.OUTCOME_REFUSED + "held reply discarded (%s)" % why)
+        elif phase == "sending" or entry.get("outcome_pending"):
+            self._append_held_outcome(entry, sp_channels.STATE_UNKNOWN)
+
+    def _notify_frozen(self, rec, tag):
+        """Tell a requester once that its held reply is unsettled and new ones wait."""
+        entry = self.reply_budget.held.get(rec.get("sessionId"))
+        if not isinstance(entry, dict) or entry.get("frozen_notified"):
+            return
+        detail = (
+            "reply not delivered: an earlier reply to this peer may or may not have "
+            "arrived, so new replies wait. `peers.py budget reset %s` or `peers.py "
+            "budget allow %s --replies N` clears it" % (self.thread_id, self.thread_id)
+        )
+        self._status_to_record(rec, tag.get("mid"), "failed", detail)
+        notice = (
+            "[session-peers] a reply from %s is not delivered: an earlier reply to you may "
+            "or may not have arrived, and new replies wait. Run `peers.py budget reset %s` "
+            "or `peers.py budget allow %s --replies N` to clear it."
+            % (self.name or self.thread_id, self.thread_id, self.thread_id)
+        )
+        body = sp_protocol.build_cc_body(notice, self.thread_id, self.name, None)
+        if sp_claude.deliver_to_record(rec, sp_protocol.build_user_frame(body, None)):
+            entry["frozen_notified"] = True
+
+    def _recover_held(self):
+        """After taking ownership, settle held replies a crash left mid-step.
+
+        Never sends and never spends, except that a ``sending`` entry whose
+        accepted outcome is already recorded was delivered and is spent now.
+        """
+        rb = self.reply_budget
+        owed = []
+        changed = False
+        for sid, entry in list(rb.held.items()):
+            if not isinstance(entry, dict) or not entry.get("channel") or not entry.get("channel_mid"):
+                continue
+            key, mid = entry["channel"], entry["channel_mid"]
+            floor = entry.get("channel_floor")
+            floor = 0 if floor is None else floor
+            phase = entry.get("phase") or "publishing"
+            if phase in ("publishing", "unresolved"):
+                status = self._held_send_status(key, mid, floor)
+                if status == "found":
+                    entry["phase"] = "published"
+                    entry["release"] = entry.get("release") or "recover"
+                elif status == "absent":
+                    entry["phase"] = "fresh"
+                else:
+                    entry["phase"] = "unresolved"
+                changed = True
+            elif phase == "published":
+                entry["release"] = entry.get("release") or "recover"
+                changed = True
+            elif phase == "sending":
+                changed = True
+                try:
+                    status, found = sp_channels.find_outcome(key, mid, floor)
+                except sp_channels.ChannelError as exc:
+                    sp_runtime.log("cannot read #%s for message %s: %s" % (key, mid, exc))
+                    status, found = "unreadable", None
+                if status == "found":
+                    value = ((found.get("data") or {}).get("outcomes") or {}).get(entry.get("channel_recipient"))
+                    rb.held.pop(sid, None)
+                    if value == sp_channels.OUTCOME_ACCEPTED:
+                        rb._spend_delivery(sid, entry.get("release") == "reset", time.time())
+                        sp_runtime.log("recovered a delivered held reply for %s (message %s)" % (sid, mid))
+                    else:
+                        sp_runtime.log("dropping the held reply for %s: message %s ended %r" % (sid, mid, value))
+                else:
+                    entry["phase"] = "unknown"
+                    entry["outcome_pending"] = True
+                    entry.pop("release", None)
+                    owed.append(sid)
+        if changed:
+            self._save_state()
+        for sid in owed:
+            entry = rb.held.get(sid)
+            if entry is not None and self._append_held_outcome(entry, sp_channels.STATE_UNKNOWN):
+                entry.pop("outcome_pending", None)
+                self._save_state()
 
 
 def cmd_shim(args):

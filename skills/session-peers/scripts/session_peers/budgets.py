@@ -70,15 +70,22 @@ class ReplyBudget:
         path = sp_storage.budget_reset_path(self.owner.thread_id)
         if not os.path.exists(path):
             return
-        try:
-            os.unlink(path)
-        except OSError:
-            return
+        # The marker outlives the state change: a crash before the save redoes
+        # every step on restart, one after it only repeats idempotent ones.
         self.budgets = {}
         self.budget_sender_sid = None
         self.budget_last_at = None
         self.budget_notified = set()
         self.allowance = None
+        self._discard_frozen("budget reset")
+        for entry in self.held.values():
+            if isinstance(entry, dict):
+                entry["release"] = "reset"
+        self.owner._save_state()
+        try:
+            os.unlink(path)
+        except OSError as exc:
+            sp_runtime.log("could not remove the budget reset marker: %s" % exc)
         if initial:
             # Not yet bound or registered: defer the release (see run()).
             self.release_after_start = bool(self.held)
@@ -90,6 +97,20 @@ class ReplyBudget:
         self.owner._save_state()
 
 
+    def _discard(self, sid, why):
+        """Drop one held reply; the owner settles any channel record it left."""
+        entry = self.held.pop(sid, None)
+        if isinstance(entry, dict):
+            self.owner._held_discarded(sid, entry, why)
+
+
+    def _discard_frozen(self, why, only=None):
+        """Discard held replies of unknown fate, never re-sending them."""
+        for sid in list(self.held):
+            if (only is None or sid == only) and self.frozen(sid):
+                self._discard(sid, why)
+
+
     def expire_held(self, now=None):
         """Purge held replies past the idle window from memory AND the state file."""
         if not self.held:
@@ -98,13 +119,16 @@ class ReplyBudget:
         stale = [
             sid
             for sid, entry in self.held.items()
-            if not isinstance(entry, dict)
-            or now - float(entry.get("at") or 0) > self.reply_budget_window
+            if not self.frozen(sid)
+            and (
+                not isinstance(entry, dict)
+                or now - float(entry.get("at") or 0) > self.reply_budget_window
+            )
         ]
         if not stale:
             return
         for sid in stale:
-            self.held.pop(sid, None)
+            self._discard(sid, "expired")
         sp_runtime.log("purged %d expired held reply(s)" % len(stale))
         self.owner._save_state()
 
@@ -113,6 +137,7 @@ class ReplyBudget:
         """Deliver each still-fresh held reply once; it opens the new sequence."""
         if not self.held:
             return
+        self._discard_frozen("budget reset")
         records = self._records()
         for sid in list(self.held):
             self._release_one(sid, "reset", records)
@@ -121,32 +146,40 @@ class ReplyBudget:
     def _release_one(self, sid, reason, records):
         """Release one held reply; drop it once delivered or undeliverable.
 
-        A transient write failure keeps a fresh entry, tagged with why it was
-        being released, so `retry_held` tries it again. Usage is counted only
-        by a delivery that succeeded, so a retry never double-counts.
+        The entry is tagged with why it is being released BEFORE the attempt, so
+        a crash or a transient write failure leaves it for `retry_held`. Usage is
+        counted only by a delivery that succeeded, so a retry never double-counts.
         """
         entry = self.held.get(sid)
-        outcome = self._deliver_held(sid, entry, records, new_sequence=(reason == "reset"))
-        if outcome == "failed":
+        if self.frozen(sid):
+            return "kept"
+        if isinstance(entry, dict):
             entry["release"] = reason
-        elif outcome in ("kept", "unknown"):
-            pass
-        else:
+        outcome = self._deliver_held(sid, entry, records, new_sequence=(reason == "reset"))
+        if outcome == "unknown":
+            # Frozen now: nothing retries it; only an explicit discard ends it.
+            if isinstance(entry, dict):
+                entry.pop("release", None)
+        elif outcome == "delivered":
+            self.held.pop(sid, None)
+        elif outcome == "discarded":
             self.held.pop(sid, None)
         return outcome
 
 
     def retry_held(self):
         """Retry held replies whose release failed on a transient write error."""
+        changed = self._settle_pending_outcomes()
         pending = [
             (sid, entry.get("release"))
             for sid, entry in self.held.items()
-            if isinstance(entry, dict) and entry.get("release")
+            if isinstance(entry, dict) and entry.get("release") and not self.frozen(sid)
         ]
         if not pending:
+            if changed:
+                self.owner._save_state()
             return
         records = self._records()
-        changed = False
         for sid, reason in pending:
             if reason == "allow" and not self.may_send(sid):
                 # The allowance that released it is gone or spent.
@@ -155,45 +188,72 @@ class ReplyBudget:
                 continue
             if not self.may_send(sid):
                 continue
-            changed = self._release_one(sid, reason, records) != "failed" or changed
+            changed = self._release_one(sid, reason, records) not in ("failed", "kept") or changed
         if changed:
             self.owner._save_state()
+
+
+    def _settle_pending_outcomes(self):
+        """Append the unknown outcome a frozen entry could not record earlier."""
+        changed = False
+        for sid, entry in self.held.items():
+            if isinstance(entry, dict) and entry.get("outcome_pending") and self.frozen(sid):
+                if self.owner._held_outcome(sid, entry):
+                    entry.pop("outcome_pending", None)
+                    changed = True
+        return changed
+
+
+    def _spend_delivery(self, sid, new_sequence, now):
+        """Count one delivered release against ``sid``'s sequence."""
+        used = self.budgets.get(sid, 0)
+        if new_sequence and not (self.budget_sender_sid == sid and used > 0):
+            # An explicit reset opens a new sequence; an allowance, or a reset
+            # whose sequence other replies already reopened, adds to it.
+            used = 0
+        self.budgets[sid] = used + 1
+        self.spend_binding(sid)
+        self.budget_sender_sid = sid
+        self.budget_last_at = now
 
 
     def _deliver_held(self, sid, entry, records, new_sequence):
         """One held reply to its live requester, if still fresh and routable.
 
-        Returns ``delivered``, ``failed`` (worth a retry), ``discarded``, or
-        ``kept`` / ``unknown`` (entry left untouched, nothing spent).
+        Returns ``delivered``, ``failed`` (worth a retry), ``discarded`` (already
+        removed), or ``kept`` / ``unknown`` (entry left untouched, nothing spent).
         """
+        if self.frozen(sid):
+            return "kept"
         if not isinstance(entry, dict) or not entry.get("text"):
+            self._discard(sid, "no text")
             return "discarded"
         now = time.time()
         age = now - float(entry.get("at") or 0)
         if age > self.reply_budget_window:
             sp_runtime.log("discarding a held reply for %s: %.0fs old" % (sid, age))
+            self._discard(sid, "expired")
             return "discarded"
         rec = next((r for r in records if r.get("sessionId") == sid), None)
         if rec is None:
             sp_runtime.log("discarding a held reply: session %s is gone" % sid)
+            self._discard(sid, "session gone")
             return "discarded"
         if not self._socket_valid(rec.get("messagingSocketPath")):
             sp_runtime.log("discarding a held reply: %s listens outside the allowlist" % sid)
+            self._discard(sid, "socket outside the allowlist")
             return "discarded"
         text = sp_protocol.reply_text(entry["text"], entry.get("mid"), held_reply=True)
         result = self._deliver_reply(rec, text, entry)
-        if result in ("discarded", "kept", "unknown"):
-            # Pass 1: an unknown transport is left untouched, like "kept".
+        if result == "discarded":
+            self._discard(sid, "reply could not be built")
+            return "discarded"
+        if result in ("kept", "unknown"):
             return result
         if result != "delivered":
             sp_runtime.log("keeping the held reply for %s to retry" % sid)
             return "failed"
-        # An explicit reset opens a new sequence; an allowance continues the
-        # current one, so the release counts toward its usage.
-        self.budgets[sid] = 1 if new_sequence else self.budgets.get(sid, 0) + 1
-        self.spend_binding(sid)
-        self.budget_sender_sid = sid
-        self.budget_last_at = now
+        self._spend_delivery(sid, new_sequence, now)
         sp_runtime.log(
             "released a held reply (turn %s) to %s"
             % (entry.get("turn_id"), rec.get("name") or sid)
@@ -348,13 +408,25 @@ class ReplyBudget:
         if not os.path.exists(path):
             return
         grant = sp_runtime.read_json(path, None)
-        try:
-            os.unlink(path)
-        except OSError:
-            return
         if not self._valid_allowance(grant):
             sp_runtime.log("ignoring a malformed reply allowance for thread %s" % self.owner.thread_id)
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
             return
+        # Apply and save before the marker goes: a crash in between replays the
+        # grant, which is idempotent, instead of losing it.
+        self._discard_frozen("budget allow", only=grant["sid"])
+        self._apply_allowance(grant)
+        self.owner._save_state()
+        try:
+            os.unlink(path)
+        except OSError as exc:
+            sp_runtime.log("could not remove the allowance marker: %s" % exc)
+
+
+    def _apply_allowance(self, grant):
         sid, total = grant["sid"], grant["total"]
         granted_at = sp_runtime.parse_time(grant["at"])
         if not self._allowance_fresh(granted_at, time.time()):
@@ -377,7 +449,6 @@ class ReplyBudget:
                 "reply allowance of %d for %s already covers %d; unchanged"
                 % (current["total"], sid, total)
             )
-            self.owner._save_state()  # an idle expiry above may have ended a sequence
             return
         old_cap = self.cap_for(sid)
         # Bound: the grant continues sid's running sequence and ends with it.
@@ -398,7 +469,6 @@ class ReplyBudget:
             self.budget_notified.discard(sid)
             if self.budgets.get(sid, 0) < new_cap and sid in self.held:
                 self._release_one(sid, "allow", self._records())
-        self.owner._save_state()
 
 
     def advance_sequence(self, tag):
@@ -434,13 +504,16 @@ class ReplyBudget:
         grant bound to it go; a fresh grant still waiting for its grantee stays."""
         if self.budgets:
             sp_runtime.log("reply budget sequence reset: %s" % reason)
-        if self.held:
+        loose = [sid for sid in self.held if not self.frozen(sid)]
+        if loose:
             # Only an explicit reset releases a held reply; a sequence that
-            # moved on must not receive a stale answer later.
-            sp_runtime.log("discarding %d held reply(s): the sequence moved on" % len(self.held))
+            # moved on must not receive a stale answer later. A frozen one
+            # (unknown fate) stays until reset or allow discards it.
+            sp_runtime.log("discarding %d held reply(s): the sequence moved on" % len(loose))
+        for sid in loose:
+            self._discard(sid, "the sequence moved on")
         self.budgets = {}
         self.budget_notified = set()
-        self.held = {}
         if self.allowance and not self._allowance_waiting(now):
             sp_runtime.log("reply allowance for %s dropped: the sequence moved on"
                 % self.allowance.get("sid"))
