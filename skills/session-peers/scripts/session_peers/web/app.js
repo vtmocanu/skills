@@ -368,7 +368,9 @@
     return str(outcome) === "refused: " + str(terr);
   }
 
-  var NOTHING_DELIVERED = "Nothing delivered: every recipient was refused or skipped";
+  // "refused:" can follow a send that had begun (a transport error after the write started), so this
+  // says no delivery was confirmed, not that none happened.
+  var NOTHING_DELIVERED = "No delivery confirmed: every recipient was refused or skipped";
 
   // True when no recipient took the message: each is refused or skipped (never "outcome unknown",
   // which may have been delivered) and none ACKed. pairs: [{ outcome, ack }].

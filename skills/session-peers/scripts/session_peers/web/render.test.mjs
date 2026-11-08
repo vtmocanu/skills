@@ -1645,7 +1645,7 @@ test("chat: a send nothing took says so; mixed, acked and outcome-unknown rows s
     [CODEX_B]: { outcome: "refused: codex is not on PATH", ack: "pending" },
     [CC_A]: { outcome: "skipped: gone", ack: "not requested" },
   }))
-  assert.equal(none.textContent, "Nothing delivered: every recipient was refused or skipped")
+  assert.equal(none.textContent, "No delivery confirmed: every recipient was refused or skipped")
   assert.equal(none.attributes.class, "dstate t-bad")
   for (const recipients of [
     { [CODEX_B]: { outcome: "refused: x", ack: "pending" }, [CC_A]: { outcome: "transport accepted", ack: "pending" } },
@@ -1661,12 +1661,12 @@ test("chat: a send nothing took says so; mixed, acked and outcome-unknown rows s
   assert.equal(delivering.textContent, "Recorded, delivering…")
   const history = app.renderDelivery({ state: "complete", recipients: [row(CODEX_B, "refused: x", { ack: "not requested" }), row(CC_A, "skipped: gone", { ack: "not requested" })] })
   const line = elementsOf(history).find((n) => (n.attributes.class || "").startsWith("dnothing"))
-  assert.equal(line.textContent, "Nothing delivered: every recipient was refused or skipped")
+  assert.equal(line.textContent, "No delivery confirmed: every recipient was refused or skipped")
   assert.equal(line.attributes.class, "dnothing t-bad")
   const mixed = app.renderDelivery({ state: "complete", recipients: [row(CODEX_B, "refused: x"), row(CC_A, "transport accepted")] })
-  assert.ok(!mixed.textContent.includes("Nothing delivered"))
+  assert.ok(!mixed.textContent.includes("No delivery confirmed"))
   const unknown = app.renderDelivery({ state: "complete", recipients: [row(CODEX_B, "refused: outcome unknown")] })
-  assert.ok(!unknown.textContent.includes("Nothing delivered"))
+  assert.ok(!unknown.textContent.includes("No delivery confirmed"))
 })
 
 test("index.html carries an inline SVG icon link", () => {
