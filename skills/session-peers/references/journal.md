@@ -125,8 +125,9 @@ detected identity.
   once its request mailbox is gone. Expired request: a correlated `ask` or
   `dispatch` request whose `expires_at` has passed and whose request mailbox is
   gone (an owner-approved exception to #157's protection rule, 2026-11-06).
-  It is not deleted eagerly, only pruned under pressure, and no ACK or
-  settlement is written, so it is never shown as ACKed or settled. Plain
+  It is not deleted eagerly, only pruned under pressure. Expiry and mailbox
+  removal do not write or imply an ACK or settlement; existing ACK and
+  settlement records remain visible until the request is pruned. Plain
   recorded messages (`send --record`, `record --to`) and replies have no such
   exception. Other unfinished young entries (neither fully ACKed nor settled)
   are never pruned, including unexpired requests and entries with transport
