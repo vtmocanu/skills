@@ -1597,6 +1597,48 @@ class WebdataStateViewTests(WebdataBase):
         self.assertIsNone(self.alerts()["ops"])
         sp_journal.ack(mid, "codex:" + self.tid)
 
+    def test_channels_with_no_send_in_their_page_cannot_starve_a_later_alert(self):
+        self.broadcast()  # "two": an @all send whose ACKs are missing
+        starved = []
+        for i in range(12):
+            key = self.new_channel("aa%02d" % i)
+            lines = [encode(make_entry(key, n, "channel.note", text="n" * 600, ts=iso(time.time() - 30)))
+                     for n in range(1, 2501)]
+            write_topic(key, lines)
+            starved.append(key)
+        self.new_channel("zz-quiet")
+        roots = [str(log_path(k)) for k in starved]
+        with ReadMeter() as meter:
+            view = webdata.state_view(EMPTY)
+        rows = {r["key"]: r for r in view["channels"]}
+        self.assertEqual(rows["two"]["alert"], "missing_acks")
+        self.assertIsNone(rows["zz-quiet"]["alert"])
+        self.assertEqual(rows["zz-quiet"]["activity"], "none")
+        for key in starved:
+            self.assertEqual(rows[key]["activity"], "unknown", key)  # the bounded search ended before a send
+            self.assertIsNone(rows[key]["alert"], key)
+        first_chunk = 64 * 1024
+        for name in roots:
+            self.assertLessEqual(meter.bytes[name], first_chunk + webdata.ACTIVITY_SCAN_MAX, name)
+        self.assertLessEqual(sum(meter.bytes[n] for n in roots), webdata.REQUEST_BUDGET // 4 + len(roots) * first_chunk)
+
+    def test_the_send_search_past_the_page_stops_at_its_allowance(self):
+        key = self.new_channel("deep")
+        lines = [encode(make_entry(key, 1, "channel.send", send_data("old"), ts=iso(time.time() - 90)))]
+        lines += [encode(make_entry(key, n, "channel.note", text="n" * 600, ts=iso(time.time() - 30)))
+                  for n in range(2, 800)]
+        write_topic(key, lines)
+        long = webdata.HistorySnapshot(key, webdata.Budget()).read(limit=webdata.ALERT_WINDOW, want_send=True)
+        self.assertTrue([e for e in long.items if e.get("kind") == "channel.send"])
+        short = webdata.HistorySnapshot(key, webdata.Budget()).read(
+            limit=webdata.ALERT_WINDOW, want_send=True, send_scan=32 * 1024)
+        self.assertEqual([e["seq"] for e in short.page], [e["seq"] for e in long.page])
+        self.assertFalse([e for e in short.items if e.get("kind") == "channel.send"])
+        self.assertFalse(short.covered_all)
+        self.assertEqual(short.stop_reason, "cap")
+        self.assertLessEqual(short.topic_bytes, 64 * 1024 + 32 * 1024)
+        self.assertEqual(webdata._post_activity(short, time.time()), ("unknown", None))
+
     def test_alert_clears_when_every_recipient_acked(self):
         mid = self.broadcast()
         sp_journal.ack(mid, "codex:" + self.tid)
@@ -2840,6 +2882,36 @@ class WebdataActivityTests(WebdataBase):
         tracked = [k for k, _seq, _fp in webdata.decode_cursor(view["cursor"])["c"]]
         self.assertEqual(tracked, sorted(tracked, key=lambda k: (k != "general", k)))
 
+    def test_a_send_stamped_far_in_the_future_is_unknown_and_a_small_skew_is_posted(self):
+        self.assertEqual(webdata.FUTURE_SKEW, 300)
+        now = time.time()
+        self.chan("zzz", [self.sent("zzz", 1, ts="9999-12-31T00:00:00Z")])
+        self.chan("skew", [self.sent("skew", 1, ts=iso(now + 60))])
+        self.chan("recent", [self.sent("recent", 1, ts=self.ago(5))])
+        self.chan("quiet", [self.note("quiet", 1)])
+        view, rows = self.view(now=now)
+        self.assertEqual((rows["zzz"]["activity"], rows["zzz"]["last_post_ts"]), ("unknown", None))
+        self.assertEqual(rows["skew"]["activity"], "posted")
+        self.assertEqual([r["key"] for r in view["channels"]], ["general", "skew", "recent", "quiet", "zzz"])
+
+    def test_equal_activity_ties_by_label_then_key_and_an_unreadable_row_sorts_among_unknown_as_hash_key(self):
+        self.chan("tie-a", [self.note("tie-a", 1)])
+        self.chan("tie-b", [self.note("tie-b", 1)])
+        self.chan("lost", [self.sent("lost", 1), oversized_line(2)])
+        self.chan("mist", [self.sent("mist", 1), oversized_line(2)])
+        with open(os.path.join(sp_channels.channels_root(), "midway.json"), "w") as fh:
+            fh.write("{}")
+        labels = {
+            "tie-a": {"label": "#zeta", "status": "current"},
+            "tie-b": {"label": "#alpha", "status": "current"},
+            "lost": {"label": "#lost", "status": "current"}, "mist": {"label": "#nist", "status": "current"},
+        }
+        view = webdata.state_view(dict(EMPTY, labels=labels))
+        keys = [r["key"] for r in view["channels"]]
+        self.assertEqual(keys[:3], ["general", "tie-b", "tie-a"])
+        # unknown rows: "#lost" < "#midway" (unreadable, no label) < "#nist"
+        self.assertEqual(keys[3:], ["lost", "midway", "mist"])
+
     def test_a_membership_change_alone_does_not_move_a_channel(self):
         member = "codex:" + new_uuid()
         sp_channels.create_channel("old", self.me, [member])
@@ -2917,6 +2989,20 @@ class WebdataLabelFallbackTests(WebdataBase):
             self.assertEqual(
                 (rows["buddy-aaaa00000000"]["label"], rows["buddy-aaaa00000000"]["label_status"]),
                 ("#%s-%s" % (lead[:11], buddy[:14]), "current"))
+
+    def test_the_fallback_uses_the_maps_discovery_labelled_with_and_a_new_channel_moves_no_label(self):
+        lead, buddy = "cc:" + new_uuid(), "codex:" + new_uuid()
+        self.buddy(lead, buddy, "buddy-aaaa00000000")
+        label_names = {lead: "fire", buddy: "ice"}
+        labels = sp_channels.derive_labels([sp_channels.read_channel("buddy-aaaa00000000")], label_names, {})
+        self.assertEqual(labels["buddy-aaaa00000000"]["label"], "#fire-ice")
+        discovery = dict(EMPTY, labels=labels, label_names=label_names, label_liveness={},
+                         names={lead: "other"}, liveness={buddy: "gone"})
+        self.buddy("cc:" + new_uuid(), "codex:" + new_uuid(), "buddy-bbbb00000000")  # newer than the pass
+        rows = {r["key"]: r for r in webdata.state_view(discovery)["channels"]}
+        self.assertEqual((rows["buddy-aaaa00000000"]["label"], rows["buddy-aaaa00000000"]["label_status"]),
+                         ("#fire-ice", "current"))
+        self.assertTrue(rows["buddy-bbbb00000000"]["label"].startswith("#cc:"))
 
     def test_discovery_labels_win_and_an_unreadable_row_has_none(self):
         lead, buddy = "cc:" + new_uuid(), "codex:" + new_uuid()

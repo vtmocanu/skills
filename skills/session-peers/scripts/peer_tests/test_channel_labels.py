@@ -7,7 +7,7 @@ key stays the address.
 from peer_tests.support import *  # noqa: F401,F403
 from peer_tests.test_channel_buddy import BuddyChannelBase
 from peer_tests.test_opencode import OC_A, OC_B
-from session_peers import channels as sp_channels, journal as sp_journal, web, webdata as sp_webdata
+from session_peers import channels as sp_channels, journal as sp_journal, storage as sp_storage, web, webdata as sp_webdata
 
 DOT = "·"
 ASCII_DOT = "\\u00b7"
@@ -670,3 +670,55 @@ class PageLabelTests(LabelBase):
         self.assertIn(ASCII_DOT, label)
         for bad in ("\x1b", "\x07", "\n", DOT):
             self.assertNotIn(bad, label)
+
+
+class OwnerHygieneTests(LabelBase):
+    """A peer-written ``owner`` that is not a typed id of a buddy kind is never looked up."""
+
+    EVIL = "codex:../../outside/victim"
+
+    def record_calls(self):
+        calls = []
+
+        def note(name):
+            def hook(*args, **kwargs):
+                calls.append((name, args))
+                return None
+            return hook
+
+        patches = [
+            mock.patch.object(sp_storage, "thread_home", note("thread_home")),
+            mock.patch.object(sp_storage, "_pidfile_is_held", note("_pidfile_is_held")),
+            mock.patch.object(sp_channels.sp_codex, "resolve_thread", note("resolve_thread")),
+        ]
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+        return calls
+
+    def test_pair_of_flags_an_unnormalizable_or_non_buddy_owner_unverified(self):
+        for bad in (self.EVIL, "web:" + new_uuid(), "nonsense", ""):
+            with self.subTest(bad=bad):
+                lead, buddy, status = sp_channels.pair_of(buddy_rec("buddy-aa", bad, self.x))
+                self.assertEqual((str(lead), buddy, status), (bad, None, "unverified"))
+                self.assertIsInstance(lead, sp_channels.UnverifiedId)
+                self.assertEqual(sp_channels.pair_lookup_ids([buddy_rec("buddy-aa", bad, self.x)]), ([], []))
+
+    def test_the_owner_is_normalized_for_lookups(self):
+        lead, buddy, status = sp_channels.pair_of(buddy_rec("buddy-aa", "cc:" + self.lead[3:].upper(), self.x))
+        self.assertEqual((lead, buddy, status), (self.lead, self.x, "known"))
+        self.assertNotIsInstance(lead, sp_channels.UnverifiedId)
+
+    def test_the_cli_and_the_page_look_nothing_up_for_a_path_shaped_owner(self):
+        self.assertEqual(self.bset(self.x)[0], 0)
+        self.edit_record(lambda rec: rec.update(owner=self.EVIL, members=[self.EVIL, self.x]))
+        calls = self.record_calls()
+        row = self.row()
+        self.assertEqual(row["label_status"], "unverified")
+        self.assertEqual(row["label"], "#codex:../../ou")
+        self.assertIsNone(row["current_buddy"])
+        self.assertEqual(calls, [])  # the CLI looked nothing up: the lead is not a typed id
+        view = sp_webdata.state_view(web.run_discovery())
+        page = {r["key"]: r for r in view["channels"]}[self.key]
+        self.assertEqual((page["label"], page["label_status"]), (row["label"], "unverified"))
+        self.assertEqual([c for c in calls if "victim" in str(c) or ".." in str(c)], [])

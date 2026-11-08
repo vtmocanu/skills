@@ -69,7 +69,6 @@ DISCOVERY_PASS_BUDGET = 8.0  # seconds one pass may start new member checks
 SUBPROCESS_MEMBERS_PER_PASS = 64  # Codex/OpenCode members checked per pass (each may shell out)
 MEMBERS_PER_CHANNEL = 64
 MEMBERS_TOTAL = 512
-CHANNELS_MAX = 2048
 ASSET_MAX = 4 * 1024 * 1024
 BODY_MAX = 1024 * 1024  # largest POST body (Content-Length) a chat-mode send accepts
 BODY_GRACE = 0.5  # the body read gives up this long before the connection cut, so the 408 can still be written
@@ -116,18 +115,22 @@ def _empty_discovery(**flags):
     return out
 
 
-def _read_records():
-    """``{key: record}`` of every readable stored channel, each read once with its own budget.
+def _read_records(deadline):
+    """``({key: record}, truncated)`` of the readable stored channels, each read once with its own budget.
 
+    At most CHANNEL_MAX_CHANNELS keys, in sorted key order (as ``channels.label_context`` orders
+    buddy records), and no key is started after the monotonic ``deadline`` (``truncated``).
     ``webdata._read_record`` opens without following links or blocking, so a planted FIFO or symlink
     reads as None and is skipped; a fresh budget per record keeps the total of the records from
-    starving the later ones."""
+    starving the later ones (each is at most ``channels.RECORD_MAX_BYTES``)."""
     records = {}
-    for key in sp_channels.list_keys()[:CHANNELS_MAX]:
+    for key in sorted(sp_channels.list_keys())[:sp_constants.CHANNEL_MAX_CHANNELS]:
+        if time.monotonic() >= deadline:
+            return records, True
         record = sp_webdata._read_record(key, sp_webdata.Budget())
         if record is not None:
             records[key] = record
-    return records
+    return records, False
 
 
 def _rosters(records):
@@ -143,15 +146,7 @@ def _pair_identities(records):
     """``(live, named)``: the typed ids whose liveness a label needs (both members of each known pair)
     and those whose name it needs (every lead and current buddy), first CHANNEL_MAX_CHANNELS buddy
     records by key only, as ``channels.label_context``."""
-    live, named = [], []
-    buddies = sorted((r for r in records.values() if r.get("kind") == "buddy"), key=lambda r: r["key"])
-    for record in buddies[:sp_constants.CHANNEL_MAX_CHANNELS]:
-        lead, buddy, pair = sp_channels.pair_of(record)
-        for typed in (lead, buddy):
-            if typed and typed not in named:
-                named.append(typed)
-            if pair == sp_channels.PAIR_KNOWN and typed not in live:
-                live.append(typed)
+    named, live = sp_channels.pair_lookup_ids(records.values())
     return live, named
 
 
@@ -168,13 +163,14 @@ def _registry_view(typed, kind, ident, live, by_sid):
     return activity, name
 
 
-def _opencode_view(members):
-    """``({typed: activity}, {typed: title})`` of the OpenCode members; unreadable means unknown."""
+def _opencode_view(members, cache=None):
+    """``({typed: activity}, {typed: title})`` of the OpenCode members; unreadable means unknown.
+    ``cache`` is shared with the pass's other lookups so the recent sessions are listed once."""
     try:
         active = sp_opencode.active_ids()
     except Exception:
         active = None
-    titles = sp_channels.opencode_titles()
+    titles = sp_channels.opencode_titles(cache)
     activity, names = {}, {}
     for typed in members:
         sid = typed.partition(":")[2]
@@ -198,7 +194,7 @@ def run_discovery(requester=None, previous=None):
     liveness (the previous pass's result), else its short id and ``unverified``, and the pass is
     ``truncated``."""
     with _DISCOVERY_LOCK, sp_storage.no_create(), sp_runtime.quiet():
-        records = _read_records()
+        records, truncated = _read_records(time.monotonic() + DISCOVERY_PASS_BUDGET)
         general, rosters = _rosters(records)
         live_ids, named_ids = _pair_identities(records)
         members, seen = [], set()
@@ -208,7 +204,7 @@ def run_discovery(requester=None, previous=None):
                     seen.add(typed)
                     members.append(typed)
         cache, liveness, activity, names, homes = {}, {}, {}, {}, {}
-        deadline, subprocess_left, truncated = time.monotonic() + DISCOVERY_PASS_BUDGET, SUBPROCESS_MEMBERS_PER_PASS, False
+        deadline, subprocess_left = time.monotonic() + DISCOVERY_PASS_BUDGET, SUBPROCESS_MEMBERS_PER_PASS
         checked, unchecked = set(), []
         for typed in members:
             if time.monotonic() >= deadline:
@@ -242,7 +238,7 @@ def run_discovery(requester=None, previous=None):
                     pass
         oc_members = [m for m in members if m.startswith("oc:") and m in checked]
         if oc_members and time.monotonic() < deadline:
-            oc_activity, oc_names = _opencode_view(oc_members)
+            oc_activity, oc_names = _opencode_view(oc_members, cache)
             activity.update(oc_activity)
             names.update(oc_names)
         elif oc_members:
@@ -263,16 +259,18 @@ def run_discovery(requester=None, previous=None):
                 label_names.update(sp_channels.session_names(oc_named, cache))
             except Exception:
                 pass
-        elif oc_named:  # out of time: what the previous pass found stays
+        elif oc_named:  # out of time
             truncated = True
-            label_names.update({t: prev_names[t] for t in oc_named if isinstance(prev_names.get(t), str)})
+        # An identity that got no name (out of time, a failed or skipped lookup) keeps what the previous pass found.
+        kept = {t: prev_names[t] for t in oc_named if t not in label_names and isinstance(prev_names.get(t), str)}
+        label_names.update(kept)
+        truncated = truncated or bool(kept)
         for typed in live_ids:
             if typed in checked:
                 label_live[typed] = liveness[typed]
             else:
                 label_live[typed] = prev_live.get(typed) if prev_live.get(typed) in ("live", "gone", "unverified") else "unverified"
-        labels = sp_channels.derive_labels(
-            list(records.values()), {**names, **label_names}, {**liveness, **label_live})
+        labels = sp_channels.derive_labels(list(records.values()), label_names, label_live)
         found = {"general": general, "liveness": liveness, "activity": activity, "names": names,
                  "homes": homes, "stale": False, "pending": False, "truncated": truncated,
                  "unchecked": unchecked, "labels": labels, "label_names": label_names,

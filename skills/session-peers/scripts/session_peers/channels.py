@@ -1014,14 +1014,20 @@ def registry_name(kind, ident, by_sid):
                  if clip_name(r.get("name"))), None)
 
 
-def opencode_titles():
-    """``{session id: title}`` of the recent top-level OpenCode sessions; unreadable gives ``{}``."""
+def opencode_titles(cache=None):
+    """``{session id: title}`` of the recent top-level OpenCode sessions; unreadable gives ``{}``.
+
+    With a ``cache`` (the dict ``member_liveness`` shares) the sessions are listed once per cache."""
+    if cache is not None and "oc_titles" in cache:
+        return cache["oc_titles"]
     titles = {}
     try:
         for session in sp_opencode.recent_sessions():
             titles[session["id"]] = clip_name(session.get("title"))
     except Exception:
         pass
+    if cache is not None:
+        cache["oc_titles"] = titles
     return titles
 
 
@@ -1046,7 +1052,7 @@ def session_names(typeds, cache=None):
                     names[typed] = name
     oc = [t for t in wanted if t.startswith("oc:")]
     if oc:
-        titles = opencode_titles()
+        titles = opencode_titles(cache)
         lookups, down = 0, False
         for typed in oc:
             sid = typed.partition(":")[2]
@@ -1065,14 +1071,27 @@ def session_names(typeds, cache=None):
     return names
 
 
+class UnverifiedId(str):
+    """A peer-written ``owner`` that is not a canonical typed id of a buddy kind: shown (escaped, short
+    form) but never looked up, so it can never name a path."""
+
+
 def pair_of(rec):
     """``(lead, buddy_or_None, status)`` of a buddy channel record.
 
     ``current_buddy`` absent means the record predates the field (``unverified``); None means no
     current buddy (``none``); a canonical typed id of a buddy kind other than the owner is the
-    buddy (``known``); anything else is ``unverified``.
+    buddy (``known``); anything else is ``unverified``. The lead is the owner normalized with
+    ``journal._norm``; an owner that is not a typed id of a buddy kind is returned as an
+    ``UnverifiedId`` of the raw string, with status ``unverified``.
     """
-    lead = rec.get("owner")
+    raw = rec.get("owner")
+    try:
+        lead = sp_journal._norm(raw)
+        if lead.partition(":")[0] not in sp_constants.BUDDY_KINDS:
+            raise ValueError("not a buddy kind")
+    except Exception:
+        return UnverifiedId(raw if isinstance(raw, str) else ""), None, PAIR_UNVERIFIED
     if "current_buddy" not in rec:
         return lead, None, PAIR_UNVERIFIED
     value = rec["current_buddy"]
@@ -1159,6 +1178,23 @@ def derive_labels(records, names, liveness):
     return out
 
 
+def pair_lookup_ids(records):
+    """``(named, live)``: the normalized typed ids whose name a label needs (lead and current buddy of
+    each buddy record) and whose liveness it needs (both members of each known pair), in first-seen
+    order over the first CHANNEL_MAX_CHANNELS buddy records by key. An ``UnverifiedId`` is never included."""
+    named, live = [], []
+    buddies = sorted((r for r in records if r.get("kind") == "buddy"), key=lambda r: r["key"])
+    for rec in buddies[:sp_constants.CHANNEL_MAX_CHANNELS]:
+        lead, buddy, pair = pair_of(rec)
+        for typed in (lead, buddy):
+            if typed and not isinstance(typed, UnverifiedId):
+                if typed not in named:
+                    named.append(typed)
+                if pair == PAIR_KNOWN and typed not in live:
+                    live.append(typed)
+    return named, live
+
+
 def label_context(records, cache, liveness_of=None, names_of=None):
     """``(names, liveness)`` for ``derive_labels``: the lead of every buddy record, and the liveness
     of both members of each known pair. No binding file is read. The store is peer-writable, so
@@ -1173,20 +1209,7 @@ def label_context(records, cache, liveness_of=None, names_of=None):
     an outage. ``cc:`` liveness reads the registry and is not limited."""
     liveness_of = liveness_of or member_liveness
     names_of = names_of or session_names
-    names_wanted, live_wanted = set(), set()
-    names_order, live_order = [], []
-    buddies = sorted((r for r in records if r.get("kind") == "buddy"), key=lambda r: r["key"])
-    for rec in buddies[:sp_constants.CHANNEL_MAX_CHANNELS]:
-        lead, buddy, pair = pair_of(rec)
-        for typed in (lead, buddy):
-            if typed and typed not in names_wanted:
-                names_wanted.add(typed)
-                names_order.append(typed)
-        if pair == PAIR_KNOWN:
-            for typed in (lead, buddy):
-                if typed not in live_wanted:
-                    live_wanted.add(typed)
-                    live_order.append(typed)
+    names_order, live_order = pair_lookup_ids(records)
     try:
         names = dict(names_of(names_order, cache)) if names_order else {}
     except Exception:
