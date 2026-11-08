@@ -54,7 +54,8 @@ the same user. Connection, header and read-budget details are in the
     follow by their newest send (newest first), then channels with no posts,
     then channels whose activity is unknown; ties break by label, then key.
     Only sends count (not joins, leaves or handovers), so a membership change
-    does not move a channel. A channel whose newest send is stamped more than
+    does not move a channel (an oversized entry, or a send pushed out of the
+    read window, can make a channel's activity unknown, which does move it). A channel whose newest send is stamped more than
     300 s in the future counts as unknown. The channel you selected stays
     selected and is scrolled into view whenever the rail reorders, on a poll or a
     state refresh.
@@ -136,10 +137,13 @@ Everything is bounded; a request that hits a bound says so in the page
   skipped OpenCode lookup) keeps the previous pass's name and liveness if there
   is one, else its short id and `unverified` liveness; either way the pass is
   reported incomplete (`discovery stopped early`). A deleted OpenCode session
-  (reported not found) drops its name and does not mark the pass incomplete.
-  Labels for a channel newer than the last discovery pass, or before the first
-  pass, are derived on the request thread without lookups (short ids until the
-  next pass). Finding the newest send continues past the 25-entry
+  (reported not found) drops its name and does not mark the pass incomplete; an
+  OpenCode session that exists but has no title counts as checked (short id,
+  pass not incomplete). Labels for a channel newer than the last discovery
+  pass, or before the first pass, are derived on the request thread without
+  lookups, from the last pass's names: identities that pass named keep their
+  names, identities it did not name (and everything before the first pass)
+  show short ids. Finding the newest send continues past the 25-entry
   alert page within the channel's 1 MiB read, reading at most 256 KiB more per
   channel and, across all tracked channels, about a quarter of what is left of
   the 8 MiB request; a channel it cannot settle within that is activity

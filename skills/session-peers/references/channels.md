@@ -295,8 +295,8 @@ A label names the channel by its pair and is computed at render time:
   apart). Named channels are never suffixed, and `#general` and existing
   channel keys are reserved.
 - A label is display only, never an address: it is not stored, and `send --to`
-  takes `send --to '#buddy-<hash>'`, the `#` form `channel list` prints beside
-  a buddy label (or `#NAME` for a named channel). `channel members` and
+  takes `send --to '#buddy-<hash>'`, the `#` form `channel list` prints in its
+  `key #buddy-…` field at the end of the line (or `#NAME` for a named channel). `channel members` and
   `channel tail` accept the key with or without `#`; a label is refused.
 - `channel list --json` rows carry `label`, `label_status` (`current`,
   `stale`, `unverified`) and `current_buddy` (the typed id when the pair is
@@ -304,10 +304,14 @@ A label names the channel by its pair and is computed at render time:
 - Lookups are capped per `channel list`: names and liveness are looked up for
   the first 256 buddy records in key order; at most 32 non-`cc` liveness checks
   (every `codex:` check, and each OpenCode check not answered by the already
-  listed sessions) and at most 32 OpenCode `get_session` name lookups are made,
-  and none after the first OpenCode failure. Past the liveness cap a member's
-  liveness is `unverified` (not stale). Past the name-lookup cap, or after an
-  OpenCode failure, a member has no OpenCode name and shows the short id.
+  listed sessions) and at most 32 OpenCode `get_session` name lookups are made.
+  Past the liveness cap a member's liveness is `unverified` (not stale). Name
+  lookups: at most 32 `get_session` calls per listing, and a failed call stops
+  further name lookups in that listing; members already titled from the
+  recent-sessions list keep their names, the rest show the short id (so do
+  members past the cap). A `get_session` answer that the session does not exist
+  is not a failure. Liveness: an OpenCode liveness check stops further OpenCode
+  liveness checks only when the session walk itself failed.
   Claude and Codex registry names are not capped. Records past the 256 cap get
   no lookups (names found for other records may still apply).
 
