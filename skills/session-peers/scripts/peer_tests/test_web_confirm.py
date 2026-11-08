@@ -501,7 +501,7 @@ class ConfirmTeardownTests(ConfirmBase):
         real_deliver = sp_channels._deliver_member
         real_join = test_web_chat.join_or_fail
 
-        def deliver(args, member, *rest):
+        def deliver(args, member, *rest, **kw):
             workers.append(threading.current_thread())
             entered.set()
             if not release.wait(10):
@@ -512,7 +512,7 @@ class ConfirmTeardownTests(ConfirmBase):
                 # A regressed teardown: never deliver against the restored environment.
                 failures.append("the delivery ran with HOME/CODEX_HOME %r" % (pair,))
                 return sp_channels.OUTCOME_REFUSED + "test env mismatch"
-            result = real_deliver(args, member, *rest)
+            result = real_deliver(args, member, *rest, **kw)
             listener = listeners[member]
             deadline = time.monotonic() + 10
             while not listener.of_type("user") and time.monotonic() < deadline:

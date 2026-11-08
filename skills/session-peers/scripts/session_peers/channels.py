@@ -1517,9 +1517,17 @@ def _last_error(stderr_text, rc):
     return _reason(lines[-1][len("error: "):] if lines else "delivery failed (exit %d)" % rc)
 
 
-def _outcome_of(payload, rc, stderr_text):
-    """The shared-vocabulary outcome of one member's delivery attempt."""
+def _outcome_of(payload, rc, stderr_text, unknown_ok=False):
+    """The shared-vocabulary outcome of one member's delivery attempt.
+
+    ``unknown_ok`` maps a last ``error:`` line that starts with "outcome unknown"
+    (a frame that may have landed) to STATE_UNKNOWN instead of a refusal.
+    """
     if rc != 0:
+        if unknown_ok:
+            lines = [ln for ln in stderr_text.splitlines() if ln.startswith("error: ")]
+            if lines and lines[-1][len("error: "):].startswith("outcome unknown"):
+                return STATE_UNKNOWN
         return OUTCOME_REFUSED + _last_error(stderr_text, rc)
     if not payload:
         return STATE_UNKNOWN
@@ -1531,16 +1539,23 @@ def _outcome_of(payload, rc, stderr_text):
     return OUTCOME_ACCEPTED
 
 
-def _deliver_member(args, member, sender, mid, text, snapshot):
-    """Route-check and deliver ``text`` to one member; its outcome. Never raises on a delivery failure."""
+def _deliver_member(args, member, sender, mid, text, snapshot, never_wake=True, wake=False,
+                    unknown_ok=False, payloads=None):
+    """Route-check and deliver ``text`` to one member; its outcome. Never raises on a delivery failure.
+
+    A fan-out never wakes a member (``never_wake``); the targeted buddy send
+    passes ``never_wake=False`` and its ``wake``. ``unknown_ok`` lets an
+    "outcome unknown" delivery read as STATE_UNKNOWN. ``payloads``, when a list,
+    receives the member's own direct payload (or None).
+    """
     from . import messaging as sp_messaging, routes as sp_routes
 
     member_args = copy.copy(args)
     member_args.to = member
     member_args.message = text
     member_args.record = False
-    member_args.wake = False
-    member_args.never_wake = True
+    member_args.wake = wake
+    member_args.never_wake = never_wake
     member_args.result_sink = []
     member_args.channel_msg_id = mid
     member_args.channel_snapshot = snapshot
@@ -1559,7 +1574,9 @@ def _deliver_member(args, member, sender, mid, text, snapshot):
         err.write("error: %s\n" % exc)
         rc = 1
     payload = member_args.result_sink[-1] if member_args.result_sink else None
-    return _outcome_of(payload, rc, err.getvalue())
+    if payloads is not None:
+        payloads.append(payload)
+    return _outcome_of(payload, rc, err.getvalue(), unknown_ok)
 
 
 def send_channel(args):
@@ -1733,7 +1750,8 @@ def _send(args):
             lock.abandon()
 
 
-def _deliver_all(args, lock, send, members, guard=None, pointer=None, ack=True):
+def _deliver_all(args, lock, send, members, guard=None, pointer=None, ack=True,
+                 never_wake=True, wake=False, unknown_ok=False, payloads=None):
     """Deliver serially, append the one outcome entry, then release the lock.
 
     ``(outcomes, notes, update_failed, problem)``; ``problem`` is the ChannelError
@@ -1741,7 +1759,8 @@ def _deliver_all(args, lock, send, members, guard=None, pointer=None, ack=True):
     context-manager factory entered around each member's delivery and never
     across a pacing sleep; ``pointer`` says whether the text carries the ACK
     pointer (default: whenever ``journaled``); ``ack`` False notes every member
-    as ACK not requested.
+    as ACK not requested. ``never_wake``, ``wake``, ``unknown_ok`` and
+    ``payloads`` pass to ``_deliver_member``; the defaults are the fan-out's.
     """
     key, sender, mid, body, journaled = send
     snapshot, gone, deliver, excluded = members
@@ -1765,7 +1784,9 @@ def _deliver_all(args, lock, send, members, guard=None, pointer=None, ack=True):
                 _sleep(wait)
         text = _delivery_text(key, mid, sender, member, body, pointer)
         with (guard() if guard is not None else contextlib.nullcontext()):
-            outcomes[member] = _deliver_member(args, member, sender, mid, text, snap)
+            outcomes[member] = _deliver_member(
+                args, member, sender, mid, text, snap, never_wake=never_wake, wake=wake,
+                unknown_ok=unknown_ok, payloads=payloads)
         if is_claude:
             last_claude = _clock()
         if journaled and outcomes[member].startswith(OUTCOME_REFUSED):
@@ -1927,6 +1948,238 @@ def _report(payload, rc, as_json, journaled, headline):
         print(sp_journal._human("  %s: %s%s" % (
             member, outcome, " (%s)" % notes[member] if member in notes else "")))
     return rc
+
+
+# --------------------------------------------------------------------------
+# Targeted sends: one recipient of a buddy channel
+# --------------------------------------------------------------------------
+
+
+class TargetedTooLarge(ChannelError):
+    """A targeted send whose channel header pushes the delivery over a peer cap."""
+
+
+def buddy_route(owner, member):
+    """``(key, None)`` when ``member`` can be reached through ``owner``'s buddy channel, else ``(None, reason)``.
+
+    Needs ``find_buddy_channel(owner)`` to name a ``buddy`` channel ``owner``
+    still owns with both ``owner`` and ``member`` on its roster. It checks nothing
+    about the caller.
+    """
+    try:
+        key = find_buddy_channel(owner)
+        rec = read_channel(key) if key is not None else None
+    except (ChannelError, OSError) as exc:
+        return None, _reason(exc)
+    if rec is None or rec["kind"] != "buddy" or rec["owner"] != owner:
+        return None, "no buddy channel"
+    if owner not in rec["members"]:
+        return None, "the lead left #%s" % key
+    if member not in rec["members"]:
+        return None, "member not in #%s" % key
+    return key, None
+
+
+def buddy_route_gone(owner, member, key):
+    """True only when channel ``key`` provably no longer routes ``member`` for ``owner``.
+
+    Gone: the record file does not exist (FileNotFoundError), or it parsed and
+    is not a ``buddy`` channel ``owner`` owns, or lacks ``owner`` or ``member``.
+    Anything else (another stat error, an oversized, malformed or invalid record,
+    which ``read_channel`` folds into None) is not proof: it returns False, so
+    the caller holds instead of falling back.
+    """
+    try:
+        os.stat(_record_path(key))
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    try:
+        rec = read_channel(key)
+    except (ChannelError, OSError):
+        return False
+    if rec is None:
+        return False  # present but unreadable or invalid
+    if rec["kind"] != "buddy" or rec["owner"] != owner:
+        return True
+    return owner not in rec["members"] or member not in rec["members"]
+
+
+def prepare_targeted(key, sender, recipient, body, mid, record, wake=False):
+    """The plan of a one-recipient send to ``recipient`` of channel ``key``; writes nothing.
+
+    Shaped like ``_prepare_send``'s plan, so ``_record_journal`` and
+    ``_append_send`` take it. It is never an ``@all``: a leading ``@all`` is
+    plain text, takes no allowance and is journaled only when ``record``.
+    Raises ChannelError (``TargetedTooLarge`` when the delivery is over a peer cap).
+    """
+    rec = read_channel(key)
+    if rec is None:
+        raise ChannelError("no channel named #%s; run `peers.py channel list`" % key)
+    for who in (sender, recipient):
+        if who not in rec["members"]:
+            raise ChannelError(
+                "%s is not a member of #%s" % (sp_journal._human(who), key))
+    _check_roster_cap(rec)
+    if member_liveness(recipient) == "gone":
+        raise ChannelError(
+            "%s is gone; nothing was recorded or sent" % sp_journal._human(recipient), 1)
+    try:
+        _check_size(key, mid, sender, [recipient], body, record)
+    except ChannelError as exc:
+        header = _delivery_text(key, mid, sender, recipient, "", False).splitlines()[0]
+        raise TargetedTooLarge(
+            "%s (channel header %r is %d bytes)" % (exc, header, len(header.encode("utf-8"))), exc.code)
+    deliver, excluded = [recipient], []
+    if record:
+        deliver, excluded = _journal_preflight([recipient])
+        if not deliver:
+            detail = "; ".join("%s: %s" % (m, r) for m, r in excluded[:3])
+            raise ChannelError(
+                "no recipient of this message can be recorded for ACK%s; nothing was recorded or sent"
+                % (" (%s)" % detail if detail else ""), 1)
+    return types.SimpleNamespace(
+        key=key, sender=sender, body=body, mid=mid, coverage=None, gaps=[], general=False,
+        is_all=False, journaled=bool(record), pointer=bool(record), delivers=True,
+        snapshot=[recipient], gone=[], live=[recipient], deliver=deliver, excluded=excluded,
+        wake=bool(wake))
+
+
+def history_floor(key):
+    """The last seq of ``key``'s history (0 when empty); ChannelError when it cannot be read."""
+    try:
+        return read_history(key, limit=1)["next"]
+    except (OSError, sp_topics.TopicError) as exc:
+        raise ChannelError("could not read the history of #%s: %s" % (key, exc), 1)
+
+
+def _publish_journal(plan):
+    """The journal step of a targeted send: record the message when the plan is journaled."""
+    if plan.journaled:
+        _record_journal(plan)
+
+
+def _publish_history(plan):
+    """The history step of a targeted send: append the ``channel.send`` entry; the held ``_SendLock``."""
+    return _append_send(plan, {"targeted": True})
+
+
+def publish_targeted(plan):
+    """Journal (when asked) and append the ``channel.send`` entry; the held ``_SendLock``.
+
+    JournalError and ChannelError propagate; nothing is delivered here.
+    """
+    _publish_journal(plan)
+    return _publish_history(plan)
+
+
+def _find_kind(key, mid, floor, kind):
+    """``("found", entry)``, ``("absent", None)`` or ``("evidence missing", None)`` for ``mid``'s ``kind`` entry after ``floor``."""
+    cursor = floor
+    limit = sp_constants.TOPIC_TAIL_MAX
+    missing = False
+    try:
+        while True:
+            page = read_history(key, since=cursor, limit=limit)
+            gap = page.get("gap")
+            if gap is not None and gap["to"] > floor:
+                missing = True  # retention pruned entries the mid could be among
+            for entry in page["entries"]:
+                data = entry.get("data")
+                if (entry.get("kind") == kind and isinstance(data, dict)
+                        and data.get("message_id") == mid):
+                    return "found", entry
+            if len(page["entries"]) < limit:
+                return ("evidence missing", None) if missing else ("absent", None)
+            cursor = page["next"]
+    except (OSError, sp_topics.TopicError) as exc:
+        raise ChannelError("could not read the history of #%s: %s" % (key, exc), 1)
+
+
+def find_send(key, mid, floor):
+    """Where ``mid``'s ``channel.send`` entry stands among the entries after ``floor``."""
+    return _find_kind(key, mid, floor, EVENT_SEND)
+
+
+def find_outcome(key, mid, floor):
+    """Where ``mid``'s ``channel.outcome`` entry stands among the entries after ``floor``."""
+    return _find_kind(key, mid, floor, EVENT_OUTCOME)
+
+
+def finish_targeted(key, sender, mid, recipient, outcome, floor, lock=None):
+    """Append the one ``channel.outcome`` of a targeted send unless one exists; True when it did.
+
+    Takes a fresh ``_SendLock`` when ``lock`` is None, and releases the lock
+    on every path. Raises ChannelError.
+    """
+    try:
+        if lock is None:
+            try:
+                lock = _SendLock(mid)
+            except OSError as exc:
+                raise ChannelError("could not lock message %s: %s" % (mid, exc), 1)
+        status, _entry = find_outcome(key, mid, floor)
+        if status != "absent":
+            return False
+        append_history(key, EVENT_OUTCOME, sender, {"message_id": mid, "outcomes": {recipient: outcome}})
+        return True
+    finally:
+        if lock is not None:
+            lock.release()
+
+
+def release_unfinished(lock):
+    """Release a send lock without recording an outcome."""
+    lock.release()
+
+
+def send_targeted(args, key, sender, recipient):
+    """Send ``args.message`` to ``recipient`` alone through channel ``key``; the exit code.
+
+    The CLI's targeted path (a buddy route): the same journal, history, delivery
+    and outcome steps as a fan-out, for one recipient, with a wake allowed and an
+    "outcome unknown" delivery recorded as unknown rather than refused.
+    """
+    as_json = bool(getattr(args, "json", False))
+    mid = str(uuidlib.uuid4())
+    plan = prepare_targeted(
+        key, sender, recipient, args.message, mid, bool(getattr(args, "record", False)),
+        wake=bool(getattr(args, "wake", False)))
+    try:
+        _publish_journal(plan)
+    except sp_journal.JournalError as exc:
+        return sp_journal.presend_failed(exc, as_json)
+    if plan.journaled:
+        _failpoint("send_after_journal")
+    lock = _publish_history(plan)
+    payloads = []
+    try:
+        outcomes, notes, update_failed, problem = _deliver_all(
+            args, lock, (key, sender, mid, plan.body, plan.journaled),
+            (plan.snapshot, plan.gone, plan.deliver, plan.excluded),
+            never_wake=False, wake=plan.wake, unknown_ok=True, payloads=payloads)
+    finally:
+        if lock is not None:
+            lock.abandon()  # a no-op after a normal release
+    direct = payloads[-1] if payloads and payloads[-1] else {}
+    payload = dict(direct)
+    outcome = outcomes[recipient]
+    bad = outcome.startswith(OUTCOME_REFUSED) or outcome == STATE_UNKNOWN
+    if not direct:
+        payload["status"] = "unknown" if outcome == STATE_UNKNOWN else "failed" if bad else "sent"
+    payload.update({"route": "buddy_channel", "channel": key, "message_id": mid, "outcomes": outcomes})
+    if notes:
+        payload["notes"] = notes
+    if plan.journaled:
+        payload["journal"] = {"message_id": mid, "recorded": True}
+    if problem is not None:
+        _err("%s; the delivery was made but its outcome is not recorded and reads as unknown" % problem)
+    rc = sp_journal.EXIT_UPDATE_FAILED if update_failed else 1 if bad or problem else 0
+    # An unknown outcome may have been delivered (the write began), so it is not "not delivered".
+    prefix = "delivery unconfirmed: " if outcome == STATE_UNKNOWN else "not delivered: " if bad else ""
+    headline = "%ssent to #%s (buddy), message %s" % (prefix, key, mid)
+    return _report(payload, rc, as_json, plan.journaled, headline)
 
 
 # --------------------------------------------------------------------------

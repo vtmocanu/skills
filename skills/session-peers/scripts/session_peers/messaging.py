@@ -99,8 +99,44 @@ def _expand_buddy_arg(args, attr, purpose):
     return None
 
 
+def _buddy_channel_route(args):
+    """``(key, sender, recipient)`` when ``send --to buddy`` can ride the pair's buddy channel, else ``(None, reason)``.
+
+    ``args.to`` is the already-expanded buddy. The channel is used only for the
+    binding's own owner sending as itself, with nothing that needs a direct
+    OpenCode delivery.
+    """
+    if any(getattr(args, name, None) for name in ("from_thread", "from_name", "from_sid", "from_socket")):
+        return None, "--from-* names another sender"
+    if getattr(args, "allow_reply_wake", None) is not None or getattr(args, "in_reply_to", None):
+        return None, "--allow-reply-wake/--in-reply-to need a direct OpenCode delivery"
+    try:
+        sender = sp_journal.caller()
+        ident = sp_identity.caller_identity(args)
+        owner = sp_journal._norm("%s:%s" % (ident["kind"], ident["uuid"]))
+    except sp_journal.JournalError as exc:
+        return None, "sender identity: %s" % sp_journal._human(str(exc))
+    except ValueError:
+        return None, "the caller is not the binding's owner"
+    try:
+        recipient = sp_journal._norm(args.to)
+    except ValueError:
+        return None, "the buddy's id is not a typed id"
+    if sender != owner:
+        return None, "the caller is not the binding's owner"
+    if sender == recipient:
+        return None, "a session cannot be its own buddy"
+    from . import channels as sp_channels
+
+    key, reason = sp_channels.buddy_route(sender, recipient)
+    if key is None:
+        return None, reason
+    return key, sender, recipient
+
+
 def cmd_send(args):
     sp_diagnostics.warn_versions()
+    buddy_alias = args.to in ("buddy", "@buddy")
     failed = _expand_buddy_arg(args, "to", "send")
     if failed is not None:
         return failed
@@ -111,6 +147,21 @@ def cmd_send(args):
         return sp_channels.send_channel(args)
     try:
         args.message = sp_runtime.message_from_args(args)
+    except ValueError as exc:
+        sys.stderr.write("error: %s\n" % exc)
+        return 1
+    if buddy_alias:
+        route = _buddy_channel_route(args)
+        if len(route) == 3:
+            from . import channels as sp_channels
+
+            try:
+                return sp_channels.send_targeted(args, *route)
+            except sp_channels.ChannelError as exc:
+                sys.stderr.write("error: %s\n" % exc)
+                return exc.code
+        sys.stderr.write("note: buddy channel not used: %s; trying the direct route\n" % route[1])
+    try:
         _validate_reply_wake(args)
     except ValueError as exc:
         sys.stderr.write("error: %s\n" % exc)
@@ -710,6 +761,13 @@ def _send_claude(target, args, oc_sender=None):
             sp_reply_wake.forget(reply_id)
         sys.stderr.write("error: %s\n" % exc)
         return _transport_failed(args, msg_id, exc)
+    except sp_claude.FrameUncertain as exc:
+        # The frame may have landed, so a reply-wake grant is kept.
+        sys.stderr.write(
+            "error: outcome unknown: could not confirm delivery to %s: %s; "
+            "check the recipient before resending\n" % (target, exc)
+        )
+        return _transport_failed(args, msg_id, exc)
     except OSError as exc:
         if reply_id:
             sp_reply_wake.forget(reply_id)
@@ -778,6 +836,12 @@ def _send_claude_channel(target, args, sender_sid):
         sp_claude.send_frame(rec["messagingSocketPath"], frame, auth_token=sp_claude.peer_token_for(rec))
     except (sp_codex.ResolveError, ValueError) as exc:
         sys.stderr.write("error: %s\n" % exc)
+        return 1
+    except sp_claude.FrameUncertain as exc:
+        sys.stderr.write(
+            "error: outcome unknown: could not confirm delivery to %s: %s; "
+            "check the recipient before resending\n" % (target, exc)
+        )
         return 1
     except OSError as exc:
         sys.stderr.write("error: could not reach %s: %s\n" % (target, exc))

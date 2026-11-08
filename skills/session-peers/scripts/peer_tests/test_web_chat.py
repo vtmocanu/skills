@@ -713,11 +713,11 @@ class ChatRowTests(ChatBase):
         real = sp_channels._deliver_member
         calls = []
 
-        def flaky(args, member, *rest):
+        def flaky(args, member, *rest, **kw):
             calls.append(member)
             if len(calls) == 2:
                 raise RuntimeError("second recipient exploded")
-            return real(args, member, *rest)
+            return real(args, member, *rest, **kw)
 
         with mock.patch.object(sp_channels, "_deliver_member", flaky):
             direct = self.accepted([self.codex, self.cc], "hello")

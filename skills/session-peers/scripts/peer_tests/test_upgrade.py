@@ -162,9 +162,16 @@ class TestInstalledShimUpgrade(Base):
                    ev("task_complete", turn_id=turn_id, last_agent_message="answer%d" % number))
             return turn_id
 
+        def settled(turn_id):
+            # The ledger save precedes the live-cursor save; the turn is quiescent
+            # only once the saved cursor has caught up with the whole rollout.
+            state = sp_runtime.read_json(state_path)
+            return (turn_id in state.get("processed_turns", [])
+                    and state["tail"]["cursor"] == os.path.getsize(str(rollout)))
+
         for number in range(1, 5):
             turn_id = turn(number)
-            self.assertTrue(wait_for(lambda: turn_id in sp_runtime.read_json(state_path).get("processed_turns", [])))
+            self.assertTrue(wait_for(lambda: settled(turn_id)))
         state_a = sp_runtime.read_json(state_path)
         self.assertEqual(state_a["test_install"], "A")
         self.assertEqual(state_a["code_digest"], digest_a)
@@ -188,7 +195,7 @@ class TestInstalledShimUpgrade(Base):
         proc_b.wait(timeout=5)
         last_turn = turn(5)  # A recent completion while no shim is running.
         self.start_installed(script_b, tid)
-        self.assertTrue(wait_for(lambda: last_turn in sp_runtime.read_json(state_path).get("processed_turns", [])))
+        self.assertTrue(wait_for(lambda: settled(last_turn)))
         recovered = sp_runtime.read_json(state_path)
         self.assertEqual(recovered["binding"]["spent"], 3)
         self.assertEqual(recovered["budgets"][sid], 3)
