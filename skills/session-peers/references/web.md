@@ -132,9 +132,13 @@ Everything is bounded; a request that hits a bound says so in the page
   adds no lookups. Pair identities (a buddy channel's lead and current buddy)
   are checked before any other member: liveness first, then OpenCode name
   lookups, which share the 64-check allowance, are capped at 32 per pass and stop
-  at the 8 s budget. So those limits reach labels only when pair identities
-  alone exceed them (for example more than 64 non-`cc` pair identities, or a
-  slow pass). An identity a pass could not check is checked first on the next
+  at the 8 s budget. Liveness keeps back one check per untitled OpenCode pair
+  session (at most 32) for its name lookup, so a pair identity costs one check
+  (`codex:`, titled `oc:`) or two (untitled `oc:`). Those limits reach labels
+  once pair identities alone need more than 64 checks (`codex` count + titled
+  `oc` count + 2 × untitled `oc` count > 64; for example 33 untitled OpenCode
+  buddies: 32 liveness checks and 32 name lookups use all 64, so one pair is
+  left for the next pass), or on a slow pass. An identity a pass could not check is checked first on the next
   pass, except that one whose lookup failed goes last, so it cannot starve the
   others. A pair identity a pass could not check (out of time, a failed or
   skipped OpenCode lookup) keeps the previous pass's name and liveness if there
