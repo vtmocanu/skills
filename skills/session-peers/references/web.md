@@ -52,7 +52,7 @@ the same user. Connection, header and read-budget details are in the
   `unknown`, `unverified`). An `@all` post adds an ACK tally and names the
   missing recipients (refused and gone recipients, whose ACK was never
   requested, are outside it); a recipient's journaled transport error is shown on its
-  row. Membership changes (joined, left, removed, handover, created) are
+  row, except one that only repeats a `refused: <reason>` (the reason shows once). Membership changes (joined, left, removed, handover, created) are
   entries too.
 - **Details panel.** Runtime, state and the typed address of a member. `Copy
   address` is active only for a strict typed id (`cc:`, `codex:`, `oc:` form);
@@ -240,7 +240,7 @@ state shows in the page's status row for that `message_id`:
 | State | Meaning |
 | --- | --- |
 | `queued` | Accepted in memory; nothing written yet. |
-| `pending` | Journaled and delivered or attempted. Each recipient shows its outcome; each recipient's ACK reads pending until acked (or `ACK not requested`). `delivering` is true while the worker is still delivering. |
+| `pending` | Journaled and delivered or attempted. Each recipient shows its outcome; each recipient's ACK reads pending until acked (or `ACK not requested`). `delivering` is true while the worker is still delivering. When every recipient is `refused: ...` or `skipped: ...` (none ACKed, none `refused: outcome unknown`), the row reads "No delivery confirmed: every recipient was refused or skipped" in the bad tone instead of "Recorded". It does not claim nothing arrived: a `refused:` outcome can follow a send whose write had already begun. The ACK tally reads "N of M acknowledged", plus "(K unverified)" when some pending recipients are unverified. |
 | `not sent: <reason>` | Refused before any write (journal full or unavailable, an unresolvable recipient, oversized text, an unusable channel). The id never gets a journal entry. |
 | `not sent (journaled)` | A channel post was journaled but its history append failed; nothing was delivered or asked of anyone. |
 | `failed after recording` | The worker hit an unexpected error after the message was journaled. Check the recipients before resending. |
@@ -309,7 +309,10 @@ unavailable), nothing is shown and the sender is told afterwards: a
 `peers.py send --to web:` waits for an answer line on its connection.
 
 The feed takes its provenance from the verified sender, never from the body;
-an unverified sender shows as such. "Verified" means the frame's claimed
+an unverified sender shows as such. The body's leading origin line
+(`[session-peers from ...]`) naming that verified sender's id, plus any tag and
+`reply route` lines directly following it (at most 3 lines in all), are shown
+as one muted line above the text; any other text stays in the body. "Verified" means the frame's claimed
 reply socket belongs to a live registry record; the sending process is not
 authenticated to that record. Any process of the same OS user can claim
 another live session's socket, the same trust boundary as the rest of

@@ -27,6 +27,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `session-peers` web chat page: a refusal's reason shows once, a send every recipient refused or skipped reads "No delivery confirmed", the Browser tally says "acknowledged" (with an unverified count), a verified sender's provenance lines are muted above the message text, and the page has a favicon. The chat tests' send worker is now stopped and joined before the test environment is restored.
 - `session-peers` tests: the `wait` idle-transition test rewrites the session record atomically, so `wait` can no longer read a half-written record and miss the change (an intermittent failure; #167).
 
 - `session-peers`: an ambiguous name lists every candidate with kind, liveness and typed ID, including dead sessions and Codex threads that are all dead. `buddy set`, `up`, `restart`, `down` and `budget` print the same candidate lines. Codex thread titles that are not plain peer names now print quoted in the multi-match error.

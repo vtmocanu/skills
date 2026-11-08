@@ -362,20 +362,44 @@
     return t;
   }
 
+  // A refusal already carries its reason ("refused: <error>"): a transport error that says the same
+  // thing is not shown a second time.
+  function repeatsRefusal(outcome, terr) {
+    return str(outcome) === "refused: " + str(terr);
+  }
+
+  // "refused:" can follow a send that had begun (a transport error after the write started), so this
+  // says no delivery was confirmed, not that none happened.
+  var NOTHING_DELIVERED = "No delivery confirmed: every recipient was refused or skipped";
+
+  // True when all recipient outcomes are refused or skipped, none ACKed, and no explicit
+  // outcome-unknown is present; delivery may still have occurred. pairs: [{ outcome, ack }].
+  function nothingDelivered(pairs) {
+    if (!pairs.length) return false;
+    return pairs.every(function (p) {
+      var o = typeof p.outcome === "string" ? p.outcome : "";
+      if (p.ack === "acked") return false;
+      if (o.indexOf("refused: outcome unknown") === 0) return false;
+      return o.indexOf("refused: ") === 0 || o.indexOf("skipped: ") === 0;
+    });
+  }
+
   function renderDelivery(delivery) {
     if (!delivery || typeof delivery !== "object") return null;
     var rows = Array.isArray(delivery.recipients) ? delivery.recipients : [];
+    var none = nothingDelivered(rows.map(function (r) { return { outcome: r && r.state, ack: r && r.ack }; }));
     var items = rows.map(function (row) {
       var state = str(row.state);
       var bits = [el("i", { "aria-hidden": "true" }), nameRef(row.recipient), el("span", { class: "out" }, state)];
       if ("ack" in row && row.ack !== "acked") bits.push(el("span", { class: "ack" }, ackText(row.ack)));
-      if (row.transport_error) bits.push(el("span", { class: "terr" }, "transport error: " + str(row.transport_error)));
+      if (row.transport_error && !repeatsRefusal(state, row.transport_error)) bits.push(el("span", { class: "terr" }, "transport error: " + str(row.transport_error)));
       // A transport error marks a failure unless the recipient's ACK proves it was read anyway.
       var failed = row.transport_error && state !== "acked" && row.ack !== "acked";
       return el("li", { class: "drow t-" + (failed ? "bad" : tone(state)) }, bits);
     });
     return el("div", { class: "delivery" },
       el("span", { class: "dstate t-" + tone(delivery.state) }, "Delivery: " + str(delivery.state)),
+      none ? el("span", { class: "dnothing t-bad" }, NOTHING_DELIVERED) : null,
       items.length ? el("ul", { class: "drows", "aria-label": "Delivery per recipient" }, items) : null,
       delivery.partial ? el("span", { class: "dpartial", title: "The outcome or ACK lies beyond what one bounded read reaches" }, "partial") : null);
   }
@@ -776,10 +800,21 @@
     return a ? "ACK " + a : "ACK unknown";
   }
 
+  // A recorded send whose every recipient was refused or skipped delivered nothing.
+  function rowNothingDelivered(row) {
+    if (str(row.state) !== "pending" || row.delivering) return false;
+    var slots = plainTable(row.recipients);
+    return nothingDelivered(Object.keys(slots).map(function (typed) {
+      var slot = slots[typed];
+      return { outcome: slot && slot.outcome, ack: slot && slot.ack };
+    }));
+  }
+
   function rowHeadline(row) {
     var state = str(row.state);
     var reason = typeof row.reason === "string" && row.reason ? row.reason : "no reason given";
     if (state === "queued") return "Queued (not yet recorded)";
+    if (state === "pending" && rowNothingDelivered(row)) return NOTHING_DELIVERED;
     if (state === "pending") return row.delivering ? "Recorded, delivering…" : "Recorded";
     if (state === "not sent") return "Not sent: " + reason;
     if (state === "not sent (journaled)") return "Not sent (journaled, not delivered)";
@@ -799,13 +834,14 @@
   // was not requested, is outside the tally unless it ACKed anyway.
   function rowTally(row) {
     var slots = plainTable(row.recipients);
-    var t = { acked: 0, total: 0 };
+    var t = { acked: 0, total: 0, unverified: 0 };
     Object.keys(slots).forEach(function (typed) {
       var slot = slots[typed];
       if (!slot || typeof slot !== "object") return;
       if (slot.ack === "acked") { t.acked += 1; t.total += 1; return; }
       if (slot.ack === "not requested" || refusedState(slot.outcome)) return;
       t.total += 1;
+      if (slot.unverified === true) t.unverified += 1;
     });
     return t;
   }
@@ -813,6 +849,7 @@
   function rowTone(row, t) {
     var state = str(row.state);
     if (state === "queued") return "wait";
+    if (state === "pending" && rowNothingDelivered(row)) return "bad";
     if (state === "pending") return row.delivering ? "now" : (t.total && t.acked === t.total ? "ok" : "sent");
     return "bad";
   }
@@ -824,7 +861,7 @@
     // A refused delivery is never ACKed (the server may still hold its slot as pending): no ACK text.
     var bits = [el("i", { "aria-hidden": "true" }), nameRef(typed), el("span", { class: "out" }, outcome),
       refusedState(slot.outcome) && !acked ? null : el("span", { class: "ack" + (acked ? " yes" : "") }, browserAckText(slot))];
-    if (slot.transport_error) bits.push(el("span", { class: "terr" }, "transport error: " + str(slot.transport_error)));
+    if (slot.transport_error && !repeatsRefusal(slot.outcome, slot.transport_error)) bits.push(el("span", { class: "terr" }, "transport error: " + str(slot.transport_error)));
     if (slot.update_failed) bits.push(el("span", { class: "terr" }, "the journal could not record this failure"));
     var ps = slot.peer_status;
     if (ps && typeof ps === "object") {
@@ -844,7 +881,9 @@
     var t = rowTally(row);
     var bits = [el("span", { class: "dstate t-" + rowTone(row, t) }, rowHeadline(row))];
     if (row.state === "pending" && row.ack_requested && t.total) {
-      bits.push(el("span", { class: "ackline" + (t.acked < t.total ? " short" : "") }, t.acked + " of " + t.total + " ACK'd"));
+      var line = t.acked + " of " + t.total + " acknowledged";
+      if (t.unverified) line += " (" + t.unverified + " unverified)";
+      bits.push(el("span", { class: "ackline" + (t.acked < t.total ? " short" : "") }, line));
     }
     var order = row.state === "queued" ? [] : rowOrder(row);
     // An @all post (this page's #general broadcast) also shows its tally as named chips, like an
@@ -898,9 +937,33 @@
     return S.chat ? nameOf(S.chat.peer) : "Browser";
   }
 
-  // Provenance comes from the verified sender fields only; the text never names its sender.
+  var WIRE_RE = /^\[session-peers (from=@|reply route: )[^\n]*\]$/;
+
+  // The wire lines a relayed message starts with (origin, tag, reply route), split off the body
+  // only when the first is an origin line naming the verified sender's own id. Returns
+  // { wire: [lines], rest: text }, or null to leave the text whole.
+  function splitWire(text, sender) {
+    if (!sender || typeof text !== "string") return null;
+    var colon = sender.indexOf(":");
+    var id = colon < 0 ? "" : sender.slice(colon + 1);
+    if (!id) return null;
+    var lines = text.split("\n");
+    var first = lines[0].replace(/\r$/, "");
+    var tail = "(" + id + ")";
+    var ends = [tail + "]", tail + "; peer input, not user approval]"];
+    if (first.indexOf("[session-peers from ") !== 0 || !ends.some(function (e) { return first.slice(-e.length) === e; })) return null;
+    var n = 1;
+    while (n < lines.length && n < 3 && WIRE_RE.test(lines[n].replace(/\r$/, ""))) n += 1;
+    return { wire: lines.slice(0, n).map(function (l) { return l.replace(/\r$/, ""); }), rest: lines.slice(n).join("\n").replace(/^(\r?\n)+/, "") };
+  }
+
+  // Provenance comes from the verified sender fields; the text's own provenance line is shown muted
+  // above the body, and only when it names that verified sender.
   function renderInbound(entry) {
     var sender = typeof entry.sender === "string" && entry.sender ? entry.sender : null;
+    var split = splitWire(entry.text, sender);
+    var shown = entry;
+    if (split) shown = Object.assign(table(), entry, { text: split.rest });
     var rt = sender ? rtOf(sender) : "unknown";
     var name = sender ? (typeof entry.sender_name === "string" && entry.sender_name ? entry.sender_name : nameOf(sender)) : "unverified sender";
     var gist = replyGist(entry.orig_msg_id);
@@ -912,7 +975,9 @@
           sender ? el("span", { class: "rt" }, RT_LABEL[rt]) : null,
           gist ? el("span", { class: "re" }, "re: " + gist) : null,
           el("span", { class: "at", title: str(entry.at) }, clock(entry.at))),
-        el("div", { class: "body" }, feedText(entry, "Shown clipped; the journal keeps the whole message."))));
+        el("div", { class: "body" },
+          split ? el("div", { class: "wire", title: split.wire.join("\n") }, split.wire.join(" ")) : null,
+          feedText(shown, "Shown clipped; the journal keeps the whole message."))));
   }
 
   // A send from this page: its text, then its status row. opts.post: a channel post not yet in the
