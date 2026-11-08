@@ -1981,17 +1981,27 @@ def buddy_route(owner, member):
 
 
 def buddy_route_gone(owner, member, key):
-    """True only when channel ``key`` was read and provably no longer routes ``member`` for ``owner``.
+    """True only when channel ``key`` provably no longer routes ``member`` for ``owner``.
 
-    Gone: the record is absent, is not a ``buddy`` channel ``owner`` owns, or
-    lacks ``owner`` or ``member``. A read error is not proof: it returns False,
-    so the caller holds instead of falling back.
+    Gone: the record file does not exist (FileNotFoundError), or it parsed and
+    is not a ``buddy`` channel ``owner`` owns, or lacks ``owner`` or ``member``.
+    Anything else (another stat error, an oversized, malformed or invalid record,
+    which ``read_channel`` folds into None) is not proof: it returns False, so
+    the caller holds instead of falling back.
     """
+    try:
+        os.stat(_record_path(key))
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
     try:
         rec = read_channel(key)
     except (ChannelError, OSError):
         return False
-    if rec is None or rec["kind"] != "buddy" or rec["owner"] != owner:
+    if rec is None:
+        return False  # present but unreadable or invalid
+    if rec["kind"] != "buddy" or rec["owner"] != owner:
         return True
     return owner not in rec["members"] or member not in rec["members"]
 

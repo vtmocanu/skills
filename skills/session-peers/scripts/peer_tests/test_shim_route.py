@@ -352,6 +352,66 @@ class TestRouteFailures(RouteBase):
         self.assertEqual(len(self.sends()), 1)
 
 
+    def record_breaks_at(self, trigger, how):
+        """After ``trigger`` runs, the buddy channel record really fails to read: ``how`` is
+        "stat" (os.stat raises PermissionError) or "json" (read_json returns None)."""
+        path = sp_channels._record_path(self.key)
+        real_stat, real_json = sp_channels.os.stat, sp_channels.sp_runtime.read_json
+        real_trigger = getattr(sp_channels, trigger)
+        state = {"broken": False}
+
+        def stat(p, *a, **kw):
+            if state["broken"] and how == "stat" and str(p) == str(path):
+                raise PermissionError(13, "Permission denied", str(p))
+            return real_stat(p, *a, **kw)
+
+        def read_json(p, *a, **kw):
+            if state["broken"] and how == "json" and str(p) == str(path):
+                return None
+            return real_json(p, *a, **kw)
+
+        def trig(*args, **kw):
+            state["broken"] = True
+            return real_trigger(*args, **kw)
+
+        return contextlib.ExitStack(), [
+            mock.patch.object(sp_channels.os, "stat", stat),
+            mock.patch.object(sp_channels.sp_runtime, "read_json", read_json),
+            mock.patch.object(sp_channels, trigger, trig)]
+
+    def run_broken(self, trigger, how, fn):
+        stack, patches = self.record_breaks_at(trigger, how)
+        with stack:
+            for p in patches:
+                stack.enter_context(p)
+            fn()
+
+    def test_a_really_unreadable_record_holds_an_ordinary_answer(self):
+        for how in ("stat", "json"):
+            with self.subTest(how=how):
+                self.shim.reply_budget.held.clear()
+                self.run_broken("history_floor", how, lambda: self.shim._handle_turn_end(self.turn()))
+                time.sleep(0.2)
+                self.assertEqual(self.replies(), [], how)
+                self.assertEqual(self.shim.reply_budget.held[self.sid]["release"], "route")
+                self.assertEqual(self.sends(), [])
+
+    def test_a_really_unreadable_record_keeps_a_fresh_held_answer_held(self):
+        with self.fail_once():
+            self.shim._handle_turn_end(self.turn())
+        for how in ("stat", "json"):
+            with self.subTest(how=how):
+                self.run_broken("prepare_targeted", how, self.shim.reply_budget.retry_held)
+                time.sleep(0.2)
+                self.assertEqual(self.replies(), [], how)
+                self.assertEqual(self.shim.reply_budget.held[self.sid]["phase"], "fresh")
+        self.shim.reply_budget.retry_held()
+        wait_for(lambda: self.replies())
+        time.sleep(0.2)
+        self.assertEqual(len(self.replies()), 1)
+        self.assertEqual(len(self.sends()), 1)
+
+
 class TestUnreadableFloor(RouteBase):
     @staticmethod
     def unreadable(key):
