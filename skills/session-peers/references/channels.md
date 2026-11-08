@@ -279,7 +279,10 @@ runs `channel leave`.
   `transport accepted` and delivered once; an earlier buddy still on the roster
   routes its answers the same way, to the lead only. `@name` extra targets,
   status frames and notices stay direct, as does everything when there is no
-  buddy channel. An answer that fits only without the header is sent direct.
+  buddy channel. An answer that fits only without the header is sent direct, and
+  so is one whose route stopped holding before it was published (the shim left
+  the channel, `buddy clear`, a handover); a transient channel read failure
+  instead holds the answer for a retry. Nothing already published goes direct.
 - The shim saves its processed-turn record before the turn's first reply, status
   or `[session-peers]` notice frame, so after a crash an answer is never re-published or re-sent. A published send
   with no outcome reads `unknown`, and a crash before publication can lose the

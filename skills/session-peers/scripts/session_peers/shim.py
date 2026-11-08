@@ -373,6 +373,7 @@ class Shim:
                 "held": self._bound_held(),
                 "allowance": self.reply_budget.allowance,
                 "applied_allow": self.reply_budget.applied_allow,
+                "applied_reset": self.reply_budget.applied_reset,
                 "binding": self.reply_budget.binding,
                 "contacts": self._bound(self.contacts),
                 "updated_at": sp_runtime.now_iso(),
@@ -1243,8 +1244,17 @@ class Shim:
             sp_runtime.log("reply too large for #%s (%s); sending directly" % (key, exc))
             return self._direct_reply(rec, text, entry)
         except sp_channels.ChannelError as exc:
-            sp_runtime.log("cannot route a reply through #%s: %s" % (key, exc))
-            return "failed"
+            # Nothing is published yet. A route that no longer holds (a roster
+            # change since buddy_route) goes direct, as with no route; a
+            # transient read failure holds the answer, as a history_floor
+            # failure does.
+            if sp_channels.buddy_route(lead, sender)[0] != key:
+                sp_runtime.log("route to #%s no longer holds (%s); sending directly" % (key, exc))
+                return self._direct_reply(rec, text, entry)
+            sp_runtime.log("cannot route a reply through #%s (%s); holding the reply" % (key, exc))
+            result = RouteResult("route_failed")
+            result.info = {"mid": mid, "key": key, "floor": floor, "sender": sender, "recipient": lead}
+            return result
         try:
             lock = sp_channels.publish_targeted(plan)
         except (sp_channels.ChannelError, OSError) as exc:
@@ -1392,6 +1402,12 @@ class Shim:
                 sp_runtime.log("reply too large for #%s (%s); sending directly" % (key, exc))
                 return self._direct_reply(rec, text, entry)
             except sp_channels.ChannelError as exc:
+                # Still fresh, so nothing is published: when the stored route no
+                # longer holds (`buddy clear`, a handover), deliver directly
+                # instead of retrying a route that can never succeed.
+                if sp_channels.buddy_route(lead, sender)[0] != key:
+                    sp_runtime.log("route to #%s no longer holds (%s); sending the held reply directly" % (key, exc))
+                    return self._direct_reply(rec, text, entry)
                 sp_runtime.log("cannot route a reply through #%s: %s" % (key, exc))
                 return "failed"
             entry["channel"], entry["channel_mid"], entry["channel_floor"] = key, mid, floor

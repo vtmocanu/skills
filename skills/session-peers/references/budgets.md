@@ -79,7 +79,16 @@ not replenish it. Raising it may deliver a held reply at once.
   reply is discarded without being re-sent and history keeps `unknown`.
   `buddy set --replies` does not discard it. Discarding a non-frozen held reply
   after publication records `refused: held reply discarded (<why>)`. Reset and allow apply and
-  save before deleting their marker, so a crash redoes or keeps the result.
+  save before deleting their marker, so a crash redoes or keeps the result. The
+  shim remembers the reset marker it applied, so a marker it cannot delete is
+  applied once, not again on every poll; a new `budget reset` writes a new
+  marker and applies.
+- **Known race** (not closed): `budget reset` and `budget allow` read the
+  thread's state file and write it back. If the shim saves in between (a held
+  reply's phase, or its processed-turn record) and then crashes before its next
+  save, the restarted shim reads the older state and can retry a frame already
+  sent or replay a delivered turn. The window needs a shim crash right after
+  such a save; avoid running reset or allow while a reply is mid-delivery.
 - **Limits**: an ordinary (not held) answer is delivered at most once. Crash scope:
   see [buddy traffic](channels.md#buddy-traffic).
 - **Supervised multi-round work** (a user-requested review loop): first run

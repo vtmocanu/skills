@@ -39,6 +39,10 @@ class ReplyBudget:
         # a replay after a crash does not discard the freeze it created.
         applied = state.get("applied_allow")
         self.applied_allow = applied if isinstance(applied, dict) else None
+        # The reset marker already applied ({"ino", "mtime_ns"}): a marker that
+        # cannot be removed is applied once, not again on every poll.
+        applied_reset = state.get("applied_reset")
+        self.applied_reset = applied_reset if isinstance(applied_reset, dict) else None
         # `buddy set --replies N`: a finite TOTAL for one owner session on this
         # thread, spent across sequences, never replenished. Only `buddy clear`
         # or binding another buddy revokes it (a revoke marker).
@@ -72,7 +76,23 @@ class ReplyBudget:
 
     def consume_reset(self, initial=False):
         path = sp_storage.budget_reset_path(self.owner.thread_id)
-        if not os.path.exists(path):
+        try:
+            st = os.stat(path)
+        except OSError:
+            return
+        marker = {"ino": st.st_ino, "mtime_ns": st.st_mtime_ns}
+        if self.applied_reset == marker:
+            # Applied and saved already; only the unlink failed before. Retry
+            # it, but never apply the same reset twice.
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+            if initial:
+                # A crash after the save but before the unlink: the replies this
+                # reset tagged still wait for their release once bound.
+                self.release_after_start = any(
+                    isinstance(e, dict) and e.get("release") == "reset" for e in self.held.values())
             return
         # The marker outlives the state change: a crash before the save redoes
         # every step on restart, one after it only repeats idempotent ones.
@@ -85,6 +105,7 @@ class ReplyBudget:
         for entry in self.held.values():
             if isinstance(entry, dict):
                 entry["release"] = "reset"
+        self.applied_reset = marker
         self.owner._save_state()
         try:
             os.unlink(path)

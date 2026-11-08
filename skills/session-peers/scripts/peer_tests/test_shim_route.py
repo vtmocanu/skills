@@ -250,6 +250,62 @@ class TestRouteFailures(RouteBase):
         self.assertEqual(self.shim.reply_budget.budgets.get(self.sid, 0), 0)
 
 
+    def test_a_fresh_held_answer_goes_direct_once_its_route_no_longer_holds(self):
+        # N1: held before publication, then the shim left the channel (`buddy clear`):
+        # a retry must not keep failing on a route that can never succeed.
+        with self.fail_once():
+            self.shim._handle_turn_end(self.turn())
+        held = self.shim.reply_budget.held[self.sid]
+        self.assertEqual((held["release"], held["phase"]), ("route", "fresh"))
+        sp_channels.buddy_channel_remove(self.lead, self.sender)
+        self.shim.reply_budget.retry_held()
+        wait_for(lambda: self.replies())
+        time.sleep(0.2)
+        self.assertEqual(len(self.replies()), 1)
+        self.assertEqual(self.sends(), [])
+        self.assertNotIn(self.sid, self.shim.reply_budget.held)
+
+    def test_an_answer_whose_route_stopped_holding_before_publication_goes_direct(self):
+        # N4: buddy_route succeeded, then the roster changed before prepare_targeted.
+        real = sp_channels.prepare_targeted
+
+        def leave_then_prepare(*args, **kw):
+            sp_channels.buddy_channel_remove(self.lead, self.sender)
+            return real(*args, **kw)
+
+        with mock.patch.object(sp_channels, "prepare_targeted", leave_then_prepare):
+            self.shim._handle_turn_end(self.turn())
+        wait_for(lambda: self.replies())
+        time.sleep(0.2)
+        self.assertEqual(len(self.replies()), 1)
+        self.assertEqual(self.sends(), [])
+        self.assertEqual(self.shim.reply_budget.held, {})
+        self.assertEqual(self.shim.reply_budget.budgets[self.sid], 1)
+
+    def test_a_transient_prepare_failure_holds_the_answer_and_a_retry_routes_it_once(self):
+        # N4: the route still holds, so the failure is transient: hold, then publish once.
+        real = sp_channels.prepare_targeted
+        state = {"n": 0}
+
+        def flaky(*args, **kw):
+            state["n"] += 1
+            if state["n"] == 1:
+                raise sp_channels.ChannelError("could not read the channel record", 1)
+            return real(*args, **kw)
+
+        with mock.patch.object(sp_channels, "prepare_targeted", flaky):
+            self.shim._handle_turn_end(self.turn())
+            time.sleep(0.2)
+            self.assertEqual(self.replies(), [])
+            self.assertEqual(self.shim.reply_budget.held[self.sid]["release"], "route")
+            self.shim.reply_budget.retry_held()
+        wait_for(lambda: self.replies())
+        time.sleep(0.2)
+        self.assertEqual(len(self.replies()), 1)
+        self.assertEqual(len(self.sends()), 1)
+        self.assertEqual(self.outcomes(), [{self.lead: "transport accepted"}])
+
+
 class TestUnreadableFloor(RouteBase):
     @staticmethod
     def unreadable(key):
@@ -785,6 +841,29 @@ class TestMarkerCrashPoints(HeldBase):
         self.finish()
         self.assertEqual(other.of_type("user"), [])
         self.assertFalse(os.path.exists(sp_storage.budget_reset_path(self.tid)))
+
+    def test_an_undeletable_reset_marker_is_applied_once_not_on_every_poll(self):
+        # N5: when the unlink keeps failing, later polls must not zero the budget again
+        # or discard a freeze created after the reset.
+        self.write_reset()
+        with mock.patch.object(sp_budgets.os, "unlink", side_effect=PermissionError("read-only")):
+            self.budget().consume_reset()
+            self.assertTrue(os.path.exists(sp_storage.budget_reset_path(self.tid)))
+            self.budget().budgets[self.sid] = 2
+            sid2 = new_uuid()
+            self.budget().held[sid2] = {"text": "x", "at": time.time(), "phase": "unknown", "channel_mid": "z"}
+            self.budget().consume_reset()
+            self.budget().consume_reset()
+        self.assertEqual(self.budget().budgets[self.sid], 2)
+        self.assertIn(sid2, self.budget().held)
+        # Once the unlink works again the marker is removed without re-applying.
+        self.budget().consume_reset()
+        self.assertFalse(os.path.exists(sp_storage.budget_reset_path(self.tid)))
+        self.assertEqual(self.budget().budgets[self.sid], 2)
+        # A new reset (a new marker) still applies.
+        self.write_reset()
+        self.budget().consume_reset()
+        self.assertEqual(self.budget().budgets, {})
 
     def arm_after_apply(self):
         armed = {"on": False}
