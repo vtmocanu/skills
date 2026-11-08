@@ -532,14 +532,16 @@ class JournalRetentionTests(JournalBase):
         rid = str(uuid.uuid4())
         self.assertEqual(journal.record_reply(rid, self.B, [self.A], "r" * 400, self.now - 5,
                                               "/nonexistent/spj/reply.json"), "recorded")
-        self.now += 700
-        self.set_cap(self.size())
+        reply = journal.reply_message_id(rid)
+        fillers = self.pad(6)
+        # A request from a new sender, so only the size cap binds: pruning either
+        # expired entry would admit it.
+        self.set_cap(self.size() + 100)  # slack for float-width jitter, far below one entry
         before = self.snapshot()
         with self.assertRaises(journal.JournalFull):
-            self.msg(body="n" * 400)
+            self.req(body="n" * 400)
         self.assertEqual(self.snapshot(), before)
-        self.assertEqual(len(self.ids()), 2)
-        self.assertIn(plain, self.ids())
+        self.assertEqual(self.ids(), [plain, reply] + fillers)
 
     def test_event_write_prunes_an_expired_request_when_over_the_cap(self):
         expired = self.req(body="q" * 400, expires=self.now - 5)

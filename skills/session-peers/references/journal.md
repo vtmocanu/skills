@@ -133,8 +133,9 @@ detected identity.
   errors: a transport error alone makes nothing eligible.
 - **Clock skew:** records dated up to 14 days ahead are kept. A clock step-back
   of more than 14 days can drop records at the next rewrite.
-- **Retrieval guarantee (#160 channel contract):** a body stays available until
-  it is 14 days old while it is un-ACKed and unsettled, or while its
+- **Retrieval guarantee (#160 channel contract):** except as below, a body
+  stays available until it is 14 days old while it is un-ACKed and unsettled,
+  or while its
   correlated mailbox is live (never past the 14-day age cap). An ACKed or
   settled correlated entry stays protected while its mailbox exists (still
   subject to the age cap). There is no guarantee once an entry is fully ACKed
