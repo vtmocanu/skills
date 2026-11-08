@@ -9,9 +9,9 @@ from peer_tests.support import *  # noqa: F401,F403
 from peer_tests.test_channel_buddy import BuddyChannelBase
 from peer_tests.test_opencode import OC_B
 from peer_tests.test_webdata import EMPTY
-from session_peers import channels as sp_channels, claude as sp_claude, journal as sp_journal
-from session_peers import buddy as sp_buddy, protocol as sp_protocol
-from session_peers import messaging as sp_messaging, routes as sp_routes, topics as sp_topics, webdata
+from session_peers import buddy as sp_buddy, channels as sp_channels, claude as sp_claude, journal as sp_journal
+from session_peers import messaging as sp_messaging, protocol as sp_protocol, routes as sp_routes
+from session_peers import topics as sp_topics, webdata
 
 FAKE_AUTH = "line-one"
 
@@ -243,8 +243,8 @@ class UnknownOutcomeTests(TargetedBase):
             with self.subTest(exc=exc), mock.patch.object(sp_claude, "send_frame", side_effect=exc), \
                     mock.patch.object(sp_journal, "transport_failed", return_value=0):
                 rc, out, err = self.send_to(self.peer_typed, json=False)
-            self.assertEqual(rc, 1, err)
-            self.assertIn("not delivered: sent to #", out + err)
+                self.assertEqual(rc, 1, err)
+                self.assertIn("not delivered: sent to #", out + err)
         rc, out, err = self.send_to(self.peer_typed, json=False)
         self.assertEqual(rc, 0, err)
         self.assertIn("sent to #", out + err)
@@ -559,9 +559,11 @@ class BuddySendRouteTests(BuddySendBase):
         rc, out, err = self.send_buddy("--json", message="please review")
         self.assertEqual(rc, 0, err)
         mid = json.loads(out)["message_id"]
+        self.assertEqual(len(self.sends()), 1)
         queued = self.queue_calls()
         self.assertEqual(len(queued), 1)
         text = queued[0][4]
+        self.assertIn("[channel #", text)
         tag, _body = sp_protocol.parse_tag(text)
         self.assertIsNotNone(tag)
         self.assertEqual(tag["sid"], self.lead.partition(":")[2])
@@ -573,6 +575,7 @@ class BuddySendRouteTests(BuddySendBase):
         self.assertEqual(rc, 0, err)
         rc, _out, err = self.send_buddy("--wake")
         self.assertEqual(rc, 0, err)
+        self.assertEqual(len(self.sends()), 1)
         prompts = self.oc_calls("session.prompt")
         self.assertEqual(len(prompts), 1)
         self.assertTrue(prompts[0]["data"]["resume"])
@@ -646,15 +649,12 @@ class BuddySendFallbackTests(BuddySendBase):
         kind, _, uuid = self.lead.partition(":")
         with mock.patch.object(sp_buddy, "read_buddy", return_value={"buddy": {"kind": kind, "uuid": uuid}}):
             rc, _out, err = self.send_buddy()
-        self.assertIn("note: buddy channel not used: a session cannot be its own buddy", err)
+        self.assertIn(self.NOTE % "a session cannot be its own buddy", err)
         self.assertEqual(self.sends(), [])
-
-    def test_a_recipient_the_journal_cannot_resolve_is_refused_with_nothing_written(self):
-        with mock.patch.object(sp_journal, "_resolve_recipients", side_effect=sp_journal.JournalRefused("nope")):
-            rc, _out, err = self.send_buddy("--record")
-        self.assertEqual(rc, 1, err)
-        self.assertEqual(self.sends(), [])
-        self.assertEqual(self.journal_entries(), [])
+        # The direct path then refuses a send to the caller's own Claude Code session.
+        self.assertEqual(rc, 2, err)
+        self.assertIn("must reach Claude Code session", err)
+        self.assertIn("native SendMessage", err)
         self.assertEqual(self.queue_calls(), [])
 
     def test_a_caller_that_is_not_the_binding_owner_goes_direct(self):
@@ -686,6 +686,18 @@ class BuddySendRefusalTests(BuddySendBase):
             rc, _out, err = self.send_buddy("--record")
         self.assertEqual(rc, 1)
         self.assertRegex(err, r"error: too big \(channel header .*\bis \d+ bytes")
+        self.assertEqual(self.sends(), [])
+        self.assertEqual(self.journal_entries(), [])
+        self.assertEqual(self.queue_calls(), [])
+
+
+    def test_a_recipient_the_journal_cannot_resolve_is_refused_with_nothing_written(self):
+        with mock.patch.object(sp_journal, "_resolve_recipients", side_effect=sp_journal.JournalRefused("nope")):
+            rc, _out, err = self.send_buddy("--record")
+        self.assertEqual(rc, 1, err)
+        self.assertIn("no recipient of this message can be recorded for ACK", err)
+        self.assertIn("nothing was recorded or sent", err)
+        self.assertNotIn("buddy channel not used", err)
         self.assertEqual(self.sends(), [])
         self.assertEqual(self.journal_entries(), [])
         self.assertEqual(self.queue_calls(), [])
