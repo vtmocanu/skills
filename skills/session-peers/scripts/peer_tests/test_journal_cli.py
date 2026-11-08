@@ -457,6 +457,80 @@ class JournalPreSendFailureTests(JournalCliBase):
         self.assertFalse(os.path.exists(self.mailbox(request["request_id"])[1]))
         self.assertEqual(self.records(), before)
 
+    def prefill_sender_quota(self, tid, target, expired):
+        """20 equal requests from the codex thread; the cap leaves room for 20.5, so a 21st needs a prune.
+
+        Each has a real request mailbox in the request directory. When ``expired`` the mailboxes and
+        journal expiry are in the past (``ask``'s own sweep removes the mailboxes before it journals),
+        otherwise both are in the future.
+        """
+        os.makedirs(sp_storage.request_dir(), exist_ok=True)
+        offset = -60 if expired else 600
+        rids = []
+        for _ in range(20):
+            rid = new_id()
+            expires_at = time.time() + offset
+            meta_path = sp_storage.request_path(rid)
+            pathlib.Path(meta_path).write_text(json.dumps({"expires_at": expires_at}))
+            journal.record_request(rid, "codex:" + tid, [target], "q?", expires_at, meta_path)
+            rids.append(rid)
+        os.environ[CAP_ENV] = str(82 * (os.path.getsize(self.jpath()) // 20))
+        return rids
+
+    def ask_args(self, tid):
+        return ("ask", "--to", "cc:cc-target", "--from-thread", tid, "--message", "q?",
+                "--timeout", "30", "--json")
+
+    def test_ask_prunes_an_expired_request_with_a_removed_mailbox_under_sender_quota(self):
+        listener, rec = self.peer("cc-target", pid=os.getppid())
+        tid, _rollout = self.one_thread()
+        self.as_codex(tid)
+        prefilled = self.prefill_sender_quota(tid, "cc:" + rec["sessionId"], expired=True)
+        proc = self.run_patched("", *self.ask_args(tid), wait=False)
+        frame = wait_for(lambda: listener.of_type("user"))[0]
+        rid = frame["message"]["content"].split('id="')[1].split('"')[0]
+        rc, _out, err = self.reply_as(rec["sessionId"], rid, "ans")
+        self.assertEqual(rc, 0, err)
+        out, err = proc.communicate(timeout=30)
+        self.assertEqual(proc.returncode, 0, err)
+        self.assertEqual(json.loads(out.strip().splitlines()[-1])["message"], "ans")
+        ids = [e["message_id"] for e in self.entries()]
+        self.assertNotIn(prefilled[0], ids)
+        self.assertEqual(ids[:19], prefilled[1:])
+        self.assertIn(rid, ids)
+        self.assertEqual([r for r in self.records() if r["type"] == "ack"], [])
+
+    def test_ask_exits_75_when_the_sender_quota_is_held_by_unexpired_requests(self):
+        _listener, rec = self.peer("cc-target", pid=os.getppid())
+        tid, _rollout = self.one_thread()
+        self.as_codex(tid)
+        prefilled = self.prefill_sender_quota(tid, "cc:" + rec["sessionId"], expired=False)
+        before = self.records()
+        rc, out, err = self.cli(*self.ask_args(tid))
+        self.assertEqual(rc, 75, err)
+        self.assertEqual(json.loads(out)["status"], "journal_full")
+        self.assertEqual(self.records(), before)
+        self.assertEqual([e["message_id"] for e in self.entries()], prefilled)
+
+    def test_expired_unreplied_request_reads_as_pending_to_its_recipient(self):
+        _listener, rec = self.peer("cc-target", pid=os.getppid())
+        tid, _rollout = self.one_thread()
+        rid = new_id()
+        journal.record_request(rid, "codex:" + tid, ["cc:" + rec["sessionId"]], "q?",
+                               time.time() - 60, "/nonexistent/spj/%s.request.json" % rid)
+        self.as_cc(rec)
+        rc, out, err = self.cli("inbox", "journal", "--json")
+        self.assertEqual(rc, 0, err)
+        listing = json.loads(out)
+        self.assertEqual([i["message_id"] for i in listing], [rid])
+        self.assertEqual([s["state"] for s in listing[0]["slots"]], ["pending"])
+        rc, out, err = self.cli("inbox", "acks", rid, "--json")
+        self.assertEqual(rc, 0, err)
+        view = json.loads(out)
+        self.assertEqual([r["state"] for r in view["recipients"]], ["pending"])
+        self.assertIsNone(view["settlement"])
+        self.assert_no_acks(rid)
+
     def test_unwritable_journal_directory_refuses_with_1_and_sends_nothing(self):
         listener, _rec = self.peer("cc-target", pid=os.getppid())
         tid, _rollout = self.one_thread()
