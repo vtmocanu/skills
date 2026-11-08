@@ -29,10 +29,12 @@ after DISCOVERY_PASS_BUDGET seconds (a check already running, lsof up to 20 s or
 up to 30 s, can overrun it; requests never wait longer than DISCOVERY_WAIT) and checks at most
 SUBPROCESS_MEMBERS_PER_PASS members that need a subprocess (Codex, OpenCode); members not reached are
 ``unverified`` and the result's ``discovery`` object carries ``truncated``. The members of each buddy
-channel's current pair are checked first (their liveness, then their OpenCode names), before the other
-roster members, but still inside the same deadline and allowances: those limits cut the other members
-first, and the channel labels (``labels``) keep the previous pass's name and liveness for a pair member
-a pass could not check, with ``truncated`` set. Reading the channel records has its own
+channel's current pair are checked first (their liveness, then their OpenCode names, which share the
+allowance and stop at the deadline), before the other roster members, but still inside the same
+deadline and allowances: those limits cut the other members first, and reach the channel labels
+(``labels``) only when the pair identities alone exceed them; the labels then keep the previous pass's
+name and liveness for a pair member a pass could not check, with ``truncated`` set. The next pass
+checks such a member first (a failing name lookup goes last). Reading the channel records has its own
 DISCOVERY_PASS_BUDGET deadline, separate from the member checks', so a pass may start new work for up
 to two budgets. The pass runs with
 ``runtime.log`` muted on its thread.
@@ -192,19 +194,22 @@ def run_discovery(requester=None, previous=None):
 
     ``labels`` are ``channels.derive_labels`` over the channel records read here (the same records
     ``channel list`` labels). The identities of every known buddy pair are checked before any other
-    member, so the pass limits cut the roster first; they can still cut the labels, because the identity
-    checks run inside the same deadline and allowances. The OpenCode name lookups (get_session calls,
-    stopped at the pass deadline) are charged to the same subprocess allowance as the liveness checks;
-    pair liveness leaves them half of it (at most SESSION_LOOKUPS_MAX).
+    member: liveness first, then the OpenCode names (get_session calls, at most SESSION_LOOKUPS_MAX,
+    stopped at the pass deadline). Liveness and name lookups share the SUBPROCESS_MEMBERS_PER_PASS
+    allowance: pair liveness leaves the lookups one call per pair id missing from the recent sessions
+    (at most SESSION_LOOKUPS_MAX), and a pair member that only that share held back is checked after the
+    lookups, with what they did not use, before any non-pair member. So the limits reach labels only when
+    the pair identities alone exceed them.
     ``unchecked`` lists the members whose liveness was not checked and ``label_deferred`` the pair
     OpenCode identities whose name lookup got no answer; the next pass (given this result as
-    ``previous``) checks those first, so none is starved. An identity this pass could not check
-    (``label_names``, ``label_liveness`` hold what labels used) keeps ``previous``'s name and
-    liveness (the previous pass's result), else its short id and ``unverified``. The pass is
-    ``truncated`` when a pair member's liveness was not checked or a pair identity's OpenCode name
-    lookup failed, was skipped or ran out of time (neither named nor reported missing), whether or
-    not a previous name is kept; a session the service reports missing gets its short id and does
-    not truncate."""
+    ``previous``) checks those first, except that the identity whose lookup failed (``label_failed``,
+    the failure that ends the lookups) goes last, so a persistently failing id cannot starve the others.
+    An identity this pass could not check (``label_names``, ``label_liveness`` hold what labels used)
+    keeps ``previous``'s name and liveness (the previous pass's result), else its short id and
+    ``unverified``. The pass is ``truncated`` when a pair member's liveness was not checked or a pair
+    identity's OpenCode name lookup failed, was skipped or ran out of time (neither named nor reported
+    missing), whether or not a previous name is kept; a session the service reports missing gets its
+    short id and does not truncate."""
     with _DISCOVERY_LOCK, sp_storage.no_create(), sp_runtime.quiet():
         records, truncated = _read_records(time.monotonic() + DISCOVERY_PASS_BUDGET)
         general, rosters = _rosters(records)
@@ -221,34 +226,44 @@ def run_discovery(requester=None, previous=None):
         pair_ids = set(live_ids)
 
         def check(typed, keep=0):  # ``keep``: allowance this check leaves unspent (the name lookups' share)
+            """Check ``typed``; False when only ``keep`` stopped it (nothing recorded: retry it later)."""
             nonlocal truncated, subprocess_left
             if time.monotonic() >= deadline:
                 liveness[typed], truncated = "unverified", True
                 unchecked.append(typed)
-                return
+                return True
             if not typed.startswith("cc:"):
-                if subprocess_left <= keep:
+                if 0 < subprocess_left <= keep:
+                    return False
+                if subprocess_left <= 0:
                     liveness[typed], truncated = "unverified", True
                     unchecked.append(typed)
-                    return
+                    return True
                 subprocess_left -= 1
             checked.add(typed)
             try:
                 liveness[typed] = sp_channels.member_liveness(typed, cache)
             except Exception:
                 liveness[typed] = "unverified"
+            return True
 
         prev = previous if isinstance(previous, dict) else {}
         prev_unchecked = prev.get("unchecked") if isinstance(prev.get("unchecked"), list) else []
         prev_deferred = prev.get("label_deferred") if isinstance(prev.get("label_deferred"), list) else []
+        prev_failed = prev.get("label_failed") if isinstance(prev.get("label_failed"), list) else []
+        unchecked_pos = {t: i for i, t in enumerate(prev_unchecked)}
+        deferred_pos = {t: i for i, t in enumerate(prev_deferred)}
         # the pair identities' liveness, then their names, before any other member; the identities the
         # previous pass could not check come first, in the order it left them (stable otherwise), so no identity is starved
         pair_order = [t for t in members if t in pair_ids]
-        pair_order.sort(key=lambda t: prev_unchecked.index(t) if t in prev_unchecked else len(prev_unchecked))
-        # pair liveness leaves half the allowance (at most SESSION_LOOKUPS_MAX) to the OpenCode name lookups
-        keep = min(sp_channels.SESSION_LOOKUPS_MAX, SUBPROCESS_MEMBERS_PER_PASS // 2) if any(t.startswith("oc:") for t in named_ids) else 0
-        for typed in pair_order:
-            check(typed, keep)
+        pair_order.sort(key=lambda t: unchecked_pos.get(t, len(unchecked_pos)))
+        # pair liveness leaves the OpenCode name lookups the allowance they will use: one get_session per
+        # pair id missing from the recent sessions (at most SESSION_LOOKUPS_MAX); what they do not use is
+        # released to the pair members that wait for it
+        titles = sp_channels.opencode_titles(cache) if any(t.startswith("oc:") for t in named_ids) else {}
+        keep = min(sp_channels.SESSION_LOOKUPS_MAX,
+                   len([t for t in named_ids if t.startswith("oc:") and not titles.get(t.partition(":")[2])]))
+        waiting = [typed for typed in pair_order if not check(typed, keep)]
         by_sid = {}
         if any(not m.startswith("oc:") for m in members) or any(not m.startswith("oc:") for m in named_ids):
             if "cc" not in cache:  # the read member_liveness shares: liveness, names and activity come from one
@@ -261,14 +276,15 @@ def run_discovery(requester=None, previous=None):
         prev_live = prev.get("label_liveness") if isinstance(prev.get("label_liveness"), dict) else {}
         label_names, label_live = {}, {}
         oc_named = [t for t in named_ids if t.startswith("oc:")]
-        oc_named.sort(key=lambda t: prev_deferred.index(t) if t in prev_deferred else len(prev_deferred))
+        # the ids the previous pass skipped come first (in its order), the one whose lookup failed goes last
+        oc_named.sort(key=lambda t: (2, 0) if t in prev_failed else (0, deferred_pos[t]) if t in deferred_pos else (1, 0))
         for typed in named_ids:
             kind, _sep, ident = typed.partition(":")
             if kind in ("cc", "codex"):  # one registry read, no allowance
                 name = sp_channels.registry_name(kind, ident, by_sid)
                 if name:
                     label_names[typed] = name
-        not_found, answered = set(), set()
+        not_found, answered, label_failed = set(), set(), []
         if oc_named and time.monotonic() < deadline:
             stats = {}
             try:
@@ -278,6 +294,9 @@ def run_discovery(requester=None, previous=None):
             except Exception:
                 pass
             subprocess_left -= min(stats.get("lookups", 0), max(subprocess_left, 0))
+            label_failed = [stats["failed"]] if isinstance(stats.get("failed"), str) else []
+        for typed in waiting:  # pair members only the lookups' share kept back: they get what is left
+            check(typed)
         # An identity whose lookup neither named it nor found it missing (out of time, failed or skipped) keeps what
         # the previous pass found, and the pass is truncated. One the service definitively reported missing (a
         # deleted session) does not keep a name: it gets its short id.
@@ -318,7 +337,7 @@ def run_discovery(requester=None, previous=None):
         labels = sp_channels.derive_labels(list(records.values()), label_names, label_live)
         found = {"general": general, "liveness": liveness, "activity": activity, "names": names,
                  "homes": homes, "stale": False, "pending": False, "truncated": truncated,
-                 "unchecked": unchecked, "label_deferred": label_deferred, "labels": labels, "label_names": label_names,
+                 "unchecked": unchecked, "label_deferred": label_deferred, "label_failed": label_failed, "labels": labels, "label_names": label_names,
                  "label_liveness": label_live}
         if requester is not None:
             replies = {}

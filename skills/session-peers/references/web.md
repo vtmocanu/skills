@@ -130,10 +130,13 @@ Everything is bounded; a request that hits a bound says so in the page
 - **Labels and order.** Labels are computed on the discovery thread over at
   most 256 stored channel records (each read with its own budget), so a request
   adds no lookups. Pair identities (a buddy channel's lead and current buddy)
-  are checked before any other member, within the 64-check allowance and the
-  8 s budget, so those limits reach labels only when pair identities alone
-  exceed them (for example more than 64 non-`cc` pair identities, or a slow
-  pass). A pair identity a pass could not check (out of time, a failed or
+  are checked before any other member: liveness first, then OpenCode name
+  lookups, which share the 64-check allowance, are capped at 32 per pass and stop
+  at the 8 s budget. So those limits reach labels only when pair identities
+  alone exceed them (for example more than 64 non-`cc` pair identities, or a
+  slow pass). An identity a pass could not check is checked first on the next
+  pass, except that one whose lookup failed goes last, so it cannot starve the
+  others. A pair identity a pass could not check (out of time, a failed or
   skipped OpenCode lookup) keeps the previous pass's name and liveness if there
   is one, else its short id and `unverified` liveness; either way the pass is
   reported incomplete (`discovery stopped early`). A deleted OpenCode session

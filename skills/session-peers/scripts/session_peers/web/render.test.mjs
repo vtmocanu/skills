@@ -2606,6 +2606,18 @@ test("refresh: a state refresh redraws the selected channel's header when its la
   assert.ok(!t.document.byId.title.textContent.includes("#old"))
 })
 
+test("refresh: a state refresh whose selection fell back redraws title and body together", async () => {
+  const t = bootFixture({ "/api/state": orderState([lblRow("a", "#old", "none")]), "/api/channel/a": pageFixture("a", [sendEntry(1, "zebrafish")]) })
+  await t.app.ready
+  await t.app.selectChannel("a")
+  assert.equal(t.document.byId.title.textContent, "#old")
+  t.routes["/api/state"] = orderState([lblRow("b", "#other", "none")])
+  t.routes["/api/changes"] = quiet("C1", { channels: { b: { new: true } } })
+  await t.app.pollOnce()
+  assert.ok(!t.document.byId.title.textContent.includes("#old"))
+  assert.ok(!t.document.byId.stream.textContent.includes("zebrafish"), "the old channel's entries are gone with its title")
+})
+
 test("refresh: a state refresh that reorders the rail scrolls the selected lane into view once", async () => {
   const t = pollOrderBoot()
   await t.app.ready

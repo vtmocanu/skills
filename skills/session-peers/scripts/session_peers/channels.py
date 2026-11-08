@@ -1036,7 +1036,8 @@ def session_names(typeds, cache=None, not_found=None, answered=None, deadline=No
 
     ``deadline`` (a ``time.monotonic`` value): no get_session lookup starts once it is reached; the
     skipped ids are not answered. ``max_lookups`` lowers the SESSION_LOOKUPS_MAX cap. With a ``stats``
-    dict, ``stats["lookups"]`` is set to the number of get_session calls made.
+    dict, ``stats["lookups"]`` is set to the number of get_session calls made and ``stats["failed"]`` to
+    the typed id whose lookup failed (no answer; the first failure ends the lookups).
 
     With a ``not_found`` set, the typed oc ids that ``opencode.get_session`` definitively reported
     as not existing are added to it (a failure or a skipped lookup is not added). With an ``answered``
@@ -1086,6 +1087,8 @@ def session_names(typeds, cache=None, not_found=None, answered=None, deadline=No
                 except Exception:
                     title = None
                     down = True  # no answer: no further lookups in this call
+                    if stats is not None:
+                        stats["failed"] = typed
             if title:
                 names[typed] = title
     return names

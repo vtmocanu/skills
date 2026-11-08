@@ -1952,7 +1952,7 @@
       if (!S.cursor && typeof data.cursor === "string") S.cursor = data.cursor;
       renderChrome(railOrder() !== orderBefore);
       if (S.view === "conv" && headerSignature() !== headBefore) {  // a renamed pair or a changed marker
-        withFocus(function () { fill($("title"), [chanText(S.selected), labelMark(S.rows[S.selected])]); });
+        withFocus(function () { renderMain({}); });  // title and body together: the selection may have fallen back
       }
     });
   }
