@@ -469,7 +469,7 @@ class JournalRetentionTests(JournalBase):
         with self.assertRaises(journal.JournalFull) as ctx:
             self.req(sender=sender, body="q" * 400)
         self.assertIn("session-peers journal full:", str(ctx.exception))
-        self.assertIn("expired request", str(ctx.exception))
+        self.assertIn("expired request whose mailbox is gone", str(ctx.exception))
         self.assertEqual(self.snapshot(), before)
         self.now += 700
         newest = self.req(sender=sender, body="q" * 400, expires=self.now + 600)
