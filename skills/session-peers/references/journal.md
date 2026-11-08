@@ -119,21 +119,20 @@ detected identity.
   settlements, transport errors, handovers).
 - **Quotas:** plain recorded messages take at most 50% of the cap; each sender
   at most 25%.
-- **Under size pressure** only finished entries are pruned: every recipient
-  ACKed, or a settled correlated entry (settlement needs no ACK). A correlated
-  entry is pruned only once its request mailbox is gone. Unfinished young
-  entries (neither fully ACKed nor settled) are never pruned, including
-  expired requests and entries with transport errors: pruning keys only on ACK
-  and settlement.
+- **Under size or quota pressure** a plain entry is eligible once every
+  recipient ACKs it. A correlated entry is eligible once its request mailbox is
+  gone and the entry is fully ACKed or settled. An `ask` or `dispatch` request
+  also becomes eligible once it reaches `expires_at` and its mailbox is gone.
+  Expiry does not ACK or settle the request. Transport errors alone do not make
+  an entry eligible.
 - **Clock skew:** records dated up to 14 days ahead are kept. A clock step-back
   of more than 14 days can drop records at the next rewrite.
-- **Retrieval guarantee (#160 channel contract):** a body stays available until
-  it is 14 days old while it is un-ACKed and unsettled, or while its
-  correlated mailbox is live (never past the 14-day age cap). An ACKed or
-  settled correlated entry stays protected while its mailbox exists (still
-  subject to the age cap). There is no guarantee once an entry is fully ACKed
-  or settled and, if correlated, its mailbox is gone. A channel history that
-  must keep the body longer should keep its own copy.
+- **Retrieval guarantee (#160 channel contract):** a body stays available
+  until the 14-day age cap while it is ineligible for pruning. This includes
+  all correlated entries whose mailbox still exists and all un-ACKed plain
+  entries. A body eligible for pruning stays readable until a write prunes
+  it under pressure or at the age cap. A channel history that must keep the
+  body longer should keep its own copy.
 
 An entry past the age cap is shown `[expired]` until a write prunes it.
 

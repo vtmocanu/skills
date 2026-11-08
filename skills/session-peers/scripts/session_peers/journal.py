@@ -538,20 +538,21 @@ class _Model:
     def live(self):
         return [rec for rec in self.recs if not rec.dead]
 
-    def eligible(self, entry, gone):
-        """Done (every slot ACKed or settled) and, if correlated, its mailbox is gone."""
+    def eligible(self, entry, now, gone):
+        """Check whether pressure may prune the entry at the writer's time snapshot."""
         d = entry.d
-        settled = entry.settled is not None
-        if not settled and not all(slot in entry.acks for slot in d["to"]):
+        finished = entry.settled is not None or all(slot in entry.acks for slot in d["to"])
+        expired_request = d["kind"] == "request" and d["expires_at"] <= now
+        if not (finished or expired_request):
             return False
         return d["kind"] == "message" or gone(d["mailbox"])
 
-    def prune_eligible(self, fits, helps, gone):
+    def prune_eligible(self, fits, helps, now, gone):
         """Drop the oldest eligible entries that help, until ``fits()``."""
         for entry in list(self.entries.values()):
             if fits():
                 return
-            if helps(entry) and self.eligible(entry, gone):
+            if helps(entry) and self.eligible(entry, now, gone):
                 self.drop_entry(entry)
 
     def meta(self, next_seq, malformed):
@@ -1100,10 +1101,10 @@ def _add_message(rec, revalidate=None, dedupe=False, check_id=True):
             return (total_v or (msg_v and entry.d["kind"] == "message")
                     or (sender_v and _bucket(entry.d) == bucket))
 
-        m.prune_eligible(lambda: not any(violations()), helps, _gone_cache())
+        m.prune_eligible(lambda: not any(violations()), helps, now, _gone_cache())
         if any(violations()):
             raise JournalFull(
-                "session-peers journal full: no finished entry can be pruned to fit %d more bytes; "
+                "session-peers journal full: no eligible entry can be pruned to fit %d more bytes; "
                 "ACK or settle older messages, or retry after they expire" % size
             )
         new = _Rec(rec, line)
@@ -1233,7 +1234,7 @@ def _write_event(make):
         m.age_prune(now)
         m.prune_grants(keep=new if rec["type"] == "handover" else None)
         if m.total > cap:
-            m.prune_eligible(lambda: m.total <= cap, lambda _entry: True, _gone_cache())
+            m.prune_eligible(lambda: m.total <= cap, lambda _entry: True, now, _gone_cache())
         if m.total > cap + sp_constants.JOURNAL_EVENT_RESERVE:
             raise JournalFull(
                 "session-peers journal full: even the event reserve is exhausted by entries that "
