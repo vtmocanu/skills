@@ -35,6 +35,10 @@ class ReplyBudget:
         # for the current sequence. Dropped whenever the sequence resets.
         allowance = state.get("allowance")
         self.allowance = allowance if self._valid_allowance(allowance) else None
+        # The last grant consume_allowance started applying ({"sid", "at"}), so
+        # a replay after a crash does not discard the freeze it created.
+        applied = state.get("applied_allow")
+        self.applied_allow = applied if isinstance(applied, dict) else None
         # `buddy set --replies N`: a finite TOTAL for one owner session on this
         # thread, spent across sequences, never replenished. Only `buddy clear`
         # or binding another buddy revokes it (a revoke marker).
@@ -184,12 +188,11 @@ class ReplyBudget:
             if sid not in self.held:
                 # Evicted or discarded earlier in this loop.
                 continue
-            if reason == "allow" and not self.may_send(sid):
-                # The allowance that released it is gone or spent.
+            if not self.may_send(sid):
+                # Whatever released it is gone or spent: it stays budget-held
+                # until a later reset or allow releases it.
                 self.held[sid].pop("release", None)
                 changed = True
-                continue
-            if not self.may_send(sid):
                 continue
             changed = self._release_one(sid, reason, records) not in ("failed", "kept") or changed
         if changed:
@@ -420,7 +423,13 @@ class ReplyBudget:
             return
         # Apply and save before the marker goes: a crash in between replays the
         # grant, which is idempotent, instead of losing it.
-        self._discard_frozen("budget allow", only=grant["sid"])
+        # A replay of the grant already applied must not discard a freeze that
+        # applying it created, so the applied grant is saved before it runs.
+        marker = {"sid": grant["sid"], "at": grant["at"]}
+        if self.applied_allow != marker:
+            self._discard_frozen("budget allow", only=grant["sid"])
+            self.applied_allow = marker
+            self.owner._save_state()
         self._apply_allowance(grant)
         self.owner._save_state()
         try:

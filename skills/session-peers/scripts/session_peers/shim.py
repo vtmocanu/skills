@@ -113,9 +113,11 @@ class Shim:
             self.tail = sp_rollout.RolloutTail.from_state(self.rollout_path, state.get("tail"))
         # This is an at-most-once processing ledger, including dropped replies,
         # not evidence of delivery. Read the legacy name when upgrading.
+        saved_turns = state.get("processed_turns", state.get("delivered")) or []
+        # A ledger saved mid-batch can exceed the bound; do not cut it on reload.
         self.processed_turns = collections.deque(
-            state.get("processed_turns", state.get("delivered")) or [],
-            maxlen=sp_constants.PROCESSED_TURN_HISTORY,
+            saved_turns,
+            maxlen=max(sp_constants.PROCESSED_TURN_HISTORY, len(saved_turns)),
         )
         self.reply_budget = sp_budgets.ReplyBudget(
             self, state,
@@ -370,6 +372,7 @@ class Shim:
                 "budget_notified": sorted(self.reply_budget.budget_notified),
                 "held": self._bound_held(),
                 "allowance": self.reply_budget.allowance,
+                "applied_allow": self.reply_budget.applied_allow,
                 "binding": self.reply_budget.binding,
                 "contacts": self._bound(self.contacts),
                 "updated_at": sp_runtime.now_iso(),
@@ -751,6 +754,10 @@ class Shim:
             # the middle must replay the unhandled turns. Left set on an
             # exception so _cleanup's save also stays on the batch tail.
             self._in_batch = bool(events)
+            if events:
+                # Saves in the batch keep the batch-start cursor, so the ledger
+                # must not forget any turn handled meanwhile.
+                self.processed_turns = collections.deque(self.processed_turns, maxlen=None)
             for event in events:
                 if event.kind == "start":
                     self._set_status("busy")
@@ -760,6 +767,9 @@ class Shim:
             self._in_batch = False
             if events:
                 self._save_state()
+                self.processed_turns = collections.deque(
+                    self.processed_turns, maxlen=sp_constants.PROCESSED_TURN_HISTORY
+                )
             self._ensure_record()
             last_live, last_alias = self._poll_maintenance(
                 time.time(), last_live, last_alias
@@ -1221,8 +1231,12 @@ class Shim:
         try:
             floor = sp_channels.history_floor(key)
         except sp_channels.ChannelError as exc:
-            sp_runtime.log("cannot read the history of #%s (%s); sending directly" % (key, exc))
-            return self._direct_reply(rec, text, entry)
+            # The channel is verified, so nothing goes direct: hold the answer
+            # with no floor and let the retry compute it when it publishes.
+            sp_runtime.log("cannot read the history of #%s (%s); holding the reply" % (key, exc))
+            result = RouteResult("route_failed")
+            result.info = {"mid": mid, "key": key, "floor": None, "sender": sender, "recipient": lead}
+            return result
         try:
             plan = sp_channels.prepare_targeted(key, sender, lead, text, mid, False)
         except sp_channels.TargetedTooLarge as exc:
@@ -1339,6 +1353,14 @@ class Shim:
             key = entry["channel"]
             sender = entry.get("channel_sender") or sender
             floor = entry.get("channel_floor")
+            if floor is None and (entry.get("phase") or "fresh") == "fresh":
+                # Held before the history could be read: nothing is published
+                # yet, so the floor is taken now, at publish time.
+                try:
+                    floor = sp_channels.history_floor(key)
+                except sp_channels.ChannelError as exc:
+                    sp_runtime.log("cannot read the history of #%s (%s); keeping the reply held" % (key, exc))
+                    return "failed"
             floor = 0 if floor is None else floor
         else:
             key, _reason = sp_channels.buddy_route(lead, sender)
@@ -1347,8 +1369,8 @@ class Shim:
             try:
                 floor = sp_channels.history_floor(key)
             except sp_channels.ChannelError as exc:
-                sp_runtime.log("cannot read the history of #%s (%s); sending directly" % (key, exc))
-                return self._direct_reply(rec, text, entry)
+                sp_runtime.log("cannot read the history of #%s (%s); keeping the reply held" % (key, exc))
+                return "failed"
         mid = entry.get("channel_mid") or str(uuid.uuid4())
         phase = entry.get("phase") or "fresh"
         if phase in ("publishing", "unresolved"):

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import collections
 import contextlib
 import io
 import os
@@ -11,6 +12,7 @@ from unittest import mock
 
 from .support import ShimBase, append, ev, new_uuid, sp_codex, user_item, wait_for
 from session_peers import budgets as sp_budgets, channels as sp_channels, claude as sp_claude
+from session_peers import journal as sp_journal
 from session_peers import constants as sp_constants, protocol as sp_protocol, runtime as sp_runtime
 from session_peers import shim as sp_shim, storage as sp_storage
 
@@ -43,6 +45,9 @@ class RouteBase(ShimBase):
     def sends(self):
         return [e for e in self.history() if e["kind"] == "channel.send"]
 
+    def journal_entries(self):
+        return sp_journal.read_only_view()["entries"]
+
     def outcomes(self):
         return [e["data"]["outcomes"] for e in self.history() if e["kind"] == "channel.outcome"]
 
@@ -74,6 +79,7 @@ class TestRoutedAnswer(RouteBase):
         self.assertIn("[in reply to message m-1]", body)
         self.assertEqual(frames[0]["msg_id"], data["message_id"])
         self.assertEqual(self.shim.reply_budget.budgets[self.sid], 1)
+        self.assertEqual(self.journal_entries(), [])
 
     def test_a_codex_lead_is_routed_as_codex(self):
         lead_tid = new_uuid()
@@ -244,6 +250,64 @@ class TestRouteFailures(RouteBase):
         self.assertEqual(self.shim.reply_budget.budgets.get(self.sid, 0), 0)
 
 
+class TestUnreadableFloor(RouteBase):
+    @staticmethod
+    def unreadable(key):
+        raise sp_channels.ChannelError("history unreadable", 1)
+
+    def test_an_unreadable_history_holds_an_ordinary_answer_and_a_retry_delivers_it_once(self):
+        with mock.patch.object(sp_channels, "history_floor", self.unreadable):
+            self.shim._handle_turn_end(self.turn())
+        time.sleep(0.2)
+        self.assertEqual(self.replies(), [])
+        self.assertEqual(self.sends(), [])
+        self.assertEqual(self.shim.reply_budget.budgets.get(self.sid, 0), 0)
+        held = self.shim.reply_budget.held[self.sid]
+        self.assertEqual(held["release"], "route")
+        self.assertEqual(held["phase"], "fresh")
+        self.assertEqual(held["channel"], self.key)
+        self.assertTrue(held["channel_mid"])
+        self.assertIsNone(held["channel_floor"])
+        mid = held["channel_mid"]
+        with mock.patch.object(sp_channels, "history_floor", self.unreadable):
+            self.shim.reply_budget.retry_held()
+        time.sleep(0.2)
+        self.assertEqual(self.replies(), [])
+        self.assertIn(self.sid, self.shim.reply_budget.held)
+        self.shim.reply_budget.retry_held()
+        wait_for(lambda: self.replies())
+        time.sleep(0.2)
+        self.assertEqual(len(self.replies()), 1)
+        self.assertEqual([e["data"]["message_id"] for e in self.sends()], [mid])
+        self.assertEqual(self.outcomes(), [{self.lead: "transport accepted"}])
+        self.assertEqual(self.shim.reply_budget.budgets[self.sid], 1)
+        self.assertNotIn(self.sid, self.shim.reply_budget.held)
+
+    def test_an_unreadable_history_keeps_a_released_held_answer_held(self):
+        budget = self.shim.reply_budget
+        budget.budgets[self.sid] = sp_constants.REPLY_BUDGET
+        budget.budget_sender_sid = self.sid
+        budget.budget_last_at = time.time()
+        self.shim._handle_turn_end(self.turn(text="held answer", mid="m-held"))
+        self.assertNotIn("channel_mid", budget.held[self.sid])
+        with open(sp_storage.budget_reset_path(self.tid), "w") as fh:
+            fh.write("{}")
+        with mock.patch.object(sp_channels, "history_floor", self.unreadable):
+            budget.consume_reset()
+        time.sleep(0.2)
+        self.assertEqual(self.replies(), [])
+        self.assertEqual(self.sends(), [])
+        self.assertEqual(budget.budgets.get(self.sid, 0), 0)
+        self.assertEqual(budget.held[self.sid]["release"], "reset")
+        budget.retry_held()
+        wait_for(lambda: self.replies())
+        time.sleep(0.2)
+        self.assertEqual(len(self.replies()), 1)
+        self.assertEqual(len(self.sends()), 1)
+        self.assertEqual(budget.budgets[self.sid], 1)
+        self.assertEqual(budget.held, {})
+
+
 class TestRoutedBudget(RouteBase):
     def test_a_spent_budget_holds_and_the_reset_releases_through_the_channel_once(self):
         for index in range(sp_constants.REPLY_BUDGET):
@@ -395,6 +459,7 @@ class TestHeldRelease(HeldBase):
         self.assertEqual(self.outcomes(), [{self.lead: "transport accepted"}])
         self.assertEqual(self.budget().held, {})
         self.assertEqual(self.budget().budgets[self.sid], 1)
+        self.assertEqual(self.journal_entries(), [])
 
     def test_an_allowance_releases_a_held_answer_through_the_channel_once(self):
         self.cap_hold()
@@ -464,6 +529,7 @@ class TestHeldRelease(HeldBase):
         self.assertEqual(self.outcomes(), [{self.lead: "transport accepted"}])
         self.assertEqual(self.budget().budgets[self.sid], 1)
         self.assertEqual(self.budget().held, {})
+        self.assertEqual(self.journal_entries(), [])
 
     def test_an_uncertain_release_reaches_the_recipient_once_and_is_never_retried(self):
         self.cap_hold()
@@ -481,6 +547,17 @@ class TestHeldRelease(HeldBase):
         entry = self.budget().held[self.sid]
         self.assertEqual(entry["phase"], "unknown")
         self.assertNotIn("release", entry)
+
+    def test_a_cap_blocked_retry_drops_the_release_tag_of_a_route_entry_and_sends_nothing(self):
+        self.route_entry("fresh", new_uuid(), None, release="route")
+        self.budget().budgets[self.sid] = sp_constants.REPLY_BUDGET
+        self.budget().budget_sender_sid = self.sid
+        self.budget().budget_last_at = time.time()
+        self.budget().retry_held()
+        time.sleep(0.2)
+        self.assertNotIn("release", self.budget().held[self.sid])
+        self.assertEqual(self.replies(), [])
+        self.assertEqual(self.sends(), [])
 
     def test_the_cap_is_honoured_after_other_replies_used_the_budget(self):
         with self.fail_send_once():
@@ -768,7 +845,8 @@ class TestMarkerCrashPoints(HeldBase):
             with self.assertRaises(Crash):
                 self.budget().consume_allowance()
         shim = self.restart()
-        self.assertEqual(shim.reply_budget.held[self.sid]["phase"], "unknown")
+        # The discard was saved with the applied grant, before the apply ran.
+        self.assertNotIn(self.sid, shim.reply_budget.held)
         shim.reply_budget.consume_allowance()
         shim.reply_budget.retry_held()
         time.sleep(0.3)
@@ -776,6 +854,38 @@ class TestMarkerCrashPoints(HeldBase):
         self.assertNotIn(self.sid, shim.reply_budget.held)
         shim._handle_turn_end(self.turn(text="after", mid="m-after"))
         wait_for(lambda: len(self.replies()) == 2 or None)
+
+    def test_a_replayed_allowance_keeps_the_freeze_its_own_release_created(self):
+        self.cap_hold()
+        self.write_allow(sp_constants.REPLY_BUDGET + 2)
+        real_unlink = os.unlink
+        allow_path = sp_storage.budget_allow_path(self.tid)
+
+        def unlink(path, *args, **kwargs):
+            if path == allow_path:
+                raise Crash()
+            return real_unlink(path, *args, **kwargs)
+
+        with self.uncertain(), mock.patch.object(sp_budgets.os, "unlink", unlink):
+            with self.assertRaises(Crash):
+                self.budget().consume_allowance()
+        wait_for(lambda: self.replies())
+        self.assertEqual(self.budget().held[self.sid]["phase"], "unknown")
+        self.assertTrue(os.path.exists(sp_storage.budget_allow_path(self.tid)))
+        shim = self.restart()
+        shim.reply_budget.consume_allowance()
+        shim.reply_budget.retry_held()
+        time.sleep(0.3)
+        self.assertEqual(shim.reply_budget.held[self.sid]["phase"], "unknown")
+        self.assertEqual(len(self.replies()), 1)
+        self.assertEqual(len(self.sends()), 1)
+        self.assertFalse(os.path.exists(sp_storage.budget_allow_path(self.tid)))
+        # A different, later grant is a new decision and discards it as before.
+        time.sleep(0.01)
+        self.write_allow(sp_constants.REPLY_BUDGET + 3)
+        shim.reply_budget.consume_allowance()
+        self.assertNotIn(self.sid, shim.reply_budget.held)
+        self.assertEqual(len(self.replies()), 1)
 
 
 class TestHeldRecovery(HeldBase):
@@ -1139,6 +1249,38 @@ class TestPollBatchCrash(RouteBase):
         self.assertEqual(len([t for t in texts if "answer 2" in t]), 1)
         self.assertEqual(len(self.sends()), 2)
 
+
+    def test_a_batch_longer_than_the_ledger_bound_replays_no_answer(self):
+        turns = 5
+        for number in range(1, turns + 1):
+            self.tagged_turn(number)
+        real = sp_channels.finish_targeted
+        calls = {"n": 0}
+
+        def finish(key, sender, mid, recipient, outcome, floor, lock=None):
+            calls["n"] += 1
+            if calls["n"] == turns:
+                sp_channels.release_unfinished(lock)
+                raise Crash()
+            return real(key, sender, mid, recipient, outcome, floor, lock)
+
+        with mock.patch.object(sp_constants, "PROCESSED_TURN_HISTORY", 3), \
+                mock.patch.object(sp_constants, "REPLY_BUDGET", 20):
+            # The shim was built before the bound was lowered.
+            self.shim.processed_turns = collections.deque(self.shim.processed_turns, maxlen=3)
+            with mock.patch.object(sp_channels, "finish_targeted", finish):
+                with self.assertRaises(Crash):
+                    self.poll_once(self.shim)
+            wait_for(lambda: len(self.replies()) >= turns or None)
+            restarted = sp_shim.Shim(sp_codex.resolve_thread(self.tid))
+            restarted.codex_version = "0.153.4"
+            self.poll_once(restarted)
+            time.sleep(0.3)
+        texts = [self.content(f) for f in self.replies()]
+        self.assertEqual(len(texts), turns)
+        for number in range(1, turns + 1):
+            self.assertEqual(len([t for t in texts if "answer %d" % number in t]), 1, number)
+        self.assertEqual(len(self.sends()), turns)
 
     def crash_on_second_records(self):
         real = sp_claude.live_claude_records
