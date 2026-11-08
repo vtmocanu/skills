@@ -2396,7 +2396,7 @@ test("labels: stale and unverified pairs carry distinct visible markers, a curre
   await t.app.ready
   const marks = (key) => elementsOf(laneOf(t, key)).filter((n) => (n.attributes.class || "").startsWith("lblmark")).map((n) => n.textContent)
   assert.deepEqual(marks("a"), ["stale (name may be out of date)"])
-  assert.deepEqual(marks("b"), ["pair unverified"])
+  assert.deepEqual(marks("b"), ["pair unverified (the pair behind this name could not be verified)"])
   assert.deepEqual(marks("c"), [])
 })
 
@@ -2524,4 +2524,116 @@ test("chat: the composer posts to the key, not the label, for a channel labelled
   sendButton(t).dispatch("click")
   await settle()
   assert.equal(t.sends[0].body.to, "#pairkey")
+})
+
+test("labels: the lane's activity note has no role of its own, so the lane name keeps it", async () => {
+  const t = bootFixture({ "/api/state": orderState([lblRow("a", "#a", "unknown")]) })
+  await t.app.ready
+  const lane = laneOf(t, "a")
+  assert.ok(lane.textContent.includes("activity unknown"))
+  assert.ok(!elementsOf(lane).some((n) => n.attributes.role === "note"))
+})
+
+test("rail: no activity note on #general or an unreadable row, whatever their activity says", async () => {
+  const state = orderState([chRow("u", { unreadable: true, activity: "unknown", members: [] })])
+  state.channels[0].activity = "unknown"
+  const t = bootFixture({ "/api/state": state })
+  await t.app.ready
+  assert.ok(!laneOf(t, "general").textContent.includes("activity unknown"))
+  assert.ok(!laneOf(t, "u").textContent.includes("activity unknown"))
+})
+
+test("labels: the header and the details heading carry the stale and unverified markers too", async () => {
+  const t = bootFixture({ "/api/state": orderState([
+    lblRow("a", "#lead", "none", null, { label_status: "stale" }),
+    lblRow("b", "#lead-2", "none", null, { label_status: "unverified" }),
+    lblRow("c", "#fine", "none")]),
+  "/api/channel/a": pageFixture("a", [sendEntry(1, "x")]), "/api/channel/b": pageFixture("b", [sendEntry(1, "x")]),
+  "/api/channel/c": pageFixture("c", [sendEntry(1, "x")]) })
+  await t.app.ready
+  await t.app.selectChannel("a")
+  assert.ok(t.document.byId.title.textContent.includes("stale"))
+  assert.ok(t.document.byId.info.textContent.includes("stale"))
+  await t.app.selectChannel("b")
+  assert.ok(t.document.byId.title.textContent.includes("pair unverified"))
+  assert.ok(t.document.byId.info.textContent.includes("pair unverified"))
+  await t.app.selectChannel("c")
+  assert.ok(!t.document.byId.title.textContent.includes("unverified") && !t.document.byId.title.textContent.includes("stale"))
+})
+
+test("rail order: sort stamps read like the server (numeric strings, milliseconds, naive ISO as UTC, junk as 0, huge first)", async () => {
+  const t = bootFixture({ "/api/state": orderState([
+    lblRow("junk", "#a-junk", "posted", "not a time"),
+    lblRow("ms", "#b-ms", "posted", 5e11),
+    lblRow("num", "#c-num", "posted", "1700000000"),
+    lblRow("naive", "#d-naive", "posted", "2025-01-01T00:00:00"),
+    lblRow("huge", "#e-huge", "posted", 1e300)]) })
+  await t.app.ready
+  assert.deepEqual(laneNames(t), ["#general", "#e-huge", "#d-naive", "#c-num", "#b-ms", "#a-junk"])
+})
+
+test("poll: a send with a huge or non-finite stamp makes the channel unknown, not posted", async () => {
+  const t = pollOrderBoot()
+  await t.app.ready
+  t.routes["/api/changes"] = quiet("C1", { channels: { c: { entries: [sendEntry(6, "far", { ts: 1e300 })], gap: null } } })
+  await t.app.pollOnce()
+  assert.ok(laneOf(t, "c").textContent.includes("activity unknown"))
+  t.routes["/api/changes"] = quiet("C2", { channels: { b: { entries: [sendEntry(7, "ms", { ts: Date.now() })], gap: null } } })
+  await t.app.pollOnce()
+  assert.equal(laneNames(t)[1], "#b", "a millisecond stamp counts as now")
+})
+
+test("poll: the newest send by position sets the stamp even when older than the known one", async () => {
+  const t = bootFixture({ "/api/state": orderState([
+    lblRow("a", "#a", "posted", stampAt(10)), lblRow("b", "#b", "posted", stampAt(50))]) })
+  await t.app.ready
+  assert.deepEqual(laneNames(t), ["#general", "#a", "#b"])
+  t.routes["/api/changes"] = quiet("C1", { channels: { a: { entries: [sendEntry(6, "old", { ts: stampAt(500) })], gap: null } } })
+  await t.app.pollOnce()
+  assert.deepEqual(laneNames(t), ["#general", "#b", "#a"])
+})
+
+test("refresh: a state refresh that reorders the rail scrolls the selected lane into view once", async () => {
+  const t = pollOrderBoot()
+  await t.app.ready
+  await t.app.selectChannel("c")
+  const calls = []
+  t.routes["/api/state"] = orderState([
+    lblRow("a", "#a", "posted", "2026-03-01T00:00:00+00:00"),
+    lblRow("b", "#b", "posted", "2026-02-01T00:00:00+00:00"),
+    lblRow("c", "#c", "posted", "2026-04-01T00:00:00+00:00"),
+    lblRow("zz", "#zz", "none")])
+  t.routes["/api/changes"] = quiet("C1", { channels: { zz: { new: true } } })
+  const realCreate = t.document.createElement
+  t.document.createElement = (tag) => { const n = realCreate(tag); n.scrollIntoView = (o) => calls.push([n, o]); return n }
+  await t.app.pollOnce()
+  t.document.createElement = realCreate
+  assert.deepEqual(laneNames(t), ["#general", "#c", "#a", "#b", "#zz"])
+  assert.equal(calls.length, 1)
+  assert.ok(calls[0][0] === laneOf(t, "c"))
+})
+
+test("refresh: the server's order replaces what polls inferred, and an activity change without a reorder does not scroll", async () => {
+  const t = pollOrderBoot()
+  await t.app.ready
+  await t.app.selectChannel("c")
+  t.routes["/api/changes"] = quiet("C1", { channels: { c: { entries: [sendEntry(6, "z", { ts: stampAt(1) })], gap: null } } })
+  await t.app.pollOnce()
+  assert.deepEqual(laneNames(t), ["#general", "#c", "#a", "#b"])
+  t.routes["/api/changes"] = quiet("C2", { channels: { zz: { new: true } } })
+  t.routes["/api/state"] = orderState([
+    lblRow("a", "#a", "posted", "2026-03-01T00:00:00+00:00"),
+    lblRow("b", "#b", "posted", "2026-02-01T00:00:00+00:00"),
+    lblRow("c", "#c", "none"), lblRow("zz", "#zz", "none")])
+  await t.app.pollOnce()
+  assert.deepEqual(laneNames(t), ["#general", "#a", "#b", "#c", "#zz"])
+  const calls = []
+  const realCreate = t.document.createElement
+  t.document.createElement = (tag) => { const n = realCreate(tag); n.scrollIntoView = (o) => calls.push([n, o]); return n }
+  t.routes["/api/changes"] = quiet("C3", { activity_unknown: ["zz"] })
+  await t.app.pollOnce()
+  t.document.createElement = realCreate
+  assert.ok(laneOf(t, "zz").textContent.includes("activity unknown"))
+  assert.deepEqual(laneNames(t), ["#general", "#a", "#b", "#c", "#zz"])
+  assert.equal(calls.length, 0)
 })

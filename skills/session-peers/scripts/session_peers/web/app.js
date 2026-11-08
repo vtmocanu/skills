@@ -267,6 +267,30 @@
     return d ? d.getTime() : 0;
   }
 
+  // Sort and activity time in epoch seconds, as webdata._stamp reads runtime.parse_time: a number or
+  // numeric string above 1e11 is milliseconds, a naive ISO time is UTC, anything unclear or
+  // non-finite is 0. (parseTs stays the display reading.)
+  var NUMERIC_TS = /^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/;
+
+  function sortStamp(ts) {
+    var n = null;
+    if (typeof ts === "boolean") n = ts ? 1 : 0;
+    else if (typeof ts === "number") n = ts;
+    else if (typeof ts === "string") {
+      var text = ts.trim();
+      if (!text) return 0;
+      if (NUMERIC_TS.test(text)) n = Number(text);
+      else {
+        text = text.replace(/(\.\d{3})\d+/, "$1");
+        if (/^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}/.test(text) && !/(Z|[+-]\d{2}(:?\d{2})?)$/i.test(text.slice(11))) text += "Z";
+        var ms = Date.parse(text.replace(" ", "T"));
+        return isFinite(ms) ? ms / 1000 : 0;
+      }
+    }
+    if (n === null || !isFinite(n)) return 0;
+    return n > 1e11 ? n / 1000 : n;
+  }
+
   // ------------------------------------------------------------------------
   // Pieces
   // ------------------------------------------------------------------------
@@ -301,6 +325,18 @@
     var display = row && typeof row.display === "string" ? row.display : str(key);
     if (row && row.kind === "buddy") return [display];
     return [el("span", { class: "chan" }, "#"), display.replace(/^#/, "")];
+  }
+
+  // The marker after a label the server could not vouch for: stale, or the pair unverified.
+  function labelMark(row) {
+    var status = row && row.label_status;
+    return status === "stale"
+      ? el("span", { class: "lblmark stale", title: "The pair this name came from has ended or changed; the name may be out of date" }, "stale",
+        el("span", { class: "sr" }, " (name may be out of date)"))
+      : status === "unverified"
+        ? el("span", { class: "lblmark unv", title: "The pair behind this name could not be verified" }, "pair unverified",
+          el("span", { class: "sr" }, " (the pair behind this name could not be verified)"))
+        : null;
   }
 
   function chanText(key) {
@@ -347,7 +383,7 @@
     var rx = rowRank(x), ry = rowRank(y);
     if (rx !== ry) return rx - ry;
     if (rx === 1) {
-      var nx = stamp(activityOf(x).ts), ny = stamp(activityOf(y).ts);
+      var nx = sortStamp(activityOf(x).ts), ny = sortStamp(activityOf(y).ts);
       if (nx !== ny) return ny - nx;
     }
     var kx = str(x.key), ky = str(y.key);
@@ -713,15 +749,9 @@
         el("div", { class: "members" }, members.map(chip),
           row.omitted_members ? el("span", { class: "who more" }, "+" + row.omitted_members) : null)];
     }
-    var status = row.label_status;
-    var mark = status === "stale"
-      ? el("span", { class: "lblmark stale", title: "The pair this name came from has ended or changed; the name may be out of date" }, "stale",
-        el("span", { class: "sr" }, " (name may be out of date)"))
-      : status === "unverified"
-        ? el("span", { class: "lblmark unv", title: "The pair behind this name could not be verified" }, "pair unverified")
-        : null;
+    var mark = labelMark(row);
     var unknown = !row.unreadable && key !== "general" && activityOf(row).a === "unknown"
-      ? el("div", { class: "actnote", role: "note" }, "activity unknown",
+      ? el("div", { class: "actnote" }, "activity unknown",
         el("span", { class: "sr" }, " (posts could not be read; this is not the same as no posts)"))
       : null;
     var lane = el("div", { class: "lane", role: "button", tabindex: "0", "aria-current": current ? "true" : null, "data-focus": "lane:" + key },
@@ -820,7 +850,7 @@
   function renderDetails(row) {
     if (!row) return [el("h2", null, "Details"), el("p", { class: "muted" }, "No channel selected.")];
     var members = Array.isArray(row.members) ? row.members : [];
-    var out = [el("h2", null, chanText(row.key))];
+    var out = [el("h2", null, chanText(row.key), labelMark(row))];
     if (row.key === "general") {
       out.push(el("div", { class: "card" }, el("b", null, "Everyone"),
         el("dl", { class: "kv" }, fleetRuntimes(members).map(function (rt) {
@@ -1900,9 +1930,10 @@
 
   function refreshState() {
     return api("/api/state").then(function (data) {
+      var orderBefore = railOrder();
       setState(data);
       if (!S.cursor && typeof data.cursor === "string") S.cursor = data.cursor;
-      renderChrome();
+      renderChrome(railOrder() !== orderBefore);
     });
   }
 
@@ -2288,32 +2319,28 @@
     var row = S.rows[key];
     if (!row) return false;
     var cur = activityOf(row);
-    if (cur.a === a && (a !== "posted" || stamp(cur.ts) === stamp(ts))) return false;
+    if (cur.a === a && (a !== "posted" || sortStamp(cur.ts) === sortStamp(ts))) return false;
     S.activity[key] = { a: a, ts: a === "posted" ? ts : null };
     return true;
   }
 
   // What a poll's entries say about a channel's activity, as webdata._post_activity reads a snapshot:
-  // a newest send makes it posted (when newer than what is known), an oversized placeholder after the
-  // newest send (or with none) may hide a send, and a send stamped beyond FUTURE_SKEW is unknown.
+  // the newest send by position makes it posted with that send's ts, unless an oversized placeholder
+  // came after it (it may hide a send) or the send is stamped beyond FUTURE_SKEW: then unknown.
+  // Oversized with no send is unknown too.
   function noteActivity(key, entries) {
     var send = null, hidden = false;
     entries.forEach(function (e) {
       if (!e || typeof e !== "object") return;
-      if (e.kind === "oversized" || e.oversized) {
-        if (!(send && typeof e.seq === "number" && typeof send.seq === "number" && e.seq < send.seq)) hidden = true;
-      } else if (e.kind === "send") {
+      if (e.kind === "oversized" || e.oversized) hidden = true;
+      else if (e.kind === "send") {
         send = e;
         hidden = false;
       }
     });
     if (hidden) return setActivity(key, "unknown");
     if (!send) return false;
-    if (stamp(send.ts) / 1000 > Date.now() / 1000 + FUTURE_SKEW) return setActivity(key, "unknown");
-    var row = S.rows[key];
-    if (!row) return false;
-    var cur = activityOf(row);
-    if (cur.a === "posted" && stamp(send.ts) <= stamp(cur.ts)) return false;
+    if (sortStamp(send.ts) > Date.now() / 1000 + FUTURE_SKEW) return setActivity(key, "unknown");
     return setActivity(key, "posted", send.ts);
   }
 
@@ -2599,9 +2626,9 @@
     if (lane && typeof lane.scrollIntoView === "function") lane.scrollIntoView({ block: "nearest" });
   }
 
-  function renderChrome() {
+  function renderChrome(moved) {
     S.focusables = table();
-    renderLanes();
+    renderLanes(moved);
     renderModeBadge();
     renderFleet();
     renderLegend();
@@ -2677,7 +2704,7 @@
       var key = S.selected;
       var row = S.rows[key];
       var page = S.pages[key];
-      title = chanText(key);
+      title = [chanText(key), labelMark(row)];
       var count = row && Array.isArray(row.members) ? row.members.length : 0;
       sub = key === "general" ? count + " sessions, everyone" : count + " member" + (count === 1 ? "" : "s");
       var covRow = row ? { coverage: Object.assign(table(), row.coverage && typeof row.coverage === "object" ? row.coverage : {}) } : { coverage: table() };

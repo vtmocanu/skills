@@ -29,10 +29,12 @@ after DISCOVERY_PASS_BUDGET seconds (a check already running, lsof up to 20 s or
 up to 30 s, can overrun it; requests never wait longer than DISCOVERY_WAIT) and checks at most
 SUBPROCESS_MEMBERS_PER_PASS members that need a subprocess (Codex, OpenCode); members not reached are
 ``unverified`` and the result's ``discovery`` object carries ``truncated``. The members of each buddy
-channel's current pair are checked first, so those limits cut the other members, and the channel
-labels (``labels``) keep the previous pass's name and liveness for a pair member a pass could not
-check. Reading the channel records has its own DISCOVERY_PASS_BUDGET deadline, separate from the
-member checks', so a pass may take up to two budgets. The pass runs with
+channel's current pair are checked first (their liveness, then their OpenCode names), before the other
+roster members, but still inside the same deadline and allowances: those limits cut the other members
+first, and the channel labels (``labels``) keep the previous pass's name and liveness for a pair member
+a pass could not check, with ``truncated`` set. Reading the channel records has its own
+DISCOVERY_PASS_BUDGET deadline, separate from the member checks', so a pass may start new work for up
+to two budgets. The pass runs with
 ``runtime.log`` muted on its thread.
 
 Handler threads must never resolve CODEX_HOME: discovery's ``storage.codex_home_override`` mutates
@@ -190,10 +192,14 @@ def run_discovery(requester=None, previous=None):
 
     ``labels`` are ``channels.derive_labels`` over the channel records read here (the same records
     ``channel list`` labels). The identities of every known buddy pair are checked before any other
-    member, so the pass limits cut the roster, not the labels; an identity this pass still could not
-    check (``label_names``, ``label_liveness`` hold what labels used) keeps ``previous``'s name and
-    liveness (the previous pass's result), else its short id and ``unverified``, and the pass is
-    ``truncated``."""
+    member, so the pass limits cut the roster first; they can still cut the labels, because the identity
+    checks run inside the same deadline and allowances. An identity this pass could not check
+    (``label_names``, ``label_liveness`` hold what labels used) keeps ``previous``'s name and
+    liveness (the previous pass's result), else its short id and ``unverified``. The pass is
+    ``truncated`` when a pair member's liveness was not checked or a pair identity's OpenCode name
+    lookup failed, was skipped or ran out of time (neither named nor reported missing), whether or
+    not a previous name is kept; a session the service reports missing gets its short id and does
+    not truncate."""
     with _DISCOVERY_LOCK, sp_storage.no_create(), sp_runtime.quiet():
         records, truncated = _read_records(time.monotonic() + DISCOVERY_PASS_BUDGET)
         general, rosters = _rosters(records)
@@ -207,25 +213,60 @@ def run_discovery(requester=None, previous=None):
         cache, liveness, activity, names, homes = {}, {}, {}, {}, {}
         deadline, subprocess_left = time.monotonic() + DISCOVERY_PASS_BUDGET, SUBPROCESS_MEMBERS_PER_PASS
         checked, unchecked = set(), []
-        for typed in members:
+        pair_ids = set(live_ids)
+
+        def check(typed):
+            nonlocal truncated, subprocess_left
             if time.monotonic() >= deadline:
                 liveness[typed], truncated = "unverified", True
                 unchecked.append(typed)
-                continue
+                return
             if not typed.startswith("cc:"):
                 if subprocess_left <= 0:
                     liveness[typed], truncated = "unverified", True
                     unchecked.append(typed)
-                    continue
+                    return
                 subprocess_left -= 1
             checked.add(typed)
             try:
                 liveness[typed] = sp_channels.member_liveness(typed, cache)
             except Exception:
                 liveness[typed] = "unverified"
+
+        for typed in members:  # the pair identities' liveness, then their names, before any other member
+            if typed in pair_ids:
+                check(typed)
         by_sid = {}
         if any(not m.startswith("oc:") for m in members) or any(not m.startswith("oc:") for m in named_ids):
             by_sid = sp_channels.registry_by_session(cache)
+        prev = previous if isinstance(previous, dict) else {}
+        prev_names = prev.get("label_names") if isinstance(prev.get("label_names"), dict) else {}
+        prev_live = prev.get("label_liveness") if isinstance(prev.get("label_liveness"), dict) else {}
+        label_names, label_live = {}, {}
+        oc_named = [t for t in named_ids if t.startswith("oc:")]
+        for typed in named_ids:
+            kind, _sep, ident = typed.partition(":")
+            if kind in ("cc", "codex"):  # one registry read, no allowance
+                name = sp_channels.registry_name(kind, ident, by_sid)
+                if name:
+                    label_names[typed] = name
+        not_found = set()
+        if oc_named and time.monotonic() < deadline:
+            try:
+                label_names.update(sp_channels.session_names(oc_named, cache, not_found))
+            except Exception:
+                pass
+        # An identity whose lookup neither named it nor found it missing (out of time, failed or skipped) keeps what
+        # the previous pass found, and the pass is truncated. One the service definitively reported missing (a
+        # deleted session) does not keep a name: it gets its short id.
+        if any(t not in label_names and t not in not_found for t in oc_named):
+            truncated = True
+        kept = {t: prev_names[t] for t in oc_named if t not in label_names and t not in not_found
+                and isinstance(prev_names.get(t), str)}
+        label_names.update(kept)
+        for typed in members:  # the other roster members
+            if typed not in pair_ids:
+                check(typed)
         for typed in members:
             kind, _sep, ident = typed.partition(":")
             if kind in ("cc", "codex"):
@@ -244,31 +285,6 @@ def run_discovery(requester=None, previous=None):
             names.update(oc_names)
         elif oc_members:
             truncated = True
-        prev = previous if isinstance(previous, dict) else {}
-        prev_names = prev.get("label_names") if isinstance(prev.get("label_names"), dict) else {}
-        prev_live = prev.get("label_liveness") if isinstance(prev.get("label_liveness"), dict) else {}
-        label_names, label_live = {}, {}
-        oc_named = [t for t in named_ids if t.startswith("oc:")]
-        for typed in named_ids:
-            kind, _sep, ident = typed.partition(":")
-            if kind in ("cc", "codex"):  # one registry read, no allowance
-                name = sp_channels.registry_name(kind, ident, by_sid)
-                if name:
-                    label_names[typed] = name
-        not_found = set()
-        if oc_named and time.monotonic() < deadline:
-            try:
-                label_names.update(sp_channels.session_names(oc_named, cache, not_found))
-            except Exception:
-                pass
-        elif oc_named:  # out of time
-            truncated = True
-        # An identity that got no name (out of time, a failed or skipped lookup) keeps what the previous pass
-        # found. One the service definitively reported missing (a deleted session) does not: it gets its short id.
-        kept = {t: prev_names[t] for t in oc_named if t not in label_names and t not in not_found
-                and isinstance(prev_names.get(t), str)}
-        label_names.update(kept)
-        truncated = truncated or bool(kept)
         for typed in live_ids:
             if typed in checked:
                 label_live[typed] = liveness[typed]

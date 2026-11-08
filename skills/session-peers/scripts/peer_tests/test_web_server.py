@@ -1209,7 +1209,7 @@ class DiscoveryLabelTests(WebBase):
         self.assertEqual(kept["label_names"][oc], "ocname")
         self.assertTrue(kept["truncated"])
         self.assertEqual(fresh["labels"][key]["label"], "#alpha-oc:" + oc[7:15])
-        self.assertFalse(fresh["truncated"])
+        self.assertTrue(fresh["truncated"], "a lookup that neither named nor found it missing truncates, with no previous name too")
 
     def chained_oc_passes(self, oc, key, answers):
         """Run one pass per entry of ``answers`` (a title, or an exception class), chaining ``previous``
@@ -1250,6 +1250,31 @@ class DiscoveryLabelTests(WebBase):
         for later in (second, third):
             self.assertEqual(later["labels"][key]["label"], "#alpha-ocname")
             self.assertTrue(later["truncated"])
+
+    def test_a_failed_opencode_lookup_with_no_previous_name_is_truncated(self):
+        oc, key = "oc:ses_" + "f" * 26, "buddy-%012x" % 0xe00003
+        self.buddy(self.me, oc, key)
+        (only,) = self.chained_oc_passes(oc, key, [RuntimeError])
+        self.assertEqual(only["labels"][key]["label"], "#alpha-oc:" + oc[7:15])
+        self.assertTrue(only["truncated"])
+
+    def test_a_slow_non_pair_roster_member_does_not_remove_the_pairs_opencode_names(self):
+        oc, key = "oc:ses_" + "a" * 26, "buddy-%012x" % 0xe00004
+        self.buddy(self.me, oc, key)
+        other = "codex:" + new_uuid()
+
+        def liveness(typed, cache=None):
+            if typed == other:
+                time.sleep(0.4)
+            return "live"
+
+        with mock.patch.object(sp_channels.sp_opencode, "recent_sessions", lambda *a, **k: [{"id": oc.partition(":")[2], "title": "ocname"}]), \
+                mock.patch.object(sp_channels.sp_opencode, "active_ids", lambda: {}), \
+                mock.patch.object(sp_channels, "general_members", return_value=([other], {}, [])), \
+                mock.patch.object(sp_channels, "member_liveness", liveness), \
+                mock.patch.object(web, "DISCOVERY_PASS_BUDGET", 0.2):
+            found = web.run_discovery()
+        self.assertEqual(found["labels"][key]["label"], "#alpha-ocname")
 
     def test_the_recent_opencode_sessions_are_listed_once_per_pass(self):
         oc, key = "oc:ses_" + "c" * 26, "buddy-%012x" % 0xd00001
