@@ -83,12 +83,13 @@ not replenish it. Raising it may deliver a held reply at once.
   shim remembers the reset marker it applied, so a marker it cannot delete is
   applied once, not again on every poll; a new `budget reset` writes a new
   marker and applies.
-- **Known race** (not closed): `budget reset` and `budget allow` read the
-  thread's state file and write it back. If the shim saves in between (a held
-  reply's phase, or its processed-turn record) and then crashes before its next
-  save, the restarted shim reads the older state and can retry a frame already
-  sent or replay a delivered turn. The window needs a shim crash right after
-  such a save; avoid running reset or allow while a reply is mid-delivery.
+- **Known race** (not closed): `budget reset` reads the thread's state file and
+  writes it back (`budget allow` writes only its marker). If the shim saves in
+  between (a held reply's phase, or its processed-turn record) and then crashes
+  before its next save, the restarted shim reads the older state and can retry a
+  frame already sent or replay a delivered turn. The window needs a shim crash
+  right after such a save; avoid running `budget reset` while a reply is
+  mid-delivery.
 - **Limits**: an ordinary (not held) answer is delivered at most once. Crash scope:
   see [buddy traffic](channels.md#buddy-traffic).
 - **Supervised multi-round work** (a user-requested review loop): first run
