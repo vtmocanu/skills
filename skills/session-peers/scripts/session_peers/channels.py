@@ -2150,7 +2150,9 @@ def send_targeted(args, key, sender, recipient):
     if problem is not None:
         _err("%s; the delivery was made but its outcome is not recorded and reads as unknown" % problem)
     rc = sp_journal.EXIT_UPDATE_FAILED if update_failed else 1 if bad or problem else 0
-    headline = "%ssent to #%s (buddy), message %s" % ("not delivered: " if bad else "", key, mid)
+    # An unknown outcome may have been delivered (the write began), so it is not "not delivered".
+    prefix = "delivery unconfirmed: " if outcome == STATE_UNKNOWN else "not delivered: " if bad else ""
+    headline = "%ssent to #%s (buddy), message %s" % (prefix, key, mid)
     return _report(payload, rc, as_json, plan.journaled, headline)
 
 

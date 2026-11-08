@@ -264,8 +264,9 @@ runs `channel leave`.
   `channel` and `outcomes`. Exit 1 on a refused or `unknown` outcome. A gone
   buddy, a message oversize once the header is added, or a journal preflight
   failure records and sends nothing and exits 1.
-- Otherwise stderr prints `note: buddy channel not used: <reason>; sent
-  directly` and the direct send runs. Reasons: no buddy channel, the buddy is
+- Otherwise stderr prints `note: buddy channel not used: <reason>; trying the
+  direct route` and the direct send runs; it can still fail or be refused, so
+  the note is not a delivery report. Reasons: no buddy channel, the buddy is
   not a member, `--from-*`, `--allow-reply-wake` or `--in-reply-to`, the caller
   is not the binding's owner, a sender identity error, the buddy's id is not a
   typed id, the lead left the channel, a channel read error, or the buddy is the

@@ -160,7 +160,7 @@ def cmd_send(args):
             except sp_channels.ChannelError as exc:
                 sys.stderr.write("error: %s\n" % exc)
                 return exc.code
-        sys.stderr.write("note: buddy channel not used: %s; sent directly\n" % route[1])
+        sys.stderr.write("note: buddy channel not used: %s; trying the direct route\n" % route[1])
     try:
         _validate_reply_wake(args)
     except ValueError as exc:

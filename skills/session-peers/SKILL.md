@@ -158,7 +158,7 @@ verified handover names one (below):
   and never fails the binding. See [channels](references/channels.md#buddy-channels).
 - `send --to buddy` rides that channel when the buddy is a member: one history
   entry, delivered to the current buddy only. Otherwise stderr prints `note:
-  buddy channel not used: <reason>; sent directly` and it sends directly. A
+  buddy channel not used: <reason>; trying the direct route` and it tries the direct send, which can still be refused (for example Claude to Claude). A
   Codex buddy's final answers to you take the same route.
 - Uses default to all: review, brainstorm, second-opinion, co-steer, ping,
   sanity-check. `--uses` narrows consultation only; uses never grant authority.

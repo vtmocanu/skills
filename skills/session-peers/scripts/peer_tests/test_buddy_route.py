@@ -238,13 +238,16 @@ class UnknownOutcomeTests(TargetedBase):
             sp_messaging._send_claude(self.peer_typed, args, {"id": OC_B})
         forget.assert_called_once()
 
-    def test_the_headline_says_not_delivered_for_a_refused_or_unknown_send_only(self):
-        for exc in (sp_claude.FrameUncertain("broken pipe"), OSError("refused")):
+    def test_the_headline_separates_unconfirmed_from_not_delivered(self):
+        # FrameUncertain: the write began, so it may have arrived; a plain OSError is a definite refusal.
+        for exc, want, not_want in ((sp_claude.FrameUncertain("broken pipe"), "delivery unconfirmed: sent to #", "not delivered"),
+                                    (OSError("refused"), "not delivered: sent to #", "delivery unconfirmed")):
             with self.subTest(exc=exc), mock.patch.object(sp_claude, "send_frame", side_effect=exc), \
                     mock.patch.object(sp_journal, "transport_failed", return_value=0):
                 rc, out, err = self.send_to(self.peer_typed, json=False)
                 self.assertEqual(rc, 1, err)
-                self.assertIn("not delivered: sent to #", out + err)
+                self.assertIn(want, out + err)
+                self.assertNotIn(not_want, out + err)
         rc, out, err = self.send_to(self.peer_typed, json=False)
         self.assertEqual(rc, 0, err)
         self.assertIn("sent to #", out + err)
@@ -596,14 +599,15 @@ class BuddySendRouteTests(BuddySendBase):
         os.unlink(sp_channels._record_path(self.key))
         rc, _out, err = self.send_buddy()
         self.assertNotEqual(rc, 0)
-        self.assertIn("note: buddy channel not used: no buddy channel; sent directly", err)
+        self.assertIn("note: buddy channel not used: no buddy channel; trying the direct route", err)
+        self.assertNotIn("sent directly", err)
         self.assertIn("SendMessage", err)
         time.sleep(0.2)
         self.assertEqual(listener.of_type("user"), [])
 
 
 class BuddySendFallbackTests(BuddySendBase):
-    NOTE = "note: buddy channel not used: %s; sent directly\n"
+    NOTE = "note: buddy channel not used: %s; trying the direct route\n"
 
     def assert_direct(self, rc, err, reason):
         self.assertIn(self.NOTE % reason, err)
