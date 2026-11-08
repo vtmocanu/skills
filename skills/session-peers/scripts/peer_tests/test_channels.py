@@ -68,7 +68,8 @@ class ChannelCommandTests(ChannelBase):
         listing = json.loads(self.ok("list", "--json"))
         self.assertEqual(
             listing,
-            [{"name": "ops", "display": "ops", "kind": "named", "owner": self.me, "members": 3, "you": "owner"}],
+            [{"name": "ops", "display": "ops", "kind": "named", "owner": self.me, "members": 3, "you": "owner",
+              "label": "#ops", "label_status": "current", "current_buddy": None}],
         )
         self.assertIn("#ops  named  3 members  owner", self.ok("list"))
         members = json.loads(self.ok("members", "ops", "--json"))["members"]

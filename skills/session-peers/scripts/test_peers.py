@@ -43,6 +43,7 @@ MODULES = (
     "peer_tests.test_channel_general",
     "peer_tests.test_channel_lifecycle",
     "peer_tests.test_channel_buddy",
+    "peer_tests.test_channel_labels",
     "peer_tests.test_buddy_route",
     "peer_tests.test_shim_route",
     "peer_tests.test_webdata",

@@ -363,6 +363,8 @@ def create_channel(name, owner, members=(), kind="named", display=None, reserved
             "key": key, "display": display or key, "kind": kind, "owner": owner,
             "members": roster, "created_at": sp_runtime.now_iso(),
         }
+        if kind == "buddy":
+            rec["current_buddy"] = None  # buddy_channel_add sets it next, under the channel lock
         with _flock(_lock_path(key)):
             _write_record(rec)
             _failpoint("after_membership_before_history")
@@ -374,8 +376,9 @@ def change_membership(key, mutate, actor):
     """Run ``mutate(record)`` under the channel lock and persist the result.
 
     ``mutate`` edits the record in place and returns ``(event_kind, data)``, or
-    None for a no-op. The record is replaced FIRST; the history entry follows.
-    Returns ``(record, entry_or_None)``.
+    None for a no-op, or ``(None, None)`` for a record-only change (the record is
+    written, no history entry). The record is replaced FIRST; the history entry
+    follows. Returns ``(record, entry_or_None)``.
     """
     with _flock(_lock_path(key)):
         rec = read_channel(key)
@@ -386,9 +389,12 @@ def change_membership(key, mutate, actor):
         change = mutate(new)
         if change is None:
             return rec, None
+        event, data = change
+        if event is None:
+            _write_record(new)
+            return new, None
         _write_record(new)
         _failpoint("after_membership_before_history")
-        event, data = change
         return new, append_history(key, event, actor, data)
 
 
@@ -954,13 +960,225 @@ def _cmd_remove(args, me):
     return 0
 
 
+# --------------------------------------------------------------------------
+# Session names and channel labels
+# --------------------------------------------------------------------------
+
+_ABSENT = object()
+NAME_MAX = 200
+LABEL_CURRENT, LABEL_STALE, LABEL_UNVERIFIED = "current", "stale", "unverified"
+PAIR_KNOWN, PAIR_NONE, PAIR_UNVERIFIED = "known", "none", "unverified"
+_MIDDLE_DOT = "·"
+_SUFFIX_START = 4
+
+
+def clip_name(name):
+    """``name`` cut to NAME_MAX characters, or None when it is not a non-empty string."""
+    return name[:NAME_MAX] if isinstance(name, str) and name else None
+
+
+def registry_by_session(cache):
+    """``{lowercase session id: [registry records]}`` of Claude and Codex sessions.
+
+    ``cache`` is the dict ``member_liveness`` shares; its ``cc`` read is reused when it succeeded.
+    """
+    cached = cache.get("cc")
+    if cached and cached[1] is None:
+        records = cached[0]
+    else:
+        try:
+            records = sp_claude.read_claude_records()
+        except Exception:
+            records = []
+    by_sid = {}
+    for record in records:
+        sid = record.get("sessionId")
+        if isinstance(sid, str):
+            by_sid.setdefault(sid.lower(), []).append(record)
+    return by_sid
+
+
+def registry_matches(kind, ident, by_sid):
+    """The registry records of a Claude session (``kind`` cc) or Codex shim (codex); web records never match."""
+    return [
+        r for r in by_sid.get(ident.lower(), ())
+        if not sp_claude.is_web_record(r) and (r.get("entrypoint") == "codex") == (kind == "codex")
+    ]
+
+
+def registry_name(kind, ident, by_sid):
+    """The name of a Claude session or Codex shim from its registry records, or None."""
+    return next((clip_name(r.get("name")) for r in registry_matches(kind, ident, by_sid)
+                 if clip_name(r.get("name"))), None)
+
+
+def opencode_titles():
+    """``{session id: title}`` of the recent top-level OpenCode sessions; unreadable gives ``{}``."""
+    titles = {}
+    try:
+        for session in sp_opencode.recent_sessions():
+            titles[session["id"]] = clip_name(session.get("title"))
+    except Exception:
+        pass
+    return titles
+
+
+def session_names(typeds, cache=None):
+    """``{typed: name}`` for the typed ids that have one.
+
+    cc and codex: the registry name. oc: the title among the recent sessions, else
+    ``opencode.get_session`` (older and child sessions). A failure means no name.
+    """
+    cache = {} if cache is None else cache
+    names = {}
+    wanted = [t for t in typeds if isinstance(t, str)]
+    if any(not t.startswith("oc:") for t in wanted):
+        by_sid = registry_by_session(cache)
+        for typed in wanted:
+            kind, _sep, ident = typed.partition(":")
+            if kind in ("cc", "codex"):
+                name = registry_name(kind, ident, by_sid)
+                if name:
+                    names[typed] = name
+    oc = [t for t in wanted if t.startswith("oc:")]
+    if oc:
+        titles = opencode_titles()
+        for typed in oc:
+            sid = typed.partition(":")[2]
+            title = titles.get(sid)
+            if not title:
+                try:
+                    title = clip_name(sp_opencode.get_session(sid).get("title"))
+                except Exception:
+                    title = None
+            if title:
+                names[typed] = title
+    return names
+
+
+def pair_of(rec):
+    """``(lead, buddy_or_None, status)`` of a buddy channel record.
+
+    ``current_buddy`` absent means the record predates the field (``unverified``); None means no
+    current buddy (``none``); a canonical typed id of a buddy kind other than the owner is the
+    buddy (``known``); anything else is ``unverified``.
+    """
+    lead = rec.get("owner")
+    if "current_buddy" not in rec:
+        return lead, None, PAIR_UNVERIFIED
+    value = rec["current_buddy"]
+    if value is None:
+        return lead, None, PAIR_NONE
+    try:
+        typed = sp_journal._norm(value)
+    except Exception:
+        return lead, None, PAIR_UNVERIFIED
+    if typed.partition(":")[0] not in sp_constants.BUDDY_KINDS or typed == lead:
+        return lead, None, PAIR_UNVERIFIED
+    return lead, typed, PAIR_KNOWN
+
+
+def _short_id(typed):
+    kind, _sep, ident = str(typed).partition(":")
+    if ident.startswith("ses_"):
+        ident = ident[len("ses_"):]
+    return "%s:%s" % (kind, ident[:8])
+
+
+def _label_part(typed, names):
+    from . import webdata as sp_webdata  # webdata imports this module at its top
+    name = clip_name(names.get(typed))
+    text = sp_webdata.escape_text(name if name else _short_id(typed))
+    return text.replace(_MIDDLE_DOT, "\\u00b7")
+
+
+def _buddy_base(rec, names, liveness):
+    lead, buddy, pair = pair_of(rec)
+    lead_part = _label_part(lead, names)
+    if pair == PAIR_UNVERIFIED:
+        return "#" + lead_part, LABEL_UNVERIFIED
+    if pair == PAIR_NONE:
+        return "#" + lead_part, LABEL_STALE
+    buddy_part = _label_part(buddy, names)
+    base = "#" + lead_part if lead_part == buddy_part else "#%s-%s" % (lead_part, buddy_part)
+    gone = any(liveness.get(t) == "gone" for t in (lead, buddy))
+    return base, LABEL_STALE if gone else LABEL_CURRENT
+
+
+def derive_labels(records, names, liveness):
+    """``{key: {"label", "status"}}`` for channel ``records``; status is current, stale or unverified.
+
+    Named channels are ``#<key>``. A buddy channel is named after its pair (see ``pair_of``) from
+    ``names`` and ``liveness`` (``{typed: ...}``). Equal buddy labels, or one equal to a named
+    ``#key``, get U+00B7 and the first L hex chars of the key after ``buddy-``, L from 4 up until
+    distinct within the group. A label is display only, never an address.
+    """
+    out, buddies, taken = {}, {}, set()
+    for rec in records:
+        key = rec["key"]
+        if rec.get("kind") == "buddy":
+            buddies[key] = _buddy_base(rec, names, liveness)
+        else:
+            out[key] = {"label": "#" + key, "status": LABEL_CURRENT}
+            taken.add("#" + key)
+    groups = {}
+    for key, (base, _status) in buddies.items():
+        groups.setdefault(base, []).append(key)
+    for base, keys in groups.items():
+        status_of = {k: buddies[k][1] for k in keys}
+        if len(keys) == 1 and base not in taken:
+            out[keys[0]] = {"label": base, "status": status_of[keys[0]]}
+            continue
+        tails = {k: k[len(sp_constants.CHANNEL_BUDDY_PREFIX):] if k.startswith(sp_constants.CHANNEL_BUDDY_PREFIX) else k
+                 for k in keys}
+        width = _SUFFIX_START
+        while len({t[:width] for t in tails.values()}) < len(keys) and width < max(map(len, tails.values())):
+            width += 1
+        for k in keys:
+            out[k] = {"label": base + _MIDDLE_DOT + tails[k][:width], "status": status_of[k]}
+    return out
+
+
+def label_context(records, cache, liveness_of=member_liveness, names_of=session_names):
+    """``(names, liveness)`` for ``derive_labels``: the lead of every buddy record, and the liveness
+    of both members of each known pair. No binding file is read."""
+    names_wanted, live_wanted = [], []
+    for rec in records:
+        if rec.get("kind") != "buddy":
+            continue
+        lead, buddy, pair = pair_of(rec)
+        for typed in (lead, buddy):
+            if typed and typed not in names_wanted:
+                names_wanted.append(typed)
+        if pair == PAIR_KNOWN:
+            for typed in (lead, buddy):
+                if typed not in live_wanted:
+                    live_wanted.append(typed)
+    try:
+        names = dict(names_of(names_wanted, cache)) if names_wanted else {}
+    except Exception:
+        names = {}
+    liveness = {}
+    for typed in live_wanted:
+        try:
+            liveness[typed] = liveness_of(typed, cache)
+        except Exception:
+            liveness[typed] = "unverified"
+    return names, liveness
+
+
 def _cmd_list(args, me):
+    records = list_channels()
+    labels = derive_labels(records, *label_context(records, {}))
     rows = []
-    for rec in list_channels():
+    for rec in records:
         role = "owner" if rec["owner"] == me else "member" if me in rec["members"] else "-"
+        label = labels[rec["key"]]
         rows.append({
             "name": rec["key"], "display": rec.get("display"), "kind": rec.get("kind"),
             "owner": rec.get("owner"), "members": len(rec["members"]), "you": role,
+            "label": label["label"], "label_status": label["status"],
+            "current_buddy": rec.get("current_buddy"),
         })
     if args.json:
         print(json.dumps(rows))
@@ -968,10 +1186,15 @@ def _cmd_list(args, me):
     if not rows:
         print("no channels")
     for row in rows:
-        print("#%s  %s  %d members  %s  owner %s" % (
-            row["name"], sp_journal._human(row["kind"]), row["members"], row["you"],
+        line = "%s  %s  %d members  %s  owner %s" % (
+            sp_journal._human(row["label"]), sp_journal._human(row["kind"]), row["members"], row["you"],
             sp_journal._human(row["owner"]),
-        ))
+        )
+        if row["kind"] == "buddy":
+            line += "  key #%s" % sp_journal._human(row["name"])
+        if row["label_status"] != LABEL_CURRENT:
+            line += "  " + row["label_status"]
+        print(line)
     return 0
 
 
@@ -1165,6 +1388,8 @@ def _handover_mutator(me, target, label):
             if rec["kind"] == "buddy":
                 # The display names the lead, so only the lead's handover renames it.
                 rec["display"] = "buddy \u00b7 %s" % label
+                # The successor's binding lives in its own CODEX_HOME; its next buddy set records it.
+                rec["current_buddy"] = None
         return EVENT_HANDOVER, {"member": me, "to": target}
 
     return mutate
@@ -1235,8 +1460,10 @@ def buddy_channel_add(owner, buddy):
     def mutate(rec):
         if rec["owner"] != owner:
             raise ChannelError("#%s is no longer owned by this session" % rec["key"])
+        field_current = rec.get("current_buddy", _ABSENT) == buddy
+        rec["current_buddy"] = buddy
         if buddy in rec["members"]:
-            return None
+            return None if field_current else (None, None)
         _check_member_cap(len(rec["members"]) + 1)
         rec["members"].append(buddy)
         return EVENT_JOINED, {"member": buddy}
@@ -1254,8 +1481,12 @@ def buddy_channel_remove(owner, buddy):
     def mutate(rec):
         if rec["owner"] != owner:
             raise ChannelError("#%s is no longer owned by this session" % rec["key"])
+        current = rec.get("current_buddy", _ABSENT)
+        clear_field = current is _ABSENT or current == buddy
+        if clear_field:
+            rec["current_buddy"] = None
         if buddy not in rec["members"]:
-            return None
+            return (None, None) if clear_field and current is not None else None
         rec["members"].remove(buddy)
         return EVENT_REMOVED, {"member": buddy}
 

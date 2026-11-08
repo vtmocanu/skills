@@ -97,7 +97,7 @@ _JSON_TYPE_RE = re.compile(r"application/json(?:\s*;\s*charset=utf-8)?", re.IGNO
 _CURSOR_RE = re.compile(r"[A-Za-z0-9_-]{1,65536}")
 _ACTIVITY = {"busy": "working", "idle": "idle"}
 _OC_ACTIVITY = {"running": "working", "idle": "idle"}
-NAME_MAX = 200
+NAME_MAX = sp_channels.NAME_MAX
 DRAIN_READS = 16
 
 _DISCOVERY_LOCK = threading.Lock()
@@ -128,33 +128,17 @@ def _rosters():
 
 
 def _registry_by_session(cache):
-    cached = cache.get("cc")
-    if cached and cached[1] is None:
-        records = cached[0]
-    else:
-        try:
-            records = sp_claude.read_claude_records()
-        except Exception:
-            records = []
-    by_sid = {}
-    for record in records:
-        sid = record.get("sessionId")
-        if isinstance(sid, str):
-            by_sid.setdefault(sid.lower(), []).append(record)
-    return by_sid
+    return sp_channels.registry_by_session(cache)
 
 
 def _clip(name):
-    return name[:NAME_MAX] if isinstance(name, str) and name else None
+    return sp_channels.clip_name(name)
 
 
 def _registry_view(typed, kind, ident, live, by_sid):
     """``(activity, name)`` of a Claude session or Codex shim from its registry record."""
-    matches = [
-        r for r in by_sid.get(ident.lower(), ())
-        if not sp_claude.is_web_record(r) and (r.get("entrypoint") == "codex") == (kind == "codex")
-    ]
-    name = next((_clip(r.get("name")) for r in matches if _clip(r.get("name"))), None)
+    matches = sp_channels.registry_matches(kind, ident, by_sid)
+    name = sp_channels.registry_name(kind, ident, by_sid)
     activity = "unknown"
     if live:
         for record in matches:
@@ -170,12 +154,7 @@ def _opencode_view(members):
         active = sp_opencode.active_ids()
     except Exception:
         active = None
-    titles = {}
-    try:
-        for session in sp_opencode.recent_sessions():
-            titles[session["id"]] = _clip(session.get("title"))
-    except Exception:
-        pass
+    titles = sp_channels.opencode_titles()
     activity, names = {}, {}
     for typed in members:
         sid = typed.partition(":")[2]
