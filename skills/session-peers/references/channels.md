@@ -236,8 +236,8 @@ sender.
 
 `buddy set` creates or reuses the lead's buddy channel and adds the bound
 buddy; `buddy clear` removes the buddy it clears. The key is
-`buddy-<first 12 hex of sha256 of the owner's typed id>`, the display name
-`buddy · <owner name>`. Binding a second buddy adds it and keeps the first, so
+`buddy-<first 12 hex of sha256 of the owner's typed id>`, the stored display
+name `buddy · <owner name>`; listings show the [label](#buddy-channel-labels). Binding a second buddy adds it and keeps the first, so
 a lead with two buddies has one channel with three members while the binding
 names only the latest. Remove an earlier buddy with `channel remove`, or it
 runs `channel leave`.
@@ -295,17 +295,21 @@ A label names the channel by its pair and is computed at render time:
   apart). Named channels are never suffixed, and `#general` and existing
   channel keys are reserved.
 - A label is display only, never an address: it is not stored, and `send --to`
-  and the other commands take the `buddy-<hash>` key (or `#NAME` for a named
-  channel), which `channel list` prints beside a buddy label.
+  takes `send --to '#buddy-<hash>'`, the `#` form `channel list` prints beside
+  a buddy label (or `#NAME` for a named channel). `channel members` and
+  `channel tail` accept the key with or without `#`; a label is refused.
 - `channel list --json` rows carry `label`, `label_status` (`current`,
   `stale`, `unverified`) and `current_buddy` (the typed id when the pair is
   known, otherwise `null`).
 - Lookups are capped per `channel list`: names and liveness are looked up for
-  the first 256 buddy records by key only; at most 32 non-`cc` liveness checks
+  the first 256 buddy records in key order; at most 32 non-`cc` liveness checks
   (every `codex:` check, and each OpenCode check not answered by the already
   listed sessions) and at most 32 OpenCode `get_session` name lookups are made,
-  and none after the first OpenCode failure. Past a cap a member's liveness is
-  `unverified` (not stale) and its name is the short id.
+  and none after the first OpenCode failure. Past the liveness cap a member's
+  liveness is `unverified` (not stale). Past the name-lookup cap, or after an
+  OpenCode failure, a member has no OpenCode name and shows the short id.
+  Claude and Codex registry names are not capped. Records past the 256 cap get
+  no lookups (names found for other records may still apply).
 
 ### Buddy traffic
 
