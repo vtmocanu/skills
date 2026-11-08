@@ -1248,7 +1248,7 @@ class Shim:
             # change since buddy_route) goes direct, as with no route; a
             # transient read failure holds the answer, as a history_floor
             # failure does.
-            if sp_channels.buddy_route(lead, sender)[0] != key:
+            if sp_channels.buddy_route_gone(lead, sender, key):
                 sp_runtime.log("route to #%s no longer holds (%s); sending directly" % (key, exc))
                 return self._direct_reply(rec, text, entry)
             sp_runtime.log("cannot route a reply through #%s (%s); holding the reply" % (key, exc))
@@ -1405,7 +1405,7 @@ class Shim:
                 # Still fresh, so nothing is published: when the stored route no
                 # longer holds (`buddy clear`, a handover), deliver directly
                 # instead of retrying a route that can never succeed.
-                if sp_channels.buddy_route(lead, sender)[0] != key:
+                if sp_channels.buddy_route_gone(lead, sender, key):
                     sp_runtime.log("route to #%s no longer holds (%s); sending the held reply directly" % (key, exc))
                     return self._direct_reply(rec, text, entry)
                 sp_runtime.log("cannot route a reply through #%s: %s" % (key, exc))

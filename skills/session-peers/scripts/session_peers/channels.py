@@ -1980,6 +1980,22 @@ def buddy_route(owner, member):
     return key, None
 
 
+def buddy_route_gone(owner, member, key):
+    """True only when channel ``key`` was read and provably no longer routes ``member`` for ``owner``.
+
+    Gone: the record is absent, is not a ``buddy`` channel ``owner`` owns, or
+    lacks ``owner`` or ``member``. A read error is not proof: it returns False,
+    so the caller holds instead of falling back.
+    """
+    try:
+        rec = read_channel(key)
+    except (ChannelError, OSError):
+        return False
+    if rec is None or rec["kind"] != "buddy" or rec["owner"] != owner:
+        return True
+    return owner not in rec["members"] or member not in rec["members"]
+
+
 def prepare_targeted(key, sender, recipient, body, mid, record, wake=False):
     """The plan of a one-recipient send to ``recipient`` of channel ``key``; writes nothing.
 

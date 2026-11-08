@@ -306,6 +306,52 @@ class TestRouteFailures(RouteBase):
         self.assertEqual(self.outcomes(), [{self.lead: "transport accepted"}])
 
 
+    def store_breaks_at(self, trigger):
+        """Patch read_channel to fail once ``trigger`` (a patched sp_channels name) has been called."""
+        real_read = sp_channels.read_channel
+        real_trigger = getattr(sp_channels, trigger)
+        state = {"broken": False}
+
+        def read(*args, **kw):
+            if state["broken"]:
+                raise sp_channels.ChannelError("could not read the channel record", 1)
+            return real_read(*args, **kw)
+
+        def trig(*args, **kw):
+            state["broken"] = True
+            return real_trigger(*args, **kw)
+
+        return state, mock.patch.multiple(sp_channels, read_channel=read, **{trigger: trig})
+
+    def test_an_unreadable_store_at_prepare_and_recheck_holds_the_answer(self):
+        # buddy_route verified the route; then the store cannot be read by prepare_targeted
+        # nor by the recheck: no proof the route is gone, so hold, never send direct.
+        state, patch = self.store_breaks_at("history_floor")
+        with patch:
+            self.shim._handle_turn_end(self.turn())
+        time.sleep(0.2)
+        self.assertEqual(self.replies(), [])
+        self.assertEqual(self.shim.reply_budget.held[self.sid]["release"], "route")
+        self.assertEqual(self.sends(), [])
+
+    def test_a_fresh_held_answer_with_an_unreadable_store_stays_held(self):
+        with self.fail_once():
+            self.shim._handle_turn_end(self.turn())
+        self.assertEqual(self.shim.reply_budget.held[self.sid]["phase"], "fresh")
+        state, patch = self.store_breaks_at("prepare_targeted")
+        with patch:
+            self.shim.reply_budget.retry_held()
+        time.sleep(0.2)
+        self.assertEqual(self.replies(), [])
+        self.assertIn(self.sid, self.shim.reply_budget.held)
+        # Readable again: the retry publishes it once through the channel.
+        self.shim.reply_budget.retry_held()
+        wait_for(lambda: self.replies())
+        time.sleep(0.2)
+        self.assertEqual(len(self.replies()), 1)
+        self.assertEqual(len(self.sends()), 1)
+
+
 class TestUnreadableFloor(RouteBase):
     @staticmethod
     def unreadable(key):
