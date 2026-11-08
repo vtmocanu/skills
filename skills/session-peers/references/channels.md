@@ -96,6 +96,7 @@ entry when the fan-out finishes (a 64-recipient post costs two entries):
 | `skipped: gone` | The member was [verified gone](#liveness). |
 | `refused: <reason>` | The route or the journal refused that member (for example a Codex thread whose liveness cannot be checked). |
 | `recorded` | `--record` on `#general`: journaled, nothing delivered. |
+| `unknown` | The frame may have arrived (an uncertain transport, or a published buddy send with no outcome). Never retried. |
 
 A journaled member the journal cannot address is `refused: <reason>` with the
 note `ACK not requested (unverified)`. If no recipient is journalable, exit 1
@@ -247,6 +248,43 @@ runs `channel leave`.
 - A lead that handed its buddy channel over gets no new one; the warning names
   the successor that owns it.
 - Nobody joins a buddy channel with `channel join`.
+
+### Buddy traffic
+
+- `send --to buddy` (or `@buddy`) goes as a targeted one-recipient send when the
+  caller owns a buddy channel that lists the bound buddy. It appears once in
+  history (`channel tail`, the dashboard) with the usual `[channel #… message …
+  from … to …]` header and is delivered once, to the current buddy only: earlier
+  buddies still on the roster get nothing, and a leading `@all` adds no
+  recipients. `--wake` is accepted and the direct buddy wake rule is kept, so a
+  bound OpenCode buddy is woken (a fan-out never wakes). `--record` journals one
+  entry for the buddy, so `ack` reads the same, and the delivery carries the
+  ACK pointer line.
+- With `--json` the payload is the direct one plus `route: "buddy_channel"`,
+  `channel` and `outcomes`. Exit 1 on a refused or `unknown` outcome. A gone
+  buddy, a message oversize once the header is added, or a journal preflight
+  failure records and sends nothing and exits 1.
+- Otherwise stderr prints `note: buddy channel not used: <reason>; sent
+  directly` and the direct send runs. Reasons: no buddy channel, the buddy is
+  not a member, `--from-*`, `--allow-reply-wake` or `--in-reply-to`, the caller
+  is not the binding's owner, a sender identity error, or the buddy is the
+  caller. A Claude-to-Claude fallback is still refused (use `SendMessage`);
+  with a buddy channel a Claude lead reaches a Claude buddy through it. `ask`
+  and `dispatch` are unchanged.
+- A Codex buddy's final answer to its lead (the requester whose buddy channel
+  lists the shim's thread) takes the same targeted send, recorded
+  `transport accepted` and delivered once; an earlier buddy still on the roster
+  routes its answers the same way, to the lead only. `@name` extra targets,
+  status frames and notices stay direct, as does everything when there is no
+  buddy channel. An answer that fits only without the header is sent direct.
+- The shim saves its processed-turn record before the first frame of a turn, so
+  after a crash an answer is never re-published or re-sent. A published send
+  with no outcome reads `unknown`, and a crash before publication can lose the
+  answer. This is process-crash scope only; state writes are not fsynced.
+- An uncertain transport (the frame may have arrived) is recorded `unknown` and
+  not retried; a definite failure is recorded `refused: …` and not retried. A
+  failed channel write with the entry confirmed absent makes the answer a held
+  reply (see [budgets](budgets.md)).
 
 ## Claude to Claude
 

@@ -137,7 +137,9 @@ verified handover names one (below):
 ```
 
 - Claude session with a Claude Code buddy: talk natively (`SendMessage`), never
-  through `peers.py`. Still `buddy set` it so other skills see the binding.
+  through `peers.py`, but post reviews and verdicts to the buddy channel
+  (`send --to '#buddy-…'`), since native messages cannot be rerouted. Still
+  `buddy set` it so other skills see the binding.
 - Strip a leading `@`. Bare `buddy set` binds the other peer sharing this
   session's own name and excludes this session. If none exists, ask the user.
 - A message that is just "buddy" (or "find/bind your buddy") with no name, often
@@ -152,6 +154,10 @@ verified handover names one (below):
 - `buddy set` also adds the buddy to your buddy channel (created on first use)
   and `clear` removes it; a failure prints `warning: buddy channel not updated`
   and never fails the binding. See [channels](references/channels.md#buddy-channels).
+- `send --to buddy` rides that channel when the buddy is a member: one history
+  entry, delivered to the current buddy only. Otherwise stderr prints `note:
+  buddy channel not used: <reason>; sent directly` and it sends directly. A
+  Codex buddy's final answers to you take the same route.
 - Uses default to all: review, brainstorm, second-opinion, co-steer, ping,
   sanity-check. `--uses` narrows consultation only; uses never grant authority.
 - When the user binds a buddy without assigning a lead, ask once who leads;
@@ -327,7 +333,7 @@ Choose the response path:
 <this skill's directory>/scripts/peers.py wait --for cc:<uuid> --state idle --timeout 600 --json
 ```
 
-- `--to buddy` uses the bound UUID. ask/dispatch/wait require a Claude buddy.
+- `--to buddy` uses the bound UUID (`send` through the buddy channel when it can). ask/dispatch/wait require a Claude buddy.
 - `CODEX_THREAD_ID` supplies identity automatically; `--from-thread` overrides
   it. A live shim supplies the native reply route for `send`; without it,
   delivery warns that replies cannot route. Each send returns a message ID.

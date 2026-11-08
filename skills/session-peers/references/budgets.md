@@ -59,9 +59,32 @@ not replenish it. Raising it may deliver a held reply at once.
   state, never the log) and `budget reset` releases it, marked
   `[held reply, in reply to message <msg_id>]`, once the shim is up. Any other
   reset discards it, and the shim purges it from its state 30 minutes after
-  holding it. The shim emits a correlated `failed` status
+  holding it (a frozen reply, below, is neither purged nor discarded by them).
+  The shim emits a correlated `failed` status
   (surfaced only when the requester tracks the originating message) and one
   plain, non-replyable notice per sequence naming the reset command.
+- **Held replies and the buddy channel**: when the requester's buddy channel
+  lists this thread, a held reply released by `budget reset`, `budget allow` or
+  a binding grant goes through the [channel route](channels.md#buddy-traffic)
+  once. Its budget is spent only after a definite delivery. A definite failure
+  after the history entry is retried as the same entry, with no second history
+  or journal entry. Restart recovery never sends.
+- **Frozen reply**: when the outcome is uncertain (the frame may have arrived),
+  history shows `unknown` and the reply is kept with no budget spent. Newer
+  automatic replies to that requester are blocked, each answered with a status
+  and the first with one notice. The freeze survives the idle window, a peer
+  change and restarts, and the 30-minute purge skips it. Only an explicit
+  `budget reset`, or `budget allow` for that requester, ends it: the frozen
+  reply is discarded without being re-sent and history keeps `unknown`.
+  `buddy set --replies` does not discard it. Discarding a published held reply
+  records `refused: held reply discarded (<why>)`. Reset and allow apply and
+  save before deleting their marker, so a crash redoes or keeps the result.
+- **Limits**: an ordinary (not held) answer is delivered at most once. The shim
+  saves its processed-turn record before the first frame of a turn, so after a
+  crash it is never re-published or re-sent: a published send with no outcome
+  reads `unknown`, and a crash before publication can lose the answer. Covers
+  process crashes only; state writes are not fsynced, so power loss is not
+  covered.
 - **Supervised multi-round work** (a user-requested review loop): first run
   `peers.py list`; a target showing `not registered` with no `shim <pid>` has no
   reply route, so run `peers.py up <name|uuid>` before sending. Then grant
