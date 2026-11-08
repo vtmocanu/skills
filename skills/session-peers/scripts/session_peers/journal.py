@@ -1112,9 +1112,9 @@ def _add_message(rec, revalidate=None, dedupe=False, check_id=True):
         m.prune_eligible(lambda: not any(violations()), helps, _gone_cache(), now)
         if any(violations()):
             raise JournalFull(
-                "session-peers journal full: no finished entry or expired request can be pruned "
-                "to fit %d more bytes; ACK or settle older messages, or retry after requests "
-                "expire or entries age out" % size
+                "session-peers journal full: no finished entry or expired request whose mailbox is "
+                "gone can be pruned to fit %d more bytes; ACK or settle older messages, or retry "
+                "after requests expire and their mailboxes are removed, or entries age out" % size
             )
         new = _Rec(rec, line)
         m.add(new)
