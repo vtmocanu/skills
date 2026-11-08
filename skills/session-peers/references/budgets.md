@@ -69,11 +69,11 @@ not replenish it. Raising it may deliver a held reply at once.
   once. Its budget is spent only after a definite delivery. A definite failure
   after the history entry is retried as the same entry, with no second history
   or journal entry. Restart recovery itself sends nothing; a held reply it
-  finds already published is retried once by the normal retry, as the same entry.
+  finds already published is handed to the normal retry, as the same entry.
 - **Frozen reply**: when the outcome is uncertain (the frame may have arrived),
   history shows `unknown` and the reply is kept with no budget spent. Newer
-  automatic replies to that requester are blocked (dropped, not queued), each answered with a status
-  and the first with one notice. The freeze survives the idle window, a peer
+  automatic replies to that requester are blocked (dropped, not queued); each
+  of the requester's own turns gets a status and the first also one notice. The freeze survives the idle window, a peer
   change and restarts, and the 30-minute purge skips it. Only an explicit
   `budget reset`, or `budget allow` for that requester, ends it: the frozen
   reply is discarded without being re-sent and history keeps `unknown`.

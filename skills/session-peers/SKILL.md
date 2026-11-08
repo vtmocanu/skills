@@ -302,7 +302,7 @@ before installing hooks, attaching persistently, restarting/stopping shims, or G
 Read [references/messaging.md](references/messaging.md) before shell-only sends
 or relying on advanced addressing and mailbox details.
 `peers.py` refuses bare session names (the `buddy` alias stays valid), `ask`/`dispatch` to a Codex thread and Claude-to-Claude
-`send`/`ask`/`dispatch` with exact advice; see [Route check](references/messaging.md#route-check).
+`send`/`ask`/`dispatch` with exact advice (a buddy-channel `send --to buddy` is the exception); see [Route check](references/messaging.md#route-check).
 
 ## Codex
 
