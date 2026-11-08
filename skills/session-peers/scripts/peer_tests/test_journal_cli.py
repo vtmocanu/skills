@@ -1429,6 +1429,45 @@ def listener_frames(listener):
 
 
 class JournalRegressionTests(JournalCliBase):
+    def test_twenty_expired_requests_do_not_block_the_next_ask(self):
+        listener, rec = self.peer("cc-target", pid=os.getppid())
+        tid, _rollout = self.one_thread()
+        sender, recipient = "codex:" + tid, "cc:" + rec["sessionId"]
+        body = "q" * (200 * 1024)
+        expires_at = time.time() - 60
+        expired = [new_id() for _ in range(20)]
+        for rid in expired:
+            mailbox, _reply = self.mailbox(rid)
+            journal.record_request(rid, sender, [recipient], body, expires_at, mailbox, fresh_id=True)
+
+        self.assertEqual([e["message_id"] for e in self.entries()], expired)
+        self.as_cc(rec)
+        rc, out, err = self.cli("inbox", "acks", expired[0], "--json")
+        self.assertEqual(rc, 0, err)
+        view = json.loads(out)
+        self.assertEqual(view["recipients"][0]["state"], "pending")
+        self.assertIsNone(view["settlement"])
+
+        self.as_codex(tid)
+        message = pathlib.Path(self.jhome, "ask.txt")
+        message.write_text(body, encoding="utf-8")
+        proc = self.spawn("ask", "--to", recipient, "--message-file", str(message),
+                          "--timeout", "30", "--json")
+        self.assertTrue(wait_for(lambda: listener.of_type("user") or proc.poll() is not None),
+                        "ask did not send its request or exit")
+        if proc.poll() is not None:
+            out, _ = proc.communicate(timeout=5)
+            self.fail("ask exited %d before sending: %s" % (proc.returncode, out))
+        frame = listener.of_type("user")[0]
+        rid = frame["message"]["content"].split('id="')[1].split('"')[0]
+        rc, _out, err = self.reply_as(rec["sessionId"], rid, "ok")
+        self.assertEqual(rc, 0, err)
+        out, _ = proc.communicate(timeout=30)
+        self.assertEqual(proc.returncode, 0, out)
+        self.assertEqual(json.loads(out.strip().splitlines()[-1])["message"], "ok")
+        self.assertIsNone(self.entry(expired[0]))
+        self.assertEqual(self.entry(expired[1])["recipients"][0]["state"], "pending")
+
     def test_a_mixed_claude_and_codex_environment_ask_behaves_as_before_and_records_the_requester(self):
         listener, rec = self.peer("cc-target", pid=os.getppid())
         _lo, other = self.peer("cc-other", pid=os.getpid())

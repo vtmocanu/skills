@@ -447,7 +447,14 @@ class JournalRetentionTests(JournalBase):
         self.assertEqual(self.ids(), ids[1:] + [newest])
 
     def test_young_unacked_entries_survive_a_full_journal(self):
-        expired = self.req(body="q" * 400, expires=self.now - 5)
+        mailbox = os.path.join(self.root, "live-mailbox.json")
+        open(mailbox, "w").close()
+        expired = self.req(body="q" * 400, expires=self.now - 5, mailbox=mailbox)
+        unexpired = self.req(body="q" * 400)
+        request_id = str(uuid.uuid4())
+        journal.record_reply(request_id, self.B, [self.A], "r" * 400, self.now - 5,
+                             os.path.join(self.root, "gone-mailbox.json"))
+        reply = journal.reply_message_id(request_id)
         failed = self.msg(body="m" * 400)
         journal.transport_error(failed, self.A, "no route")
         plain = self.msg(body="p" * 400)
@@ -456,7 +463,29 @@ class JournalRetentionTests(JournalBase):
         with self.assertRaises(journal.JournalFull):
             self.msg(body="n" * 400)
         self.assertEqual(self.snapshot(), before)
-        self.assertEqual(self.ids(), [expired, failed, plain])
+        self.assertEqual(self.ids(), [expired, unexpired, reply, failed, plain])
+
+    def test_expired_unsettled_request_is_only_pruned_under_quota_pressure(self):
+        self.set_cap(4000)
+        mailbox = os.path.join(self.root, "mailbox.json")
+        open(mailbox, "w").close()
+        body = "q" * 500
+        expired = self.req(sender=self.B, body=body, mailbox=mailbox, expires=self.now + 1)
+        self.now += 1
+        os.unlink(mailbox)
+
+        # A write that fits both the total and per-sender quotas leaves the request alone.
+        other = self.msg(sender=self.C)
+        self.assertEqual(journal.get(expired, self.A)["body"], body)
+        view = self.entry(expired)
+        self.assertEqual(view["recipients"][0]["state"], "pending")
+        self.assertIsNone(view["settlement"])
+        [listed, _other] = journal.list_for(self.A)
+        self.assertEqual(listed["message_id"], expired)
+        self.assertEqual(listed["slots"][0]["state"], "pending")
+
+        newest = self.req(sender=self.B, body=body)
+        self.assertEqual(self.ids(), [other, newest])
 
     def test_live_mailbox_protects_acked_and_settled_entries(self):
         mailbox = os.path.join(self.root, "mailbox.json")
