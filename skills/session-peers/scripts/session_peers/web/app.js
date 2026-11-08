@@ -1939,12 +1939,21 @@
     if (!rows[S.selected]) S.selected = rows.general ? "general" : (S.state.channels && S.state.channels[0] ? str(S.state.channels[0].key) : "general");
   }
 
+  function headerSignature() {
+    var row = S.rows[S.selected];
+    return S.selected + "\n" + chanText(S.selected) + "\n" + (row && row.label_status);
+  }
+
   function refreshState() {
     return api("/api/state").then(function (data) {
       var orderBefore = railOrder();
+      var headBefore = headerSignature();
       setState(data);
       if (!S.cursor && typeof data.cursor === "string") S.cursor = data.cursor;
       renderChrome(railOrder() !== orderBefore);
+      if (S.view === "conv" && headerSignature() !== headBefore) {  // a renamed pair or a changed marker
+        withFocus(function () { fill($("title"), [chanText(S.selected), labelMark(S.rows[S.selected])]); });
+      }
     });
   }
 

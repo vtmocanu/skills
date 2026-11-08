@@ -1134,14 +1134,14 @@ class DiscoveryLabelTests(WebBase):
     def test_opencode_names_out_of_time_come_from_the_previous_pass(self):
         oc, key = "oc:ses_" + "a" * 26, "buddy-%012x" % 0x555555
         self.buddy(self.me, oc, key)
-        with mock.patch.object(sp_channels, "session_names", lambda typeds, cache=None, not_found=None, answered=None: {oc: "ocname"}):
+        with mock.patch.object(sp_channels, "session_names", lambda typeds, cache=None, not_found=None, answered=None, **kw: {oc: "ocname"}):
             first = web.run_discovery()
         self.assertEqual(first["labels"][key]["label"], "#alpha-ocname")
         asked = []
         read_all = web._read_records
         with mock.patch.object(web, "DISCOVERY_PASS_BUDGET", -1.0), \
                 mock.patch.object(web, "_read_records", lambda deadline: read_all(float("inf"))), \
-                mock.patch.object(sp_channels, "session_names", lambda typeds, cache=None, not_found=None, answered=None: asked.append(typeds) or {}):
+                mock.patch.object(sp_channels, "session_names", lambda typeds, cache=None, not_found=None, answered=None, **kw: asked.append(typeds) or {}):
             kept = web.run_discovery(previous=first)
             fresh = web.run_discovery()
         self.assertEqual(asked, [])
@@ -1199,10 +1199,10 @@ class DiscoveryLabelTests(WebBase):
     def test_an_opencode_identity_whose_lookup_gave_no_name_keeps_the_previous_name(self):
         oc, key = "oc:ses_" + "b" * 26, "buddy-%012x" % 0xc00001
         self.buddy(self.me, oc, key)
-        with mock.patch.object(sp_channels, "session_names", lambda typeds, cache=None, not_found=None, answered=None: {oc: "ocname"}):
+        with mock.patch.object(sp_channels, "session_names", lambda typeds, cache=None, not_found=None, answered=None, **kw: {oc: "ocname"}):
             first = web.run_discovery()
         self.assertFalse(first["truncated"])
-        with mock.patch.object(sp_channels, "session_names", lambda typeds, cache=None, not_found=None, answered=None: {}):
+        with mock.patch.object(sp_channels, "session_names", lambda typeds, cache=None, not_found=None, answered=None, **kw: {}):
             kept = web.run_discovery(previous=first)
             fresh = web.run_discovery()
         self.assertEqual(kept["labels"][key]["label"], "#alpha-ocname")
@@ -1229,6 +1229,35 @@ class DiscoveryLabelTests(WebBase):
                 previous = web.run_discovery(previous=previous)
             results.append(previous)
         return results
+
+    def test_chained_passes_over_the_allowances_check_and_name_every_pair_identity(self):
+        ocs = ["oc:ses_%026d" % i for i in range(6)]
+        for i, oc in enumerate(ocs):
+            self.buddy("cc:" + new_uuid(), oc, "buddy-%012x" % (0xf00000 + i))
+        live_calls, name_calls = [], []
+
+        def get_session(sid):
+            name_calls.append("oc:" + sid)
+            return {"id": sid, "title": "t" + sid[-2:]}
+
+        def liveness(typed, cache=None):
+            live_calls.append(typed)
+            return "live"
+
+        previous = None
+        with mock.patch.object(web, "SUBPROCESS_MEMBERS_PER_PASS", 4), \
+                mock.patch.object(sp_channels, "SESSION_LOOKUPS_MAX", 2), \
+                mock.patch.object(sp_channels.sp_opencode, "recent_sessions", lambda *a, **k: []), \
+                mock.patch.object(sp_channels.sp_opencode, "get_session", get_session), \
+                mock.patch.object(sp_channels.sp_opencode, "active_ids", lambda: {}), \
+                mock.patch.object(sp_channels, "general_members", return_value=([], {}, [])), \
+                mock.patch.object(sp_channels, "member_liveness", liveness):
+            for _ in range(4):
+                previous = web.run_discovery(previous=previous)
+                self.assertLessEqual(len(live_calls) + len(name_calls), 100)
+        self.assertEqual(set(ocs) - set(live_calls), set(), (live_calls, previous["unchecked"]))
+        self.assertTrue(set(ocs) <= set(name_calls))
+        self.assertTrue(set(ocs) <= set(previous["label_names"]))
 
     def test_a_deleted_opencode_session_loses_its_name_and_the_pass_is_not_truncated_again(self):
         oc, key = "oc:ses_" + "d" * 26, "buddy-%012x" % 0xe00001

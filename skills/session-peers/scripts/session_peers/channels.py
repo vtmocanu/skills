@@ -1031,8 +1031,12 @@ def opencode_titles(cache=None):
     return titles
 
 
-def session_names(typeds, cache=None, not_found=None, answered=None):
+def session_names(typeds, cache=None, not_found=None, answered=None, deadline=None, max_lookups=None, stats=None):
     """``{typed: name}`` for the typed ids that have one.
+
+    ``deadline`` (a ``time.monotonic`` value): no get_session lookup starts once it is reached; the
+    skipped ids are not answered. ``max_lookups`` lowers the SESSION_LOOKUPS_MAX cap. With a ``stats``
+    dict, ``stats["lookups"]`` is set to the number of get_session calls made.
 
     With a ``not_found`` set, the typed oc ids that ``opencode.get_session`` definitively reported
     as not existing are added to it (a failure or a skipped lookup is not added). With an ``answered``
@@ -1059,13 +1063,16 @@ def session_names(typeds, cache=None, not_found=None, answered=None):
     if oc:
         titles = opencode_titles(cache)
         lookups, down = 0, False
+        cap = SESSION_LOOKUPS_MAX if max_lookups is None else min(SESSION_LOOKUPS_MAX, max_lookups)
         for typed in oc:
             sid = typed.partition(":")[2]
             title = titles.get(sid)
             if title and answered is not None:
                 answered.add(typed)
-            if not title and not down and lookups < SESSION_LOOKUPS_MAX:
+            if not title and not down and lookups < cap and (deadline is None or time.monotonic() < deadline):
                 lookups += 1
+                if stats is not None:
+                    stats["lookups"] = lookups
                 try:
                     title = clip_name(sp_opencode.get_session(sid).get("title"))
                     if answered is not None:

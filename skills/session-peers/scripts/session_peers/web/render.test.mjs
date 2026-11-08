@@ -2593,6 +2593,19 @@ test("poll: the newest send by position sets the stamp even when older than the 
   assert.deepEqual(laneNames(t), ["#general", "#b", "#a"])
 })
 
+test("refresh: a state refresh redraws the selected channel's header when its label or marker changed", async () => {
+  const t = bootFixture({ "/api/state": orderState([lblRow("a", "#old", "none")]), "/api/channel/a": pageFixture("a", [sendEntry(1, "x")]) })
+  await t.app.ready
+  await t.app.selectChannel("a")
+  assert.equal(t.document.byId.title.textContent, "#old")
+  t.routes["/api/state"] = orderState([lblRow("a", "#renamed", "none", null, { label_status: "stale" })])
+  t.routes["/api/changes"] = quiet("C1", { channels: { a: { new: true } } })
+  await t.app.pollOnce()
+  assert.ok(t.document.byId.title.textContent.includes("#renamed"))
+  assert.ok(t.document.byId.title.textContent.includes("stale"))
+  assert.ok(!t.document.byId.title.textContent.includes("#old"))
+})
+
 test("refresh: a state refresh that reorders the rail scrolls the selected lane into view once", async () => {
   const t = pollOrderBoot()
   await t.app.ready

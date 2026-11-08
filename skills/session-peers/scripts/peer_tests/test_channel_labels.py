@@ -363,6 +363,30 @@ class FanOutTests(LabelBase):
         self.assertEqual(len(calls), sp_channels.SESSION_LOOKUPS_MAX)
         self.assertEqual(set(names), set(typeds[:sp_channels.SESSION_LOOKUPS_MAX]))
 
+    def test_no_get_session_starts_after_the_deadline_and_max_lookups_lowers_the_cap(self):
+        calls = []
+        now = [100.0]
+
+        def get_session(sid):
+            calls.append(sid)
+            now[0] += 5  # each lookup takes 5 s
+            return {"id": sid, "title": "t"}
+
+        typeds = ["oc:ses_%026d" % i for i in range(10)]
+        answered, stats = set(), {}
+        with mock.patch.object(sp_channels.sp_opencode, "recent_sessions", lambda *a, **k: []), \
+                mock.patch.object(sp_channels.sp_opencode, "get_session", get_session), \
+                mock.patch.object(sp_channels.time, "monotonic", lambda: now[0]):
+            sp_channels.session_names(typeds, {}, answered=answered, deadline=111.0, stats=stats)
+        self.assertEqual(len(calls), 3)  # starts at 100, 105, 110; none at 115
+        self.assertEqual(stats["lookups"], 3)
+        self.assertEqual(answered, set(typeds[:3]))
+        calls.clear()
+        with mock.patch.object(sp_channels.sp_opencode, "recent_sessions", lambda *a, **k: []), \
+                mock.patch.object(sp_channels.sp_opencode, "get_session", get_session):
+            sp_channels.session_names(typeds, {}, max_lookups=2)
+        self.assertEqual(len(calls), 2)
+
     def test_get_session_stops_after_the_first_failure(self):
         calls = []
 

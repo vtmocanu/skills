@@ -193,7 +193,12 @@ def run_discovery(requester=None, previous=None):
     ``labels`` are ``channels.derive_labels`` over the channel records read here (the same records
     ``channel list`` labels). The identities of every known buddy pair are checked before any other
     member, so the pass limits cut the roster first; they can still cut the labels, because the identity
-    checks run inside the same deadline and allowances. An identity this pass could not check
+    checks run inside the same deadline and allowances. The OpenCode name lookups (get_session calls,
+    stopped at the pass deadline) are charged to the same subprocess allowance as the liveness checks;
+    pair liveness leaves them half of it (at most SESSION_LOOKUPS_MAX).
+    ``unchecked`` lists the members whose liveness was not checked and ``label_deferred`` the pair
+    OpenCode identities whose name lookup got no answer; the next pass (given this result as
+    ``previous``) checks those first, so none is starved. An identity this pass could not check
     (``label_names``, ``label_liveness`` hold what labels used) keeps ``previous``'s name and
     liveness (the previous pass's result), else its short id and ``unverified``. The pass is
     ``truncated`` when a pair member's liveness was not checked or a pair identity's OpenCode name
@@ -215,14 +220,14 @@ def run_discovery(requester=None, previous=None):
         checked, unchecked = set(), []
         pair_ids = set(live_ids)
 
-        def check(typed):
+        def check(typed, keep=0):  # ``keep``: allowance this check leaves unspent (the name lookups' share)
             nonlocal truncated, subprocess_left
             if time.monotonic() >= deadline:
                 liveness[typed], truncated = "unverified", True
                 unchecked.append(typed)
                 return
             if not typed.startswith("cc:"):
-                if subprocess_left <= 0:
+                if subprocess_left <= keep:
                     liveness[typed], truncated = "unverified", True
                     unchecked.append(typed)
                     return
@@ -233,9 +238,17 @@ def run_discovery(requester=None, previous=None):
             except Exception:
                 liveness[typed] = "unverified"
 
-        for typed in members:  # the pair identities' liveness, then their names, before any other member
-            if typed in pair_ids:
-                check(typed)
+        prev = previous if isinstance(previous, dict) else {}
+        prev_unchecked = prev.get("unchecked") if isinstance(prev.get("unchecked"), list) else []
+        prev_deferred = prev.get("label_deferred") if isinstance(prev.get("label_deferred"), list) else []
+        # the pair identities' liveness, then their names, before any other member; the identities the
+        # previous pass could not check come first, in the order it left them (stable otherwise), so no identity is starved
+        pair_order = [t for t in members if t in pair_ids]
+        pair_order.sort(key=lambda t: prev_unchecked.index(t) if t in prev_unchecked else len(prev_unchecked))
+        # pair liveness leaves half the allowance (at most SESSION_LOOKUPS_MAX) to the OpenCode name lookups
+        keep = min(sp_channels.SESSION_LOOKUPS_MAX, SUBPROCESS_MEMBERS_PER_PASS // 2) if any(t.startswith("oc:") for t in named_ids) else 0
+        for typed in pair_order:
+            check(typed, keep)
         by_sid = {}
         if any(not m.startswith("oc:") for m in members) or any(not m.startswith("oc:") for m in named_ids):
             if "cc" not in cache:  # the read member_liveness shares: liveness, names and activity come from one
@@ -244,11 +257,11 @@ def run_discovery(requester=None, previous=None):
                 except Exception:
                     pass
             by_sid = sp_channels.registry_by_session(cache)
-        prev = previous if isinstance(previous, dict) else {}
         prev_names = prev.get("label_names") if isinstance(prev.get("label_names"), dict) else {}
         prev_live = prev.get("label_liveness") if isinstance(prev.get("label_liveness"), dict) else {}
         label_names, label_live = {}, {}
         oc_named = [t for t in named_ids if t.startswith("oc:")]
+        oc_named.sort(key=lambda t: prev_deferred.index(t) if t in prev_deferred else len(prev_deferred))
         for typed in named_ids:
             kind, _sep, ident = typed.partition(":")
             if kind in ("cc", "codex"):  # one registry read, no allowance
@@ -257,15 +270,20 @@ def run_discovery(requester=None, previous=None):
                     label_names[typed] = name
         not_found, answered = set(), set()
         if oc_named and time.monotonic() < deadline:
+            stats = {}
             try:
-                label_names.update(sp_channels.session_names(oc_named, cache, not_found, answered))
+                label_names.update(sp_channels.session_names(
+                    oc_named, cache, not_found, answered,
+                    deadline=deadline, max_lookups=max(subprocess_left, 0), stats=stats))
             except Exception:
                 pass
+            subprocess_left -= min(stats.get("lookups", 0), max(subprocess_left, 0))
         # An identity whose lookup neither named it nor found it missing (out of time, failed or skipped) keeps what
         # the previous pass found, and the pass is truncated. One the service definitively reported missing (a
         # deleted session) does not keep a name: it gets its short id.
         # An existing session with no title was answered too: no name, no kept name, no truncation.
-        if any(t not in label_names and t not in not_found and t not in answered for t in oc_named):
+        label_deferred = [t for t in oc_named if t not in label_names and t not in not_found and t not in answered]
+        if label_deferred:
             truncated = True
         kept = {t: prev_names[t] for t in oc_named
                 if t not in label_names and t not in not_found and t not in answered
@@ -300,7 +318,7 @@ def run_discovery(requester=None, previous=None):
         labels = sp_channels.derive_labels(list(records.values()), label_names, label_live)
         found = {"general": general, "liveness": liveness, "activity": activity, "names": names,
                  "homes": homes, "stale": False, "pending": False, "truncated": truncated,
-                 "unchecked": unchecked, "labels": labels, "label_names": label_names,
+                 "unchecked": unchecked, "label_deferred": label_deferred, "labels": labels, "label_names": label_names,
                  "label_liveness": label_live}
         if requester is not None:
             replies = {}
