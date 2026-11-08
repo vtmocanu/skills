@@ -527,15 +527,15 @@ class JournalRetentionTests(JournalBase):
         self.assertIsNone(journal.acks_view(expired, self.A)["settlement"])
         self.assertFalse([r for r in self.records() if r["type"] in ("ack", "settled")])
 
-    def test_expired_plain_message_and_reply_stay_protected(self):
+    def test_plain_message_and_expired_reply_stay_protected(self):
         plain = self.msg(body="p" * 400)
         rid = str(uuid.uuid4())
         self.assertEqual(journal.record_reply(rid, self.B, [self.A], "r" * 400, self.now - 5,
                                               "/nonexistent/spj/reply.json"), "recorded")
         reply = journal.reply_message_id(rid)
         fillers = self.pad(6)
-        # A request from a new sender, so only the size cap binds: pruning either
-        # expired entry would admit it.
+        # A request from a new sender, so only the size cap binds: pruning the
+        # reply would admit it (plain-message protection is covered elsewhere).
         self.set_cap(self.size() + 100)  # slack for float-width jitter, far below one entry
         before = self.snapshot()
         with self.assertRaises(journal.JournalFull):

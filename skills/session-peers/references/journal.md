@@ -135,15 +135,14 @@ detected identity.
   of more than 14 days can drop records at the next rewrite.
 - **Retrieval guarantee (#160 channel contract):** except as below, a body
   stays available until it is 14 days old while it is un-ACKed and unsettled,
-  or while its
-  correlated mailbox is live (never past the 14-day age cap). An ACKed or
-  settled correlated entry stays protected while its mailbox exists (still
-  subject to the age cap). There is no guarantee once an entry is fully ACKed
-  or settled and, if correlated, its mailbox is gone. An unsettled request
-  whose `expires_at` has passed and whose mailbox is gone has no guarantee
-  either and may be pruned under pressure; `record`-style messages and replies
-  are unchanged. A channel history that must keep the body longer should keep
-  its own copy.
+  or while its correlated mailbox is live (never past the 14-day age cap). An
+  ACKed or settled correlated entry stays protected while its mailbox exists
+  (still subject to the age cap). There is no guarantee once an entry is fully
+  ACKed or settled and, if correlated, its mailbox is gone. An unsettled
+  request whose `expires_at` has passed and whose mailbox is gone has no
+  guarantee either and may be pruned under pressure; `record`-style messages
+  and replies are unchanged. A channel history that must keep the body longer
+  should keep its own copy.
 
 An entry past the age cap is shown `[expired]` until a write prunes it.
 
