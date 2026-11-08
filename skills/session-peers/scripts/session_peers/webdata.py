@@ -1233,7 +1233,7 @@ def _reply_budget(tid, home, now, budget, requester=None):
     if not isinstance(sid, str) or not sid:
         return {"requester": None, "label": BUDGET_LABEL}, False
     owner = types.SimpleNamespace(thread_id=tid)
-    meter = sp_budgets.ReplyBudget(owner, state, records=None, socket_valid=None, deliver_frame=None)
+    meter = sp_budgets.ReplyBudget(owner, state, records=None, socket_valid=None, deliver_reply=None)
     # The window and the grant check of ``ReplyBudget.configure_window``, without its stderr log
     # line (it names the peer-written sid).
     window = sp_runtime._float_env("SESSION_PEERS_REPLY_BUDGET_WINDOW", sp_constants.REPLY_BUDGET_WINDOW_DEFAULT)

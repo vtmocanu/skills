@@ -10,15 +10,15 @@ class ReplyBudget:
     """Reply accounting and held replies in the owner's existing state file.
 
     The owning shim supplies its thread ID, current name/socket, and the
-    _save_state callback. Discovery/socket checks and frame delivery come from
+    _save_state callback. Discovery/socket checks and reply delivery come from
     shim callbacks; this component adds no transport import, lock, or file format.
     """
 
-    def __init__(self, owner, state, *, records, socket_valid, deliver_frame):
+    def __init__(self, owner, state, *, records, socket_valid, deliver_reply):
         self.owner = owner
         self._records = records
         self._socket_valid = socket_valid
-        self._deliver_frame = deliver_frame
+        self._deliver_reply = deliver_reply
         self.budgets = dict(state.get("budgets") or {})
         self.budget_sender_sid = state.get("budget_sender_sid")
         self.budget_last_at = sp_runtime.parse_time(state.get("budget_last_at"))
@@ -129,6 +129,8 @@ class ReplyBudget:
         outcome = self._deliver_held(sid, entry, records, new_sequence=(reason == "reset"))
         if outcome == "failed":
             entry["release"] = reason
+        elif outcome in ("kept", "unknown"):
+            pass
         else:
             self.held.pop(sid, None)
         return outcome
@@ -146,10 +148,12 @@ class ReplyBudget:
         records = self._records()
         changed = False
         for sid, reason in pending:
-            if reason == "allow" and self.budgets.get(sid, 0) >= self.cap_for(sid):
+            if reason == "allow" and not self.may_send(sid):
                 # The allowance that released it is gone or spent.
                 self.held[sid].pop("release", None)
                 changed = True
+                continue
+            if not self.may_send(sid):
                 continue
             changed = self._release_one(sid, reason, records) != "failed" or changed
         if changed:
@@ -159,7 +163,8 @@ class ReplyBudget:
     def _deliver_held(self, sid, entry, records, new_sequence):
         """One held reply to its live requester, if still fresh and routable.
 
-        Returns ``delivered``, ``failed`` (worth a retry) or ``discarded``.
+        Returns ``delivered``, ``failed`` (worth a retry), ``discarded``, or
+        ``kept`` / ``unknown`` (entry left untouched, nothing spent).
         """
         if not isinstance(entry, dict) or not entry.get("text"):
             return "discarded"
@@ -176,12 +181,11 @@ class ReplyBudget:
             sp_runtime.log("discarding a held reply: %s listens outside the allowlist" % sid)
             return "discarded"
         text = sp_protocol.reply_text(entry["text"], entry.get("mid"), held_reply=True)
-        try:
-            body = sp_protocol.build_cc_body(text, self.owner.thread_id, self.owner.name, self.owner.sock_path)
-        except ValueError as exc:
-            sp_runtime.log("cannot build a held reply for %s: %s" % (sid, exc))
-            return "discarded"
-        if not self._deliver_frame(rec, sp_protocol.build_user_frame(body, self.owner.sock_path)):
+        result = self._deliver_reply(rec, text, entry)
+        if result in ("discarded", "kept", "unknown"):
+            # Pass 1: an unknown transport is left untouched, like "kept".
+            return result
+        if result != "delivered":
             sp_runtime.log("keeping the held reply for %s to retry" % sid)
             return "failed"
         # An explicit reset opens a new sequence; an allowance continues the
@@ -219,6 +223,17 @@ class ReplyBudget:
         more than a minute ahead is refused rather than trusted to last.
         """
         return -60.0 <= now - at <= self.reply_budget_window
+
+
+    def may_send(self, sid):
+        """True while ``sid`` is under its consecutive-reply cap."""
+        return self.budgets.get(sid, 0) < self.cap_for(sid)
+
+
+    def frozen(self, sid):
+        """True while a held reply for ``sid`` is mid-send or of unknown fate."""
+        entry = self.held.get(sid)
+        return isinstance(entry, dict) and entry.get("phase") in ("unknown", "sending")
 
 
     def cap_for(self, sid):
