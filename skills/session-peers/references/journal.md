@@ -119,12 +119,18 @@ detected identity.
   settlements, transport errors, handovers).
 - **Quotas:** plain recorded messages take at most 50% of the cap; each sender
   at most 25%.
-- **Under size pressure** only finished entries are pruned: every recipient
-  ACKed, or a settled correlated entry (settlement needs no ACK). A correlated
-  entry is pruned only once its request mailbox is gone. Unfinished young
-  entries (neither fully ACKed nor settled) are never pruned, including
-  expired requests and entries with transport errors: pruning keys only on ACK
-  and settlement.
+- **Under pressure** (the size cap or a quota) only finished entries and
+  expired requests are pruned. Finished: every recipient ACKed, or a settled
+  correlated entry (settlement needs no ACK); a correlated entry is pruned only
+  once its request mailbox is gone. Expired request: a correlated `ask` or
+  `dispatch` request whose `expires_at` has passed and whose request mailbox is
+  gone (an owner-approved exception to #157's protection rule, 2026-11-06).
+  It is not deleted eagerly, only pruned under pressure, and no ACK or
+  settlement is written, so it is never shown as ACKed or settled. Plain
+  recorded messages (`send --record`, `record --to`) and replies have no such
+  exception. Other unfinished young entries (neither fully ACKed nor settled)
+  are never pruned, including unexpired requests and entries with transport
+  errors: a transport error alone makes nothing eligible.
 - **Clock skew:** records dated up to 14 days ahead are kept. A clock step-back
   of more than 14 days can drop records at the next rewrite.
 - **Retrieval guarantee (#160 channel contract):** a body stays available until
@@ -132,8 +138,11 @@ detected identity.
   correlated mailbox is live (never past the 14-day age cap). An ACKed or
   settled correlated entry stays protected while its mailbox exists (still
   subject to the age cap). There is no guarantee once an entry is fully ACKed
-  or settled and, if correlated, its mailbox is gone. A channel history that
-  must keep the body longer should keep its own copy.
+  or settled and, if correlated, its mailbox is gone. An unsettled request
+  whose `expires_at` has passed and whose mailbox is gone has no guarantee
+  either and may be pruned under pressure; `record`-style messages and replies
+  are unchanged. A channel history that must keep the body longer should keep
+  its own copy.
 
 An entry past the age cap is shown `[expired]` until a write prunes it.
 
@@ -141,7 +150,7 @@ An entry past the age cap is shown `[expired]` until a write prunes it.
 
 | Code | When | Meaning |
 | --- | --- | --- |
-| 75 | Before sending | Journal full. On a sending command nothing was sent. `--json` prints `{"status":"journal_full","detail":...}`. Recipients `ack`, or wait for expiry, then retry. `ack` and `inbox handover` can also return 75 when even the event reserve is exhausted. |
+| 75 | Before sending | Journal full. On a sending command nothing was sent. `--json` prints `{"status":"journal_full","detail":...}`. Recipients `ack`, or wait for expiry, then retry: entries age out at 14 days, and a request becomes prunable once its `expires_at` has passed and its mailbox is gone. `ack` and `inbox handover` can also return 75 when even the event reserve is exhausted. |
 | 1 | Before any transport call | Journal unavailable or refused (bad mode, lock held, not a recipient, unknown id), or the request mailbox write failed: on a sending command nothing was sent. |
 | 1 | After a failed transport call | The transport reported failure and its `transport_error` journal update succeeded. It may still have delivered (for example a timed-out queue or API call); the command never resends. Check the recipient before resending. |
 | 76 | After transport | A journal update after a transport attempt failed (the command prints `journal update failed: ...` on stderr). The transport itself may have succeeded or failed. A failed `journal.meta.json` write after a durable record or event is not an update failure. |

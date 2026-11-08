@@ -446,8 +446,112 @@ class JournalRetentionTests(JournalBase):
         newest = self.req(body="r" * 400)
         self.assertEqual(self.ids(), ids[1:] + [newest])
 
-    def test_young_unacked_entries_survive_a_full_journal(self):
+    def live_mailbox(self, name="live.json"):
+        path = os.path.join(self.root, name)
+        open(path, "w").close()
+        return path
+
+    def pad(self, count=7):
+        """Protected (unexpired, mailbox-gone) requests from other senders, so the sender quota is not the limit."""
+        return [self.req(body="f" * 400) for _ in range(count)]
+
+    def fill_sender_quota(self, sender, expires=None):
+        """20 equal requests from ``sender``; the cap leaves room for 20.5, so a 21st needs a prune."""
+        ids = [self.req(sender=sender, body="q" * 400, expires=expires) for _ in range(20)]
+        unit = self.size() // 20
+        self.set_cap(82 * unit)
+        return ids
+
+    def test_sender_quota_pressure_is_relieved_only_by_expired_requests(self):
+        sender = cc()
+        ids = self.fill_sender_quota(sender)
+        before = self.snapshot()
+        with self.assertRaises(journal.JournalFull) as ctx:
+            self.req(sender=sender, body="q" * 400)
+        self.assertIn("session-peers journal full:", str(ctx.exception))
+        self.assertIn("expired request", str(ctx.exception))
+        self.assertEqual(self.snapshot(), before)
+        self.now += 700
+        newest = self.req(sender=sender, body="q" * 400, expires=self.now + 600)
+        remaining = self.ids()
+        self.assertNotIn(ids[0], remaining)
+        self.assertEqual(remaining, ids[1:] + [newest])
+
+    def test_expired_request_stays_readable_until_pressure(self):
         expired = self.req(body="q" * 400, expires=self.now - 5)
+        fillers = self.pad()
+        self.assertIn(expired, self.ids())
+        self.assertEqual(journal.get(expired, self.A)["body"], "q" * 400)
+        self.set_cap(self.size() + 100)  # slack for float-width jitter, far below one entry
+        newest = self.req(body="n" * 400)
+        self.assertEqual(self.ids(), fillers[:] + [newest])
+
+    def test_expired_request_with_an_existing_mailbox_is_protected(self):
+        mailbox = self.live_mailbox()
+        expired = self.req(body="q" * 400, expires=self.now - 5, mailbox=mailbox)
+        fillers = self.pad()
+        self.set_cap(self.size() + 100)  # slack for float-width jitter, far below one entry
+        before = self.snapshot()
+        with self.assertRaises(journal.JournalFull):
+            self.req(body="n" * 400)
+        self.assertEqual(self.snapshot(), before)
+        os.unlink(mailbox)
+        newest = self.req(body="n" * 400)
+        self.assertEqual(self.ids(), fillers + [newest])
+
+    def test_unexpired_request_with_a_gone_mailbox_is_protected(self):
+        kept = [self.req(body="q" * 400)] + self.pad(6)
+        self.set_cap(self.size() + 100)
+        before = self.snapshot()
+        with self.assertRaises(journal.JournalFull):
+            self.req(body="n" * 400)
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(self.ids(), kept)
+
+    def test_expired_request_boundary_counts_as_expired(self):
+        edge = self.req(body="q" * 400, expires=self.now)
+        fillers = self.pad()
+        self.set_cap(self.size() + 100)  # slack for float-width jitter, far below one entry
+        newest = self.req(body="n" * 400)
+        self.assertEqual(self.ids(), fillers + [newest])
+
+    def test_expired_request_is_never_treated_as_acked(self):
+        expired = self.req(to=[self.A], body="q" * 400, expires=self.now - 5)
+        entry = self.entry(expired)
+        self.assertEqual([r["state"] for r in entry["recipients"]], ["pending"])
+        self.assertIsNone(entry["settlement"])
+        self.assertIn(expired, [e["message_id"] for e in journal.list_for(self.A)])
+        self.assertEqual(journal.get(expired, self.A)["acks"], [])
+        self.assertEqual([r["state"] for r in journal.acks_view(expired, self.A)["recipients"]],
+                         ["pending"])
+        self.assertIsNone(journal.acks_view(expired, self.A)["settlement"])
+        self.assertFalse([r for r in self.records() if r["type"] in ("ack", "settled")])
+
+    def test_expired_plain_message_and_reply_stay_protected(self):
+        plain = self.msg(body="p" * 400)
+        rid = str(uuid.uuid4())
+        self.assertEqual(journal.record_reply(rid, self.B, [self.A], "r" * 400, self.now - 5,
+                                              "/nonexistent/spj/reply.json"), "recorded")
+        self.now += 700
+        self.set_cap(self.size())
+        before = self.snapshot()
+        with self.assertRaises(journal.JournalFull):
+            self.msg(body="n" * 400)
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(len(self.ids()), 2)
+        self.assertIn(plain, self.ids())
+
+    def test_event_write_prunes_an_expired_request_when_over_the_cap(self):
+        expired = self.req(body="q" * 400, expires=self.now - 5)
+        target = self.req(body="t" * 400)
+        self.set_cap(self.size())
+        journal.ack(target, self.A)
+        self.assertNotIn(expired, self.ids())
+        self.assertIn(target, self.ids())
+        self.assertLessEqual(self.size(), int(os.environ[CAP_ENV]))
+
+    def test_young_unacked_entries_survive_a_full_journal(self):
+        expired = self.req(body="q" * 400, expires=self.now - 5, mailbox=self.live_mailbox())
         failed = self.msg(body="m" * 400)
         journal.transport_error(failed, self.A, "no route")
         plain = self.msg(body="p" * 400)
