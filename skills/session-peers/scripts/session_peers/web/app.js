@@ -268,26 +268,37 @@
   }
 
   // Sort and activity time in epoch seconds, as webdata._stamp reads runtime.parse_time: a number or
-  // numeric string above 1e11 is milliseconds, a naive ISO time is UTC, anything unclear or
-  // non-finite is 0. (parseTs stays the display reading.)
-  var NUMERIC_TS = /^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/;
+  // numeric string above 1e11 is milliseconds, a naive ISO time is UTC, "inf"/"Infinity" and an
+  // overflowing number such as "1e400" are +-Infinity (the comparator orders them without
+  // subtracting), underscores between digits count ("1_700_000_000"), a lowercase "z" suffix, NaN
+  // and anything unclear read as 0. (parseTs stays the display reading.) Known differences: a string
+  // longer than 64 characters is 0 here (it bounds the work per stamp), and ISO forms the server's
+  // fromisoformat accepts but Date.parse does not (such as 20250101T000000Z) or non-ASCII digits
+  // read as 0 here.
+  var DIGITS = "\\d+(?:_\\d+)*";
+  var NUMERIC_TS = new RegExp("^[+-]?(?:" + DIGITS + "(?:\\." + "(?:" + DIGITS + ")?)?|\\." + DIGITS + ")(?:[eE][+-]?" + DIGITS + ")?$");
+  var INFINITE_TS = /^([+-]?)(?:inf|infinity)$/i;
 
   function sortStamp(ts) {
     var n = null;
     if (typeof ts === "boolean") n = ts ? 1 : 0;
     else if (typeof ts === "number") n = ts;
     else if (typeof ts === "string") {
+      if (ts.length > 64) return 0;
       var text = ts.trim();
       if (!text) return 0;
-      if (NUMERIC_TS.test(text)) n = Number(text);
+      var inf = INFINITE_TS.exec(text);
+      if (inf) n = inf[1] === "-" ? -Infinity : Infinity;
+      else if (NUMERIC_TS.test(text)) n = Number(text.replace(/_/g, ""));
       else {
+        if (/z$/.test(text)) return 0;
         text = text.replace(/(\.\d{3})\d+/, "$1");
-        if (/^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}/.test(text) && !/(Z|[+-]\d{2}(:?\d{2})?)$/i.test(text.slice(11))) text += "Z";
+        if (/^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}/.test(text) && !/(Z|[+-]\d{2}(:?\d{2})?)$/.test(text.slice(11))) text += "Z";
         var ms = Date.parse(text.replace(" ", "T"));
         return isFinite(ms) ? ms / 1000 : 0;
       }
     }
-    if (n === null || !isFinite(n)) return 0;
+    if (n === null || n !== n) return 0;
     return n > 1e11 ? n / 1000 : n;
   }
 
@@ -384,7 +395,7 @@
     if (rx !== ry) return rx - ry;
     if (rx === 1) {
       var nx = sortStamp(activityOf(x).ts), ny = sortStamp(activityOf(y).ts);
-      if (nx !== ny) return ny - nx;
+      if (nx !== ny) return ny > nx ? 1 : -1;  // never a subtraction: two infinities would give NaN
     }
     var kx = str(x.key), ky = str(y.key);
     var c = cmpCodePoints(serverLabel(x) || "#" + kx, serverLabel(y) || "#" + ky);

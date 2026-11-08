@@ -57,7 +57,7 @@ import sys
 import threading
 import time
 import urllib.parse
-from . import channels as sp_channels, constants as sp_constants, identity as sp_identity
+from . import channels as sp_channels, claude as sp_claude, constants as sp_constants, identity as sp_identity
 from . import opencode as sp_opencode, runtime as sp_runtime, storage as sp_storage, webchat as sp_webchat
 from . import webdata as sp_webdata, webpeer as sp_webpeer
 
@@ -238,6 +238,11 @@ def run_discovery(requester=None, previous=None):
                 check(typed)
         by_sid = {}
         if any(not m.startswith("oc:") for m in members) or any(not m.startswith("oc:") for m in named_ids):
+            if "cc" not in cache:  # the read member_liveness shares: liveness, names and activity come from one
+                try:
+                    cache["cc"] = sp_claude.read_claude_records_checked()
+                except Exception:
+                    pass
             by_sid = sp_channels.registry_by_session(cache)
         prev = previous if isinstance(previous, dict) else {}
         prev_names = prev.get("label_names") if isinstance(prev.get("label_names"), dict) else {}
@@ -250,18 +255,20 @@ def run_discovery(requester=None, previous=None):
                 name = sp_channels.registry_name(kind, ident, by_sid)
                 if name:
                     label_names[typed] = name
-        not_found = set()
+        not_found, answered = set(), set()
         if oc_named and time.monotonic() < deadline:
             try:
-                label_names.update(sp_channels.session_names(oc_named, cache, not_found))
+                label_names.update(sp_channels.session_names(oc_named, cache, not_found, answered))
             except Exception:
                 pass
         # An identity whose lookup neither named it nor found it missing (out of time, failed or skipped) keeps what
         # the previous pass found, and the pass is truncated. One the service definitively reported missing (a
         # deleted session) does not keep a name: it gets its short id.
-        if any(t not in label_names and t not in not_found for t in oc_named):
+        # An existing session with no title was answered too: no name, no kept name, no truncation.
+        if any(t not in label_names and t not in not_found and t not in answered for t in oc_named):
             truncated = True
-        kept = {t: prev_names[t] for t in oc_named if t not in label_names and t not in not_found
+        kept = {t: prev_names[t] for t in oc_named
+                if t not in label_names and t not in not_found and t not in answered
                 and isinstance(prev_names.get(t), str)}
         label_names.update(kept)
         for typed in members:  # the other roster members

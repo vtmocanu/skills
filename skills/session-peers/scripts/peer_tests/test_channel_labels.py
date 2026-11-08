@@ -299,6 +299,23 @@ class NameTests(LabelBase):
         self.assertEqual(names, {})
         self.assertEqual(missing, {gone})
 
+    def test_session_names_answered_holds_every_opencode_id_the_lookup_reached(self):
+        titled, untitled, gone, down = ("oc:ses_" + c * 26 for c in "abcd")
+
+        def get_session(sid, *args, **kwargs):
+            if sid == "ses_" + "b" * 26:
+                return {"id": sid, "title": ""}
+            if sid == "ses_" + "c" * 26:
+                raise sp_channels.sp_opencode.OpenCodeNotFound("deleted")
+            raise RuntimeError("down")
+
+        answered = set()
+        with mock.patch.object(sp_channels.sp_opencode, "recent_sessions", lambda *a, **k: [{"id": "ses_" + "a" * 26, "title": "t"}]), \
+                mock.patch.object(sp_channels.sp_opencode, "get_session", get_session):
+            names = sp_channels.session_names([titled, untitled, gone, down], {}, None, answered)
+        self.assertEqual(names, {titled: "t"})
+        self.assertEqual(answered, {titled, untitled, gone})
+
     def test_a_failing_opencode_lookup_gives_no_name_and_the_short_id(self):
         typed = "oc:" + OC_A
 

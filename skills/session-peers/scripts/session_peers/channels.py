@@ -1031,11 +1031,13 @@ def opencode_titles(cache=None):
     return titles
 
 
-def session_names(typeds, cache=None, not_found=None):
+def session_names(typeds, cache=None, not_found=None, answered=None):
     """``{typed: name}`` for the typed ids that have one.
 
     With a ``not_found`` set, the typed oc ids that ``opencode.get_session`` definitively reported
-    as not existing are added to it (a failure or a skipped lookup is not added).
+    as not existing are added to it (a failure or a skipped lookup is not added). With an ``answered``
+    set, every typed oc id the lookup reached an answer for is added: titled, untitled (the session
+    exists with an empty title) or not found. A failed or skipped lookup is not added.
 
     cc and codex: the registry name. oc: the title among the recent sessions, else
     ``opencode.get_session`` (older and child sessions), at most SESSION_LOOKUPS_MAX lookups and
@@ -1060,14 +1062,20 @@ def session_names(typeds, cache=None, not_found=None):
         for typed in oc:
             sid = typed.partition(":")[2]
             title = titles.get(sid)
+            if title and answered is not None:
+                answered.add(typed)
             if not title and not down and lookups < SESSION_LOOKUPS_MAX:
                 lookups += 1
                 try:
                     title = clip_name(sp_opencode.get_session(sid).get("title"))
+                    if answered is not None:
+                        answered.add(typed)
                 except sp_opencode.OpenCodeNotFound:
                     title = None  # the service answered: this session is gone, others may resolve
                     if not_found is not None:
                         not_found.add(typed)
+                    if answered is not None:
+                        answered.add(typed)
                 except Exception:
                     title = None
                     down = True  # no answer: no further lookups in this call

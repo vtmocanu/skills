@@ -2637,3 +2637,51 @@ test("refresh: the server's order replaces what polls inferred, and an activity 
   assert.deepEqual(laneNames(t), ["#general", "#a", "#b", "#c", "#zz"])
   assert.equal(calls.length, 0)
 })
+
+const orderOf = async (stamps) => {
+  const rows = stamps.map((ts, i) => lblRow("r" + i, "#r" + i, "posted", ts))
+  const t = bootFixture({ "/api/state": orderState(rows) })
+  await t.app.ready
+  return laneNames(t).slice(1)
+}
+
+test("rail order: a long digit string sorts as 0 in linear time", async () => {
+  const hostile = "9".repeat(200000) + "x"
+  const started = Date.now()
+  const names = await orderOf([hostile, "1700000000"])
+  assert.ok(Date.now() - started < 500, "took " + (Date.now() - started) + " ms")
+  assert.deepEqual(names, ["#r1", "#r0"])
+})
+
+test("rail order: infinities read like the server and never reach the comparator as NaN", async () => {
+  // webdata._row_order: +inf is the newest, -inf the oldest; a number that overflows is infinite
+  const names = await orderOf(["-Infinity", "1700000000", "inf", "1e400", "-1e400", "nan", "-inf"])
+  assert.deepEqual(names, ["#r2", "#r3", "#r1", "#r5", "#r0", "#r4", "#r6"])
+})
+
+test("rail order: underscores between digits count, others and a lowercase z suffix read as 0", async () => {
+  const names = await orderOf(["1__0", "1_700_000_000", "2025-01-01T00:00:00z", "1_", "2025-01-01T00:00:00Z"])
+  assert.deepEqual(names, ["#r4", "#r1", "#r0", "#r2", "#r3"])
+})
+
+test("refresh: a state refresh that keeps the order does not scroll", async () => {
+  const rows = () => [
+    lblRow("a", "#a", "posted", "2026-03-01T00:00:00+00:00"),
+    lblRow("b", "#b", "posted", "2026-02-01T00:00:00+00:00"),
+    lblRow("c", "#c", "none"), lblRow("zz", "#zz", "none")]
+  const t = bootFixture({ "/api/state": orderState(rows()) })
+  await t.app.ready
+  await t.app.selectChannel("c")
+  const calls = []
+  let fetched = 0
+  const next = orderState(rows())
+  t.routes["/api/state"] = () => { fetched++; return next }
+  t.routes["/api/changes"] = quiet("C1", { channels: { zz: { new: true } } })
+  const realCreate = t.document.createElement
+  t.document.createElement = (tag) => { const n = realCreate(tag); n.scrollIntoView = (o) => calls.push([n, o]); return n }
+  await t.app.pollOnce()
+  t.document.createElement = realCreate
+  assert.ok(fetched >= 1, "the state was refreshed")
+  assert.deepEqual(laneNames(t), ["#general", "#a", "#b", "#c", "#zz"])
+  assert.equal(calls.length, 0)
+})

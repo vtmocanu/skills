@@ -1134,14 +1134,14 @@ class DiscoveryLabelTests(WebBase):
     def test_opencode_names_out_of_time_come_from_the_previous_pass(self):
         oc, key = "oc:ses_" + "a" * 26, "buddy-%012x" % 0x555555
         self.buddy(self.me, oc, key)
-        with mock.patch.object(sp_channels, "session_names", lambda typeds, cache=None, not_found=None: {oc: "ocname"}):
+        with mock.patch.object(sp_channels, "session_names", lambda typeds, cache=None, not_found=None, answered=None: {oc: "ocname"}):
             first = web.run_discovery()
         self.assertEqual(first["labels"][key]["label"], "#alpha-ocname")
         asked = []
         read_all = web._read_records
         with mock.patch.object(web, "DISCOVERY_PASS_BUDGET", -1.0), \
                 mock.patch.object(web, "_read_records", lambda deadline: read_all(float("inf"))), \
-                mock.patch.object(sp_channels, "session_names", lambda typeds, cache=None, not_found=None: asked.append(typeds) or {}):
+                mock.patch.object(sp_channels, "session_names", lambda typeds, cache=None, not_found=None, answered=None: asked.append(typeds) or {}):
             kept = web.run_discovery(previous=first)
             fresh = web.run_discovery()
         self.assertEqual(asked, [])
@@ -1199,10 +1199,10 @@ class DiscoveryLabelTests(WebBase):
     def test_an_opencode_identity_whose_lookup_gave_no_name_keeps_the_previous_name(self):
         oc, key = "oc:ses_" + "b" * 26, "buddy-%012x" % 0xc00001
         self.buddy(self.me, oc, key)
-        with mock.patch.object(sp_channels, "session_names", lambda typeds, cache=None, not_found=None: {oc: "ocname"}):
+        with mock.patch.object(sp_channels, "session_names", lambda typeds, cache=None, not_found=None, answered=None: {oc: "ocname"}):
             first = web.run_discovery()
         self.assertFalse(first["truncated"])
-        with mock.patch.object(sp_channels, "session_names", lambda typeds, cache=None, not_found=None: {}):
+        with mock.patch.object(sp_channels, "session_names", lambda typeds, cache=None, not_found=None, answered=None: {}):
             kept = web.run_discovery(previous=first)
             fresh = web.run_discovery()
         self.assertEqual(kept["labels"][key]["label"], "#alpha-ocname")
@@ -1217,7 +1217,7 @@ class DiscoveryLabelTests(WebBase):
         results, previous = [], None
         for answer in answers:
             def get_session(sid, answer=answer):
-                if isinstance(answer, str):
+                if isinstance(answer, str) or answer is None:
                     return {"id": sid, "title": answer}
                 raise answer("answer")
 
@@ -1241,6 +1241,41 @@ class DiscoveryLabelTests(WebBase):
             self.assertEqual(later["labels"][key]["label"], "#alpha-oc:" + oc[7:15])
             self.assertNotIn(oc, later["label_names"])
             self.assertFalse(later["truncated"])
+
+    def test_an_untitled_opencode_session_loses_its_name_and_the_pass_is_not_truncated(self):
+        oc, key = "oc:ses_" + "9" * 26, "buddy-%012x" % 0xe00005
+        self.buddy(self.me, oc, key)
+        first, second, third = self.chained_oc_passes(oc, key, ["ocname", "", None])
+        self.assertEqual(first["labels"][key]["label"], "#alpha-ocname")
+        for later in (second, third):
+            self.assertEqual(later["labels"][key]["label"], "#alpha-oc:" + oc[7:15])
+            self.assertNotIn(oc, later["label_names"])
+            self.assertFalse(later["truncated"])
+
+    def test_a_pass_reads_the_claude_registry_once_for_liveness_names_and_activity(self):
+        oc_lead, oc_buddy = "oc:ses_" + "7" * 26, "oc:ses_" + "8" * 26
+        self.buddy(oc_lead, oc_buddy, "buddy-%012x" % 0xe00006)
+        member = "cc:" + new_uuid()
+        reads = []
+        real_checked, real_plain = sp_channels.sp_claude.read_claude_records_checked, sp_channels.sp_claude.read_claude_records
+
+        def checked():
+            reads.append("checked")
+            return real_checked()
+
+        def plain():
+            reads.append("plain")
+            return real_plain()
+
+        with mock.patch.object(sp_channels.sp_claude, "read_claude_records_checked", checked), \
+                mock.patch.object(sp_channels.sp_claude, "read_claude_records", plain), \
+                mock.patch.object(sp_channels.sp_opencode, "recent_sessions", lambda *a, **k: []), \
+                mock.patch.object(sp_channels.sp_opencode, "get_session", lambda sid: {"id": sid, "title": "t"}), \
+                mock.patch.object(sp_channels.sp_opencode, "active_ids", lambda: {}), \
+                mock.patch.object(sp_channels, "general_members", return_value=([member], {}, [])):
+            found = web.run_discovery()
+        self.assertIn(member, found["liveness"])
+        self.assertEqual(len(reads), 1, reads)
 
     def test_a_failed_opencode_lookup_keeps_the_name_through_chained_passes_and_is_truncated(self):
         oc, key = "oc:ses_" + "e" * 26, "buddy-%012x" % 0xe00002
