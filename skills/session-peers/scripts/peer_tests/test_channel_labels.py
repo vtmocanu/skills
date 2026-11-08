@@ -7,7 +7,7 @@ key stays the address.
 from peer_tests.support import *  # noqa: F401,F403
 from peer_tests.test_channel_buddy import BuddyChannelBase
 from peer_tests.test_opencode import OC_A, OC_B
-from session_peers import channels as sp_channels
+from session_peers import channels as sp_channels, journal as sp_journal, webdata as sp_webdata
 
 DOT = "·"
 ASCII_DOT = "\\u00b7"
@@ -33,6 +33,14 @@ class LabelBase(BuddyChannelBase):
 
     def raw(self):
         return sp_channels.read_channel(self.key)
+
+    def edit_record(self, change):
+        path = sp_channels._record_path(self.key)
+        with open(path) as handle:
+            rec = json.load(handle)
+        change(rec)
+        with open(path, "w") as handle:
+            json.dump(rec, handle)
 
     def in_home(self, name):
         """Point CODEX_HOME at a second, empty home (HOME, and so the channel store, stays shared)."""
@@ -75,6 +83,24 @@ class ProjectionTests(LabelBase):
         row = self.row()
         self.assertEqual((row["label"], row["label_status"]), ("#lead", "stale"))
 
+    def test_clear_on_a_record_without_the_field_sets_it_to_null(self):
+        self.assertEqual(self.bset(self.x)[0], 0)
+        self.edit_record(lambda rec: rec.pop("current_buddy"))
+        self.assertEqual(self.cli("buddy", "clear")[0], 0)
+        self.assertIn("current_buddy", self.raw())
+        self.assertIsNone(self.raw()["current_buddy"])
+        row = self.row()
+        self.assertEqual((row["label"], row["label_status"]), ("#lead", "stale"))
+
+    def test_clear_after_the_buddy_was_removed_from_the_roster_still_nulls_the_field(self):
+        self.assertEqual(self.bset(self.x)[0], 0)
+        self.ok("remove", self.key, self.x)
+        self.assertEqual(self.raw()["current_buddy"], self.x)
+        self.assertEqual(self.cli("buddy", "clear")[0], 0)
+        self.assertIsNone(self.raw()["current_buddy"])
+        row = self.row()
+        self.assertEqual((row["label"], row["label_status"]), ("#lead", "stale"))
+
     def test_clear_leaves_a_field_that_names_a_different_buddy(self):
         self.assertEqual(self.bset(self.x)[0], 0)
         self.assertEqual(self.bset(self.y)[0], 0)
@@ -95,12 +121,7 @@ class ProjectionTests(LabelBase):
 
     def test_a_record_without_the_field_is_unverified_then_backfilled_by_the_next_set(self):
         self.assertEqual(self.bset(self.x)[0], 0)
-        path = sp_channels._record_path(self.key)
-        with open(path) as handle:
-            rec = json.load(handle)
-        del rec["current_buddy"]
-        with open(path, "w") as handle:
-            json.dump(rec, handle)
+        self.edit_record(lambda rec: rec.pop("current_buddy"))
         row = self.row()
         self.assertEqual((row["label"], row["label_status"]), ("#lead", "unverified"))
         self.assertIsNone(row["current_buddy"])
@@ -117,6 +138,17 @@ class ProjectionTests(LabelBase):
                 self.assertEqual(sp_channels.pair_of(rec)[2], "unverified")
                 labels = sp_channels.derive_labels([rec], {}, {})
                 self.assertEqual(labels[self.key]["status"], "unverified")
+
+    def test_list_json_emits_the_pair_buddy_not_the_raw_field(self):
+        self.assertEqual(self.bset(self.x)[0], 0)
+        for bad in ({"a": 1}, ["codex:x"], 7, "garbage", self.lead):
+            with self.subTest(bad=bad):
+                self.edit_record(lambda rec: rec.update(current_buddy=bad))
+                row = self.row()
+                self.assertIsNone(row["current_buddy"])
+                self.assertEqual(row["label_status"], "unverified")
+        self.edit_record(lambda rec: rec.pop("current_buddy"))
+        self.assertIsNone(self.row()["current_buddy"])
 
     def test_pair_of_reports_known_none_and_unverified(self):
         self.assertEqual(sp_channels.pair_of(buddy_rec("buddy-aa", self.lead, self.x)),
@@ -279,7 +311,82 @@ class NameTests(LabelBase):
         self.assertEqual(len(seen[0]), 3)  # the second record's lead, no buddy
 
 
+class FanOutTests(LabelBase):
+    def test_get_session_lookups_are_capped_per_call(self):
+        calls = []
+
+        def get_session(sid):
+            calls.append(sid)
+            return {"id": sid, "title": "t"}
+
+        typeds = ["oc:ses_%026d" % i for i in range(100)]
+        with mock.patch.object(sp_channels.sp_opencode, "recent_sessions", lambda *a, **k: []), \
+                mock.patch.object(sp_channels.sp_opencode, "get_session", get_session):
+            names = sp_channels.session_names(typeds, {})
+        self.assertEqual(len(calls), sp_channels.SESSION_LOOKUPS_MAX)
+        self.assertEqual(set(names), set(typeds[:sp_channels.SESSION_LOOKUPS_MAX]))
+
+    def test_get_session_stops_after_the_first_failure(self):
+        calls = []
+
+        def get_session(sid):
+            calls.append(sid)
+            raise sp_channels.sp_opencode.OpenCodeError("down")
+
+        typeds = ["oc:ses_%026d" % i for i in range(10)]
+        with mock.patch.object(sp_channels.sp_opencode, "recent_sessions", lambda *a, **k: []), \
+                mock.patch.object(sp_channels.sp_opencode, "get_session", get_session):
+            self.assertEqual(sp_channels.session_names(typeds, {}), {})
+        self.assertEqual(len(calls), 1)
+
+    def test_label_work_covers_at_most_the_channel_cap_of_buddy_records_in_key_order(self):
+        cap = sp_constants.CHANNEL_MAX_CHANNELS
+        records = [buddy_rec("buddy-%06d" % i, "cc:" + new_uuid(), "codex:" + new_uuid()) for i in range(cap + 20)]
+        records.reverse()
+        asked, live_calls = [], []
+
+        def names_of(typeds, cache):
+            asked.extend(typeds)
+            return {}
+
+        def liveness_of(typed, cache):
+            live_calls.append(typed)
+            return "live"
+
+        names, live = sp_channels.label_context(records, {}, liveness_of=liveness_of, names_of=names_of)
+        covered = {t for rec in sorted(records, key=lambda r: r["key"])[:cap] for t in (rec["owner"], rec["current_buddy"])}
+        self.assertEqual(set(asked), covered)
+        self.assertEqual(len(asked), len(set(asked)))
+        self.assertEqual(set(live_calls), covered)
+        labels = sp_channels.derive_labels(records, names, live)
+        beyond = records[0]  # the highest key
+        self.assertEqual(labels[beyond["key"]]["status"], "current")
+        self.assertEqual(labels[beyond["key"]]["label"],
+                         "#%s-%s" % (self.short(beyond["owner"]), self.short(beyond["current_buddy"])))
+
+    def test_label_context_resolves_its_defaults_at_call_time(self):
+        rec = buddy_rec("buddy-aaaa00000000", self.lead, self.x)
+        with mock.patch.object(sp_channels, "session_names", lambda typeds, cache: {self.lead: "patched"}), \
+                mock.patch.object(sp_channels, "member_liveness", lambda typed, cache: "gone"):
+            names, live = sp_channels.label_context([rec], {})
+        self.assertEqual(names, {self.lead: "patched"})
+        self.assertEqual(live, {self.lead: "gone", self.x: "gone"})
+
+
 class CollisionTests(LabelBase):
+    def test_a_lead_named_general_never_labels_as_the_general_channel(self):
+        rec, names = self.pair("buddy-abcd11111111", "general")
+        rec["current_buddy"] = None
+        out = sp_channels.derive_labels([rec], names, {})
+        self.assertEqual(out["buddy-abcd11111111"]["label"], "#general" + DOT + "abcd")
+
+    def test_a_buddy_label_equal_to_another_buddys_key_form_is_suffixed(self):
+        other = buddy_rec("buddy-eeee00000000", "cc:" + new_uuid(), "codex:" + new_uuid())
+        rec, names = self.pair("buddy-abcd11111111", "buddy-eeee00000000")
+        out = sp_channels.derive_labels([other, rec], names, {})
+        self.assertEqual(out["buddy-abcd11111111"]["label"], "#buddy-eeee00000000" + DOT + "abcd")
+        self.assertNotIn(out["buddy-abcd11111111"]["label"], {"#" + other["key"], out[other["key"]]["label"]})
+
     def pair(self, key, name):
         lead, buddy = "cc:" + new_uuid(), "codex:" + new_uuid()
         return buddy_rec(key, lead, buddy), {lead: name, buddy: name}
@@ -342,13 +449,16 @@ class OutputTests(LabelBase):
         self.assertEqual(self.cli("buddy", "clear")[0], 0)
         stale = [l for l in self.ok("list").splitlines() if self.key in l][0]
         self.assertTrue(stale.startswith("#lead  buddy"), stale)
-        self.assertTrue(stale.endswith("stale"), stale)
+        self.assertTrue(stale.endswith("  stale"), stale)
         rows = self.rows()
         self.assertEqual(set(rows["ops"]) - set(rows[self.key]), set())
         self.assertEqual(rows[self.key]["label_status"], "stale")
+        self.edit_record(lambda rec: rec.pop("current_buddy"))
+        unverified = [l for l in self.ok("list").splitlines() if self.key in l][0]
+        self.assertTrue(unverified.endswith("  unverified"), unverified)
 
     def test_hostile_names_render_the_same_escaped_label_in_text_and_json(self):
-        evil = "evil\x1b]0;pwned\x07\n<b>x</b>" + DOT
+        evil = "evil\x1b]0;pwned\x07\n<b>x</b>" + DOT + "\ue000\u0378"
         self.rename_lead(evil)
         self.assertEqual(self.bset(self.x)[0], 0)
         label = self.row()["label"]
@@ -358,16 +468,40 @@ class OutputTests(LabelBase):
         self.assertNotIn("\x1b", text)
         self.assertIn(label, text)
         self.assertIn(ASCII_DOT, label)
+        self.assertIn("\\ue000\\u0378", label)
+        line = [l for l in text.splitlines() if self.key in l][0]
+        cli_label = line.split("  buddy")[0]
+        self.assertEqual(cli_label, sp_journal._human(label))
+        self.assertEqual(cli_label, label)
+        self.assertEqual(sp_webdata.escape_text(label), label)
+        derived = sp_channels.derive_labels(sp_channels.list_channels(), *sp_channels.label_context(
+            sp_channels.list_channels(), {}))
+        self.assertEqual(derived[self.key]["label"], label)
+
+    def test_every_other_category_c_character_is_a_fixed_point_of_human_and_escape_text(self):
+        for ch in ("\ue000", "\u0378", "\U000f0000", "\U0010ffff", "\ud800", "\u00ad"):
+            with self.subTest(ch=ch):
+                rec = buddy_rec("buddy-aaaa00000000", self.lead, self.x)
+                label = sp_channels.derive_labels([rec], {self.lead: "a" + ch + "b"}, {})[rec["key"]]["label"]
+                self.assertEqual(sp_journal._human(label), label)
+                self.assertEqual(sp_webdata.escape_text(label), label)
+                self.assertNotIn(ch, label)
 
 
 class AddressingTests(LabelBase):
     def test_a_label_is_refused_as_an_address_while_the_key_works(self):
         self.assertEqual(self.bset(self.x)[0], 0)
+        self.assertEqual(self.cli("buddy", "clear")[0], 0)
         label = self.row()["label"]
-        rc, _out, err = self.ch("members", label)
+        self.assertEqual(label, "#lead")  # a syntactically valid channel name, but not a stored channel
+        for args in (("members", label), ("tail", label), ("tail", label, "--json")):
+            with self.subTest(args=args):
+                rc, _out, _err = self.ch(*args)
+                self.assertNotEqual(rc, 0)
+        rc, _out, _err = self.cli("send", "--to", label, "--message", "hello")
         self.assertNotEqual(rc, 0)
-        rc, _out, err = self.ch("members", "#" + self.key)
-        self.assertEqual(rc, 0, err)
-        rc, _out, err = self.ch("members", self.key)
-        self.assertEqual(rc, 0, err)
+        for args in (("members", "#" + self.key), ("members", self.key), ("tail", self.key)):
+            with self.subTest(args=args):
+                rc, _out, err = self.ch(*args)
+                self.assertEqual(rc, 0, err)
         self.assertNotIn(label, json.dumps(sp_channels.read_channel(self.key)))

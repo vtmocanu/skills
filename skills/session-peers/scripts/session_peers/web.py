@@ -51,7 +51,7 @@ import sys
 import threading
 import time
 import urllib.parse
-from . import channels as sp_channels, claude as sp_claude, constants as sp_constants, identity as sp_identity
+from . import channels as sp_channels, constants as sp_constants, identity as sp_identity
 from . import opencode as sp_opencode, runtime as sp_runtime, storage as sp_storage, webchat as sp_webchat
 from . import webdata as sp_webdata, webpeer as sp_webpeer
 
@@ -97,7 +97,6 @@ _JSON_TYPE_RE = re.compile(r"application/json(?:\s*;\s*charset=utf-8)?", re.IGNO
 _CURSOR_RE = re.compile(r"[A-Za-z0-9_-]{1,65536}")
 _ACTIVITY = {"busy": "working", "idle": "idle"}
 _OC_ACTIVITY = {"running": "working", "idle": "idle"}
-NAME_MAX = sp_channels.NAME_MAX
 DRAIN_READS = 16
 
 _DISCOVERY_LOCK = threading.Lock()
@@ -125,14 +124,6 @@ def _rosters():
         if record is not None:
             rosters.append(record["members"][:MEMBERS_PER_CHANNEL])
     return (general, coverage, gaps), rosters
-
-
-def _registry_by_session(cache):
-    return sp_channels.registry_by_session(cache)
-
-
-def _clip(name):
-    return sp_channels.clip_name(name)
 
 
 def _registry_view(typed, kind, ident, live, by_sid):
@@ -197,7 +188,7 @@ def run_discovery(requester=None):
                 liveness[typed] = sp_channels.member_liveness(typed, cache)
             except Exception:
                 liveness[typed] = "unverified"
-        by_sid = _registry_by_session(cache) if any(not m.startswith("oc:") for m in members) else {}
+        by_sid = sp_channels.registry_by_session(cache) if any(not m.startswith("oc:") for m in members) else {}
         for typed in members:
             kind, _sep, ident = typed.partition(":")
             if kind in ("cc", "codex"):

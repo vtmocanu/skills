@@ -28,6 +28,7 @@ import stat
 import sys
 import time
 import types
+import unicodedata
 import uuid as uuidlib
 from . import constants as sp_constants, protocol as sp_protocol, runtime as sp_runtime
 from . import claude as sp_claude, codex as sp_codex, identity as sp_identity
@@ -970,6 +971,7 @@ LABEL_CURRENT, LABEL_STALE, LABEL_UNVERIFIED = "current", "stale", "unverified"
 PAIR_KNOWN, PAIR_NONE, PAIR_UNVERIFIED = "known", "none", "unverified"
 _MIDDLE_DOT = "·"
 _SUFFIX_START = 4
+SESSION_LOOKUPS_MAX = 32  # OpenCode get_session calls one session_names call may make
 
 
 def clip_name(name):
@@ -1027,7 +1029,8 @@ def session_names(typeds, cache=None):
     """``{typed: name}`` for the typed ids that have one.
 
     cc and codex: the registry name. oc: the title among the recent sessions, else
-    ``opencode.get_session`` (older and child sessions). A failure means no name.
+    ``opencode.get_session`` (older and child sessions), at most SESSION_LOOKUPS_MAX lookups and
+    none after the first failure. A failure or a skipped lookup means no name.
     """
     cache = {} if cache is None else cache
     names = {}
@@ -1043,14 +1046,17 @@ def session_names(typeds, cache=None):
     oc = [t for t in wanted if t.startswith("oc:")]
     if oc:
         titles = opencode_titles()
+        lookups, down = 0, False
         for typed in oc:
             sid = typed.partition(":")[2]
             title = titles.get(sid)
-            if not title:
+            if not title and not down and lookups < SESSION_LOOKUPS_MAX:
+                lookups += 1
                 try:
                     title = clip_name(sp_opencode.get_session(sid).get("title"))
                 except Exception:
                     title = None
+                    down = True  # the service is unavailable: no further lookups in this call
             if title:
                 names[typed] = title
     return names
@@ -1085,10 +1091,20 @@ def _short_id(typed):
     return "%s:%s" % (kind, ident[:8])
 
 
+def _escape_other(char):
+    """``char``, or its ``\\uXXXX`` form when it is category C: ``sp_journal._human`` blanks the ones
+    ``webdata.escape_text`` keeps (Co, Cn), so the CLI and the page would otherwise differ."""
+    if not unicodedata.category(char).startswith("C"):
+        return char
+    code = ord(char)
+    return "\\u%04x" % code if code <= 0xFFFF else "\\U%08x" % code
+
+
 def _label_part(typed, names):
     from . import webdata as sp_webdata  # webdata imports this module at its top
     name = clip_name(names.get(typed))
     text = sp_webdata.escape_text(name if name else _short_id(typed))
+    text = "".join(_escape_other(c) for c in text)
     return text.replace(_MIDDLE_DOT, "\\u00b7")
 
 
@@ -1113,14 +1129,15 @@ def derive_labels(records, names, liveness):
     ``#key``, get U+00B7 and the first L hex chars of the key after ``buddy-``, L from 4 up until
     distinct within the group. A label is display only, never an address.
     """
-    out, buddies, taken = {}, {}, set()
+    out, buddies = {}, {}
+    taken = {"#" + sp_constants.CHANNEL_GENERAL}
     for rec in records:
         key = rec["key"]
+        taken.add("#" + key)
         if rec.get("kind") == "buddy":
             buddies[key] = _buddy_base(rec, names, liveness)
         else:
             out[key] = {"label": "#" + key, "status": LABEL_CURRENT}
-            taken.add("#" + key)
     groups = {}
     for key, (base, _status) in buddies.items():
         groups.setdefault(base, []).append(key)
@@ -1139,27 +1156,32 @@ def derive_labels(records, names, liveness):
     return out
 
 
-def label_context(records, cache, liveness_of=member_liveness, names_of=session_names):
+def label_context(records, cache, liveness_of=None, names_of=None):
     """``(names, liveness)`` for ``derive_labels``: the lead of every buddy record, and the liveness
-    of both members of each known pair. No binding file is read."""
-    names_wanted, live_wanted = [], []
-    for rec in records:
-        if rec.get("kind") != "buddy":
-            continue
+    of both members of each known pair. No binding file is read. The store is peer-writable, so
+    only the first CHANNEL_MAX_CHANNELS buddy records by key are looked up; the rest get short ids."""
+    liveness_of = liveness_of or member_liveness
+    names_of = names_of or session_names
+    names_wanted, live_wanted = set(), set()
+    names_order, live_order = [], []
+    buddies = sorted((r for r in records if r.get("kind") == "buddy"), key=lambda r: r["key"])
+    for rec in buddies[:sp_constants.CHANNEL_MAX_CHANNELS]:
         lead, buddy, pair = pair_of(rec)
         for typed in (lead, buddy):
             if typed and typed not in names_wanted:
-                names_wanted.append(typed)
+                names_wanted.add(typed)
+                names_order.append(typed)
         if pair == PAIR_KNOWN:
             for typed in (lead, buddy):
                 if typed not in live_wanted:
-                    live_wanted.append(typed)
+                    live_wanted.add(typed)
+                    live_order.append(typed)
     try:
-        names = dict(names_of(names_wanted, cache)) if names_wanted else {}
+        names = dict(names_of(names_order, cache)) if names_order else {}
     except Exception:
         names = {}
     liveness = {}
-    for typed in live_wanted:
+    for typed in live_order:
         try:
             liveness[typed] = liveness_of(typed, cache)
         except Exception:
@@ -1178,7 +1200,7 @@ def _cmd_list(args, me):
             "name": rec["key"], "display": rec.get("display"), "kind": rec.get("kind"),
             "owner": rec.get("owner"), "members": len(rec["members"]), "you": role,
             "label": label["label"], "label_status": label["status"],
-            "current_buddy": rec.get("current_buddy"),
+            "current_buddy": pair_of(rec)[1] if rec.get("kind") == "buddy" else None,
         })
     if args.json:
         print(json.dumps(rows))
