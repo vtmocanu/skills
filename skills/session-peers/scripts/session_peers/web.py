@@ -28,7 +28,10 @@ request waits for it at most DISCOVERY_WAIT seconds and then serves the last res
 after DISCOVERY_PASS_BUDGET seconds (a check already running, lsof up to 20 s or an OpenCode API call
 up to 30 s, can overrun it; requests never wait longer than DISCOVERY_WAIT) and checks at most
 SUBPROCESS_MEMBERS_PER_PASS members that need a subprocess (Codex, OpenCode); members not reached are
-``unverified`` and the result's ``discovery`` object carries ``truncated``. The pass runs with
+``unverified`` and the result's ``discovery`` object carries ``truncated``. The members of each buddy
+channel's current pair are checked first, so those limits cut the other members, and the channel
+labels (``labels``) keep the previous pass's name and liveness for a pair member a pass could not
+check. The pass runs with
 ``runtime.log`` muted on its thread.
 
 Handler threads must never resolve CODEX_HOME: discovery's ``storage.codex_home_override`` mutates
@@ -108,22 +111,48 @@ _DISCOVERY_LOCK = threading.Lock()
 
 def _empty_discovery(**flags):
     out = {"general": ([], None, []), "liveness": {}, "activity": {}, "names": {}, "homes": {},
-           "stale": False, "pending": False}
+           "labels": {}, "stale": False, "pending": False}
     out.update(flags)
     return out
 
 
-def _rosters():
-    """``(general_discovery, [member lists])``: #general's members, then every readable stored channel's."""
+def _read_records():
+    """``{key: record}`` of every readable stored channel, each read once with its own budget.
+
+    ``webdata._read_record`` opens without following links or blocking, so a planted FIFO or symlink
+    reads as None and is skipped; a fresh budget per record keeps the total of the records from
+    starving the later ones."""
+    records = {}
+    for key in sp_channels.list_keys()[:CHANNELS_MAX]:
+        record = sp_webdata._read_record(key, sp_webdata.Budget())
+        if record is not None:
+            records[key] = record
+    return records
+
+
+def _rosters(records):
+    """``(general_discovery, [member lists])``: #general's members, then every record's."""
     general, coverage, gaps = sp_channels.general_members()
     general = [m for m in general if isinstance(m, str)]
     rosters = [general[:MEMBERS_PER_CHANNEL]]
-    budget = sp_webdata.Budget()
-    for key in sp_channels.list_keys()[:CHANNELS_MAX]:
-        record = sp_webdata._read_record(key, budget)
-        if record is not None:
-            rosters.append(record["members"][:MEMBERS_PER_CHANNEL])
+    rosters.extend(record["members"][:MEMBERS_PER_CHANNEL] for record in records.values())
     return (general, coverage, gaps), rosters
+
+
+def _pair_identities(records):
+    """``(live, named)``: the typed ids whose liveness a label needs (both members of each known pair)
+    and those whose name it needs (every lead and current buddy), first CHANNEL_MAX_CHANNELS buddy
+    records by key only, as ``channels.label_context``."""
+    live, named = [], []
+    buddies = sorted((r for r in records.values() if r.get("kind") == "buddy"), key=lambda r: r["key"])
+    for record in buddies[:sp_constants.CHANNEL_MAX_CHANNELS]:
+        lead, buddy, pair = sp_channels.pair_of(record)
+        for typed in (lead, buddy):
+            if typed and typed not in named:
+                named.append(typed)
+            if pair == sp_channels.PAIR_KNOWN and typed not in live:
+                live.append(typed)
+    return live, named
 
 
 def _registry_view(typed, kind, ident, live, by_sid):
@@ -155,16 +184,25 @@ def _opencode_view(members):
     return activity, names
 
 
-def run_discovery(requester=None):
+def run_discovery(requester=None, previous=None):
     """One discovery pass: the ``discovery`` dict ``webdata.state_view`` takes. Reads only, never creates.
 
     ``requester`` (chat mode: the browser peer's sid) adds ``replies_left``: for each Codex member whose
     home was found, the replies that requester has left in the member's saved reply budget (None when it
-    cannot be read). It is worked out here, on the discovery thread, never on a request thread."""
+    cannot be read). It is worked out here, on the discovery thread, never on a request thread.
+
+    ``labels`` are ``channels.derive_labels`` over the channel records read here (the same records
+    ``channel list`` labels). The identities of every known buddy pair are checked before any other
+    member, so the pass limits cut the roster, not the labels; an identity this pass still could not
+    check (``label_names``, ``label_liveness`` hold what labels used) keeps ``previous``'s name and
+    liveness (the previous pass's result), else its short id and ``unverified``, and the pass is
+    ``truncated``."""
     with _DISCOVERY_LOCK, sp_storage.no_create(), sp_runtime.quiet():
-        general, rosters = _rosters()
+        records = _read_records()
+        general, rosters = _rosters(records)
+        live_ids, named_ids = _pair_identities(records)
         members, seen = [], set()
-        for roster in rosters:
+        for roster in [live_ids] + rosters:
             for typed in roster:
                 if typed not in seen and len(members) < MEMBERS_TOTAL:
                     seen.add(typed)
@@ -188,7 +226,9 @@ def run_discovery(requester=None):
                 liveness[typed] = sp_channels.member_liveness(typed, cache)
             except Exception:
                 liveness[typed] = "unverified"
-        by_sid = sp_channels.registry_by_session(cache) if any(not m.startswith("oc:") for m in members) else {}
+        by_sid = {}
+        if any(not m.startswith("oc:") for m in members) or any(not m.startswith("oc:") for m in named_ids):
+            by_sid = sp_channels.registry_by_session(cache)
         for typed in members:
             kind, _sep, ident = typed.partition(":")
             if kind in ("cc", "codex"):
@@ -207,9 +247,36 @@ def run_discovery(requester=None):
             names.update(oc_names)
         elif oc_members:
             truncated = True
+        prev = previous if isinstance(previous, dict) else {}
+        prev_names = prev.get("label_names") if isinstance(prev.get("label_names"), dict) else {}
+        prev_live = prev.get("label_liveness") if isinstance(prev.get("label_liveness"), dict) else {}
+        label_names, label_live = {}, {}
+        oc_named = [t for t in named_ids if t.startswith("oc:")]
+        for typed in named_ids:
+            kind, _sep, ident = typed.partition(":")
+            if kind in ("cc", "codex"):  # one registry read, no allowance
+                name = sp_channels.registry_name(kind, ident, by_sid)
+                if name:
+                    label_names[typed] = name
+        if oc_named and time.monotonic() < deadline:
+            try:
+                label_names.update(sp_channels.session_names(oc_named, cache))
+            except Exception:
+                pass
+        elif oc_named:  # out of time: what the previous pass found stays
+            truncated = True
+            label_names.update({t: prev_names[t] for t in oc_named if isinstance(prev_names.get(t), str)})
+        for typed in live_ids:
+            if typed in checked:
+                label_live[typed] = liveness[typed]
+            else:
+                label_live[typed] = prev_live.get(typed) if prev_live.get(typed) in ("live", "gone", "unverified") else "unverified"
+        labels = sp_channels.derive_labels(
+            list(records.values()), {**names, **label_names}, {**liveness, **label_live})
         found = {"general": general, "liveness": liveness, "activity": activity, "names": names,
                  "homes": homes, "stale": False, "pending": False, "truncated": truncated,
-                 "unchecked": unchecked}
+                 "unchecked": unchecked, "labels": labels, "label_names": label_names,
+                 "label_liveness": label_live}
         if requester is not None:
             replies = {}
             for typed in members:
@@ -237,7 +304,9 @@ class Discovery:
         result = None
         try:
             requester = self._requester() if self._requester is not None else None
-            result = run_discovery(requester) if requester is not None else run_discovery()
+            with self._cond:
+                kwargs = {"previous": self._result} if self._result is not None else {}
+            result = run_discovery(requester, **kwargs) if requester is not None else run_discovery(**kwargs)
         except Exception:  # a failed pass marks the answer stale/pending; its cause is never logged
             result = None
         finally:

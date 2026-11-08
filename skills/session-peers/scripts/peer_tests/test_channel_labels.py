@@ -7,7 +7,7 @@ key stays the address.
 from peer_tests.support import *  # noqa: F401,F403
 from peer_tests.test_channel_buddy import BuddyChannelBase
 from peer_tests.test_opencode import OC_A, OC_B
-from session_peers import channels as sp_channels, journal as sp_journal, webdata as sp_webdata
+from session_peers import channels as sp_channels, journal as sp_journal, web, webdata as sp_webdata
 
 DOT = "·"
 ASCII_DOT = "\\u00b7"
@@ -615,3 +615,58 @@ class AddressingTests(LabelBase):
                 rc, _out, err = self.ch(*args)
                 self.assertEqual(rc, 0, err)
         self.assertNotIn(label, json.dumps(sp_channels.read_channel(self.key)))
+
+
+class PageLabelTests(LabelBase):
+    """The page's label (``state_view`` over a discovery pass) is the CLI's label, from any CODEX_HOME."""
+
+    def page(self):
+        view = sp_webdata.state_view(web.run_discovery())
+        return {row["key"]: row for row in view["channels"]}
+
+    def page_label(self):
+        row = self.page()[self.key]
+        return row["label"], row["label_status"]
+
+    def agree(self):
+        """The page and the CLI show one label from each of two homes; that label is returned."""
+        seen = []
+        (self.root / "orca").mkdir(exist_ok=True)
+        try:
+            for home in (self.codex_dir, self.root / "orca"):
+                os.environ["CODEX_HOME"] = str(home)
+                row = self.row()
+                cli = (row["label"], row["label_status"])
+                self.assertEqual(self.page_label(), cli)
+                seen.append(cli)
+        finally:
+            os.environ["CODEX_HOME"] = str(self.codex_dir)
+        self.assertEqual(seen[0], seen[1])
+        return seen[0]
+
+    def test_set_clear_and_handover_give_the_same_page_and_cli_label_from_both_homes(self):
+        self.assertEqual(self.bset(self.x)[0], 0)
+        self.assertEqual(self.agree(), ("#lead-" + self.short(self.x), "current"))
+        os.environ["CODEX_HOME"] = str(self.root / "orca")
+        (self.root / "orca").mkdir(exist_ok=True)
+        self.assertEqual(self.page_label()[0], "#lead-" + self.short(self.x))
+        os.environ["CODEX_HOME"] = str(self.codex_dir)
+        self.assertEqual(self.cli("buddy", "clear")[0], 0)
+        self.assertEqual(self.agree(), ("#lead", "stale"))
+        self.assertEqual(self.bset(self.y)[0], 0)
+        _peer, successor = self.peer_cc("successor")
+        self.assertEqual(self.cli("inbox", "handover", "--to", successor)[0], 0)
+        self.assertEqual(self.cli("handover", "--to", successor)[0], 0)
+        self.assertEqual(self.agree(), ("#successor", "stale"))
+
+    def test_hostile_names_give_the_same_label_in_state_view_json_and_channel_list(self):
+        self.rename_lead("evil\x1b]0;pwned\x07\n<b>x</b>" + DOT + "͸")
+        self.assertEqual(self.bset(self.x)[0], 0)
+        cli = self.row()["label"]
+        view = sp_webdata.state_view(web.run_discovery())
+        shown = json.loads(json.dumps(view))
+        label = {row["key"]: row for row in shown["channels"]}[self.key]["label"]
+        self.assertEqual(label, cli)
+        self.assertIn(ASCII_DOT, label)
+        for bad in ("\x1b", "\x07", "\n", DOT):
+            self.assertNotIn(bad, label)

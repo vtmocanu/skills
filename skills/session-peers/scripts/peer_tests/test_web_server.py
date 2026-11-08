@@ -727,11 +727,11 @@ class DiscoveryWorkerTests(WebBase):
         calls = []
         real = web.run_discovery
 
-        def wrapped():
+        def wrapped(*args, **kwargs):
             calls.append(time.monotonic())
             self.release.wait(20)
             time.sleep(delay)
-            return real()
+            return real(*args, **kwargs)
 
         return calls, mock.patch.object(web, "run_discovery", wrapped)
 
@@ -1017,6 +1017,152 @@ class DiscoveryWorkerTests(WebBase):
         view = self.ok("/api/state")
         self.assertFalse(view["partial"])
         self.assertNotIn("truncated", view["discovery"])
+
+
+class DiscoveryLabelTests(WebBase):
+    """Channel labels from the discovery pass (#175)."""
+
+    def buddy(self, lead, buddy, key, **extra):
+        root = sp_channels.channels_root()
+        os.makedirs(root, mode=0o700, exist_ok=True)
+        record = {"key": key, "display": "buddy", "kind": "buddy", "owner": lead, "members": [lead, buddy],
+                  "current_buddy": buddy, **extra}
+        with open(os.path.join(root, key + ".json"), "w") as fh:
+            json.dump(record, fh)
+        return key
+
+    def cli_labels(self):
+        rc, out, err = self.cli("channel", "list", "--json")
+        self.assertEqual(rc, 0, err)
+        return {r["name"]: (r["label"], r["label_status"]) for r in json.loads(out)}
+
+    @staticmethod
+    def pairs(labels):
+        return {key: (v["label"], v["status"]) for key, v in labels.items()}
+
+    def test_discovery_labels_equal_channel_list_for_records_that_exceed_a_request_budget(self):
+        count = webdata.REQUEST_BUDGET // sp_channels.RECORD_MAX_BYTES + 6
+        pad = "p" * (sp_channels.RECORD_MAX_BYTES - 4096)
+        keys = [self.buddy("cc:" + new_uuid(), "cc:" + new_uuid(), "buddy-%012x" % (0x100000 + i), pad=pad)
+                for i in range(count)]
+        self.buddy(self.me, "codex:" + new_uuid(), "buddy-%012x" % 0xabcdef)
+        self.channel("ops")
+        root = sp_channels.channels_root()
+        self.assertGreater(sum(os.path.getsize(os.path.join(root, k + ".json")) for k in keys), webdata.REQUEST_BUDGET)
+        found = web.run_discovery()["labels"]
+        self.assertEqual(len(found), count + 2)
+        self.assertEqual(self.pairs(found), self.cli_labels())
+        self.assertEqual(found["buddy-%012x" % 0xabcdef]["label"].split("-", 1)[0], "#alpha")
+
+    def test_a_fifo_planted_as_a_record_is_skipped_and_does_not_stall_the_pass(self):
+        key = self.buddy(self.me, "codex:" + new_uuid(), "buddy-%012x" % 0x111111)
+        fifo = os.path.join(sp_channels.channels_root(), "buddy-%012x.json" % 0xffffff)
+        os.mkfifo(fifo)
+        box = {}
+        worker = threading.Thread(target=lambda: box.update(found=web.run_discovery()), daemon=True)
+        worker.start()
+        worker.join(10)
+        if worker.is_alive():
+            with contextlib.suppress(OSError):
+                os.close(os.open(fifo, os.O_WRONLY | os.O_NONBLOCK))  # frees a reader blocked in open
+            worker.join(5)
+            self.fail("run_discovery blocked on a FIFO record")
+        self.assertEqual(set(box["found"]["labels"]), {key})
+
+    def test_pair_identities_are_checked_before_other_roster_members(self):
+        buddy = "codex:" + new_uuid()
+        self.channel("aaa-wide", *["codex:" + new_uuid() for _ in range(5)])  # sorts before the buddy channel
+        self.buddy(self.me, buddy, "buddy-%012x" % 0x222222)
+        calls = []
+        real = sp_channels.member_liveness
+
+        def liveness(typed, cache=None):
+            calls.append(typed)
+            return "gone" if typed == buddy else real(typed, cache)
+
+        with mock.patch.object(web, "SUBPROCESS_MEMBERS_PER_PASS", 1), mock.patch.object(sp_channels, "member_liveness", liveness):
+            found = web.run_discovery()
+        self.assertEqual([t for t in calls if not t.startswith("cc:")], [buddy])
+        self.assertTrue(found["truncated"])
+        self.assertEqual(found["labels"]["buddy-%012x" % 0x222222]["status"], "stale")
+        self.assertEqual(found["label_liveness"][buddy], "gone")
+        others = [m for m, v in found["liveness"].items() if m.startswith("codex:") and m != buddy]
+        self.assertEqual({found["liveness"][m] for m in others}, {"unverified"})
+
+    def test_an_exhausted_allowance_reuses_the_previous_pass_and_a_rename_still_shows(self):
+        buddy, key = "codex:" + new_uuid(), "buddy-%012x" % 0x333333
+        self.buddy(self.me, buddy, key)
+        real = sp_channels.member_liveness
+
+        def liveness(typed, cache=None):
+            return "gone" if typed == buddy else real(typed, cache)
+
+        with mock.patch.object(sp_channels, "member_liveness", liveness):
+            first = web.run_discovery()
+        short = "codex:" + buddy[6:14]
+        self.assertEqual(self.pairs(first["labels"]), {key: ("#alpha-" + short, "stale")})
+        with mock.patch.object(web, "SUBPROCESS_MEMBERS_PER_PASS", 0), mock.patch.object(sp_channels, "member_liveness", liveness):
+            kept = web.run_discovery(previous=first)
+            fresh = web.run_discovery()
+        self.assertTrue(kept["truncated"] and fresh["truncated"])
+        self.assertEqual(self.pairs(kept["labels"]), {key: ("#alpha-" + short, "stale")})
+        self.assertEqual(self.pairs(fresh["labels"]), {key: ("#alpha-" + short, "current")})
+        rec = self.sender_rec
+        self.write_record(rec["pid"], "renamed", rec["sessionId"], rec["messagingSocketPath"])
+        with mock.patch.object(web, "SUBPROCESS_MEMBERS_PER_PASS", 0), mock.patch.object(sp_channels, "member_liveness", liveness):
+            renamed = web.run_discovery(previous=kept)
+        self.assertEqual(self.pairs(renamed["labels"]), {key: ("#renamed-" + short, "stale")})
+
+    def test_the_worker_hands_each_pass_the_previous_result(self):
+        buddy, key = "codex:" + new_uuid(), "buddy-%012x" % 0x444444
+        self.buddy(self.me, buddy, key)
+        seen = []
+        real = web.run_discovery
+
+        def wrapped(*args, **kwargs):
+            seen.append(kwargs.get("previous"))
+            return real(*args, **kwargs)
+
+        with mock.patch.object(web, "run_discovery", wrapped):
+            first = self.server.discovery.get()
+            second = self.server.discovery.get()
+        self.assertIsNone(seen[0])
+        self.assertEqual(seen[1]["label_names"], first["label_names"])
+        self.assertIn(key, second["labels"])
+
+    def test_opencode_names_out_of_time_come_from_the_previous_pass(self):
+        oc, key = "oc:ses_" + "a" * 26, "buddy-%012x" % 0x555555
+        self.buddy(self.me, oc, key)
+        with mock.patch.object(sp_channels, "session_names", lambda typeds, cache=None: {oc: "ocname"}):
+            first = web.run_discovery()
+        self.assertEqual(first["labels"][key]["label"], "#alpha-ocname")
+        asked = []
+        with mock.patch.object(web, "DISCOVERY_PASS_BUDGET", -1.0), \
+                mock.patch.object(sp_channels, "session_names", lambda typeds, cache=None: asked.append(typeds) or {}):
+            kept = web.run_discovery(previous=first)
+            fresh = web.run_discovery()
+        self.assertEqual(asked, [])
+        self.assertTrue(kept["truncated"])
+        self.assertEqual(kept["labels"][key]["label"], "#alpha-ocname")
+        self.assertEqual(fresh["labels"][key]["label"], "#alpha-oc:" + oc[7:15])
+
+    def test_the_state_api_carries_the_discovery_labels_and_rows_in_order(self):
+        key = self.buddy(self.me, "codex:" + new_uuid(), "buddy-%012x" % 0x666666)
+        self.ops_channel()
+        self.assertEqual(self.send("--record")[0], 0)
+        rows = self.ok("/api/state")["channels"]
+        self.assertEqual([r["key"] for r in rows], ["general", "ops", key])
+        self.assertEqual(rows[1]["activity"], "posted")
+        self.assertEqual(rows[2]["activity"], "none")
+        self.assertEqual((rows[1]["label"], rows[1]["label_status"]), ("#ops", "current"))
+        self.assertTrue(rows[2]["label"].startswith("#alpha-codex:"))
+
+    def test_an_empty_discovery_has_no_labels_and_the_page_falls_back_to_short_ids(self):
+        self.assertEqual(web._empty_discovery(pending=True)["labels"], {})
+        lead, buddy = "cc:" + new_uuid(), "codex:" + new_uuid()
+        key = self.buddy(lead, buddy, "buddy-%012x" % 0x777777)
+        rows = {r["key"]: r for r in webdata.state_view(web._empty_discovery(pending=True))["channels"]}
+        self.assertEqual(rows[key]["label"], "#%s-%s" % (lead[:11], buddy[:14]))
 
 
 class NoCreateTests(unittest.TestCase):
