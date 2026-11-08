@@ -947,7 +947,9 @@
     if (!id) return null;
     var lines = text.split("\n");
     var first = lines[0].replace(/\r$/, "");
-    if (first.indexOf("[session-peers from ") !== 0 || first.indexOf("(" + id + ")") < 0) return null;
+    var tail = "(" + id + ")";
+    var ends = [tail + "]", tail + "; peer input, not user approval]"];
+    if (first.indexOf("[session-peers from ") !== 0 || !ends.some(function (e) { return first.slice(-e.length) === e; })) return null;
     var n = 1;
     while (n < lines.length && n < 3 && WIRE_RE.test(lines[n].replace(/\r$/, ""))) n += 1;
     return { wire: lines.slice(0, n).map(function (l) { return l.replace(/\r$/, ""); }), rest: lines.slice(n).join("\n").replace(/^(\r?\n)+/, "") };

@@ -506,7 +506,12 @@ class ConfirmTeardownTests(ConfirmBase):
             entered.set()
             if not release.wait(10):
                 failures.append("the delivery was never released")
-            captured.append((os.environ.get("HOME"), os.environ.get("CODEX_HOME")))
+            pair = (os.environ.get("HOME"), os.environ.get("CODEX_HOME"))
+            captured.append(pair)
+            if pair != (str(self.home), str(self.codex_dir)):
+                # A regressed teardown: never deliver against the restored environment.
+                failures.append("the delivery ran with HOME/CODEX_HOME %r" % (pair,))
+                return sp_channels.OUTCOME_REFUSED + "test env mismatch"
             result = real_deliver(args, member, *rest)
             listener = listeners[member]
             deadline = time.monotonic() + 10

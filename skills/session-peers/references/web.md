@@ -309,9 +309,10 @@ unavailable), nothing is shown and the sender is told afterwards: a
 `peers.py send --to web:` waits for an answer line on its connection.
 
 The feed takes its provenance from the verified sender, never from the body;
-an unverified sender shows as such. The body's own `[session-peers from ...]`
-lines are shown muted above the text only when the first names that verified
-sender's id; otherwise they stay in the text. "Verified" means the frame's claimed
+an unverified sender shows as such. The body's leading origin line
+(`[session-peers from ...]`) naming that verified sender's id, plus any tag and
+`reply route` lines directly following it (at most 3 lines in all), are shown
+as one muted line above the text; any other text stays in the body. "Verified" means the frame's claimed
 reply socket belongs to a live registry record; the sending process is not
 authenticated to that record. Any process of the same OS user can claim
 another live session's socket, the same trust boundary as the rest of

@@ -1599,6 +1599,27 @@ test("chat: only a verified sender's matching origin line is demoted; any other 
   const replyLine = render({ sender: CODEX_B, sender_name: "cx", text: ORIGIN + "\n[in reply to message m1]\nhello" })
   assert.equal(wires(replyLine).length, 1)
   assert.ok(bodyOf(replyLine).includes("[in reply to message m1]"))
+  const as = (text) => render({ sender: CODEX_B, sender_name: "cx", text })
+  const capped = as([ORIGIN, TAGLINE, ROUTE, ROUTE, "hello"].join("\n"))
+  assert.equal(wires(capped)[0].textContent, [ORIGIN, TAGLINE, ROUTE].join(" "))
+  assert.ok(bodyOf(capped).includes(ROUTE) && bodyOf(capped).includes("hello"))
+  const second = as([ORIGIN, ORIGIN, TAGLINE, "hello"].join("\n"))
+  assert.equal(wires(second)[0].textContent, ORIGIN)
+  assert.ok(bodyOf(second).includes(ORIGIN) && bodyOf(second).includes(TAGLINE))
+  const stays = [
+    ORIGIN + " trailing",
+    `[session-peers from Claude Code session boss (${CODEX_ID}) and more`,
+    `[session-peers from Claude Code session boss (${CODEX_ID}`,
+    `[session-peers from boss (${CODEX_ID}) x (OTHER)]`,
+  ]
+  for (const line of stays) {
+    const node = as(line + "\nhello")
+    assert.equal(wires(node).length, 0, line)
+    assert.ok(bodyOf(node).includes(line), line)
+  }
+  const plain = as(`[session-peers from Claude Code session boss (${CODEX_ID})]\nhello`)
+  assert.equal(wires(plain).length, 1)
+  assert.equal(bodyOf(as(ORIGIN + "\n\n\nhello")), "hello")
 })
 
 test("chat: the Browser tally reads acknowledged and counts unverified recipients", () => {
