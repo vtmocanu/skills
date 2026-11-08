@@ -37,12 +37,32 @@ the same user. Connection, header and read-budget details are in the
 
 ## What the page shows
 
-- **Channels rail.** `#general` first, then stored channels. Each lists its
-  members with runtime icon and name and a state: working, idle, unverified or
+- **Channels rail.** `#general` and the Browser lane first, then stored
+  channels. A buddy channel is shown by its label (the pair's names, for
+  example `#lead-buddy`), the same string as in [`channel list`](channels.md#buddy-channel-labels),
+  and the header shows it too; the `buddy-<hash>` key is still what the page
+  posts to and copies. A label is marked `stale` when there is no current buddy
+  or a pair member is gone, and `pair unverified` when the record does not
+  establish the pair. Each channel lists
+  its members with runtime icon and name and a state: working, idle, unverified or
   gone. A handover chain (buddy channels) and a `missing ACKs` (or `ACKs
   unverified`) badge cover the latest 25 entries of the channel; `unverified`
   appears when the read budget ran out before the ACK state could be
   established.
+  - **Order.** `#general` and the Browser lane are pinned. The other channels
+    follow by their newest send (newest first), then channels with no posts,
+    then channels whose activity is unknown; ties break by label, then key.
+    Only sends count (not joins, leaves or handovers), so a membership change
+    does not move a channel. A channel whose newest send is stamped more than
+    300 s in the future counts as unknown. The channel you selected stays
+    selected and is scrolled into view when the rail reorders.
+  - **Activity unknown.** A channel shows an "activity unknown" note, distinct
+    from "no posts", when its newest send could not be established: the read
+    did not reach one within its bounds, met an oversized entry that may hide a
+    newer send, or was skipped or answered with a gap on a poll
+    (`activity_unknown` in `/api/changes`).
+  - **Renames.** A session rename shows on the next state refresh (every 5th
+    poll), not the next poll.
 - **Conversation.** Entries oldest first. A verdict message shows a band
   (`APPROVE`, `REVISE: N`, `BLOCK`) with its pinned SHA. A send lists one row
   per recipient with the [channels](channels.md#outcomes) outcome
@@ -104,6 +124,21 @@ Everything is bounded; a request that hits a bound says so in the page
   `unverified` and the page notes "discovery stopped early". A check already
   running (`lsof`, an OpenCode API call) can overrun the 8 s. A request waits
   at most 7 s, then serves the last result as stale or an empty pending one.
+- **Labels and order.** Labels are computed on the discovery thread over at
+  most 256 stored channel records (each read with its own budget), so a request
+  adds no lookups. Pair identities (a buddy channel's lead and current buddy)
+  are checked before any other member, so the 64-session and 8 s limits cut the
+  rosters, not the labels. An identity a pass could not check (out of time, a
+  failed or skipped OpenCode lookup) keeps the previous pass's name and
+  liveness, else its short id and `unverified`, and discovery reads as
+  incomplete (`discovery stopped early`); a deleted OpenCode session (reported
+  not found) does not keep its old name and does not mark the pass incomplete.
+  Before the first discovery result, labels are derived from the records read
+  with no session names. Finding the newest send continues past the 25-entry
+  alert page within the channel's 1 MiB read, reading at most 256 KiB more per
+  channel and, across all tracked channels, about a quarter of what is left of
+  the 8 MiB request; a channel it cannot settle within that is activity
+  unknown.
 - **What it touches.** A non-blocking probe of each channel's per-send lock,
   pidfile probes, `ps`, `lsof` and `opencode` subprocesses, and the Codex
   state SQLite opened read-only (opening a WAL database read-only may touch its
