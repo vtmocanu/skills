@@ -3,6 +3,7 @@
 import argparse
 import contextlib
 import io
+import time
 
 from peer_tests.support import *  # noqa: F401,F403
 from peer_tests.test_channel_buddy import BuddyChannelBase
@@ -50,6 +51,20 @@ class BuddyRouteTests(TargetedBase):
     def test_a_member_outside_the_roster_has_no_route(self):
         outsider = "codex:" + new_uuid()
         self.assertEqual(sp_channels.buddy_route(self.lead, outsider), (None, "member not in #%s" % self.key))
+
+    def test_a_channel_that_is_not_a_buddy_channel_has_no_route(self):
+        rec = sp_channels.read_channel(self.key)
+        rec["kind"] = "plain"
+        sp_channels._write_record(rec)
+        with mock.patch.object(sp_channels, "find_buddy_channel", return_value=self.key):
+            self.assertEqual(sp_channels.buddy_route(self.lead, self.x), (None, "no buddy channel"))
+
+    def test_a_buddy_channel_of_another_owner_has_no_route(self):
+        rec = sp_channels.read_channel(self.key)
+        rec["owner"] = "cc:" + new_uuid()
+        sp_channels._write_record(rec)
+        with mock.patch.object(sp_channels, "find_buddy_channel", return_value=self.key):
+            self.assertEqual(sp_channels.buddy_route(self.lead, self.x), (None, "no buddy channel"))
 
     def test_a_lead_who_left_the_roster_has_no_route(self):
         rec = sp_channels.read_channel(self.key)
@@ -134,6 +149,12 @@ class SendTargetedTests(TargetedBase):
         self.assertRegex(str(ctx.exception), r"channel header .*\bis \d+ bytes")
         self.assertIsInstance(ctx.exception, sp_channels.ChannelError)
 
+    def test_prepare_targeted_refuses_a_sender_that_is_not_a_member(self):
+        outsider = "cc:" + new_uuid()
+        with self.assertRaises(sp_channels.ChannelError) as ctx:
+            sp_channels.prepare_targeted(self.key, outsider, self.y, "hi", new_uuid(), False)
+        self.assertIn("is not a member of #%s" % self.key, str(ctx.exception))
+
     def test_prepare_targeted_writes_nothing(self):
         before = (self.sends(), self.journal_entries())
         plan = sp_channels.prepare_targeted(self.key, self.lead, self.y, "@all hi", new_uuid(), True, wake=True)
@@ -178,6 +199,43 @@ class UnknownOutcomeTests(TargetedBase):
         self.assertIn(
             "error: outcome unknown: could not confirm delivery to %s: boom; "
             "check the recipient before resending" % self.peer_typed, err.getvalue())
+
+    def test_the_uncertain_error_message_is_printed_by_send_claude(self):
+        rec = self.read_peer_record()
+        args = self.targeted_args("hi", to=self.peer_typed)
+        err = io.StringIO()
+        with mock.patch.object(sp_claude, "send_frame", side_effect=sp_claude.FrameUncertain("boom")), \
+                mock.patch.object(sp_claude, "_resolve_claude_record", return_value=rec), \
+                mock.patch.object(sp_routes, "verify_record", return_value=None), \
+                contextlib.redirect_stderr(err):
+            rc = sp_messaging._send_claude(self.peer_typed, args, {"id": OC_B})
+        self.assertEqual(rc, 1)
+        self.assertIn(
+            "error: outcome unknown: could not confirm delivery to %s: boom; "
+            "check the recipient before resending" % self.peer_typed, err.getvalue())
+
+    def test_send_claude_keeps_the_reply_wake_grant_on_an_uncertain_frame(self):
+        rec = self.read_peer_record()
+        args = self.targeted_args("hi", to=self.peer_typed, allow_reply_wake=30)
+        with mock.patch.object(sp_claude, "send_frame", side_effect=sp_claude.FrameUncertain("boom")), \
+                mock.patch.object(sp_claude, "_resolve_claude_record", return_value=rec), \
+                mock.patch.object(sp_routes, "verify_record", return_value=None), \
+                mock.patch.object(sp_messaging.sp_reply_wake, "issue", return_value={"expires_at": 1}) as issue, \
+                mock.patch.object(sp_messaging.sp_reply_wake, "forget") as forget, \
+                contextlib.redirect_stderr(io.StringIO()):
+            rc = sp_messaging._send_claude(self.peer_typed, args, {"id": OC_B})
+        self.assertEqual(rc, 1)
+        issue.assert_called_once()
+        forget.assert_not_called()
+        # A refusal that left nothing behind still drops the grant.
+        with mock.patch.object(sp_claude, "send_frame", side_effect=OSError("refused")), \
+                mock.patch.object(sp_claude, "_resolve_claude_record", return_value=rec), \
+                mock.patch.object(sp_routes, "verify_record", return_value=None), \
+                mock.patch.object(sp_messaging.sp_reply_wake, "issue", return_value={"expires_at": 1}), \
+                mock.patch.object(sp_messaging.sp_reply_wake, "forget") as forget, \
+                contextlib.redirect_stderr(io.StringIO()):
+            sp_messaging._send_claude(self.peer_typed, args, {"id": OC_B})
+        forget.assert_called_once()
 
     def read_peer_record(self):
         return [r for r in sp_claude.read_claude_records()
@@ -400,3 +458,215 @@ class WebdataTargetedTests(TargetedBase):
         self.assertNotIn("tally", send)
         alerts = {row["key"]: row["alert"] for row in webdata.state_view(EMPTY)["channels"]}
         self.assertIsNone(alerts[self.key])
+
+    def test_state_view_reads_no_journal_entry_for_a_targeted_alls_message_id(self):
+        rc, _out, err = self.send_to(self.y, "@all freeze", record=True)
+        self.assertEqual(rc, 0, err)
+        mid = self.sends()[0]["data"]["message_id"]
+        wanted = []
+        real = sp_journal.read_since
+
+        def spy(*args, **kwargs):
+            wanted.append(kwargs.get("want"))
+            return real(*args, **kwargs)
+
+        with mock.patch.object(sp_journal, "read_since", spy):
+            webdata.state_view(EMPTY)
+        for want in wanted:
+            self.assertNotIn(mid, want or ())
+
+
+class BuddySendBase(BuddyChannelBase):
+    """A lead whose current buddy is ``self.y``, with ``self.x`` an earlier buddy still on the roster."""
+
+    def setUp(self):
+        super().setUp()
+        for member in (self.x, self.y):
+            rc, _out, err = self.bset(member)
+            self.assertEqual(rc, 0, err)
+
+    def send_buddy(self, *extra, message="hello"):
+        return self.cli("send", "--to", "buddy", "--message", message, *extra)
+
+    def sends(self):
+        return [e for e in self.history(self.key) if e["kind"] == "channel.send"]
+
+    def direct_queued(self, thread):
+        return [c for c in self.queue_calls() if c[2] == thread]
+
+
+class BuddySendRouteTests(BuddySendBase):
+    def test_the_message_rides_the_channel_once_to_the_buddy_alone(self):
+        rc, out, err = self.send_buddy("--json")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(err, "")
+        entries = self.sends()
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["data"]["recipients"], [self.y])
+        self.assertIs(entries[0]["data"]["targeted"], True)
+        rc, tail_out, tail_err = self.cli("channel", "tail", self.key, "--json")
+        self.assertEqual(rc, 0, tail_err)
+        tail_sends = [e for e in json.loads(tail_out)["entries"] if e["kind"] == "channel.send"]
+        self.assertEqual(len(tail_sends), 1)
+        queued = self.queue_calls()
+        self.assertEqual([c[2] for c in queued], [self.y.partition(":")[2]])
+        result = json.loads(out)
+        self.assertEqual((result["route"], result["channel"]), ("buddy_channel", self.key))
+        # The keys a direct codex send reports are still there.
+        rc, direct_out, err = self.cli("send", "--to", self.y, "--message", "again", "--json")
+        self.assertEqual(rc, 0, err)
+        self.assertLessEqual(set(json.loads(direct_out)), set(result))
+        self.assertEqual(result["status"], json.loads(direct_out)["status"])
+
+    def test_an_earlier_buddy_on_the_roster_receives_nothing(self):
+        rc, _out, err = self.send_buddy()
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self.direct_queued(self.x.partition(":")[2]), [])
+
+    def test_a_leading_all_adds_no_recipients(self):
+        rc, _out, err = self.send_buddy(message="@all stop")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self.sends()[0]["data"]["recipients"], [self.y])
+        self.assertEqual(len(self.queue_calls()), 1)
+        self.assertEqual(self.journal_entries(), [])
+
+    def test_a_bound_opencode_buddy_is_woken_like_a_direct_send(self):
+        rc, _out, err = self.cli("buddy", "clear")
+        self.assertEqual(rc, 0, err)
+        rc, _out, err = self.bset("oc:oc-buddy")
+        self.assertEqual(rc, 0, err)
+        rc, _out, err = self.send_buddy("--json")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(len(self.sends()), 1)
+        prompts = self.oc_calls("session.prompt")
+        self.assertEqual(len(prompts), 1)
+        self.assertTrue(prompts[0]["data"]["resume"])
+
+    def test_wake_wakes_a_member_that_is_not_the_bound_buddy(self):
+        rc, _out, err = self.bset("oc:oc-buddy")
+        self.assertEqual(rc, 0, err)
+        rc, _out, err = self.send_buddy("--wake")
+        self.assertEqual(rc, 0, err)
+        prompts = self.oc_calls("session.prompt")
+        self.assertEqual(len(prompts), 1)
+        self.assertTrue(prompts[0]["data"]["resume"])
+
+    def test_a_claude_buddy_is_reached_through_the_channel(self):
+        listener, peer = self.peer_cc("bravo")
+        rc, _out, err = self.bset(peer)
+        self.assertEqual(rc, 0, err)
+        rc, _out, err = self.send_buddy()
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(len(self.sends()), 1)
+        self.assertTrue(wait_for(lambda: len(listener.of_type("user")) == 1))
+
+    def test_a_claude_buddy_without_a_channel_is_refused_as_before(self):
+        listener, peer = self.peer_cc("bravo")
+        rc, _out, err = self.bset(peer)
+        self.assertEqual(rc, 0, err)
+        os.unlink(sp_channels._record_path(self.key))
+        rc, _out, err = self.send_buddy()
+        self.assertNotEqual(rc, 0)
+        self.assertIn("note: buddy channel not used: no buddy channel; sent directly", err)
+        self.assertIn("SendMessage", err)
+        time.sleep(0.2)
+        self.assertEqual(listener.of_type("user"), [])
+
+
+class BuddySendFallbackTests(BuddySendBase):
+    NOTE = "note: buddy channel not used: %s; sent directly\n"
+
+    def assert_direct(self, rc, err, reason):
+        self.assertIn(self.NOTE % reason, err)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self.sends(), [])
+        self.assertEqual(len(self.direct_queued(self.y.partition(":")[2])), 1)
+
+    def test_no_channel(self):
+        os.unlink(sp_channels._record_path(self.key))
+        rc, _out, err = self.send_buddy()
+        self.assert_direct(rc, err, "no buddy channel")
+
+    def test_the_buddy_is_not_a_member(self):
+        rc, _out, err = self.cli("channel", "remove", self.key, self.y)
+        self.assertEqual(rc, 0, err)
+        rc, _out, err = self.send_buddy()
+        self.assert_direct(rc, err, "member not in #%s" % self.key)
+
+    def test_a_from_override_names_another_sender(self):
+        rc, _out, err = self.send_buddy("--from-name", "someone")
+        self.assertIn(self.NOTE % "--from-* names another sender", err)
+        self.assertEqual(self.sends(), [])
+
+    def test_reply_wake_flags_need_a_direct_delivery(self):
+        for flag in (["--allow-reply-wake", "30"], ["--in-reply-to", new_uuid()]):
+            with self.subTest(flag=flag):
+                rc, _out, err = self.send_buddy(*flag)
+                self.assertIn(
+                    self.NOTE % "--allow-reply-wake/--in-reply-to need a direct OpenCode delivery", err)
+                self.assertEqual(self.sends(), [])
+
+    def test_a_caller_that_is_not_the_binding_owner_goes_direct(self):
+        with mock.patch.object(sp_journal, "caller", return_value="cc:" + new_uuid()):
+            rc, _out, err = self.send_buddy()
+        self.assertIn(self.NOTE % "the caller is not the binding's owner", err)
+        self.assertEqual(self.sends(), [])
+
+    def test_a_sender_identity_failure_is_a_reason(self):
+        with mock.patch.object(sp_journal, "caller", side_effect=sp_journal.JournalRefused("none\x1b[31m")):
+            rc, _out, err = self.send_buddy()
+        self.assertIn("note: buddy channel not used: sender identity: none", err)
+        self.assertNotIn("\x1b", err)
+        self.assertEqual(self.sends(), [])
+
+
+class BuddySendRefusalTests(BuddySendBase):
+    def test_a_gone_buddy_is_refused_with_nothing_written(self):
+        with mock.patch.object(sp_channels, "member_liveness", return_value="gone"):
+            rc, _out, err = self.send_buddy("--record")
+        self.assertEqual(rc, 1)
+        self.assertIn("is gone; nothing was recorded or sent", err)
+        self.assertEqual(self.sends(), [])
+        self.assertEqual(self.journal_entries(), [])
+        self.assertEqual(self.queue_calls(), [])
+
+    def test_an_oversized_header_is_refused_with_nothing_written(self):
+        with mock.patch.object(sp_channels, "_check_size", side_effect=sp_channels.ChannelError("too big", 1)):
+            rc, _out, err = self.send_buddy("--record")
+        self.assertEqual(rc, 1)
+        self.assertRegex(err, r"error: too big \(channel header .*\bis \d+ bytes")
+        self.assertEqual(self.sends(), [])
+        self.assertEqual(self.journal_entries(), [])
+        self.assertEqual(self.queue_calls(), [])
+
+
+class BuddySendRecordTests(BuddySendBase):
+    def test_record_writes_one_entry_like_the_direct_path(self):
+        rc, out, err = self.send_buddy("--record", "--json")
+        self.assertEqual(rc, 0, err)
+        mid = json.loads(out)["message_id"]
+        entries = self.journal_entries()
+        self.assertEqual(len(entries), 1)
+        self.assertEqual((entries[0]["message_id"], entries[0]["from"], entries[0]["to"], entries[0]["body"]),
+                         (mid, self.lead, [self.y], "hello"))
+        self.assertEqual(json.loads(out)["journal"], {"message_id": mid, "recorded": True})
+        # The direct path to the same slot writes the same shape.
+        rc, dout, err = self.cli("send", "--to", self.y, "--message", "hello", "--record", "--json")
+        self.assertEqual(rc, 0, err)
+        direct = [e for e in self.journal_entries() if e["message_id"] == json.loads(dout)["message_id"]][0]
+        for field in ("from", "to", "body"):
+            self.assertEqual(direct[field], entries[0][field])
+        # The recipient reads both acknowledgements the same way.
+        self.as_codex(self.y.partition(":")[2])
+        rc, ack_via, err = self.cli("ack", mid)
+        self.assertEqual(rc, 0, err)
+        rc, ack_direct, err = self.cli("ack", direct["message_id"])
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(ack_via.replace(mid, "MID"), ack_direct.replace(direct["message_id"], "MID"))
+
+
+class BuddyUnchangedTests(BuddySendBase):
+    def test_ask_and_dispatch_to_buddy_do_not_use_the_channel(self):
+        for verb in ("ask", "dispatch"):
+            self.cli(verb, "--to", "buddy", "--message", "review this")
+        self.assertEqual(self.sends(), [])

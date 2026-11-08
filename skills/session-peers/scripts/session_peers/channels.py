@@ -2028,14 +2028,24 @@ def history_floor(key):
         raise ChannelError("could not read the history of #%s: %s" % (key, exc), 1)
 
 
+def _publish_journal(plan):
+    """The journal step of a targeted send: record the message when the plan is journaled."""
+    if plan.journaled:
+        _record_journal(plan)
+
+
+def _publish_history(plan):
+    """The history step of a targeted send: append the ``channel.send`` entry; the held ``_SendLock``."""
+    return _append_send(plan, {"targeted": True})
+
+
 def publish_targeted(plan):
     """Journal (when asked) and append the ``channel.send`` entry; the held ``_SendLock``.
 
     JournalError and ChannelError propagate; nothing is delivered here.
     """
-    if plan.journaled:
-        _record_journal(plan)
-    return _append_send(plan, {"targeted": True})
+    _publish_journal(plan)
+    return _publish_history(plan)
 
 
 def _find_kind(key, mid, floor, kind):
@@ -2110,13 +2120,13 @@ def send_targeted(args, key, sender, recipient):
     plan = prepare_targeted(
         key, sender, recipient, args.message, mid, bool(getattr(args, "record", False)),
         wake=bool(getattr(args, "wake", False)))
+    try:
+        _publish_journal(plan)
+    except sp_journal.JournalError as exc:
+        return sp_journal.presend_failed(exc, as_json)
     if plan.journaled:
-        try:
-            _record_journal(plan)
-        except sp_journal.JournalError as exc:
-            return sp_journal.presend_failed(exc, as_json)
         _failpoint("send_after_journal")
-    lock = _append_send(plan, {"targeted": True})
+    lock = _publish_history(plan)
     payloads = []
     try:
         outcomes, notes, update_failed, problem = _deliver_all(
@@ -2140,7 +2150,8 @@ def send_targeted(args, key, sender, recipient):
     if problem is not None:
         _err("%s; the delivery was made but its outcome is not recorded and reads as unknown" % problem)
     rc = sp_journal.EXIT_UPDATE_FAILED if update_failed else 1 if bad or problem else 0
-    return _report(payload, rc, as_json, plan.journaled, "sent to #%s (buddy), message %s" % (key, mid))
+    headline = "%ssent to #%s (buddy), message %s" % ("not delivered: " if bad else "", key, mid)
+    return _report(payload, rc, as_json, plan.journaled, headline)
 
 
 # --------------------------------------------------------------------------
