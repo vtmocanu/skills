@@ -938,7 +938,9 @@ class TestHeldDiscardOutcomes(HeldBase):
         self.assertEqual(self.sends(), [])
 
     def test_an_invalid_stored_route_is_discarded_without_channel_io(self):
-        for field, value in (("channel", "../Bad Name"), ("channel_mid", "NOT-A-UUID")):
+        mixed = "0A1B2C3D-0000-4000-8000-00000000000F"
+        for field, value in (("channel", "../Bad Name"), ("channel", "#" + self.key),
+                             ("channel_mid", "NOT-A-UUID"), ("channel_mid", mixed)):
             entry = self.route_entry("published", new_uuid(), 0)
             entry[field] = value
             self.budget().held[self.sid] = entry
@@ -950,6 +952,148 @@ class TestHeldDiscardOutcomes(HeldBase):
             for mocked in (find, finish, publish):
                 mocked.assert_not_called()
             self.assertEqual(self.replies(), [])
+
+
+class TestLedgerPersistPins(HeldBase):
+    def crash_after_send(self):
+        real = sp_claude.deliver_to_record
+
+        def landed_then_died(rec, frame):
+            real(rec, frame)
+            raise Crash()
+
+        return mock.patch.object(sp_claude, "deliver_to_record", landed_then_died)
+
+    def assert_not_resent(self, turn):
+        with self.crash_after_send():
+            with self.assertRaises(Crash):
+                self.shim._handle_turn_end(turn)
+        wait_for(lambda: self.statuses())
+        self.assertEqual(len(self.statuses()), 1)
+        restarted = sp_shim.Shim(sp_codex.resolve_thread(self.tid))
+        restarted.codex_version = "0.153.4"
+        restarted._handle_turn_end(turn)
+        time.sleep(0.3)
+        self.assertEqual(len(self.statuses()), 1)
+        self.assertEqual(self.replies(), [])
+
+    def test_the_no_final_message_path_is_not_repeated_after_a_crash(self):
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assert_not_resent(self.turn(text=None))
+
+    def test_the_frozen_path_is_not_repeated_after_a_crash(self):
+        self.freeze()
+        before = len(self.statuses())
+        turn = self.turn(text="newer", mid="m-new")
+        with self.crash_after_send():
+            with self.assertRaises(Crash):
+                self.shim._handle_turn_end(turn)
+        wait_for(lambda: len(self.statuses()) > before)
+        self.assertEqual(len(self.statuses()), before + 1)
+        restarted = sp_shim.Shim(sp_codex.resolve_thread(self.tid))
+        restarted.codex_version = "0.153.4"
+        restarted._handle_turn_end(turn)
+        time.sleep(0.3)
+        self.assertEqual(len(self.statuses()), before + 1)
+
+    def test_the_budget_cap_path_is_not_repeated_after_a_crash(self):
+        budget = self.budget()
+        budget.budgets[self.sid] = sp_constants.REPLY_BUDGET
+        budget.budget_sender_sid = self.sid
+        budget.budget_last_at = time.time()
+        self.shim._save_state()
+        self.assert_not_resent(self.turn(text="over the cap", mid="m-cap"))
+
+
+class TestHeldRoutingKeepsItsEntry(HeldBase):
+    def test_a_full_held_map_never_evicts_the_entry_being_routed(self):
+        mid = new_uuid()
+        floor = self.publish(mid)
+        entry = self.route_entry("fresh", mid, floor)
+        budget = self.budget()
+        budget.held.clear()
+        budget.held[self.sid] = entry  # inserted first: the oldest, so the first to go
+        for index in range(sp_constants.CONTACT_HISTORY + 1):
+            budget.held["s%d" % index] = {"text": "x", "at": time.time()}
+        seen = []
+        real_save = self.shim._save_state
+
+        def save(*args, **kwargs):
+            real_save(*args, **kwargs)
+            saved = sp_runtime.read_json(sp_storage.own_thread_state_path(self.tid))
+            seen.append(self.sid in saved["held"])
+
+        with mock.patch.object(self.shim, "_save_state", save):
+            self.shim._route_held(self.rec, "held answer", entry)
+        self.assertTrue(seen)
+        self.assertTrue(all(seen), seen)
+        for outcome in self.outcomes():
+            for value in outcome.values():
+                self.assertNotIn("evicted", value)
+
+
+class TestSmallPins(HeldBase):
+    def test_a_recovered_entry_with_an_invalid_route_is_dropped_without_channel_io(self):
+        mid = new_uuid()
+        entry = self.route_entry("publishing", mid, 0, release="reset")
+        entry["channel"] = "#" + self.key
+        self.shim._save_state()
+        with mock.patch.object(sp_channels, "find_send") as find, \
+                mock.patch.object(sp_channels, "find_outcome") as outcome:
+            shim = self.restart(release=False)
+        find.assert_not_called()
+        outcome.assert_not_called()
+        self.assertNotIn(self.sid, shim.reply_budget.held)
+        saved = sp_runtime.read_json(sp_storage.own_thread_state_path(self.tid))
+        self.assertNotIn(self.sid, saved["held"])
+        self.assertEqual(self.replies(), [])
+
+    def test_a_value_error_recording_the_outcome_is_logged_not_raised(self):
+        def bad(key, sender, mid, recipient, outcome, floor, lock=None):
+            sp_channels.release_unfinished(lock)
+            raise ValueError("bad outcome")
+
+        with mock.patch.object(sp_channels, "finish_targeted", bad), \
+                mock.patch.object(sp_runtime, "log") as log:
+            self.shim._handle_turn_end(self.turn())
+        wait_for(lambda: self.replies())
+        self.assertEqual(len(self.replies()), 1)
+        lines = [call.args[0] for call in log.call_args_list]
+        self.assertTrue([l for l in lines if "could not record the outcome" in l and "bad outcome" in l], lines)
+
+    def test_the_hold_log_line_escapes_a_peer_controlled_name(self):
+        rec = dict(self.rec, name="evil\nname")
+        turn = self.turn()
+        real = sp_channels.append_history
+
+        def flaky(key, kind, actor, data=None):
+            if kind == "channel.send":
+                raise sp_channels.ChannelError("disk went away", 1)
+            return real(key, kind, actor, data)
+
+        with mock.patch.object(sp_channels, "append_history", flaky), \
+                mock.patch.object(sp_runtime, "log") as log:
+            self.shim._deliver_target(rec, "text", turn.tag, turn)
+        lines = [call.args[0] for call in log.call_args_list if "holding the reply" in call.args[0]]
+        self.assertEqual(len(lines), 1, log.call_args_list)
+        self.assertNotIn("\n", lines[0])
+        self.assertIn("evil name", lines[0])
+
+    def test_retry_held_skips_an_entry_discarded_earlier_in_the_loop(self):
+        budget = self.budget()
+        other = new_uuid()
+        budget.held[self.sid] = {"text": "a", "at": time.time(), "release": "reset"}
+        budget.held[other] = {"text": "b", "at": time.time(), "release": "reset"}
+        released = []
+
+        def release(sid, reason, records):
+            released.append(sid)
+            budget.held.pop(other, None)  # evicted while the first is released
+            return "delivered"
+
+        with mock.patch.object(budget, "_release_one", release):
+            budget.retry_held()
+        self.assertEqual(released, [self.sid])
 
 
 class TestPollBatchCrash(RouteBase):
@@ -994,6 +1138,66 @@ class TestPollBatchCrash(RouteBase):
         self.assertEqual(len([t for t in texts if "answer 1" in t]), 1)
         self.assertEqual(len([t for t in texts if "answer 2" in t]), 1)
         self.assertEqual(len(self.sends()), 2)
+
+
+    def crash_on_second_records(self):
+        real = sp_claude.live_claude_records
+        calls = {"n": 0}
+
+        def records(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                raise Crash()
+            return real(*args, **kwargs)
+
+        return mock.patch.object(sp_claude, "live_claude_records", records)
+
+    def assert_each_answer_once(self):
+        restarted = sp_shim.Shim(sp_codex.resolve_thread(self.tid))
+        restarted.codex_version = "0.153.4"
+        self.poll_once(restarted)
+        wait_for(lambda: len(self.replies()) >= 2)
+        time.sleep(0.3)
+        texts = [self.content(f) for f in self.replies()]
+        self.assertEqual(len([t for t in texts if "answer 1" in t]), 1)
+        self.assertEqual(len([t for t in texts if "answer 2" in t]), 1)
+        self.assertEqual(len(texts), 2)
+
+    def test_a_crash_before_the_second_turn_persists_does_not_lose_it(self):
+        self.tagged_turn(1)
+        self.tagged_turn(2)
+        with self.crash_on_second_records():
+            with self.assertRaises(Crash):
+                self.poll_once(self.shim)
+        wait_for(lambda: self.replies())
+        self.assertEqual(len(self.replies()), 1)
+        self.assert_each_answer_once()
+
+    def test_the_cleanup_save_of_a_crashed_batch_does_not_lose_the_turn(self):
+        self.tagged_turn(1)
+        self.tagged_turn(2)
+        calls = {"n": 0}
+        real = sp_claude.live_claude_records
+
+        def records(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise Crash()
+            return real(*args, **kwargs)
+
+        old = (signal.getsignal(signal.SIGTERM), signal.getsignal(signal.SIGINT))
+        try:
+            with mock.patch.object(sp_codex, "thread_is_held", return_value=(True, os.getpid())), \
+                    mock.patch.object(self.shim.stop, "wait", side_effect=[False, True]), \
+                    mock.patch.object(self.shim, "_poll_maintenance", return_value=(0, 0)), \
+                    mock.patch.object(sp_claude, "live_claude_records", records):
+                with self.assertRaises(Crash):
+                    self.shim.run()
+        finally:
+            signal.signal(signal.SIGTERM, old[0])
+            signal.signal(signal.SIGINT, old[1])
+        self.assertEqual(self.replies(), [])
+        self.assert_each_answer_once()
 
 
 class TestRunRecoversHeld(HeldBase):

@@ -97,6 +97,8 @@ class Shim:
         self._cleaned = False
         self._routing_sid = None
         self._batch_tail = None
+        self._in_batch = False
+        self._pending_turn = None
         self._ledger_turn = None
         self._pidfile_fd = None
         self._clients = threading.Semaphore(sp_constants.MAX_CONCURRENT_CLIENTS)
@@ -341,7 +343,13 @@ class Shim:
         return held
 
     def _save_state(self, tail=None):
-        """Write the state file; ``tail`` overrides the cursor to persist."""
+        """Write the state file; ``tail`` overrides the cursor to persist.
+
+        Mid-batch (``_in_batch``) the default is the batch-start cursor, not the
+        live one that ``tail.poll()`` already advanced past the whole batch.
+        """
+        if tail is None and self._in_batch:
+            tail = self._batch_tail
         sp_runtime.write_json_atomic(
             sp_storage.thread_state_path(self.thread_id),
             {
@@ -353,7 +361,9 @@ class Shim:
                 "shim_features": list(sp_constants.SHIM_FEATURES),
                 "code_digest": self.code_digest,
                 "tail": self.tail.state() if tail is None else tail,
-                "processed_turns": list(self.processed_turns),
+                "processed_turns": [
+                    t for t in self.processed_turns if t != self._pending_turn
+                ],
                 "budgets": self._bound(self.reply_budget.budgets),
                 "budget_sender_sid": self.reply_budget.budget_sender_sid,
                 "budget_last_at": self.reply_budget.budget_last_at,
@@ -736,12 +746,18 @@ class Shim:
             except Exception as exc:  # never let a bad line kill the shim
                 sp_runtime.log("rollout read failed: %s" % exc)
                 events = []
+            # While events are being handled every save without an explicit
+            # cursor writes the batch-start tail (see _save_state); a crash in
+            # the middle must replay the unhandled turns. Left set on an
+            # exception so _cleanup's save also stays on the batch tail.
+            self._in_batch = bool(events)
             for event in events:
                 if event.kind == "start":
                     self._set_status("busy")
                 else:
                     self._set_status("idle")
                     self._handle_turn_end(event.turn)
+            self._in_batch = False
             if events:
                 self._save_state()
             self._ensure_record()
@@ -865,9 +881,16 @@ class Shim:
 
 
     def _handle_turn_end(self, turn):
+        self._handle_turn(turn)
+        # Left set when handling raises, so the cleanup save cannot record a
+        # turn whose ledger entry was never persisted as processed.
+        self._pending_turn = None
+
+    def _handle_turn(self, turn):
         if turn.turn_id in self.processed_turns:
             return
         self.processed_turns.append(turn.turn_id)
+        self._pending_turn = turn.turn_id
 
         with self._lock:
             subs, self.idle_subs = self.idle_subs, []
@@ -957,6 +980,7 @@ class Shim:
         if self._ledger_turn == turn.turn_id:
             return
         self._ledger_turn = turn.turn_id
+        self._pending_turn = None
         self._save_state(self._batch_tail)
 
     def _verified_requester(self, turn, tag, records):
@@ -1268,8 +1292,10 @@ class Shim:
         """True when the channel and message id stored in a held entry are well formed."""
         channel, mid = entry.get("channel"), entry.get("channel_mid")
         try:
-            if channel is not None:
-                sp_channels.parse_name(channel)
+            if channel is not None and (
+                not isinstance(channel, str) or channel != sp_channels.stored_key(channel)
+            ):
+                return False
         except sp_channels.ChannelError:
             return False
         return mid is None or (
