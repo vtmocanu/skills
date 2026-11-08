@@ -68,23 +68,20 @@ not replenish it. Raising it may deliver a held reply at once.
   a binding grant goes through the [channel route](channels.md#buddy-traffic)
   once. Its budget is spent only after a definite delivery. A definite failure
   after the history entry is retried as the same entry, with no second history
-  or journal entry. Restart recovery never sends.
+  or journal entry. Restart recovery itself sends nothing; a held reply it
+  finds already published is retried once by the normal retry, as the same entry.
 - **Frozen reply**: when the outcome is uncertain (the frame may have arrived),
   history shows `unknown` and the reply is kept with no budget spent. Newer
-  automatic replies to that requester are blocked, each answered with a status
+  automatic replies to that requester are blocked (dropped, not queued), each answered with a status
   and the first with one notice. The freeze survives the idle window, a peer
   change and restarts, and the 30-minute purge skips it. Only an explicit
   `budget reset`, or `budget allow` for that requester, ends it: the frozen
   reply is discarded without being re-sent and history keeps `unknown`.
-  `buddy set --replies` does not discard it. Discarding a published held reply
-  records `refused: held reply discarded (<why>)`. Reset and allow apply and
+  `buddy set --replies` does not discard it. Discarding a non-frozen held reply
+  after publication records `refused: held reply discarded (<why>)`. Reset and allow apply and
   save before deleting their marker, so a crash redoes or keeps the result.
-- **Limits**: an ordinary (not held) answer is delivered at most once. The shim
-  saves its processed-turn record before the first frame of a turn, so after a
-  crash it is never re-published or re-sent: a published send with no outcome
-  reads `unknown`, and a crash before publication can lose the answer. Covers
-  process crashes only; state writes are not fsynced, so power loss is not
-  covered.
+- **Limits**: an ordinary (not held) answer is delivered at most once. Crash scope:
+  see [buddy traffic](channels.md#buddy-traffic).
 - **Supervised multi-round work** (a user-requested review loop): first run
   `peers.py list`; a target showing `not registered` with no `shim <pid>` has no
   reply route, so run `peers.py up <name|uuid>` before sending. Then grant

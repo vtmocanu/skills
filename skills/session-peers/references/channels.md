@@ -267,24 +267,27 @@ runs `channel leave`.
 - Otherwise stderr prints `note: buddy channel not used: <reason>; sent
   directly` and the direct send runs. Reasons: no buddy channel, the buddy is
   not a member, `--from-*`, `--allow-reply-wake` or `--in-reply-to`, the caller
-  is not the binding's owner, a sender identity error, or the buddy is the
+  is not the binding's owner, a sender identity error, the buddy's id is not a
+  typed id, the lead left the channel, a channel read error, or the buddy is the
   caller. A Claude-to-Claude fallback is still refused (use `SendMessage`);
   with a buddy channel a Claude lead reaches a Claude buddy through it. `ask`
-  and `dispatch` are unchanged.
+  and `dispatch` are unchanged. A refused `--record` send whose journal update
+  fails exits 76.
 - A Codex buddy's final answer to its lead (the requester whose buddy channel
   lists the shim's thread) takes the same targeted send, recorded
   `transport accepted` and delivered once; an earlier buddy still on the roster
   routes its answers the same way, to the lead only. `@name` extra targets,
   status frames and notices stay direct, as does everything when there is no
   buddy channel. An answer that fits only without the header is sent direct.
-- The shim saves its processed-turn record before the first frame of a turn, so
+- The shim saves its processed-turn record before the turn's first answer, status or
+  notice frame, so
   after a crash an answer is never re-published or re-sent. A published send
   with no outcome reads `unknown`, and a crash before publication can lose the
   answer. This is process-crash scope only; state writes are not fsynced.
 - An uncertain transport (the frame may have arrived) is recorded `unknown` and
   not retried; a definite failure is recorded `refused: …` and not retried. A
   failed channel write with the entry confirmed absent makes the answer a held
-  reply (see [budgets](budgets.md)).
+  reply (see [budgets](budgets.md), held replies).
 
 ## Claude to Claude
 

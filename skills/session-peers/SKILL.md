@@ -136,10 +136,12 @@ verified handover names one (below):
 <this skill's directory>/scripts/peers.py buddy clear
 ```
 
-- Claude session with a Claude Code buddy: talk natively (`SendMessage`), never
-  through `peers.py`, but post reviews and verdicts to the buddy channel
-  (`send --to '#buddy-…'`), since native messages cannot be rerouted. Still
-  `buddy set` it so other skills see the binding.
+- Claude session with a Claude Code buddy: talk natively (`SendMessage`). Post
+  reviews and verdicts through the buddy channel instead, because native
+  messages cannot be rerouted: `peers.py send --to buddy` uses it when one
+  exists (for a fan-out post, find its key with `peers.py channel list`). This
+  is the channel exception in [Claude Code](#claude-code). Still `buddy set` it
+  so other skills see the binding.
 - Strip a leading `@`. Bare `buddy set` binds the other peer sharing this
   session's own name and excludes this session. If none exists, ask the user.
 - A message that is just "buddy" (or "find/bind your buddy") with no name, often
@@ -333,7 +335,8 @@ Choose the response path:
 <this skill's directory>/scripts/peers.py wait --for cc:<uuid> --state idle --timeout 600 --json
 ```
 
-- `--to buddy` uses the bound UUID (`send` through the buddy channel when it can). ask/dispatch/wait require a Claude buddy.
+- `--to buddy` uses the bound UUID (`send` through the buddy channel when it
+  can). ask/dispatch/wait require a Claude buddy.
 - `CODEX_THREAD_ID` supplies identity automatically; `--from-thread` overrides
   it. A live shim supplies the native reply route for `send`; without it,
   delivery warns that replies cannot route. Each send returns a message ID.
