@@ -10,6 +10,7 @@ from peer_tests.test_channel_buddy import BuddyChannelBase
 from peer_tests.test_opencode import OC_B
 from peer_tests.test_webdata import EMPTY
 from session_peers import channels as sp_channels, claude as sp_claude, journal as sp_journal
+from session_peers import buddy as sp_buddy, protocol as sp_protocol
 from session_peers import messaging as sp_messaging, routes as sp_routes, topics as sp_topics, webdata
 
 FAKE_AUTH = "line-one"
@@ -236,6 +237,18 @@ class UnknownOutcomeTests(TargetedBase):
                 contextlib.redirect_stderr(io.StringIO()):
             sp_messaging._send_claude(self.peer_typed, args, {"id": OC_B})
         forget.assert_called_once()
+
+    def test_the_headline_says_not_delivered_for_a_refused_or_unknown_send_only(self):
+        for exc in (sp_claude.FrameUncertain("broken pipe"), OSError("refused")):
+            with self.subTest(exc=exc), mock.patch.object(sp_claude, "send_frame", side_effect=exc), \
+                    mock.patch.object(sp_journal, "transport_failed", return_value=0):
+                rc, out, err = self.send_to(self.peer_typed, json=False)
+            self.assertEqual(rc, 1, err)
+            self.assertIn("not delivered: sent to #", out + err)
+        rc, out, err = self.send_to(self.peer_typed, json=False)
+        self.assertEqual(rc, 0, err)
+        self.assertIn("sent to #", out + err)
+        self.assertNotIn("not delivered: sent to #", out + err)
 
     def read_peer_record(self):
         return [r for r in sp_claude.read_claude_records()
@@ -542,7 +555,20 @@ class BuddySendRouteTests(BuddySendBase):
         self.assertEqual(len(prompts), 1)
         self.assertTrue(prompts[0]["data"]["resume"])
 
-    def test_wake_wakes_a_member_that_is_not_the_bound_buddy(self):
+    def test_the_message_text_carries_the_leads_reply_tag(self):
+        rc, out, err = self.send_buddy("--json", message="please review")
+        self.assertEqual(rc, 0, err)
+        mid = json.loads(out)["message_id"]
+        queued = self.queue_calls()
+        self.assertEqual(len(queued), 1)
+        text = queued[0][4]
+        tag, _body = sp_protocol.parse_tag(text)
+        self.assertIsNotNone(tag)
+        self.assertEqual(tag["sid"], self.lead.partition(":")[2])
+        self.assertEqual(tag["reply"], self.sender_rec["messagingSocketPath"])
+        self.assertEqual(tag["mid"], mid)
+
+    def test_wake_flag_is_accepted_on_the_route(self):
         rc, _out, err = self.bset("oc:oc-buddy")
         self.assertEqual(rc, 0, err)
         rc, _out, err = self.send_buddy("--wake")
@@ -605,6 +631,31 @@ class BuddySendFallbackTests(BuddySendBase):
                 self.assertIn(
                     self.NOTE % "--allow-reply-wake/--in-reply-to need a direct OpenCode delivery", err)
                 self.assertEqual(self.sends(), [])
+                # The direct path behaves as it did: a Codex buddy refuses --in-reply-to.
+                if flag[0] == "--in-reply-to":
+                    self.assertEqual(rc, 1)
+                    self.assertEqual(self.queue_calls(), [])
+
+    def test_a_buddy_that_is_not_a_typed_id_is_a_reason(self):
+        args = argparse.Namespace(to="not-typed", from_thread=None, from_name=None, from_sid=None,
+                                  from_socket=None, allow_reply_wake=None, in_reply_to=None)
+        route = sp_messaging._buddy_channel_route(args)
+        self.assertEqual(route, (None, "the buddy's id is not a typed id"))
+
+    def test_a_session_cannot_be_its_own_buddy(self):
+        kind, _, uuid = self.lead.partition(":")
+        with mock.patch.object(sp_buddy, "read_buddy", return_value={"buddy": {"kind": kind, "uuid": uuid}}):
+            rc, _out, err = self.send_buddy()
+        self.assertIn("note: buddy channel not used: a session cannot be its own buddy", err)
+        self.assertEqual(self.sends(), [])
+
+    def test_a_recipient_the_journal_cannot_resolve_is_refused_with_nothing_written(self):
+        with mock.patch.object(sp_journal, "_resolve_recipients", side_effect=sp_journal.JournalRefused("nope")):
+            rc, _out, err = self.send_buddy("--record")
+        self.assertEqual(rc, 1, err)
+        self.assertEqual(self.sends(), [])
+        self.assertEqual(self.journal_entries(), [])
+        self.assertEqual(self.queue_calls(), [])
 
     def test_a_caller_that_is_not_the_binding_owner_goes_direct(self):
         with mock.patch.object(sp_journal, "caller", return_value="cc:" + new_uuid()):

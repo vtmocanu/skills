@@ -114,11 +114,14 @@ def _buddy_channel_route(args):
         sender = sp_journal.caller()
         ident = sp_identity.caller_identity(args)
         owner = sp_journal._norm("%s:%s" % (ident["kind"], ident["uuid"]))
-        recipient = sp_journal._norm(args.to)
     except sp_journal.JournalError as exc:
         return None, "sender identity: %s" % sp_journal._human(str(exc))
     except ValueError:
         return None, "the caller is not the binding's owner"
+    try:
+        recipient = sp_journal._norm(args.to)
+    except ValueError:
+        return None, "the buddy's id is not a typed id"
     if sender != owner:
         return None, "the caller is not the binding's owner"
     if sender == recipient:
