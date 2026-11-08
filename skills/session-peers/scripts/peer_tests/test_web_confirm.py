@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import threading
+import time
 from unittest import mock
 
 from peer_tests.support import *  # noqa: F401,F403
+from peer_tests import test_web_chat
 from peer_tests.test_web_chat import ChatBase
 from peer_tests.test_web_server import wait_until
 from session_peers import channels as sp_channels, journal as sp_journal, web, webchat
@@ -486,3 +489,67 @@ class ConfirmWorkerTests(ConfirmBase):
         self.assertIn("at most one @all per sender", row["reason"])
         self.assertEqual(len(self.journal_entries()), 1)
         self.assertEqual(len(self.general_sends()), 1)
+
+
+class ConfirmTeardownTests(ConfirmBase):
+    def test_teardown_joins_a_delivering_worker_before_the_environment_is_restored(self):
+        # Regresses the teardown ordering of ChatBase. With the join removed from stop_server, `joining` never fires.
+        # With the stop moved after the environment restore, a captured HOME or CODEX_HOME differs from this test's.
+        entered, release, joining = threading.Event(), threading.Event(), threading.Event()
+        captured, failures, workers = [], [], []
+        listeners = {self.c1: self.l1, self.c2: self.l2}
+        real_deliver = sp_channels._deliver_member
+        real_join = test_web_chat.join_or_fail
+
+        def deliver(args, member, *rest):
+            workers.append(threading.current_thread())
+            entered.set()
+            if not release.wait(10):
+                failures.append("the delivery was never released")
+            captured.append((os.environ.get("HOME"), os.environ.get("CODEX_HOME")))
+            result = real_deliver(args, member, *rest)
+            listener = listeners[member]
+            deadline = time.monotonic() + 10
+            while not listener.of_type("user") and time.monotonic() < deadline:
+                time.sleep(0.01)
+            if not listener.of_type("user"):
+                failures.append("no user frame reached %s" % member)
+            return result
+
+        def join(thread, timeout, label):
+            joining.set()
+            return real_join(thread, timeout, label)
+
+        errors = []
+
+        def run_teardown():
+            try:
+                self.tearDown()
+            except BaseException as exc:  # re-raised below
+                errors.append(exc)
+
+        with mock.patch.object(webchat, "JOIN_TIMEOUT", 0.01), \
+                mock.patch.object(test_web_chat, "join_or_fail", join), \
+                mock.patch.object(sp_channels, "_deliver_member", deliver):
+            self.confirmed()
+            self.assertTrue(entered.wait(10), "the worker never started delivering")
+            tearing = threading.Thread(target=run_teardown, daemon=True)
+            tearing.start()
+            try:
+                self.assertTrue(joining.wait(10), "the teardown never joined the worker")
+            finally:
+                release.set()
+                tearing.join(30)
+        self.assertFalse(tearing.is_alive())
+        if errors:
+            raise errors[0]
+        self.assertEqual(failures, [])
+        self.assertEqual(len(captured), 2)
+        for home, codex_home in captured:
+            self.assertEqual(home, str(self.home))
+            self.assertEqual(codex_home, str(self.codex_dir))
+        self.assertTrue(workers)
+        for worker in workers:
+            self.assertFalse(worker.is_alive())
+        for listener in (self.l1, self.l2):
+            self.assertTrue(listener.of_type("user"))

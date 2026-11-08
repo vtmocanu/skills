@@ -3,7 +3,12 @@
 from __future__ import annotations
 
 import itertools
+import os
+import pathlib
+import subprocess
+import sys
 import threading
+import traceback
 import urllib.parse
 from unittest import mock
 
@@ -17,6 +22,23 @@ from session_peers import channels as sp_channels, cli as sp_cli, constants as s
 from session_peers import runtime as sp_runtime, web, webchat, webdata, webpeer as sp_webpeer
 
 ORIGIN_FMT = "http://127.0.0.1:%d"
+WORKER_JOIN_BOUND = 20.0
+
+
+def join_or_fail(thread, timeout, label):
+    """Join ``thread``; if it is still alive, report its stack and end the process with status 70.
+
+    A running delivery cannot be cancelled. Restoring the environment, or letting the next setUp rewrite it, would
+    point that delivery at another test's HOME; ending the process guarantees no later write.
+    """
+    thread.join(timeout)
+    if not thread.is_alive():
+        return
+    frame = sys._current_frames().get(thread.ident)
+    stack = "".join(traceback.format_stack(frame)) if frame is not None else "(no frame)\n"
+    sys.stderr.write("%s: send worker thread %r still alive after %.1fs; ending the process.\n%s" % (label, thread.name, timeout, stack))
+    sys.stderr.flush()
+    os._exit(70)
 
 
 class ChatBase(WebBase):
@@ -31,11 +53,40 @@ class ChatBase(WebBase):
         self.clock = [1000.0]
         server = web.Server(0, chat=True, clock=lambda: self.clock[0])
         server.chat.start()
+        self.track_chat(server.chat)
         return server
 
+    def track_chat(self, chat):
+        """Record a Chat this test started, so the teardown joins every one of its send workers."""
+        if not hasattr(self, "_chats"):
+            self._chats = []
+        self._chats.append(chat)
+
+    def start_chat(self):
+        """Replace the server's Chat with a freshly started one (the caller has stopped the old one)."""
+        self.server.chat = webchat.Chat(lambda: self.clock[0], lambda: web._DISCOVERY_LOCK)
+        self.server.chat.start()
+        self.track_chat(self.server.chat)
+
+    def tearDown(self):
+        # Cleanups first: the release events, patch stops and stop_server (which joins the send workers) must run
+        # while this test's environment and root still exist. The framework's later doCleanups finds nothing.
+        self.doCleanups()
+        super().tearDown()
+
     def stop_server(self):
+        if getattr(self, "_server_stopped", False):
+            return
+        self._server_stopped = True
+        chats = list(getattr(self, "_chats", ()))
+        for chat in chats:
+            worker = chat.worker
+            if worker is not None and worker._thread is not None:
+                worker.stop()
+                join_or_fail(worker._thread, WORKER_JOIN_BOUND, self.id())
         super().stop_server()
-        self.server.chat.stop()
+        for chat in chats:
+            chat.stop()
 
     # -- shortcuts -------------------------------------------------------------
 
@@ -158,8 +209,7 @@ class ChatBase(WebBase):
         self.chat.stop()
         for name, value in (env or {}).items():
             os.environ[name] = value
-        self.server.chat = webchat.Chat(lambda: self.clock[0], lambda: web._DISCOVERY_LOCK)
-        self.server.chat.start()
+        self.start_chat()
 
     def changes_of(self, cursor, **budget):
         return self.changes(cursor)
@@ -825,8 +875,7 @@ class ChatGateTests(ChatBase):
         self.assertEqual({r["mid"] for r in cursor_page["browser"]["sends"]}, set(mids))
         old_cursor = cursor_page["cursor"]
         self.chat.stop()
-        self.server.chat = webchat.Chat(lambda: self.clock[0], lambda: web._DISCOVERY_LOCK)
-        self.server.chat.start()
+        self.start_chat()
         time.sleep(0.5)
         self.assertEqual(self.journal_entries(), [])
         self.assertEqual(self.listener.of_type("user"), [])
@@ -930,8 +979,7 @@ class ChatFeedTests(ChatFeedBase):
         page = self.first_page()
         old_uuid = self.peer.sid
         self.chat.stop()
-        self.server.chat = webchat.Chat(lambda: self.clock[0], lambda: web._DISCOVERY_LOCK)
-        self.server.chat.start()
+        self.start_chat()
         self.assertNotEqual(self.peer.sid, old_uuid)
         fresh = self.changes(page["cursor"])
         self.assertEqual(fresh["browser"], {"entries": [], "sends": [], "gap": False, "restarted": True, "since_start": True})
@@ -1379,8 +1427,7 @@ class ChatIsolationTests(ChatFeedBase):
         self.assertIs(sys.stdout, out_router.original)
         self.assertIs(sys.stderr, err_router.original)
         self.assertNotIsInstance(sys.stdout, sp_runtime.ThreadRouter)
-        self.server.chat = webchat.Chat(lambda: self.clock[0], lambda: web._DISCOVERY_LOCK)
-        self.server.chat.start()
+        self.start_chat()
 
     def test_chat_mode_gets_do_no_mutation(self):
         self.ops_with_claude()
@@ -1898,3 +1945,27 @@ class ChatReworkTests(ChatFeedBase):
         for entry in (big, out):
             self.assertEqual(len(entry["text"]), webchat.ENTRY_TEXT_MAX)
             self.assertIs(entry["text_clipped"], True)
+
+
+class JoinOrFailTests(unittest.TestCase):
+    def test_a_thread_that_outlives_the_bound_ends_the_process_with_70_and_its_stack(self):
+        scripts = pathlib.Path(__file__).resolve().parent.parent
+        code = (
+            "import threading\n"
+            "from peer_tests.test_web_chat import join_or_fail\n"
+            "stop = threading.Event()\n"
+            "def blocked_here():\n"
+            "    stop.wait()\n"
+            "thread = threading.Thread(target=blocked_here, name='blocked-worker', daemon=True)\n"
+            "thread.start()\n"
+            "join_or_fail(thread, 0.1, 'probe-label')\n"
+        )
+        env = dict(os.environ, PYTHONPATH=str(scripts))
+        env["PATH"] = os.defpath
+        proc = subprocess.run([sys.executable, "-c", code], cwd=str(scripts), env=env,
+                              capture_output=True, text=True, timeout=60)
+        self.assertEqual(proc.returncode, 70, proc.stderr)
+        self.assertIn("probe-label", proc.stderr)
+        self.assertIn("0.1s", proc.stderr)
+        self.assertIn("blocked-worker", proc.stderr)
+        self.assertIn("blocked_here", proc.stderr)
