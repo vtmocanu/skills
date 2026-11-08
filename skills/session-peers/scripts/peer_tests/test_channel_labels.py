@@ -381,18 +381,61 @@ class FanOutTests(LabelBase):
         labels = sp_channels.derive_labels(records, _names, live)
         self.assertTrue(all(v["status"] == "current" for v in labels.values()))
 
-    def test_an_unverified_opencode_answer_stops_further_opencode_lookups(self):
-        records = [buddy_rec("buddy-%04d" % i, "cc:" + new_uuid(), "oc:ses_%026d" % i) for i in range(5)]
-        calls = []
+    def _oc_records(self, n):
+        return [buddy_rec("buddy-%04d" % i, "cc:" + new_uuid(), "oc:ses_%026d" % i) for i in range(n)]
 
-        def liveness_of(typed, cache):
-            calls.append(typed)
-            return "unverified" if typed.startswith("oc:") else "live"
+    def test_a_child_session_does_not_stop_later_opencode_lookups(self):
+        records = self._oc_records(2)
+        child, deleted = records[0]["current_buddy"][3:], records[1]["current_buddy"][3:]
 
-        _names, live = sp_channels.label_context(records, {}, liveness_of=liveness_of, names_of=lambda t, c: {})
+        def get_session(sid):
+            if sid == deleted:
+                raise sp_channels.sp_opencode.OpenCodeNotFound("deleted")
+            return {"id": sid, "title": "child"}
+
+        with mock.patch.object(sp_channels.sp_opencode, "session_walk", lambda *a, **k: []), \
+                mock.patch.object(sp_channels.sp_opencode, "get_session", get_session):
+            _names, live = sp_channels.label_context(records, {}, names_of=lambda t, c: {})
+        self.assertEqual(live["oc:" + child], "unverified")
+        self.assertEqual(live["oc:" + deleted], "gone")
+        labels = sp_channels.derive_labels(records, {}, live)
+        self.assertEqual(labels["buddy-0001"]["status"], "stale")
+
+    def test_a_failed_opencode_walk_stops_further_opencode_lookups(self):
+        records = self._oc_records(5)
+        gets = []
+
+        def walk(*a, **k):
+            raise sp_channels.sp_opencode.OpenCodeError("down")
+
+        with mock.patch.object(sp_channels.sp_opencode, "session_walk", walk), \
+                mock.patch.object(sp_channels.sp_opencode, "get_session", lambda sid: gets.append(sid)):
+            calls = []
+            real = sp_channels.member_liveness
+
+            def liveness_of(typed, cache):
+                calls.append(typed)
+                return real(typed, cache)
+
+            _names, live = sp_channels.label_context(records, {}, liveness_of=liveness_of, names_of=lambda t, c: {})
         self.assertEqual(len([t for t in calls if t.startswith("oc:")]), 1)
-        self.assertEqual(len([t for t in calls if t.startswith("cc:")]), 5)
+        self.assertEqual(gets, [])
         self.assertEqual({v for t, v in live.items() if t.startswith("oc:")}, {"unverified"})
+
+    def test_opencode_members_in_the_walk_are_not_budgeted(self):
+        n = sp_channels.SESSION_LOOKUPS_MAX + 10
+        records = self._oc_records(n)
+        ids = [r["current_buddy"][3:] for r in records]
+        walked = ids[: n - 5]
+
+        def get_session(sid):
+            raise sp_channels.sp_opencode.OpenCodeNotFound("deleted")
+
+        with mock.patch.object(sp_channels.sp_opencode, "session_walk", lambda *a, **k: [{"id": i} for i in walked]), \
+                mock.patch.object(sp_channels.sp_opencode, "get_session", get_session):
+            _names, live = sp_channels.label_context(records, {}, names_of=lambda t, c: {})
+        for i in ids:
+            self.assertEqual(live["oc:" + i], "live" if i in walked else "gone")
 
     def test_a_gone_opencode_answer_does_not_stop_opencode_lookups(self):
         records = [buddy_rec("buddy-%04d" % i, "cc:" + new_uuid(), "oc:ses_%026d" % i) for i in range(5)]
