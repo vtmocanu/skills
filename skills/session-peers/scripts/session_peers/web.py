@@ -28,7 +28,15 @@ request waits for it at most DISCOVERY_WAIT seconds and then serves the last res
 after DISCOVERY_PASS_BUDGET seconds (a check already running, lsof up to 20 s or an OpenCode API call
 up to 30 s, can overrun it; requests never wait longer than DISCOVERY_WAIT) and checks at most
 SUBPROCESS_MEMBERS_PER_PASS members that need a subprocess (Codex, OpenCode); members not reached are
-``unverified`` and the result's ``discovery`` object carries ``truncated``. The pass runs with
+``unverified`` and the result's ``discovery`` object carries ``truncated``. The members of each buddy
+channel's current pair are checked first (their liveness, then their OpenCode names, which share the
+allowance and stop at the deadline), before the other roster members, but still inside the same
+deadline and allowances: those limits cut the other members first, and reach the channel labels
+(``labels``) only when the pair identities alone exceed them; the labels then keep the previous pass's
+name and liveness for a pair member a pass could not check, with ``truncated`` set. The next pass
+checks such a member first (a failing name lookup goes last). Reading the channel records has its own
+DISCOVERY_PASS_BUDGET deadline, separate from the member checks', so a pass may start new work for up
+to two budgets. The pass runs with
 ``runtime.log`` muted on its thread.
 
 Handler threads must never resolve CODEX_HOME: discovery's ``storage.codex_home_override`` mutates
@@ -66,7 +74,6 @@ DISCOVERY_PASS_BUDGET = 8.0  # seconds one pass may start new member checks
 SUBPROCESS_MEMBERS_PER_PASS = 64  # Codex/OpenCode members checked per pass (each may shell out)
 MEMBERS_PER_CHANNEL = 64
 MEMBERS_TOTAL = 512
-CHANNELS_MAX = 2048
 ASSET_MAX = 4 * 1024 * 1024
 BODY_MAX = 1024 * 1024  # largest POST body (Content-Length) a chat-mode send accepts
 BODY_GRACE = 0.5  # the body read gives up this long before the connection cut, so the 408 can still be written
@@ -97,7 +104,6 @@ _JSON_TYPE_RE = re.compile(r"application/json(?:\s*;\s*charset=utf-8)?", re.IGNO
 _CURSOR_RE = re.compile(r"[A-Za-z0-9_-]{1,65536}")
 _ACTIVITY = {"busy": "working", "idle": "idle"}
 _OC_ACTIVITY = {"running": "working", "idle": "idle"}
-NAME_MAX = 200
 DRAIN_READS = 16
 
 _DISCOVERY_LOCK = threading.Lock()
@@ -109,52 +115,50 @@ _DISCOVERY_LOCK = threading.Lock()
 
 def _empty_discovery(**flags):
     out = {"general": ([], None, []), "liveness": {}, "activity": {}, "names": {}, "homes": {},
-           "stale": False, "pending": False}
+           "labels": {}, "stale": False, "pending": False}
     out.update(flags)
     return out
 
 
-def _rosters():
-    """``(general_discovery, [member lists])``: #general's members, then every readable stored channel's."""
+def _read_records(deadline):
+    """``({key: record}, truncated)`` of the readable stored channels, each read once with its own budget.
+
+    At most CHANNEL_MAX_CHANNELS keys, in sorted key order (as ``channels.label_context`` orders
+    buddy records), and no key is started after the monotonic ``deadline`` (``truncated``).
+    ``webdata._read_record`` opens without following links or blocking, so a planted FIFO or symlink
+    reads as None and is skipped; a fresh budget per record keeps the total of the records from
+    starving the later ones (each is at most ``channels.RECORD_MAX_BYTES``)."""
+    records = {}
+    for key in sorted(sp_channels.list_keys())[:sp_constants.CHANNEL_MAX_CHANNELS]:
+        if time.monotonic() >= deadline:
+            return records, True
+        record = sp_webdata._read_record(key, sp_webdata.Budget())
+        if record is not None:
+            records[key] = record
+    return records, False
+
+
+def _rosters(records):
+    """``(general_discovery, [member lists])``: #general's members, then every record's."""
     general, coverage, gaps = sp_channels.general_members()
     general = [m for m in general if isinstance(m, str)]
     rosters = [general[:MEMBERS_PER_CHANNEL]]
-    budget = sp_webdata.Budget()
-    for key in sp_channels.list_keys()[:CHANNELS_MAX]:
-        record = sp_webdata._read_record(key, budget)
-        if record is not None:
-            rosters.append(record["members"][:MEMBERS_PER_CHANNEL])
+    rosters.extend(record["members"][:MEMBERS_PER_CHANNEL] for record in records.values())
     return (general, coverage, gaps), rosters
 
 
-def _registry_by_session(cache):
-    cached = cache.get("cc")
-    if cached and cached[1] is None:
-        records = cached[0]
-    else:
-        try:
-            records = sp_claude.read_claude_records()
-        except Exception:
-            records = []
-    by_sid = {}
-    for record in records:
-        sid = record.get("sessionId")
-        if isinstance(sid, str):
-            by_sid.setdefault(sid.lower(), []).append(record)
-    return by_sid
-
-
-def _clip(name):
-    return name[:NAME_MAX] if isinstance(name, str) and name else None
+def _pair_identities(records):
+    """``(live, named)``: the typed ids whose liveness a label needs (both members of each known pair)
+    and those whose name it needs (every lead and current buddy), first CHANNEL_MAX_CHANNELS buddy
+    records by key only, as ``channels.label_context``."""
+    named, live = sp_channels.pair_lookup_ids(records.values())
+    return live, named
 
 
 def _registry_view(typed, kind, ident, live, by_sid):
     """``(activity, name)`` of a Claude session or Codex shim from its registry record."""
-    matches = [
-        r for r in by_sid.get(ident.lower(), ())
-        if not sp_claude.is_web_record(r) and (r.get("entrypoint") == "codex") == (kind == "codex")
-    ]
-    name = next((_clip(r.get("name")) for r in matches if _clip(r.get("name"))), None)
+    matches = sp_channels.registry_matches(kind, ident, by_sid)
+    name = sp_channels.registry_name(kind, ident, by_sid)
     activity = "unknown"
     if live:
         for record in matches:
@@ -164,18 +168,14 @@ def _registry_view(typed, kind, ident, live, by_sid):
     return activity, name
 
 
-def _opencode_view(members):
-    """``({typed: activity}, {typed: title})`` of the OpenCode members; unreadable means unknown."""
+def _opencode_view(members, cache=None):
+    """``({typed: activity}, {typed: title})`` of the OpenCode members; unreadable means unknown.
+    ``cache`` is shared with the pass's other lookups so the recent sessions are listed once."""
     try:
         active = sp_opencode.active_ids()
     except Exception:
         active = None
-    titles = {}
-    try:
-        for session in sp_opencode.recent_sessions():
-            titles[session["id"]] = _clip(session.get("title"))
-    except Exception:
-        pass
+    titles = sp_channels.opencode_titles(cache)
     activity, names = {}, {}
     for typed in members:
         sid = typed.partition(":")[2]
@@ -185,40 +185,132 @@ def _opencode_view(members):
     return activity, names
 
 
-def run_discovery(requester=None):
+def run_discovery(requester=None, previous=None):
     """One discovery pass: the ``discovery`` dict ``webdata.state_view`` takes. Reads only, never creates.
 
     ``requester`` (chat mode: the browser peer's sid) adds ``replies_left``: for each Codex member whose
     home was found, the replies that requester has left in the member's saved reply budget (None when it
-    cannot be read). It is worked out here, on the discovery thread, never on a request thread."""
+    cannot be read). It is worked out here, on the discovery thread, never on a request thread.
+
+    ``labels`` are ``channels.derive_labels`` over the channel records read here (the same records
+    ``channel list`` labels). The identities of every known buddy pair are checked before any other
+    member: liveness first, then the OpenCode names (get_session calls, at most SESSION_LOOKUPS_MAX,
+    stopped at the pass deadline). Liveness and name lookups share the SUBPROCESS_MEMBERS_PER_PASS
+    allowance: pair liveness leaves the lookups one call per pair id missing from the recent sessions
+    (at most SESSION_LOOKUPS_MAX), and a pair member that only that share held back is checked after the
+    lookups, with what they did not use, before any non-pair member. So the limits reach labels only when
+    the pair identities alone exceed them.
+    ``unchecked`` lists the members whose liveness was not checked and ``label_deferred`` the pair
+    OpenCode identities whose name lookup got no answer; the next pass (given this result as
+    ``previous``) checks those first, except that the identity whose lookup failed (``label_failed``,
+    the failure that ends the lookups) goes last, so a persistently failing id cannot starve the others.
+    An identity this pass could not check (``label_names``, ``label_liveness`` hold what labels used)
+    keeps ``previous``'s name and liveness (the previous pass's result), else its short id and
+    ``unverified``. The pass is ``truncated`` when a pair member's liveness was not checked or a pair
+    identity's OpenCode name lookup failed, was skipped or ran out of time (neither named nor reported
+    missing), whether or not a previous name is kept; a session the service reports missing gets its
+    short id and does not truncate."""
     with _DISCOVERY_LOCK, sp_storage.no_create(), sp_runtime.quiet():
-        general, rosters = _rosters()
+        records, truncated = _read_records(time.monotonic() + DISCOVERY_PASS_BUDGET)
+        general, rosters = _rosters(records)
+        live_ids, named_ids = _pair_identities(records)
         members, seen = [], set()
-        for roster in rosters:
+        for roster in [live_ids] + rosters:
             for typed in roster:
                 if typed not in seen and len(members) < MEMBERS_TOTAL:
                     seen.add(typed)
                     members.append(typed)
         cache, liveness, activity, names, homes = {}, {}, {}, {}, {}
-        deadline, subprocess_left, truncated = time.monotonic() + DISCOVERY_PASS_BUDGET, SUBPROCESS_MEMBERS_PER_PASS, False
+        deadline, subprocess_left = time.monotonic() + DISCOVERY_PASS_BUDGET, SUBPROCESS_MEMBERS_PER_PASS
         checked, unchecked = set(), []
-        for typed in members:
+        pair_ids = set(live_ids)
+
+        def check(typed, keep=0):  # ``keep``: allowance this check leaves unspent (the name lookups' share)
+            """Check ``typed``; False when only ``keep`` stopped it (nothing recorded: retry it later)."""
+            nonlocal truncated, subprocess_left
             if time.monotonic() >= deadline:
                 liveness[typed], truncated = "unverified", True
                 unchecked.append(typed)
-                continue
+                return True
             if not typed.startswith("cc:"):
+                if 0 < subprocess_left <= keep:
+                    return False
                 if subprocess_left <= 0:
                     liveness[typed], truncated = "unverified", True
                     unchecked.append(typed)
-                    continue
+                    return True
                 subprocess_left -= 1
             checked.add(typed)
             try:
                 liveness[typed] = sp_channels.member_liveness(typed, cache)
             except Exception:
                 liveness[typed] = "unverified"
-        by_sid = _registry_by_session(cache) if any(not m.startswith("oc:") for m in members) else {}
+            return True
+
+        prev = previous if isinstance(previous, dict) else {}
+        prev_unchecked = prev.get("unchecked") if isinstance(prev.get("unchecked"), list) else []
+        prev_deferred = prev.get("label_deferred") if isinstance(prev.get("label_deferred"), list) else []
+        prev_failed = prev.get("label_failed") if isinstance(prev.get("label_failed"), list) else []
+        unchecked_pos = {t: i for i, t in enumerate(prev_unchecked)}
+        deferred_pos = {t: i for i, t in enumerate(prev_deferred)}
+        # the pair identities' liveness, then their names, before any other member; the identities the
+        # previous pass could not check come first, in the order it left them (stable otherwise), so no identity is starved
+        pair_order = [t for t in members if t in pair_ids]
+        pair_order.sort(key=lambda t: unchecked_pos.get(t, len(unchecked_pos)))
+        # pair liveness leaves the OpenCode name lookups the allowance they will use: one get_session per
+        # pair id missing from the recent sessions (at most SESSION_LOOKUPS_MAX); what they do not use is
+        # released to the pair members that wait for it
+        titles = sp_channels.opencode_titles(cache) if any(t.startswith("oc:") for t in named_ids) else {}
+        keep = min(sp_channels.SESSION_LOOKUPS_MAX,
+                   len([t for t in named_ids if t.startswith("oc:") and not titles.get(t.partition(":")[2])]))
+        waiting = [typed for typed in pair_order if not check(typed, keep)]
+        by_sid = {}
+        if any(not m.startswith("oc:") for m in members) or any(not m.startswith("oc:") for m in named_ids):
+            if "cc" not in cache:  # the read member_liveness shares: liveness, names and activity come from one
+                try:
+                    cache["cc"] = sp_claude.read_claude_records_checked()
+                except Exception:
+                    pass
+            by_sid = sp_channels.registry_by_session(cache)
+        prev_names = prev.get("label_names") if isinstance(prev.get("label_names"), dict) else {}
+        prev_live = prev.get("label_liveness") if isinstance(prev.get("label_liveness"), dict) else {}
+        label_names, label_live = {}, {}
+        oc_named = [t for t in named_ids if t.startswith("oc:")]
+        # the ids the previous pass skipped come first (in its order), the one whose lookup failed goes last
+        oc_named.sort(key=lambda t: (2, 0) if t in prev_failed else (0, deferred_pos[t]) if t in deferred_pos else (1, 0))
+        for typed in named_ids:
+            kind, _sep, ident = typed.partition(":")
+            if kind in ("cc", "codex"):  # one registry read, no allowance
+                name = sp_channels.registry_name(kind, ident, by_sid)
+                if name:
+                    label_names[typed] = name
+        not_found, answered, label_failed = set(), set(), []
+        if oc_named and time.monotonic() < deadline:
+            stats = {}
+            try:
+                label_names.update(sp_channels.session_names(
+                    oc_named, cache, not_found, answered,
+                    deadline=deadline, max_lookups=max(subprocess_left, 0), stats=stats))
+            except Exception:
+                pass
+            subprocess_left -= min(stats.get("lookups", 0), max(subprocess_left, 0))
+            label_failed = [stats["failed"]] if isinstance(stats.get("failed"), str) else []
+        for typed in waiting:  # pair members only the lookups' share kept back: they get what is left
+            check(typed)
+        # An identity whose lookup neither named it nor found it missing (out of time, failed or skipped) keeps what
+        # the previous pass found, and the pass is truncated. One the service definitively reported missing (a
+        # deleted session) does not keep a name: it gets its short id.
+        # An existing session with no title was answered too: no name, no kept name, no truncation.
+        label_deferred = [t for t in oc_named if t not in label_names and t not in not_found and t not in answered]
+        if label_deferred:
+            truncated = True
+        kept = {t: prev_names[t] for t in oc_named
+                if t not in label_names and t not in not_found and t not in answered
+                and isinstance(prev_names.get(t), str)}
+        label_names.update(kept)
+        for typed in members:  # the other roster members
+            if typed not in pair_ids:
+                check(typed)
         for typed in members:
             kind, _sep, ident = typed.partition(":")
             if kind in ("cc", "codex"):
@@ -232,14 +324,21 @@ def run_discovery(requester=None):
                     pass
         oc_members = [m for m in members if m.startswith("oc:") and m in checked]
         if oc_members and time.monotonic() < deadline:
-            oc_activity, oc_names = _opencode_view(oc_members)
+            oc_activity, oc_names = _opencode_view(oc_members, cache)
             activity.update(oc_activity)
             names.update(oc_names)
         elif oc_members:
             truncated = True
+        for typed in live_ids:
+            if typed in checked:
+                label_live[typed] = liveness[typed]
+            else:
+                label_live[typed] = prev_live.get(typed) if prev_live.get(typed) in ("live", "gone", "unverified") else "unverified"
+        labels = sp_channels.derive_labels(list(records.values()), label_names, label_live)
         found = {"general": general, "liveness": liveness, "activity": activity, "names": names,
                  "homes": homes, "stale": False, "pending": False, "truncated": truncated,
-                 "unchecked": unchecked}
+                 "unchecked": unchecked, "label_deferred": label_deferred, "label_failed": label_failed, "labels": labels, "label_names": label_names,
+                 "label_liveness": label_live}
         if requester is not None:
             replies = {}
             for typed in members:
@@ -267,7 +366,9 @@ class Discovery:
         result = None
         try:
             requester = self._requester() if self._requester is not None else None
-            result = run_discovery(requester) if requester is not None else run_discovery()
+            with self._cond:
+                kwargs = {"previous": self._result} if self._result is not None else {}
+            result = run_discovery(requester, **kwargs) if requester is not None else run_discovery(**kwargs)
         except Exception:  # a failed pass marks the answer stale/pending; its cause is never logged
             result = None
         finally:

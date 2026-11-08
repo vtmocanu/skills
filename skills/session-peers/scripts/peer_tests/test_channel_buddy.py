@@ -58,6 +58,7 @@ class BuddyChannelTests(BuddyChannelBase):
         self.assertEqual(rows, [{
             "name": self.key, "display": "buddy · lead", "kind": "buddy",
             "owner": self.lead, "members": 3, "you": "owner",
+            "label": "#lead-" + self.y[:14], "label_status": "current", "current_buddy": self.y,
         }])
         self.assertEqual(self.members(), [self.lead, self.x, self.y])
 

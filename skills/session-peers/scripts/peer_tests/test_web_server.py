@@ -727,11 +727,11 @@ class DiscoveryWorkerTests(WebBase):
         calls = []
         real = web.run_discovery
 
-        def wrapped():
+        def wrapped(*args, **kwargs):
             calls.append(time.monotonic())
             self.release.wait(20)
             time.sleep(delay)
-            return real()
+            return real(*args, **kwargs)
 
         return calls, mock.patch.object(web, "run_discovery", wrapped)
 
@@ -972,7 +972,8 @@ class DiscoveryWorkerTests(WebBase):
                 mock.patch.object(sp_channels, "member_liveness", return_value="live"), \
                 mock.patch.object(web, "_opencode_view", return_value=({}, {})) as view:
             web.run_discovery()
-        view.assert_called_once_with(oc)
+        self.assertEqual(view.call_count, 1)
+        self.assertEqual(view.call_args.args[0], oc)
 
     def test_skipping_opencode_for_the_deadline_marks_the_pass_truncated(self):
         oc = ["oc:" + OC_B]
@@ -1017,6 +1018,465 @@ class DiscoveryWorkerTests(WebBase):
         view = self.ok("/api/state")
         self.assertFalse(view["partial"])
         self.assertNotIn("truncated", view["discovery"])
+
+
+class DiscoveryLabelTests(WebBase):
+    """Channel labels from the discovery pass (#175)."""
+
+    def buddy(self, lead, buddy, key, **extra):
+        root = sp_channels.channels_root()
+        os.makedirs(root, mode=0o700, exist_ok=True)
+        record = {"key": key, "display": "buddy", "kind": "buddy", "owner": lead, "members": [lead, buddy],
+                  "current_buddy": buddy, **extra}
+        with open(os.path.join(root, key + ".json"), "w") as fh:
+            json.dump(record, fh)
+        return key
+
+    def cli_labels(self):
+        rc, out, err = self.cli("channel", "list", "--json")
+        self.assertEqual(rc, 0, err)
+        return {r["name"]: (r["label"], r["label_status"]) for r in json.loads(out)}
+
+    @staticmethod
+    def pairs(labels):
+        return {key: (v["label"], v["status"]) for key, v in labels.items()}
+
+    def test_discovery_labels_equal_channel_list_for_records_that_exceed_a_request_budget(self):
+        count = webdata.REQUEST_BUDGET // sp_channels.RECORD_MAX_BYTES + 6
+        pad = "p" * (sp_channels.RECORD_MAX_BYTES - 4096)
+        keys = [self.buddy("cc:" + new_uuid(), "cc:" + new_uuid(), "buddy-%012x" % (0x100000 + i), pad=pad)
+                for i in range(count)]
+        self.buddy(self.me, "codex:" + new_uuid(), "buddy-%012x" % 0xabcdef)
+        self.channel("ops")
+        root = sp_channels.channels_root()
+        self.assertGreater(sum(os.path.getsize(os.path.join(root, k + ".json")) for k in keys), webdata.REQUEST_BUDGET)
+        found = web.run_discovery()["labels"]
+        self.assertEqual(len(found), count + 2)
+        self.assertEqual(self.pairs(found), self.cli_labels())
+        self.assertEqual(found["buddy-%012x" % 0xabcdef]["label"].split("-", 1)[0], "#alpha")
+
+    def test_a_fifo_planted_as_a_record_is_skipped_and_does_not_stall_the_pass(self):
+        key = self.buddy(self.me, "codex:" + new_uuid(), "buddy-%012x" % 0x111111)
+        fifo = os.path.join(sp_channels.channels_root(), "buddy-%012x.json" % 0xffffff)
+        os.mkfifo(fifo)
+        box = {}
+        worker = threading.Thread(target=lambda: box.update(found=web.run_discovery()), daemon=True)
+        worker.start()
+        worker.join(10)
+        if worker.is_alive():
+            with contextlib.suppress(OSError):
+                os.close(os.open(fifo, os.O_WRONLY | os.O_NONBLOCK))  # frees a reader blocked in open
+            worker.join(5)
+            self.fail("run_discovery blocked on a FIFO record")
+        self.assertEqual(set(box["found"]["labels"]), {key})
+
+    def test_pair_identities_are_checked_before_other_roster_members(self):
+        buddy = "codex:" + new_uuid()
+        self.channel("aaa-wide", *["codex:" + new_uuid() for _ in range(5)])  # sorts before the buddy channel
+        self.buddy(self.me, buddy, "buddy-%012x" % 0x222222)
+        calls = []
+        real = sp_channels.member_liveness
+
+        def liveness(typed, cache=None):
+            calls.append(typed)
+            return "gone" if typed == buddy else real(typed, cache)
+
+        with mock.patch.object(web, "SUBPROCESS_MEMBERS_PER_PASS", 1), mock.patch.object(sp_channels, "member_liveness", liveness):
+            found = web.run_discovery()
+        self.assertEqual([t for t in calls if not t.startswith("cc:")], [buddy])
+        self.assertTrue(found["truncated"])
+        self.assertEqual(found["labels"]["buddy-%012x" % 0x222222]["status"], "stale")
+        self.assertEqual(found["label_liveness"][buddy], "gone")
+        others = [m for m, v in found["liveness"].items() if m.startswith("codex:") and m != buddy]
+        self.assertEqual({found["liveness"][m] for m in others}, {"unverified"})
+
+    def test_an_exhausted_allowance_reuses_the_previous_pass_and_a_rename_still_shows(self):
+        buddy, key = "codex:" + new_uuid(), "buddy-%012x" % 0x333333
+        self.buddy(self.me, buddy, key)
+        real = sp_channels.member_liveness
+
+        def liveness(typed, cache=None):
+            return "gone" if typed == buddy else real(typed, cache)
+
+        with mock.patch.object(sp_channels, "member_liveness", liveness):
+            first = web.run_discovery()
+        short = "codex:" + buddy[6:14]
+        self.assertEqual(self.pairs(first["labels"]), {key: ("#alpha-" + short, "stale")})
+        with mock.patch.object(web, "SUBPROCESS_MEMBERS_PER_PASS", 0), mock.patch.object(sp_channels, "member_liveness", liveness):
+            kept = web.run_discovery(previous=first)
+            fresh = web.run_discovery()
+        self.assertTrue(kept["truncated"] and fresh["truncated"])
+        self.assertEqual(self.pairs(kept["labels"]), {key: ("#alpha-" + short, "stale")})
+        self.assertEqual(self.pairs(fresh["labels"]), {key: ("#alpha-" + short, "current")})
+        rec = self.sender_rec
+        self.write_record(rec["pid"], "renamed", rec["sessionId"], rec["messagingSocketPath"])
+        with mock.patch.object(web, "SUBPROCESS_MEMBERS_PER_PASS", 0), mock.patch.object(sp_channels, "member_liveness", liveness):
+            renamed = web.run_discovery(previous=kept)
+        self.assertEqual(self.pairs(renamed["labels"]), {key: ("#renamed-" + short, "stale")})
+
+    def test_the_worker_hands_each_pass_the_previous_result(self):
+        buddy, key = "codex:" + new_uuid(), "buddy-%012x" % 0x444444
+        self.buddy(self.me, buddy, key)
+        seen = []
+        real = web.run_discovery
+
+        def wrapped(*args, **kwargs):
+            seen.append(kwargs.get("previous"))
+            return real(*args, **kwargs)
+
+        with mock.patch.object(web, "run_discovery", wrapped):
+            first = self.server.discovery.get()
+            second = self.server.discovery.get()
+        self.assertIsNone(seen[0])
+        self.assertEqual(seen[1]["label_names"], first["label_names"])
+        self.assertIn(key, second["labels"])
+
+    def test_opencode_names_out_of_time_come_from_the_previous_pass(self):
+        oc, key = "oc:ses_" + "a" * 26, "buddy-%012x" % 0x555555
+        self.buddy(self.me, oc, key)
+        with mock.patch.object(sp_channels, "session_names", lambda typeds, cache=None, not_found=None, answered=None, **kw: {oc: "ocname"}):
+            first = web.run_discovery()
+        self.assertEqual(first["labels"][key]["label"], "#alpha-ocname")
+        asked = []
+        read_all = web._read_records
+        with mock.patch.object(web, "DISCOVERY_PASS_BUDGET", -1.0), \
+                mock.patch.object(web, "_read_records", lambda deadline: read_all(float("inf"))), \
+                mock.patch.object(sp_channels, "session_names", lambda typeds, cache=None, not_found=None, answered=None, **kw: asked.append(typeds) or {}):
+            kept = web.run_discovery(previous=first)
+            fresh = web.run_discovery()
+        self.assertEqual(asked, [])
+        self.assertTrue(kept["truncated"])
+        self.assertEqual(kept["labels"][key]["label"], "#alpha-ocname")
+        self.assertEqual(fresh["labels"][key]["label"], "#alpha-oc:" + oc[7:15])
+
+    def test_records_are_capped_at_the_channel_limit_in_key_order_and_one_read_each(self):
+        count = sp_constants.CHANNEL_MAX_CHANNELS + 14
+        keys = ["buddy-%012x" % (0x900000 + i) for i in range(count)]
+        for key in keys:
+            self.buddy("cc:" + new_uuid(), "cc:" + new_uuid(), key)
+        reads = []
+        real = webdata._read_record
+
+        def counting(key, budget):
+            reads.append(key)
+            return real(key, budget)
+
+        with mock.patch.object(webdata, "_read_record", counting):
+            found = web.run_discovery()
+        self.assertEqual(reads, keys[:sp_constants.CHANNEL_MAX_CHANNELS])
+        self.assertEqual(sorted(found["labels"]), keys[:sp_constants.CHANNEL_MAX_CHANNELS])
+
+    def test_a_pass_past_its_deadline_reads_no_further_record_and_is_truncated(self):
+        for i in range(5):
+            self.buddy("cc:" + new_uuid(), "cc:" + new_uuid(), "buddy-%012x" % (0xa00000 + i))
+        reads = []
+        real = webdata._read_record
+
+        def counting(key, budget):
+            reads.append(key)
+            return real(key, budget)
+
+        with mock.patch.object(web, "DISCOVERY_PASS_BUDGET", -1.0), mock.patch.object(webdata, "_read_record", counting):
+            found = web.run_discovery()
+        self.assertEqual(reads, [])
+        self.assertTrue(found["truncated"])
+
+    def test_labels_are_derived_from_the_pair_identity_maps_alone(self):
+        self.buddy(self.me, "codex:" + new_uuid(), "buddy-%012x" % 0xb00001)
+        seen = []
+        real = sp_channels.derive_labels
+
+        def spy(records, names, liveness):
+            seen.append((names, liveness))
+            return real(records, names, liveness)
+
+        with mock.patch.object(sp_channels, "derive_labels", spy):
+            found = web.run_discovery()
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(seen[0], (found["label_names"], found["label_liveness"]))
+        self.assertEqual(found["label_names"].get(self.me), "alpha")
+
+    def test_an_opencode_identity_whose_lookup_gave_no_name_keeps_the_previous_name(self):
+        oc, key = "oc:ses_" + "b" * 26, "buddy-%012x" % 0xc00001
+        self.buddy(self.me, oc, key)
+        with mock.patch.object(sp_channels, "session_names", lambda typeds, cache=None, not_found=None, answered=None, **kw: {oc: "ocname"}):
+            first = web.run_discovery()
+        self.assertFalse(first["truncated"])
+        with mock.patch.object(sp_channels, "session_names", lambda typeds, cache=None, not_found=None, answered=None, **kw: {}):
+            kept = web.run_discovery(previous=first)
+            fresh = web.run_discovery()
+        self.assertEqual(kept["labels"][key]["label"], "#alpha-ocname")
+        self.assertEqual(kept["label_names"][oc], "ocname")
+        self.assertTrue(kept["truncated"])
+        self.assertEqual(fresh["labels"][key]["label"], "#alpha-oc:" + oc[7:15])
+        self.assertTrue(fresh["truncated"], "a lookup that neither named nor found it missing truncates, with no previous name too")
+
+    def chained_oc_passes(self, oc, key, answers):
+        """Run one pass per entry of ``answers`` (a title, or an exception class), chaining ``previous``
+        the way Discovery does; the recent-session list is empty so every name needs get_session."""
+        results, previous = [], None
+        for answer in answers:
+            def get_session(sid, answer=answer):
+                if isinstance(answer, str) or answer is None:
+                    return {"id": sid, "title": answer}
+                raise answer("answer")
+
+            with mock.patch.object(sp_channels.sp_opencode, "recent_sessions", lambda *a, **k: []), \
+                    mock.patch.object(sp_channels.sp_opencode, "get_session", get_session), \
+                    mock.patch.object(sp_channels.sp_opencode, "active_ids", lambda: {}), \
+                    mock.patch.object(sp_channels, "general_members", return_value=([], {}, [])), \
+                    mock.patch.object(sp_channels, "member_liveness", lambda typed, cache=None: "live"):
+                previous = web.run_discovery(previous=previous)
+            results.append(previous)
+        return results
+
+    def test_chained_passes_over_the_allowances_check_and_name_every_pair_identity(self):
+        ocs = ["oc:ses_%026d" % i for i in range(6)]
+        for i, oc in enumerate(ocs):
+            self.buddy("cc:" + new_uuid(), oc, "buddy-%012x" % (0xf00000 + i))
+        live_calls, name_calls = [], []
+
+        def get_session(sid):
+            name_calls.append("oc:" + sid)
+            return {"id": sid, "title": "t" + sid[-2:]}
+
+        def liveness(typed, cache=None):
+            live_calls.append(typed)
+            return "live"
+
+        previous = None
+        with mock.patch.object(web, "SUBPROCESS_MEMBERS_PER_PASS", 4), \
+                mock.patch.object(sp_channels, "SESSION_LOOKUPS_MAX", 2), \
+                mock.patch.object(sp_channels.sp_opencode, "recent_sessions", lambda *a, **k: []), \
+                mock.patch.object(sp_channels.sp_opencode, "get_session", get_session), \
+                mock.patch.object(sp_channels.sp_opencode, "active_ids", lambda: {}), \
+                mock.patch.object(sp_channels, "general_members", return_value=([], {}, [])), \
+                mock.patch.object(sp_channels, "member_liveness", liveness):
+            for _ in range(4):
+                previous = web.run_discovery(previous=previous)
+                self.assertLessEqual(len(live_calls) + len(name_calls), 100)
+        self.assertEqual(set(ocs) - set(live_calls), set(), (live_calls, previous["unchecked"]))
+        self.assertTrue(set(ocs) <= set(name_calls))
+        self.assertTrue(set(ocs) <= set(previous["label_names"]))
+
+    def test_a_deleted_opencode_session_loses_its_name_and_the_pass_is_not_truncated_again(self):
+        oc, key = "oc:ses_" + "d" * 26, "buddy-%012x" % 0xe00001
+        self.buddy(self.me, oc, key)
+        gone = sp_channels.sp_opencode.OpenCodeNotFound
+        first, second, third = self.chained_oc_passes(oc, key, ["ocname", gone, gone])
+        self.assertEqual(first["labels"][key]["label"], "#alpha-ocname")
+        self.assertFalse(first["truncated"])
+        for later in (second, third):
+            self.assertEqual(later["labels"][key]["label"], "#alpha-oc:" + oc[7:15])
+            self.assertNotIn(oc, later["label_names"])
+            self.assertFalse(later["truncated"])
+
+    def test_an_untitled_opencode_session_loses_its_name_and_the_pass_is_not_truncated(self):
+        oc, key = "oc:ses_" + "9" * 26, "buddy-%012x" % 0xe00005
+        self.buddy(self.me, oc, key)
+        first, second, third = self.chained_oc_passes(oc, key, ["ocname", "", None])
+        self.assertEqual(first["labels"][key]["label"], "#alpha-ocname")
+        for later in (second, third):
+            self.assertEqual(later["labels"][key]["label"], "#alpha-oc:" + oc[7:15])
+            self.assertNotIn(oc, later["label_names"])
+            self.assertFalse(later["truncated"])
+
+    def test_a_pass_reads_the_claude_registry_once_for_liveness_names_and_activity(self):
+        oc_lead, oc_buddy = "oc:ses_" + "7" * 26, "oc:ses_" + "8" * 26
+        self.buddy(oc_lead, oc_buddy, "buddy-%012x" % 0xe00006)
+        member = "cc:" + new_uuid()
+        reads = []
+        real_checked, real_plain = sp_channels.sp_claude.read_claude_records_checked, sp_channels.sp_claude.read_claude_records
+
+        def checked():
+            reads.append("checked")
+            return real_checked()
+
+        def plain():
+            reads.append("plain")
+            return real_plain()
+
+        with mock.patch.object(sp_channels.sp_claude, "read_claude_records_checked", checked), \
+                mock.patch.object(sp_channels.sp_claude, "read_claude_records", plain), \
+                mock.patch.object(sp_channels.sp_opencode, "recent_sessions", lambda *a, **k: []), \
+                mock.patch.object(sp_channels.sp_opencode, "get_session", lambda sid: {"id": sid, "title": "t"}), \
+                mock.patch.object(sp_channels.sp_opencode, "active_ids", lambda: {}), \
+                mock.patch.object(sp_channels, "general_members", return_value=([member], {}, [])):
+            found = web.run_discovery()
+        self.assertIn(member, found["liveness"])
+        self.assertEqual(len(reads), 1, reads)
+
+    def test_a_failed_opencode_lookup_keeps_the_name_through_chained_passes_and_is_truncated(self):
+        oc, key = "oc:ses_" + "e" * 26, "buddy-%012x" % 0xe00002
+        self.buddy(self.me, oc, key)
+        first, second, third = self.chained_oc_passes(oc, key, ["ocname", RuntimeError, RuntimeError])
+        self.assertFalse(first["truncated"])
+        for later in (second, third):
+            self.assertEqual(later["labels"][key]["label"], "#alpha-ocname")
+            self.assertTrue(later["truncated"])
+
+    def test_a_failed_opencode_lookup_with_no_previous_name_is_truncated(self):
+        oc, key = "oc:ses_" + "f" * 26, "buddy-%012x" % 0xe00003
+        self.buddy(self.me, oc, key)
+        (only,) = self.chained_oc_passes(oc, key, [RuntimeError])
+        self.assertEqual(only["labels"][key]["label"], "#alpha-oc:" + oc[7:15])
+        self.assertTrue(only["truncated"])
+
+    def test_a_slow_non_pair_roster_member_does_not_remove_the_pairs_opencode_names(self):
+        oc, key = "oc:ses_" + "a" * 26, "buddy-%012x" % 0xe00004
+        self.buddy(self.me, oc, key)
+        other = "codex:" + new_uuid()
+
+        def liveness(typed, cache=None):
+            if typed == other:
+                time.sleep(0.4)
+            return "live"
+
+        with mock.patch.object(sp_channels.sp_opencode, "recent_sessions", lambda *a, **k: [{"id": oc.partition(":")[2], "title": "ocname"}]), \
+                mock.patch.object(sp_channels.sp_opencode, "active_ids", lambda: {}), \
+                mock.patch.object(sp_channels, "general_members", return_value=([other], {}, [])), \
+                mock.patch.object(sp_channels, "member_liveness", liveness), \
+                mock.patch.object(web, "DISCOVERY_PASS_BUDGET", 0.2):
+            found = web.run_discovery()
+        self.assertEqual(found["labels"][key]["label"], "#alpha-ocname")
+
+    def oc_patches(self, titled, get_session, liveness, others=()):
+        """Patches for a pass over OpenCode pair ids: ``titled`` ids come from the recent sessions."""
+        return [
+            mock.patch.object(sp_channels.sp_opencode, "recent_sessions",
+                              lambda *a, **k: [{"id": t.partition(":")[2], "title": "t"} for t in titled]),
+            mock.patch.object(sp_channels.sp_opencode, "get_session", get_session),
+            mock.patch.object(sp_channels.sp_opencode, "active_ids", lambda: {}),
+            mock.patch.object(sp_channels, "general_members", return_value=(list(others), {}, [])),
+            mock.patch.object(sp_channels, "member_liveness", liveness),
+        ]
+
+    def run_patched(self, patches, **kwargs):
+        with contextlib.ExitStack() as stack:
+            for patch in patches:
+                stack.enter_context(patch)
+            return web.run_discovery(**kwargs)
+
+    def test_pair_identities_are_never_left_unchecked_while_a_non_pair_member_is_checked(self):
+        ocs = ["oc:ses_%026d" % i for i in range(3)]
+        self.buddy(ocs[0], ocs[1], "buddy-%012x" % 0xa10001)
+        self.buddy(ocs[1], ocs[2], "buddy-%012x" % 0xa10002)
+        others = ["codex:" + new_uuid() for _ in range(2)]
+        live_calls = []
+
+        def liveness(typed, cache=None):
+            live_calls.append(typed)
+            return "live"
+
+        with mock.patch.object(web, "SUBPROCESS_MEMBERS_PER_PASS", 4):
+            found = self.run_patched(self.oc_patches(ocs, lambda sid: {"id": sid, "title": "x"}, liveness, others))
+        self.assertEqual(set(ocs) - set(live_calls), set(), found["unchecked"])
+        self.assertEqual(len([t for t in live_calls if t in others]), 1)
+        self.assertEqual(len(live_calls), 4)
+
+    def test_a_pass_charges_liveness_and_name_lookups_to_one_allowance_with_non_pair_members(self):
+        ocs = ["oc:ses_%026d" % i for i in range(4)]
+        self.buddy(ocs[0], ocs[1], "buddy-%012x" % 0xa20001)
+        self.buddy(ocs[2], ocs[3], "buddy-%012x" % 0xa20002)
+        others = ["codex:" + new_uuid() for _ in range(3)]
+        calls = []
+
+        def liveness(typed, cache=None):
+            calls.append(("live", typed))
+            return "live"
+
+        def get_session(sid):
+            calls.append(("name", sid))
+            return {"id": sid, "title": "x"}
+
+        with mock.patch.object(web, "SUBPROCESS_MEMBERS_PER_PASS", 3), \
+                mock.patch.object(sp_channels, "SESSION_LOOKUPS_MAX", 5):
+            found = self.run_patched(self.oc_patches([], get_session, liveness, others))
+        self.assertLessEqual(len(calls), 3, calls)
+        self.assertTrue(found["truncated"])
+
+    def test_a_pass_past_its_deadline_makes_no_name_lookup(self):
+        oc, key = "oc:ses_" + "5" * 26, "buddy-%012x" % 0xa30001
+        self.buddy(self.me, oc, key)
+        names = []
+
+        def liveness(typed, cache=None):
+            time.sleep(0.3)
+            return "live"
+
+        with mock.patch.object(web, "DISCOVERY_PASS_BUDGET", 0.2):
+            found = self.run_patched(self.oc_patches([], lambda sid: names.append(sid) or {"title": "x"}, liveness))
+        self.assertEqual(names, [])
+        self.assertTrue(found["truncated"])
+
+    def test_name_lookups_stop_starting_once_the_pass_deadline_passes(self):
+        ocs = ["oc:ses_%026d" % i for i in range(3)]
+        self.buddy(ocs[0], ocs[1], "buddy-%012x" % 0xa50001)
+        self.buddy(ocs[1], ocs[2], "buddy-%012x" % 0xa50002)
+        names = []
+
+        def get_session(sid):
+            names.append(sid)
+            time.sleep(0.3)
+            return {"id": sid, "title": "x"}
+
+        with mock.patch.object(web, "DISCOVERY_PASS_BUDGET", 0.2):
+            found = self.run_patched(self.oc_patches([], get_session, lambda typed, cache=None: "live"))
+        self.assertEqual(len(names), 1, names)
+        self.assertTrue(found["truncated"])
+
+    def test_one_persistently_failing_lookup_does_not_starve_the_other_identities(self):
+        ocs = ["oc:ses_%026d" % i for i in range(5)]
+        for i, oc in enumerate(ocs):
+            self.buddy("cc:" + new_uuid(), oc, "buddy-%012x" % (0xa40000 + i))
+        bad = ocs[0].partition(":")[2]
+
+        def get_session(sid):
+            if sid == bad:
+                raise RuntimeError("down")
+            return {"id": sid, "title": "t" + sid[-2:]}
+
+        previous = None
+        with mock.patch.object(sp_channels, "SESSION_LOOKUPS_MAX", 2):
+            for _ in range(5):
+                previous = self.run_patched(
+                    self.oc_patches([], get_session, lambda typed, cache=None: "live"), previous=previous)
+        self.assertEqual(set(ocs[1:]) - set(previous["label_names"]), set())
+
+    def test_the_recent_opencode_sessions_are_listed_once_per_pass(self):
+        oc, key = "oc:ses_" + "c" * 26, "buddy-%012x" % 0xd00001
+        self.buddy(self.me, oc, key)
+        listed = []
+
+        def recent(*args, **kwargs):
+            listed.append(1)
+            return [{"id": oc.partition(":")[2], "title": "ocname"}]
+
+        with mock.patch.object(sp_channels.sp_opencode, "recent_sessions", recent), \
+                mock.patch.object(sp_channels.sp_opencode, "active_ids", lambda: {}), \
+                mock.patch.object(sp_channels, "general_members", return_value=([], {}, [])), \
+                mock.patch.object(sp_channels, "member_liveness", lambda typed, cache=None: "live"):
+            found = web.run_discovery()
+        self.assertEqual(len(listed), 1)
+        self.assertEqual(found["labels"][key]["label"], "#alpha-ocname")
+
+    def test_the_state_api_carries_the_discovery_labels_and_rows_in_order(self):
+        key = self.buddy(self.me, "codex:" + new_uuid(), "buddy-%012x" % 0x666666)
+        self.ops_channel()
+        self.assertEqual(self.send("--record")[0], 0)
+        rows = self.ok("/api/state")["channels"]
+        self.assertEqual([r["key"] for r in rows], ["general", "ops", key])
+        self.assertEqual(rows[1]["activity"], "posted")
+        self.assertEqual(rows[2]["activity"], "none")
+        self.assertEqual((rows[1]["label"], rows[1]["label_status"]), ("#ops", "current"))
+        self.assertTrue(rows[2]["label"].startswith("#alpha-codex:"))
+
+    def test_an_empty_discovery_has_no_labels_and_the_page_falls_back_to_short_ids(self):
+        self.assertEqual(web._empty_discovery(pending=True)["labels"], {})
+        lead, buddy = "cc:" + new_uuid(), "codex:" + new_uuid()
+        key = self.buddy(lead, buddy, "buddy-%012x" % 0x777777)
+        rows = {r["key"]: r for r in webdata.state_view(web._empty_discovery(pending=True))["channels"]}
+        self.assertEqual(rows[key]["label"], "#%s-%s" % (lead[:11], buddy[:14]))
 
 
 class NoCreateTests(unittest.TestCase):

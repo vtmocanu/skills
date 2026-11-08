@@ -55,6 +55,8 @@ BATCH_CHANNELS = 32
 SESSIONS_MAX = 512
 BATCH_ENTRIES = 25
 ALERT_WINDOW = 25
+FUTURE_SKEW = 300  # seconds a send's ts may lie after ``now`` before its channel's activity is unknown
+ACTIVITY_SCAN_MAX = 256 * 1024  # most bytes one channel reads past its alert page to find its newest send
 SEARCH_MATCHES_MAX = PAGE_MAX
 TOKEN_MAX = 16 * 1024
 QUERY_MAX = 256
@@ -351,7 +353,7 @@ def _read_record(key, budget):
         return None
     if not all(isinstance(rec.get(f), str) for f in ("display", "kind", "owner")):
         return None
-    members = []
+    members, seen = [], set()
     for member in rec["members"]:
         if not isinstance(member, str):
             continue
@@ -359,7 +361,8 @@ def _read_record(key, budget):
             member = sp_journal._norm(member)
         except ValueError:
             continue
-        if member not in members:
+        if member not in seen:
+            seen.add(member)
             members.append(member)
     return dict(rec, members=members)
 
@@ -546,11 +549,16 @@ class HistorySnapshot:
 
     # -- read -------------------------------------------------------------
 
-    def read(self, before=None, limit=PAGE_MAX, since=None):
+    def read(self, before=None, limit=PAGE_MAX, since=None, want_send=False, send_scan=None):
         """Read the newest entries. Page mode (``since`` None) selects the newest ``limit``
         retained entries with seq < ``before`` and peeks one more to know whether older
         ones exist (``next_before``). Since mode selects every retained entry with seq >
-        ``since`` and reads back only as far as the cursor."""
+        ``since`` and reads back only as far as the cursor. ``want_send`` (page mode) keeps
+        reading past the page, within the same allowance, until a ``channel.send`` entry has
+        been decoded; the page itself is unchanged. ``send_scan`` bounds that continuation:
+        at most that many bytes are read once the page selection is complete (None: only the
+        allowance bounds it). A read the bound stopped has ``stop_reason`` ``cap`` and does not
+        cover every retained entry."""
         meta_next = self._read_meta_next()
         cap = min(TOPIC_BUDGET, self.budget.remaining())
         try:
@@ -570,7 +578,7 @@ class HistorySnapshot:
         self.fingerprint = (st.st_size, st.st_ino, st.st_mtime_ns)
         self._end = st.st_size
         try:
-            self._scan(fd, st.st_size, cap, before, limit, since)
+            self._scan(fd, st.st_size, cap, before, limit, since, want_send, send_scan)
         finally:
             os.close(fd)
         self._finish_seq(meta_next)
@@ -584,7 +592,7 @@ class HistorySnapshot:
             base = max(base, self.last_seq + 1)
         self.next_seq = base
 
-    def _scan(self, fd, end, cap, before, limit, since):
+    def _scan(self, fd, end, cap, before, limit, since, want_send=False, send_scan=None):
         ttl_days, max_entries, max_bytes = sp_topics._topic_limits()
         cutoff = (self.now if self.now is not None else time.time()) - ttl_days * 86400.0
         reader = _BackReader(fd, end, self.budget, cap)
@@ -594,6 +602,7 @@ class HistorySnapshot:
         boundary = False
         reached_start = False
         anchor = False
+        send_seen = continuing = False
         while True:
             kind, payload = reader.next_line(need=(qualifying == 0) if since is None else not newest_first)
             if kind == "end":
@@ -628,11 +637,17 @@ class HistorySnapshot:
                 break
             newest_first.append(item)
             seq = item.get("seq")
+            if "oversized" not in item and item.get("kind") == sp_channels.EVENT_SEND:
+                send_seen = True
             if since is None:
                 if before is None or (isinstance(seq, int) and seq < before):
                     qualifying += 1
-                    if qualifying >= limit + 1:
+                if qualifying >= limit + 1:
+                    if send_seen or not want_send:
                         break
+                    if send_scan is not None and not continuing:
+                        # The page is selected: the search for a send may read send_scan more bytes.
+                        continuing, reader.cap = True, min(reader.cap, reader.read + send_scan)
             elif isinstance(seq, int) and seq <= since and "oversized" not in item:
                 anchor = True
                 break
@@ -1625,7 +1640,10 @@ def changes(cursor_text, budget=None, now=None, browser=None):
     journal cursor that cannot skip an event written after that read.
 
     ``{"channels": {key: {"entries", "gap", "new"?}}, "updates", "cursor", "partial", "untracked"?,
-    "journal_gap"?}``. A channel is read only when its meta ``next_seq`` is past the cursor's seq or
+    "journal_gap"?, "activity_unknown"?}``. ``activity_unknown`` lists (in tracked order) the channels
+    this poll could not read for budget and those answered with a gap: their new entries are not all
+    in the response, so the page cannot tell whether they hold a newer send. It is absent when empty.
+    A channel is read only when its meta ``next_seq`` is past the cursor's seq or
     its stat fingerprint differs; otherwise a meta read and a stat are all it costs. A channel not
     in the cursor is reported ``{"new": true, "entries": [], "gap": null}`` and entered at its current
     position: the page loads its latest page. A channel whose retained entries start after the
@@ -1788,6 +1806,9 @@ def changes(cursor_text, budget=None, now=None, browser=None):
         pending, partial = pending[:CURSOR_UPDATES_MAX], True
     cursor_obj = {"v": 1, "c": [[key, positions[key][0], positions[key][1]] for key in order], "j": new_j, "u": pending}
     result = {"channels": out, "updates": updates, "partial": partial}
+    unknown = [key for key in tracked if key in skipped or (key in out and out[key].get("gap") is not None)]
+    if unknown:
+        result["activity_unknown"] = unknown
     if browser is not None:
         _apply_browser_updates(browser, updates)
         budget.total += reserved
@@ -2027,13 +2048,75 @@ def _journal_baseline(budget):
     return jpos, False
 
 
+ACTIVITY_POSTED, ACTIVITY_NONE, ACTIVITY_UNKNOWN = "posted", "none", "unknown"
+_ACTIVITY_RANK = {ACTIVITY_POSTED: 1, ACTIVITY_NONE: 2, ACTIVITY_UNKNOWN: 3}
+
+
+def _post_activity(snap, now):
+    """``(activity, ts)`` of one channel from a ``read(want_send=True)`` snapshot; only sends count.
+
+    ``posted`` with the newest decoded send's ``ts`` when no oversized line (which may hide a send)
+    came after it; ``none`` when nothing was sent, no oversized line was met and the read covered
+    every retained entry; otherwise ``unknown``. A channel not read at all is ``unknown``, and so is
+    one whose newest send is stamped more than FUTURE_SKEW seconds after ``now``."""
+    if snap is None:
+        return ACTIVITY_UNKNOWN, None
+    last_send = oversized_after = None
+    for index, item in enumerate(snap.items):
+        if "oversized" in item:
+            oversized_after = index
+        elif item.get("kind") == sp_channels.EVENT_SEND:
+            last_send = index
+    if last_send is not None:
+        if oversized_after is not None and oversized_after > last_send:
+            return ACTIVITY_UNKNOWN, None
+        if _stamp(snap.items[last_send].get("ts")) > now + FUTURE_SKEW:
+            return ACTIVITY_UNKNOWN, None
+        return ACTIVITY_POSTED, _ts_view(snap.items[last_send].get("ts"))
+    if oversized_after is None and snap.covered_all and not snap.unavailable:
+        return ACTIVITY_NONE, None
+    return ACTIVITY_UNKNOWN, None
+
+
+def _row_order(row):
+    """Sort key of a state row: #general, posted (newest first), none, unknown; then label, then key.
+
+    An unreadable row (no activity, no label) is unknown and ties as ``"#" + key``."""
+    if row["key"] == GENERAL:
+        return (0, 0.0, "", row["key"])
+    rank = _ACTIVITY_RANK.get(row.get("activity"), 3)
+    newest = -_stamp(row.get("last_post_ts")) if rank == 1 else 0.0
+    return (rank, newest, row.get("label") or "#" + row["key"], row["key"])
+
+
+def _channel_labels(discovery, records):
+    """``{key: {"label", "status"}}`` for the readable ``records`` ({key: record or None}).
+
+    The discovery pass's labels when they name every readable channel; otherwise (no pass yet, or
+    a channel newer than the pass) derived here from the records read with the names and liveness
+    the pass labelled with (``label_names``, ``label_liveness``; empty before the first pass)."""
+    readable = {key: rec for key, rec in records.items() if rec is not None}
+    found = discovery.get("labels") or {}
+    if all(isinstance(found.get(key), dict) for key in readable):
+        return {key: found[key] for key in readable}
+    return sp_channels.derive_labels(
+        list(readable.values()), discovery.get("label_names") or {}, discovery.get("label_liveness") or {})
+
+
 def state_view(discovery, budget=None, now=None, chat=None):
     """Metadata for the page's first load: sessions, channels (#general first), the starting cursor.
 
     ``discovery`` is supplied by the caller: ``general`` = ``(members, opencode_coverage, gaps)`` from
     ``channels.general_members()``, ``liveness`` {typed: live|gone|unverified}, ``activity`` {typed:
     working|idle|unknown}, ``stale`` and ``pending`` flags, and optionally ``names`` {typed: name} and
-    ``homes`` {Codex thread id: CODEX_HOME} (a Codex member without an entry has an unknown reply budget).
+    ``homes`` {Codex thread id: CODEX_HOME} (a Codex member without an entry has an unknown reply budget)
+    and ``labels`` {key: {"label", "status"}} (see ``channels.derive_labels``; derived here from the
+    records read when it does not name every readable channel). Each row carries ``label`` and
+    ``label_status`` (none when unreadable), ``activity`` (``posted`` with ``last_post_ts``, ``none``
+    or ``unknown``; only sends count) and the rows are ordered #general, posted newest first, none,
+    unknown, then by label and key (a channel whose newest send is stamped more than FUTURE_SKEW seconds
+    after ``now`` is ``unknown`` with ``last_post_ts`` None; an unreadable row has no label,
+    ``label_status`` or ``activity`` and sorts among ``unknown`` as ``"#" + key``); ``index``, ``sessions`` and the cursor keep the tracked order.
     No history entries are returned. Each channel's ``alert`` comes from its latest ALERT_WINDOW
     entries (``missing_acks`` when an ``@all`` send there lacks ACKs, ``unverified`` when that could
     not be established, e.g. the budget ran out); older entries are not examined. ``handover_chain``
@@ -2058,9 +2141,13 @@ def state_view(discovery, budget=None, now=None, chat=None):
     records = {key: _read_record(key, budget) for key in tracked if key != GENERAL}
     positions = [(key,) + _stat_position(key, budget) for key in tracked]
     reads = {}
+    # Searching past the alert page for a send: all channels together read at most a quarter of what is left.
+    send_scan = min(ACTIVITY_SCAN_MAX, budget.remaining() // (4 * max(1, len(tracked))))
     for key in tracked:
         if budget.remaining() > 0:
-            reads[key] = HistorySnapshot(key, budget, now=now).read(limit=ALERT_WINDOW)
+            reads[key] = HistorySnapshot(key, budget, now=now).read(
+                limit=ALERT_WINDOW, want_send=True, send_scan=send_scan)
+    labels = _channel_labels(discovery, records)
     states, want = {}, []
     for key, snap in reads.items():
         found = {}
@@ -2075,6 +2162,7 @@ def state_view(discovery, budget=None, now=None, chat=None):
         states[key] = found
     journal_ctx = read_journal_context(budget, want)
     partial = untracked > 0 or len(reads) < len(tracked) or jpartial
+    stamp_now = now if isinstance(now, (int, float)) and not isinstance(now, bool) else time.time()
     rows, pending = [], []
     index = {key: i for i, key in enumerate(tracked)}
     for key in tracked:
@@ -2113,6 +2201,11 @@ def state_view(discovery, budget=None, now=None, chat=None):
             "members": _members_of(roster, liveness, activity, names), "handover_chain": chain,
             "alert": alert, "coverage": cover,
         }
+        label = ({"label": "#" + GENERAL, "status": sp_channels.LABEL_CURRENT} if key == GENERAL
+                 else labels.get(key))
+        if label is not None:
+            row["label"], row["label_status"] = label["label"], label["status"]
+        row["activity"], row["last_post_ts"] = _post_activity(snap, stamp_now)
         if omitted:
             row["omitted_members"] = omitted
             partial = True
@@ -2133,6 +2226,7 @@ def state_view(discovery, budget=None, now=None, chat=None):
                     left = (discovery.get("replies_left") or {}).get(member["typed"])
                     details["replies_left"] = left if isinstance(left, int) and not isinstance(left, bool) else None
                 sessions.append(details)
+    rows.sort(key=_row_order)  # only the rows move: ``index``, sessions and the cursor keep tracked order
     pending = pending[::-1]
     if len(pending) > CURSOR_UPDATES_MAX:
         pending, partial = pending[:CURSOR_UPDATES_MAX], True

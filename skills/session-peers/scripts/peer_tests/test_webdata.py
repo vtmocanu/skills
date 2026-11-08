@@ -1597,6 +1597,48 @@ class WebdataStateViewTests(WebdataBase):
         self.assertIsNone(self.alerts()["ops"])
         sp_journal.ack(mid, "codex:" + self.tid)
 
+    def test_channels_with_no_send_in_their_page_cannot_starve_a_later_alert(self):
+        self.broadcast()  # "two": an @all send whose ACKs are missing
+        starved = []
+        for i in range(12):
+            key = self.new_channel("aa%02d" % i)
+            lines = [encode(make_entry(key, n, "channel.note", text="n" * 600, ts=iso(time.time() - 30)))
+                     for n in range(1, 2501)]
+            write_topic(key, lines)
+            starved.append(key)
+        self.new_channel("zz-quiet")
+        roots = [str(log_path(k)) for k in starved]
+        with ReadMeter() as meter:
+            view = webdata.state_view(EMPTY)
+        rows = {r["key"]: r for r in view["channels"]}
+        self.assertEqual(rows["two"]["alert"], "missing_acks")
+        self.assertIsNone(rows["zz-quiet"]["alert"])
+        self.assertEqual(rows["zz-quiet"]["activity"], "none")
+        for key in starved:
+            self.assertEqual(rows[key]["activity"], "unknown", key)  # the bounded search ended before a send
+            self.assertIsNone(rows[key]["alert"], key)
+        first_chunk = 64 * 1024
+        for name in roots:
+            self.assertLessEqual(meter.bytes[name], first_chunk + webdata.ACTIVITY_SCAN_MAX, name)
+        self.assertLessEqual(sum(meter.bytes[n] for n in roots), webdata.REQUEST_BUDGET // 4 + len(roots) * first_chunk)
+
+    def test_the_send_search_past_the_page_stops_at_its_allowance(self):
+        key = self.new_channel("deep")
+        lines = [encode(make_entry(key, 1, "channel.send", send_data("old"), ts=iso(time.time() - 90)))]
+        lines += [encode(make_entry(key, n, "channel.note", text="n" * 600, ts=iso(time.time() - 30)))
+                  for n in range(2, 800)]
+        write_topic(key, lines)
+        long = webdata.HistorySnapshot(key, webdata.Budget()).read(limit=webdata.ALERT_WINDOW, want_send=True)
+        self.assertTrue([e for e in long.items if e.get("kind") == "channel.send"])
+        short = webdata.HistorySnapshot(key, webdata.Budget()).read(
+            limit=webdata.ALERT_WINDOW, want_send=True, send_scan=32 * 1024)
+        self.assertEqual([e["seq"] for e in short.page], [e["seq"] for e in long.page])
+        self.assertFalse([e for e in short.items if e.get("kind") == "channel.send"])
+        self.assertFalse(short.covered_all)
+        self.assertEqual(short.stop_reason, "cap")
+        self.assertLessEqual(short.topic_bytes, 64 * 1024 + 32 * 1024)
+        self.assertEqual(webdata._post_activity(short, time.time()), ("unknown", None))
+
     def test_alert_clears_when_every_recipient_acked(self):
         mid = self.broadcast()
         sp_journal.ack(mid, "codex:" + self.tid)
@@ -2702,6 +2744,278 @@ class WebdataBrowserPostAckTests(BrowserPostHelpers, WebdataBase):
         self.assertEqual({r["ack"] for r in rows}, {"not requested"})
         rows = sp_channels.delivery_rows(dict(data, ack_requested=True), "complete", {}, None)
         self.assertEqual({r["ack"] for r in rows}, {"unverified"})
+
+
+# --------------------------------------------------------------------------
+# #175: per-channel post activity and the order of the rows
+# --------------------------------------------------------------------------
+
+
+def oversized_line(seq, kind="channel.note"):
+    """A valid history line longer than ENTRY_LINE_MAX."""
+    entry = {"seq": seq, "ts": sp_runtime.now_iso(), "kind": kind, "text": "z" * (webdata.ENTRY_LINE_MAX + 100)}
+    return encode(entry)
+
+
+class WebdataActivityTests(WebdataBase):
+    def ago(self, seconds):
+        return iso(time.time() - seconds)
+
+    def sent(self, key, seq, ts=None, body="hi"):
+        return encode(make_entry(key, seq, "channel.send", send_data(body), ts=ts or self.ago(60)))
+
+    def note(self, key, seq, size=5, ts=None):
+        return encode(make_entry(key, seq, "channel.note", text="n" * size, ts=ts or self.ago(30)))
+
+    def chan(self, key, lines):
+        self.new_channel(key)
+        write_topic(key, lines)
+        return key
+
+    def view(self, **kw):
+        view = webdata.state_view(EMPTY, **kw)
+        return view, {row["key"]: row for row in view["channels"]}
+
+    def order(self, **kw):
+        return [row["key"] for row in self.view(**kw)[0]["channels"]]
+
+    def test_posted_none_and_unknown(self):
+        stamp = self.ago(50)
+        self.chan("sent", [self.note("sent", 1), self.sent("sent", 2, ts=stamp), self.note("sent", 3)])
+        self.chan("quiet", [self.note("quiet", 1), self.note("quiet", 2)])
+        self.chan("hidden", [self.sent("hidden", 1), oversized_line(2)])
+        self.chan("older", [oversized_line(1), self.sent("older", 2, ts=stamp)])
+        _view, rows = self.view()
+        self.assertEqual((rows["sent"]["activity"], rows["sent"]["last_post_ts"]), ("posted", stamp))
+        self.assertEqual((rows["quiet"]["activity"], rows["quiet"]["last_post_ts"]), ("none", None))
+        self.assertEqual((rows["hidden"]["activity"], rows["hidden"]["last_post_ts"]), ("unknown", None))
+        # an oversized line that is older than the newest send hides nothing newer
+        self.assertEqual((rows["older"]["activity"], rows["older"]["last_post_ts"]), ("posted", stamp))
+
+    def test_only_sends_count_and_general_is_treated_alike(self):
+        stamp = self.ago(40)
+        self.chan("notes", [self.note("notes", 1), encode(make_entry("notes", 2, "channel.joined", {"member": "cc:x"}))])
+        write_topic("general", [self.sent("general", 1, ts=stamp)])
+        _view, rows = self.view()
+        self.assertEqual(rows["notes"]["activity"], "none")
+        self.assertEqual((rows["general"]["activity"], rows["general"]["last_post_ts"]), ("posted", stamp))
+        self.assertEqual((rows["general"]["label"], rows["general"]["label_status"]), ("#general", "current"))
+
+    def test_a_channel_with_no_history_log_has_no_posts_and_one_that_was_not_read_is_unknown(self):
+        self.new_channel("fresh")
+        os.unlink(str(log_path("fresh")))
+        _view, rows = self.view()
+        self.assertEqual(rows["fresh"]["activity"], "none")
+        self.chan("sent", [self.sent("sent", 1)])
+        real = webdata._stat_position
+
+        def drain(key, budget):
+            out = real(key, budget)
+            budget.charge(budget.remaining())  # nothing is left for the history reads
+            return out
+
+        with mock.patch.object(webdata, "_stat_position", drain):
+            view, rows = self.view()
+        self.assertTrue(view["partial"])
+        self.assertEqual({r["activity"] for r in rows.values()}, {"unknown"})
+        self.assertEqual({r["last_post_ts"] for r in rows.values()}, {None})
+
+    def test_a_send_behind_more_than_the_25_entry_page_is_still_found_in_one_pass(self):
+        stamp = self.ago(500)
+        self.chan("deep", [self.sent("deep", 1, ts=stamp)] + [self.note("deep", n) for n in range(2, 42)])
+        _view, rows = self.view()
+        self.assertEqual((rows["deep"]["activity"], rows["deep"]["last_post_ts"]), ("posted", stamp))
+        plain = webdata.HistorySnapshot("deep").read(limit=webdata.ALERT_WINDOW)
+        wanted = webdata.HistorySnapshot("deep").read(limit=webdata.ALERT_WINDOW, want_send=True)
+        self.assertEqual([e["seq"] for e in wanted.page], [e["seq"] for e in plain.page])
+        self.assertEqual(len(wanted.page), webdata.ALERT_WINDOW)
+        self.assertEqual((wanted.next_before, wanted.partial), (plain.next_before, plain.partial))
+        self.assertFalse([e for e in plain.items if e.get("kind") == "channel.send"])
+        self.assertTrue([e for e in wanted.items if e.get("kind") == "channel.send"])
+
+    def test_a_newest_send_over_one_mib_is_read_whole_and_posted(self):
+        body = "x" * (MIB + 4096)
+        self.assertLess(len(body), webdata.ENTRY_LINE_MAX)
+        stamp = self.ago(20)
+        self.chan("huge", [self.note("huge", 1), self.sent("huge", 2, ts=stamp, body=body)])
+        _view, rows = self.view()
+        self.assertEqual((rows["huge"]["activity"], rows["huge"]["last_post_ts"]), ("posted", stamp))
+
+    def test_reads_stay_within_their_caps_never_overlap_and_write_nothing(self):
+        stamp = self.ago(10)
+        self.chan("sent", [self.note("sent", 1), self.sent("sent", 2, ts=stamp)])
+        self.chan("quiet", [self.note("quiet", 1)])
+        self.chan("far", [self.sent("far", 1)] + [self.note("far", n, size=60000) for n in range(2, 42)])
+        self.chan("bigfirst", [self.sent("bigfirst", 1), self.note("bigfirst", 2, size=200000),
+                               self.note("bigfirst", 3, size=2 * MIB)])
+        roots = self.roots() + (sp_channels.history_dir(),)
+        before = tree_state(*roots)
+        budget = webdata.Budget()
+        with ReadMeter() as meter:
+            _view, rows = self.view(budget=budget)
+        self.assertEqual(tree_state(*roots), before)
+        self.assertLessEqual(budget.used, webdata.REQUEST_BUDGET)
+        for key in ("sent", "quiet", "far", "bigfirst"):
+            name = str(log_path(key))
+            self.assertEqual(meter.overlaps(name), [], key)
+            limit = webdata.TOPIC_BUDGET + (webdata.ENTRY_LINE_MAX if key == "bigfirst" else 0)
+            self.assertLessEqual(meter.bytes.get(name, 0), limit, key)
+        # past a small first entry the read stops at the 1 MiB topic cap
+        self.assertLessEqual(meter.bytes[str(log_path("far"))], webdata.TOPIC_BUDGET)
+        self.assertEqual(rows["far"]["activity"], "unknown")  # its one send lies behind more than the cap
+        self.assertEqual(rows["bigfirst"]["activity"], "unknown")
+        self.assertEqual(
+            [k for k in self.order() if k != "general"], ["sent", "quiet", "bigfirst", "far"])
+
+    def test_rows_are_ordered_general_posted_newest_first_none_then_unknown(self):
+        now, tie = time.time(), self.ago(100)
+        self.chan("zed", [self.sent("zed", 1, ts=now - 10.5)])  # a numeric ts: compared by time, not as text
+        self.chan("mid-b", [self.sent("mid-b", 1, ts=tie)])
+        self.chan("mid-a", [self.sent("mid-a", 1, ts=tie)])
+        self.chan("old", [self.sent("old", 1, ts=self.ago(5000))])
+        for key in ("alpha", "a0b", "a-b"):
+            self.chan(key, [self.note(key, 1)])
+        self.chan("lost", [self.sent("lost", 1), oversized_line(2)])
+        self.assertEqual(self.order(), [
+            "general", "zed", "mid-a", "mid-b", "old", "a-b", "a0b", "alpha", "lost"])
+        view = self.view()[0]
+        tracked = [k for k, _seq, _fp in webdata.decode_cursor(view["cursor"])["c"]]
+        self.assertEqual(tracked, sorted(tracked, key=lambda k: (k != "general", k)))
+
+    def test_a_send_stamped_far_in_the_future_is_unknown_and_a_small_skew_is_posted(self):
+        self.assertEqual(webdata.FUTURE_SKEW, 300)
+        now = time.time()
+        self.chan("zzz", [self.sent("zzz", 1, ts="9999-12-31T00:00:00Z")])
+        self.chan("skew", [self.sent("skew", 1, ts=iso(now + 60))])
+        self.chan("recent", [self.sent("recent", 1, ts=self.ago(5))])
+        self.chan("quiet", [self.note("quiet", 1)])
+        view, rows = self.view(now=now)
+        self.assertEqual((rows["zzz"]["activity"], rows["zzz"]["last_post_ts"]), ("unknown", None))
+        self.assertEqual(rows["skew"]["activity"], "posted")
+        self.assertEqual([r["key"] for r in view["channels"]], ["general", "skew", "recent", "quiet", "zzz"])
+
+    def test_equal_activity_ties_by_label_then_key_and_an_unreadable_row_sorts_among_unknown_as_hash_key(self):
+        self.chan("tie-a", [self.note("tie-a", 1)])
+        self.chan("tie-b", [self.note("tie-b", 1)])
+        self.chan("lost", [self.sent("lost", 1), oversized_line(2)])
+        self.chan("mist", [self.sent("mist", 1), oversized_line(2)])
+        with open(os.path.join(sp_channels.channels_root(), "midway.json"), "w") as fh:
+            fh.write("{}")
+        labels = {
+            "tie-a": {"label": "#zeta", "status": "current"},
+            "tie-b": {"label": "#alpha", "status": "current"},
+            "lost": {"label": "#lost", "status": "current"}, "mist": {"label": "#nist", "status": "current"},
+        }
+        view = webdata.state_view(dict(EMPTY, labels=labels))
+        keys = [r["key"] for r in view["channels"]]
+        self.assertEqual(keys[:3], ["general", "tie-b", "tie-a"])
+        # unknown rows: "#lost" < "#midway" (unreadable, no label) < "#nist"
+        self.assertEqual(keys[3:], ["lost", "midway", "mist"])
+
+    def test_a_membership_change_alone_does_not_move_a_channel(self):
+        member = "codex:" + new_uuid()
+        sp_channels.create_channel("old", self.me, [member])
+        sp_channels.create_channel("new", self.me, [])
+        write_topic("old", [self.sent("old", 1, ts=self.ago(900))])
+        write_topic("new", [self.sent("new", 1, ts=self.ago(100))])
+        self.assertEqual(self.order(), ["general", "new", "old"])
+        self.assertIn("channel.removed", self.history_after_remove("old", member))
+        self.assertEqual(self.order(), ["general", "new", "old"])
+        _view, rows = self.view()
+        self.assertEqual(rows["old"]["activity"], "posted")
+
+    def history_after_remove(self, key, member):
+        self.ok("remove", key, member)
+        return [e["kind"] for e in self.history(key)]
+
+    def test_a_pending_send_maps_to_its_channel_through_the_cursor_not_the_row_position(self):
+        self.tid, _rollout = self.one_thread()
+        sp_channels.create_channel("qa", self.me, ["codex:" + self.tid])
+        sp_channels.create_channel("aa", self.me, [])  # sorts before qa but has no send
+        with mock.patch.object(sp_channels, "_failpoint", WebdataPendingSendTests.hook):
+            with self.assertRaises(RuntimeError):
+                self.cli("send", "--to", "#qa", "--message", "crash", "--record")
+        mid = [e for e in self.history("qa") if e["kind"] == "channel.send"][-1]["data"]["message_id"]
+        holder = subprocess.Popen([sys.executable, "-c", HOLDER, sp_channels.send_lock_path(mid)],
+                                  stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        self._children.append(holder)
+        self.assertEqual(holder.stdout.readline().strip(), "ready")
+        try:
+            view = webdata.state_view(EMPTY)
+        finally:
+            holder.stdin.close()
+            holder.wait(timeout=10)
+        keys = [row["key"] for row in view["channels"]]
+        self.assertEqual(keys, ["general", "qa", "aa"])
+        cursor = webdata.decode_cursor(view["cursor"])
+        self.assertEqual([k for k, _s, _f in cursor["c"]], ["general", "aa", "qa"])
+        self.assertEqual(len(cursor["u"]), 1)
+        index, _seq, hexed = cursor["u"][0]
+        self.assertEqual(cursor["c"][index][0], "qa")
+        self.assertNotEqual(index, keys.index("qa"))
+        self.assertEqual(hexed, mid.replace("-", ""))
+
+    def test_activity_unknown_lists_budget_skips_and_gaps_and_is_absent_when_empty(self):
+        busy = self.new_channel("busy")
+        self.new_channel("late")
+        cursor = webdata.state_view(EMPTY)["cursor"]
+        self.assertNotIn("activity_unknown", webdata.changes(cursor))
+        write_topic(busy, note_lines(busy, webdata.PAGE_MAX + 5, 10))
+        got = webdata.changes(cursor)
+        self.assertEqual(got["channels"][busy]["gap"]["reason"], "limit")
+        self.assertEqual(got["activity_unknown"], [busy])
+        sp_topics.topic_post(sp_channels.topic_name("late"), IDENT, kind="channel.note", text="n",
+                             base=sp_channels.history_dir())
+        skipped = webdata.changes(cursor, budget=webdata.Budget(0))
+        self.assertTrue(skipped["partial"])
+        self.assertEqual(skipped["activity_unknown"], [busy, "late"])
+        self.assertNotIn("activity_unknown", webdata.changes(got["cursor"]))
+
+
+class WebdataLabelFallbackTests(WebdataBase):
+    def buddy(self, lead, buddy, key):
+        sp_channels.create_channel(key, lead, [buddy], kind="buddy", display="buddy", reserved_ok=True)
+        sp_channels.change_membership(key, lambda rec: rec.update(current_buddy=buddy) or (None, None), lead)
+
+    def test_without_discovery_labels_rows_get_short_id_labels_and_general_is_current(self):
+        lead, buddy = "cc:" + new_uuid(), "codex:" + new_uuid()
+        self.buddy(lead, buddy, "buddy-aaaa00000000")
+        self.new_channel("ops")
+        for discovery in (EMPTY, dict(EMPTY, pending=True, labels={})):
+            view = webdata.state_view(discovery)
+            rows = {row["key"]: row for row in view["channels"]}
+            self.assertEqual((rows["general"]["label"], rows["general"]["label_status"]), ("#general", "current"))
+            self.assertEqual((rows["ops"]["label"], rows["ops"]["label_status"]), ("#ops", "current"))
+            self.assertEqual(
+                (rows["buddy-aaaa00000000"]["label"], rows["buddy-aaaa00000000"]["label_status"]),
+                ("#%s-%s" % (lead[:11], buddy[:14]), "current"))
+
+    def test_the_fallback_uses_the_maps_discovery_labelled_with_and_a_new_channel_moves_no_label(self):
+        lead, buddy = "cc:" + new_uuid(), "codex:" + new_uuid()
+        self.buddy(lead, buddy, "buddy-aaaa00000000")
+        label_names = {lead: "fire", buddy: "ice"}
+        labels = sp_channels.derive_labels([sp_channels.read_channel("buddy-aaaa00000000")], label_names, {})
+        self.assertEqual(labels["buddy-aaaa00000000"]["label"], "#fire-ice")
+        discovery = dict(EMPTY, labels=labels, label_names=label_names, label_liveness={},
+                         names={lead: "other"}, liveness={buddy: "gone"})
+        self.buddy("cc:" + new_uuid(), "codex:" + new_uuid(), "buddy-bbbb00000000")  # newer than the pass
+        rows = {r["key"]: r for r in webdata.state_view(discovery)["channels"]}
+        self.assertEqual((rows["buddy-aaaa00000000"]["label"], rows["buddy-aaaa00000000"]["label_status"]),
+                         ("#fire-ice", "current"))
+        self.assertTrue(rows["buddy-bbbb00000000"]["label"].startswith("#cc:"))
+
+    def test_discovery_labels_win_and_an_unreadable_row_has_none(self):
+        lead, buddy = "cc:" + new_uuid(), "codex:" + new_uuid()
+        self.buddy(lead, buddy, "buddy-aaaa00000000")
+        with open(os.path.join(sp_channels.channels_root(), "broken.json"), "w") as fh:
+            fh.write("{}")
+        labels = {"buddy-aaaa00000000": {"label": "#fire-ice", "status": "stale"}}
+        rows = {r["key"]: r for r in webdata.state_view(dict(EMPTY, labels=labels))["channels"]}
+        self.assertEqual((rows["buddy-aaaa00000000"]["label"], rows["buddy-aaaa00000000"]["label_status"]),
+                         ("#fire-ice", "stale"))
+        self.assertTrue(rows["broken"]["unreadable"])
+        self.assertNotIn("label", rows["broken"])
+        self.assertNotIn("activity", rows["broken"])
 
 
 if __name__ == "__main__":

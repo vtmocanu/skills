@@ -193,7 +193,9 @@
     needState: false, live: { mode: "starting" }, liveText: null, untracked: 0, journalGap: false, pane: "main",
     focusables: table(), wired: false, waiting: false, allInflight: null, allLoadingNext: null, allLoadingOwner: null, allLoadingPromise: null, allGen: 0,
     // Chat mode only (state.chat): the Browser feed and the composer's own state.
-    chat: null, browser: null, compose: null
+    chat: null, browser: null, compose: null,
+    // Per channel key {a: "posted" | "none" | "unknown" | null, ts}: the state's activity, then live polls.
+    activity: table()
   };
 
   var RT_LABEL = { claude: "Claude Code", codex: "Codex", oc: "OpenCode", web: "Browser", unknown: "Unknown runtime" };
@@ -265,6 +267,41 @@
     return d ? d.getTime() : 0;
   }
 
+  // Sort and activity time in epoch seconds, as webdata._stamp reads runtime.parse_time: a number or
+  // numeric string above 1e11 is milliseconds, a naive ISO time is UTC, "inf"/"Infinity" and an
+  // overflowing number such as "1e400" are +-Infinity (the comparator orders them without
+  // subtracting), underscores between digits count ("1_700_000_000"), a lowercase "z" suffix, NaN
+  // and anything unclear read as 0. (parseTs stays the display reading.) Known differences: a string
+  // longer than 64 characters is 0 here (it bounds the work per stamp), and ISO forms the server's
+  // fromisoformat accepts but Date.parse does not (such as 20250101T000000Z) or non-ASCII digits
+  // read as 0 here.
+  var DIGITS = "\\d+(?:_\\d+)*";
+  var NUMERIC_TS = new RegExp("^[+-]?(?:" + DIGITS + "(?:\\." + "(?:" + DIGITS + ")?)?|\\." + DIGITS + ")(?:[eE][+-]?" + DIGITS + ")?$");
+  var INFINITE_TS = /^([+-]?)(?:inf|infinity)$/i;
+
+  function sortStamp(ts) {
+    var n = null;
+    if (typeof ts === "boolean") n = ts ? 1 : 0;
+    else if (typeof ts === "number") n = ts;
+    else if (typeof ts === "string") {
+      if (ts.length > 64) return 0;
+      var text = ts.trim();
+      if (!text) return 0;
+      var inf = INFINITE_TS.exec(text);
+      if (inf) n = inf[1] === "-" ? -Infinity : Infinity;
+      else if (NUMERIC_TS.test(text)) n = Number(text.replace(/_/g, ""));
+      else {
+        if (/z$/.test(text)) return 0;
+        text = text.replace(/(\.\d{3})\d+/, "$1");
+        if (/^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}/.test(text) && !/(Z|[+-]\d{2}(:?\d{2})?)$/.test(text.slice(11))) text += "Z";
+        var ms = Date.parse(text.replace(" ", "T"));
+        return isFinite(ms) ? ms / 1000 : 0;
+      }
+    }
+    if (n === null || n !== n) return 0;
+    return n > 1e11 ? n / 1000 : n;
+  }
+
   // ------------------------------------------------------------------------
   // Pieces
   // ------------------------------------------------------------------------
@@ -287,17 +324,91 @@
     return el("span", { class: "ref", title: str(typed) }, nameOf(typed));
   }
 
+  // The server's label for a channel (derived by the server, shown as text), else "".
+  function serverLabel(row) {
+    return row && typeof row.label === "string" ? row.label : "";
+  }
+
   function chanLabel(key) {
     var row = S.rows[key];
+    var label = serverLabel(row);
+    if (label) return label.charAt(0) === "#" ? [el("span", { class: "chan" }, "#"), label.slice(1)] : [label];
     var display = row && typeof row.display === "string" ? row.display : str(key);
     if (row && row.kind === "buddy") return [display];
     return [el("span", { class: "chan" }, "#"), display.replace(/^#/, "")];
   }
 
+  // The marker after a label the server could not vouch for: stale, or the pair unverified.
+  function labelMark(row) {
+    var status = row && row.label_status;
+    return status === "stale"
+      ? el("span", { class: "lblmark stale", title: "The pair this name came from has ended or changed; the name may be out of date" }, "stale",
+        el("span", { class: "sr" }, " (name may be out of date)"))
+      : status === "unverified"
+        ? el("span", { class: "lblmark unv", title: "The pair behind this name could not be verified" }, "pair unverified",
+          el("span", { class: "sr" }, " (the pair behind this name could not be verified)"))
+        : null;
+  }
+
   function chanText(key) {
     var row = S.rows[key];
+    var label = serverLabel(row);
+    if (label) return label;
     var display = row && typeof row.display === "string" ? row.display : str(key);
     return row && row.kind === "buddy" ? display : "#" + display.replace(/^#/, "");
+  }
+
+  // ------------------------------------------------------------------------
+  // Rail order: #general, then channels by their newest post, then none, then unknown. Mirrors
+  // webdata._row_order, including its code point order for labels and keys.
+  // ------------------------------------------------------------------------
+
+  var FUTURE_SKEW = 300;  // seconds; webdata.FUTURE_SKEW
+  var ACTIVITIES = { posted: true, none: true, unknown: true };
+
+  function cmpCodePoints(a, b) {
+    var i = 0, j = 0;
+    while (i < a.length && j < b.length) {
+      var x = a.codePointAt(i), y = b.codePointAt(j);
+      if (x !== y) return x < y ? -1 : 1;
+      i += x > 0xFFFF ? 2 : 1;
+      j += y > 0xFFFF ? 2 : 1;
+    }
+    return (a.length - i > 0 ? 1 : 0) - (b.length - j > 0 ? 1 : 0);
+  }
+
+  // The activity of a channel row as the page now knows it: {a: posted|none|unknown|null, ts}.
+  function activityOf(row) {
+    var live = S.activity[str(row.key)];
+    if (live) return live;
+    return { a: typeof row.activity === "string" && own(ACTIVITIES, row.activity) ? row.activity : null, ts: row.last_post_ts };
+  }
+
+  function rowRank(row) {
+    if (str(row.key) === "general") return 0;
+    var a = activityOf(row).a;
+    return a === "posted" ? 1 : a === "none" ? 2 : 3;
+  }
+
+  function compareRows(x, y) {
+    var rx = rowRank(x), ry = rowRank(y);
+    if (rx !== ry) return rx - ry;
+    if (rx === 1) {
+      var nx = sortStamp(activityOf(x).ts), ny = sortStamp(activityOf(y).ts);
+      if (nx !== ny) return ny > nx ? 1 : -1;  // never a subtraction: two infinities would give NaN
+    }
+    var kx = str(x.key), ky = str(y.key);
+    var c = cmpCodePoints(serverLabel(x) || "#" + kx, serverLabel(y) || "#" + ky);
+    return c || cmpCodePoints(kx, ky);
+  }
+
+  function orderedRows(state) {
+    var rows = state && Array.isArray(state.channels) ? state.channels.filter(function (r) { return r && typeof r === "object"; }) : [];
+    return rows.slice().sort(compareRows);
+  }
+
+  function railOrder() {
+    return orderedRows(S.state).map(function (r) { return str(r.key); }).join("\n");
   }
 
   function note(text, tone) {
@@ -649,14 +760,20 @@
         el("div", { class: "members" }, members.map(chip),
           row.omitted_members ? el("span", { class: "who more" }, "+" + row.omitted_members) : null)];
     }
+    var mark = labelMark(row);
+    var unknown = !row.unreadable && key !== "general" && activityOf(row).a === "unknown"
+      ? el("div", { class: "actnote" }, "activity unknown",
+        el("span", { class: "sr" }, " (posts could not be read; this is not the same as no posts)"))
+      : null;
     var lane = el("div", { class: "lane", role: "button", tabindex: "0", "aria-current": current ? "true" : null, "data-focus": "lane:" + key },
-      el("div", { class: "lanetop" }, el("span", { class: "lanename" }, chanLabel(key)), alertBadge(row.alert)), body);
+      el("div", { class: "lanetop" }, el("span", { class: "lanename" }, chanLabel(key), mark), alertBadge(row.alert)), unknown, body);
     S.focusables["lane:" + key] = lane;
     return onActivate(lane, function () { select(key, { fromRail: true }); });
   }
 
   function renderRail(state, selected, select) {
-    var rows = state && Array.isArray(state.channels) ? state.channels : [];
+    // Sorted on a copy: state.channels keeps the server's tracked order.
+    var rows = orderedRows(state);
     return rows.map(function (row) { return renderLane(row, row.key === selected, select || function () {}); });
   }
 
@@ -744,7 +861,7 @@
   function renderDetails(row) {
     if (!row) return [el("h2", null, "Details"), el("p", { class: "muted" }, "No channel selected.")];
     var members = Array.isArray(row.members) ? row.members : [];
-    var out = [el("h2", null, chanText(row.key))];
+    var out = [el("h2", null, chanText(row.key), labelMark(row))];
     if (row.key === "general") {
       out.push(el("div", { class: "card" }, el("b", null, "Everyone"),
         el("dl", { class: "kv" }, fleetRuntimes(members).map(function (rt) {
@@ -1817,15 +1934,26 @@
       S.view = "conv";
     }
     S.names = names; S.members = members; S.rows = rows; S.sessions = sessions;
+    S.activity = table();  // a fresh state supersedes what polls inferred
     if (typeof S.state.untracked === "number") S.untracked = S.state.untracked;
     if (!rows[S.selected]) S.selected = rows.general ? "general" : (S.state.channels && S.state.channels[0] ? str(S.state.channels[0].key) : "general");
   }
 
+  function headerSignature() {
+    var row = S.rows[S.selected];
+    return S.selected + "\n" + chanText(S.selected) + "\n" + (row && row.label_status);
+  }
+
   function refreshState() {
     return api("/api/state").then(function (data) {
+      var orderBefore = railOrder();
+      var headBefore = headerSignature();
       setState(data);
       if (!S.cursor && typeof data.cursor === "string") S.cursor = data.cursor;
-      renderChrome();
+      renderChrome(railOrder() !== orderBefore);
+      if (S.view === "conv" && headerSignature() !== headBefore) {  // a renamed pair or a changed marker
+        withFocus(function () { renderMain({}); });  // title and body together: the selection may have fallen back
+      }
     });
   }
 
@@ -2207,9 +2335,40 @@
     return hit;
   }
 
+  function setActivity(key, a, ts) {
+    var row = S.rows[key];
+    if (!row) return false;
+    var cur = activityOf(row);
+    if (cur.a === a && (a !== "posted" || sortStamp(cur.ts) === sortStamp(ts))) return false;
+    S.activity[key] = { a: a, ts: a === "posted" ? ts : null };
+    return true;
+  }
+
+  // What a poll's entries say about a channel's activity, as webdata._post_activity reads a snapshot:
+  // the newest send by position makes it posted with that send's ts, unless an oversized placeholder
+  // came after it (it may hide a send) or the send is stamped beyond FUTURE_SKEW: then unknown.
+  // Oversized with no send is unknown too.
+  function noteActivity(key, entries) {
+    var send = null, hidden = false;
+    entries.forEach(function (e) {
+      if (!e || typeof e !== "object") return;
+      if (e.kind === "oversized" || e.oversized) hidden = true;
+      else if (e.kind === "send") {
+        send = e;
+        hidden = false;
+      }
+    });
+    if (hidden) return setActivity(key, "unknown");
+    if (!send) return false;
+    if (sortStamp(send.ts) > Date.now() / 1000 + FUTURE_SKEW) return setActivity(key, "unknown");
+    return setActivity(key, "posted", send.ts);
+  }
+
   function applyChanges(data) {
     if (!data || typeof data !== "object") return Promise.resolve(false);
     var changed = false;
+    var orderBefore = railOrder();
+    var activityMoved = false;
     var reloads = [];
     var chans = data.channels && typeof data.channels === "object" ? data.channels : {};
     Object.keys(chans).forEach(function (key) {
@@ -2226,7 +2385,14 @@
         if (S.all && (S.all.covered[key] || S.all.read[key] || !S.all.next) && markAllStale(chanText(key) + " has entries this view could not stream; it may be incomplete.")) changed = true;
         return;
       }
-      if (Array.isArray(c.entries) && c.entries.length && appendEntries(key, c.entries)) changed = true;
+      if (Array.isArray(c.entries) && c.entries.length) {
+        if (noteActivity(key, c.entries)) activityMoved = true;
+        if (appendEntries(key, c.entries)) changed = true;
+      }
+    });
+    // Channels the server could not read the posts of this time: unknown, whatever the entries said.
+    (Array.isArray(data.activity_unknown) ? data.activity_unknown : []).forEach(function (key) {
+      if (typeof key === "string" && setActivity(key, "unknown")) activityMoved = true;
     });
     var updates = Array.isArray(data.updates) ? data.updates : [];
     updates.forEach(function (u) { if (applyUpdate(u)) changed = true; });
@@ -2256,7 +2422,8 @@
     return Promise.all(waits).then(function () {
       renderLive();
       renderRailNotes();
-      if (browserChanged) renderLanes();
+      var moved = railOrder() !== orderBefore;
+      if (browserChanged || activityMoved || moved) renderLanes(moved);
       if (changed) renderMain({});
       return changed;
     });
@@ -2470,15 +2637,18 @@
     fill(host, [el("i", { class: "livedot m-" + str(live.mode), "aria-hidden": "true" }), text]);
   }
 
-  function renderLanes() {
+  function renderLanes(keepSelectedVisible) {
     withFocus(function () {
       fill($("lanes"), [S.chat ? renderBrowserLane() : null].concat(renderRail(S.state, S.view === "conv" ? S.selected : null, selectChannel)));
     });
+    // The rail was reordered: keep the selected lane in view.
+    var lane = keepSelectedVisible && S.view === "conv" ? S.focusables["lane:" + S.selected] : null;
+    if (lane && typeof lane.scrollIntoView === "function") lane.scrollIntoView({ block: "nearest" });
   }
 
-  function renderChrome() {
+  function renderChrome(moved) {
     S.focusables = table();
-    renderLanes();
+    renderLanes(moved);
     renderModeBadge();
     renderFleet();
     renderLegend();
@@ -2554,7 +2724,7 @@
       var key = S.selected;
       var row = S.rows[key];
       var page = S.pages[key];
-      title = chanText(key);
+      title = [chanText(key), labelMark(row)];
       var count = row && Array.isArray(row.members) ? row.members.length : 0;
       sub = key === "general" ? count + " sessions, everyone" : count + " member" + (count === 1 ? "" : "s");
       var covRow = row ? { coverage: Object.assign(table(), row.coverage && typeof row.coverage === "object" ? row.coverage : {}) } : { coverage: table() };

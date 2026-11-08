@@ -35,7 +35,7 @@ failed.
 | `channel create NAME [--member ADDR]...` | Create a channel you own; you are a member. `ADDR` is a typed id or a name (an ambiguous name is refused with candidates). |
 | `channel join NAME` / `channel leave NAME` | Add or remove yourself. Idempotent (`already a member of`, `not a member of`). Buddy channels cannot be joined. |
 | `channel remove NAME ADDR` | Owner only: the current owner (its creator, the lead of a buddy channel, or a handover successor). Accepts a typed id of a session that no longer exists. |
-| `channel list [--json]` | Stored channels with kind, member count, your role (`owner`, `member`, `-`) and owner. |
+| `channel list [--json]` | Stored channels with [label](#buddy-channel-labels), kind, member count, your role (`owner`, `member`, `-`) and owner; a buddy channel also shows its key, and a label that is not current shows `stale` or `unverified`. `--json` adds `label`, `label_status` and `current_buddy`. |
 | `channel members NAME [--json]` | Members with `live`, `unverified` or `gone` ([liveness](#liveness)); the owner is marked. |
 | `channel tail NAME [--since SEQ] [--limit N] [--json]` | History after a cursor, ending with `next: --since N`; a cursor behind the oldest entry prints `gap: entries A..B pruned`. Default limit 20. `--json` adds a `view` (delivery state) to each send entry. |
 | `leave` | Leave every stored channel you are in, then `#general`. |
@@ -236,8 +236,8 @@ sender.
 
 `buddy set` creates or reuses the lead's buddy channel and adds the bound
 buddy; `buddy clear` removes the buddy it clears. The key is
-`buddy-<first 12 hex of sha256 of the owner's typed id>`, the display name
-`buddy · <owner name>`. Binding a second buddy adds it and keeps the first, so
+`buddy-<first 12 hex of sha256 of the owner's typed id>`, the stored display
+name `buddy · <owner name>`; listings show the [label](#buddy-channel-labels). Binding a second buddy adds it and keeps the first, so
 a lead with two buddies has one channel with three members while the binding
 names only the latest. Remove an earlier buddy with `channel remove`, or it
 runs `channel leave`.
@@ -248,6 +248,72 @@ runs `channel leave`.
 - A lead that handed its buddy channel over gets no new one; the warning names
   the successor that owns it.
 - Nobody joins a buddy channel with `channel join`.
+
+### Buddy channel labels
+
+A buddy record carries a `current_buddy` field: the typed id of the buddy the
+lead's binding named at the last successful upkeep. Absent means the record
+predates the field (the pair is *unverified*); `null` means no current buddy;
+a typed id of a buddy kind (`cc`, `codex`, `oc`) other than the owner is the
+buddy; any other value is *unverified*. It is written only under the channel
+lock:
+
+- `buddy set` records the buddy. When the buddy is already a member and only
+  the field changes, the record is rewritten without a history entry. This also
+  backfills a record that predates the field, on the owner's next `buddy set`.
+- `buddy clear` sets it to `null` when it named that buddy or was absent; a
+  field naming a different buddy is left.
+- `handover` sets it to `null` on a buddy channel whose owner changes (the
+  successor's binding lives in its own `CODEX_HOME`); the successor's next
+  `buddy set` records it.
+
+The field is the last successful upkeep, not the live binding: `buddy set --as
+OTHER` (no upkeep) and a failed upkeep leave it as it was, and a session-peers
+copy older than this change that does `buddy set` or a handover does not
+update it.
+
+A label names the channel by its pair and is computed at render time:
+
+| Label | Meaning |
+| --- | --- |
+| `#<name>` | Named channels (and `#general`): the channel name; always current. |
+| `#fire` | A buddy channel whose lead and current buddy have the same name. |
+| `#lead-buddy` | Lead and current buddy, each by session name. |
+| `#lead` `stale` | No current buddy (`null`). |
+| `#lead-buddy` or `#fire` `stale` | A member of the pair is `gone`. |
+| `#lead` `unverified` | The pair cannot be established (field absent or invalid). |
+
+- Names come from the Claude or Codex registry and from OpenCode when the label
+  is rendered; a rename writes nothing to the record. A member whose name
+  cannot be found shows a short typed id (`codex:01a1b0ab`, the first 8
+  characters of the id, after `ses_` for OpenCode). Earlier buddies still in
+  the roster never appear in the label. Names are escaped like other
+  peer-written text, and a middle dot in a name shows as `\u00b7`.
+- Two buddy channels with the same label, or a buddy label equal to a named
+  channel's `#key`, are told apart by a middle dot and the first 4 hex
+  characters of the key after `buddy-` (more when 4 do not tell the group
+  apart). Named channels are never suffixed, and `#general` and existing
+  channel keys are reserved.
+- A label is display only, never an address: it is not stored, and `send --to`
+  takes `send --to '#buddy-<hash>'`, the `#` form `channel list` prints in its
+  `key #buddy-…` field, before any `stale`/`unverified` marker (or `#NAME` for a named channel). `channel members` and
+  `channel tail` accept the key with or without `#`; a label is refused.
+- `channel list --json` rows carry `label`, `label_status` (`current`,
+  `stale`, `unverified`) and `current_buddy` (the typed id when the pair is
+  known, otherwise `null`).
+- Lookups are capped per `channel list`: names and liveness are looked up for
+  the first 256 buddy records in key order; at most 32 non-`cc` liveness checks
+  (every `codex:` check, and each OpenCode check not answered by the already
+  listed sessions) and at most 32 OpenCode `get_session` name lookups are made.
+  Past the liveness cap a member's liveness is `unverified` (not stale). Name
+  lookups: at most 32 `get_session` calls per listing, and a failed call stops
+  further name lookups in that listing; members already titled from the
+  recent-sessions list keep their names, the rest show the short id (so do
+  members past the cap). A `get_session` answer that the session does not exist
+  is not a failure. Liveness: an OpenCode liveness check stops further OpenCode
+  liveness checks only when the session walk itself failed.
+  Claude and Codex registry names are not capped. Records past the 256 cap get
+  no lookups (names found for other records may still apply).
 
 ### Buddy traffic
 
