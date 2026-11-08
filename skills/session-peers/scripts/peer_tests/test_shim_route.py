@@ -9,7 +9,7 @@ import signal
 import time
 from unittest import mock
 
-from .support import ShimBase, new_uuid, sp_codex, wait_for
+from .support import ShimBase, append, ev, new_uuid, sp_codex, user_item, wait_for
 from session_peers import budgets as sp_budgets, channels as sp_channels, claude as sp_claude
 from session_peers import constants as sp_constants, protocol as sp_protocol, runtime as sp_runtime
 from session_peers import shim as sp_shim, storage as sp_storage
@@ -550,7 +550,8 @@ class TestFreeze(HeldBase):
         self.assertEqual(len(notices), 1)
         self.assertIn("budget reset", self.content(notices[0]))
         self.assertIn("budget allow", self.content(notices[0]))
-        self.assertEqual(len([s for s in self.statuses() if "may or may not" in s["detail"]]), 1)
+        # The plain notice is sent once; every blocked request still gets its status.
+        self.assertEqual(len([s for s in self.statuses() if "may or may not" in s["detail"]]), 2)
 
     def test_a_frozen_sid_also_blocks_an_at_name_target(self):
         self.freeze()
@@ -908,6 +909,108 @@ class TestHeldRecovery(HeldBase):
         self.assertEqual(self.outcomes(), [{self.lead: "unknown"}])
         self.assertNotIn("outcome_pending", entry)
         self.assertEqual(self.replies(), [])
+
+
+class TestHeldDiscardOutcomes(HeldBase):
+    def discard_by_expiry(self, phase, published):
+        mid = new_uuid()
+        floor = self.publish(mid) if published else sp_channels.history_floor(self.key)
+        self.route_entry(phase, mid, floor)
+        budget = self.budget()
+        budget.expire_held(now=time.time() + 10 * budget.reply_budget_window)
+        self.assertNotIn(self.sid, budget.held)
+
+    def test_discarding_a_published_entry_records_a_refusal(self):
+        self.discard_by_expiry("published", True)
+        self.assertEqual(
+            self.outcomes(),
+            [{self.lead: sp_channels.OUTCOME_REFUSED + "held reply discarded (expired)"}])
+
+    def test_discarding_an_unresolved_entry_whose_send_exists_records_a_refusal(self):
+        self.discard_by_expiry("unresolved", True)
+        self.assertEqual(
+            self.outcomes(),
+            [{self.lead: sp_channels.OUTCOME_REFUSED + "held reply discarded (expired)"}])
+
+    def test_discarding_an_unresolved_entry_with_no_send_writes_nothing(self):
+        self.discard_by_expiry("unresolved", False)
+        self.assertEqual(self.outcomes(), [])
+        self.assertEqual(self.sends(), [])
+
+    def test_an_invalid_stored_route_is_discarded_without_channel_io(self):
+        for field, value in (("channel", "../Bad Name"), ("channel_mid", "NOT-A-UUID")):
+            entry = self.route_entry("published", new_uuid(), 0)
+            entry[field] = value
+            self.budget().held[self.sid] = entry
+            with mock.patch.object(sp_channels, "find_send") as find, \
+                    mock.patch.object(sp_channels, "finish_targeted") as finish, \
+                    mock.patch.object(sp_channels, "publish_targeted") as publish:
+                self.assertEqual(self.shim._route_held(self.rec, "held answer", entry), "discarded")
+                self.budget()._discard(self.sid, "test")
+            for mocked in (find, finish, publish):
+                mocked.assert_not_called()
+            self.assertEqual(self.replies(), [])
+
+
+class TestPollBatchCrash(RouteBase):
+    def setUp(self):
+        super().setUp()
+        # Not this process's pid: the shim's own record file is named after it.
+        self.listener, self.rec = self.add_listener(
+            name="cc-main", session_id=self.sid, pid=os.getppid())
+
+    def tagged_turn(self, number):
+        turn_id = "batch-%d" % number
+        tag = sp_protocol.build_tag("cc-main", self.sid, self.listener.path, "m-batch-%d" % number)
+        append(self.shim.rollout_path, ev("task_started", turn_id=turn_id),
+               user_item(tag + "\nping"),
+               ev("task_complete", turn_id=turn_id, last_agent_message="answer %d" % number))
+
+    def poll_once(self, shim):
+        with mock.patch.object(shim.stop, "wait", side_effect=[False, True]), \
+                mock.patch.object(shim, "_poll_maintenance", return_value=(0, 0)):
+            shim._poll_loop()
+
+    def test_a_crash_while_delivering_one_turn_does_not_lose_the_next_in_the_batch(self):
+        self.tagged_turn(1)
+        self.tagged_turn(2)
+
+        def die(key, sender, mid, recipient, outcome, floor, lock=None):
+            sp_channels.release_unfinished(lock)
+            raise Crash()
+
+        with mock.patch.object(sp_channels, "finish_targeted", die):
+            with self.assertRaises(Crash):
+                self.poll_once(self.shim)
+        wait_for(lambda: self.replies())
+        self.assertEqual(len(self.replies()), 1)
+        restarted = sp_shim.Shim(sp_codex.resolve_thread(self.tid))
+        restarted.codex_version = "0.153.4"
+        self.poll_once(restarted)
+        wait_for(lambda: len(self.replies()) >= 2)
+        time.sleep(0.3)
+        texts = [self.content(f) for f in self.replies()]
+        self.assertEqual(len(texts), 2)
+        self.assertEqual(len([t for t in texts if "answer 1" in t]), 1)
+        self.assertEqual(len([t for t in texts if "answer 2" in t]), 1)
+        self.assertEqual(len(self.sends()), 2)
+
+
+class TestRunRecoversHeld(HeldBase):
+    def test_run_freezes_a_sending_entry_with_no_outcome_and_sends_nothing(self):
+        mid = new_uuid()
+        floor = self.publish(mid)
+        self.route_entry("sending", mid, floor, release="reset")
+        shim = sp_shim.Shim(sp_codex.resolve_thread(self.tid))
+        shim.codex_version = "0.153.4"
+        TestUnconditionalReload.run_shim(self, shim)
+        entry = shim.reply_budget.held[self.sid]
+        self.assertEqual(entry["phase"], "unknown")
+        self.assertEqual(self.outcomes(), [{self.lead: "unknown"}])
+        self.assertEqual(self.replies(), [])
+        self.assertEqual([e["data"]["message_id"] for e in self.sends()], [mid])
+        saved = sp_runtime.read_json(sp_storage.own_thread_state_path(self.tid))
+        self.assertEqual(saved["held"][self.sid]["phase"], "unknown")
 
 
 class TestUnconditionalReload(RouteBase):

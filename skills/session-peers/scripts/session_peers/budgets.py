@@ -181,6 +181,9 @@ class ReplyBudget:
             return
         records = self._records()
         for sid, reason in pending:
+            if sid not in self.held:
+                # Evicted or discarded earlier in this loop.
+                continue
             if reason == "allow" and not self.may_send(sid):
                 # The allowance that released it is gone or spent.
                 self.held[sid].pop("release", None)
