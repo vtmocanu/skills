@@ -339,6 +339,72 @@ class FanOutTests(LabelBase):
             self.assertEqual(sp_channels.session_names(typeds, {}), {})
         self.assertEqual(len(calls), 1)
 
+    def test_a_notfound_lookup_is_not_an_outage_in_either_order(self):
+        gone, ok = "oc:ses_" + "0" * 26, "oc:ses_" + "1" * 26
+
+        def get_session(sid):
+            if sid == gone[3:]:
+                raise sp_channels.sp_opencode.OpenCodeNotFound("deleted")
+            return {"id": sid, "title": "fine"}
+
+        for order in ([gone, ok], [ok, gone]):
+            with mock.patch.object(sp_channels.sp_opencode, "recent_sessions", lambda *a, **k: []), \
+                    mock.patch.object(sp_channels.sp_opencode, "get_session", get_session):
+                self.assertEqual(sp_channels.session_names(order, {}), {ok: "fine"})
+
+    def test_notfound_still_counts_against_the_lookup_cap(self):
+        calls = []
+
+        def get_session(sid):
+            calls.append(sid)
+            raise sp_channels.sp_opencode.OpenCodeNotFound("deleted")
+
+        typeds = ["oc:ses_%026d" % i for i in range(100)]
+        with mock.patch.object(sp_channels.sp_opencode, "recent_sessions", lambda *a, **k: []), \
+                mock.patch.object(sp_channels.sp_opencode, "get_session", get_session):
+            sp_channels.session_names(typeds, {})
+        self.assertEqual(len(calls), sp_channels.SESSION_LOOKUPS_MAX)
+
+    def test_non_cc_liveness_is_budgeted_and_the_rest_is_unverified(self):
+        cap = sp_channels.SESSION_LOOKUPS_MAX
+        records = [buddy_rec("buddy-%04d" % i, "cc:" + new_uuid(), "oc:ses_%026d" % i) for i in range(cap + 10)]
+        calls = []
+
+        def liveness_of(typed, cache):
+            calls.append(typed)
+            return "live"
+
+        _names, live = sp_channels.label_context(records, {}, liveness_of=liveness_of, names_of=lambda t, c: {})
+        self.assertEqual(len([t for t in calls if not t.startswith("cc:")]), cap)
+        self.assertEqual(len([t for t in calls if t.startswith("cc:")]), cap + 10)
+        self.assertEqual(sum(1 for v in live.values() if v == "unverified"), 10)
+        labels = sp_channels.derive_labels(records, _names, live)
+        self.assertTrue(all(v["status"] == "current" for v in labels.values()))
+
+    def test_an_unverified_opencode_answer_stops_further_opencode_lookups(self):
+        records = [buddy_rec("buddy-%04d" % i, "cc:" + new_uuid(), "oc:ses_%026d" % i) for i in range(5)]
+        calls = []
+
+        def liveness_of(typed, cache):
+            calls.append(typed)
+            return "unverified" if typed.startswith("oc:") else "live"
+
+        _names, live = sp_channels.label_context(records, {}, liveness_of=liveness_of, names_of=lambda t, c: {})
+        self.assertEqual(len([t for t in calls if t.startswith("oc:")]), 1)
+        self.assertEqual(len([t for t in calls if t.startswith("cc:")]), 5)
+        self.assertEqual({v for t, v in live.items() if t.startswith("oc:")}, {"unverified"})
+
+    def test_a_gone_opencode_answer_does_not_stop_opencode_lookups(self):
+        records = [buddy_rec("buddy-%04d" % i, "cc:" + new_uuid(), "oc:ses_%026d" % i) for i in range(5)]
+        calls = []
+
+        def liveness_of(typed, cache):
+            calls.append(typed)
+            return "gone" if typed.startswith("oc:") else "live"
+
+        sp_channels.label_context(records, {}, liveness_of=liveness_of, names_of=lambda t, c: {})
+        self.assertEqual(len([t for t in calls if t.startswith("oc:")]), 5)
+
     def test_label_work_covers_at_most_the_channel_cap_of_buddy_records_in_key_order(self):
         cap = sp_constants.CHANNEL_MAX_CHANNELS
         records = [buddy_rec("buddy-%06d" % i, "cc:" + new_uuid(), "codex:" + new_uuid()) for i in range(cap + 20)]
@@ -357,7 +423,8 @@ class FanOutTests(LabelBase):
         covered = {t for rec in sorted(records, key=lambda r: r["key"])[:cap] for t in (rec["owner"], rec["current_buddy"])}
         self.assertEqual(set(asked), covered)
         self.assertEqual(len(asked), len(set(asked)))
-        self.assertEqual(set(live_calls), covered)
+        self.assertTrue(set(live_calls) <= covered)
+        self.assertTrue({t for t in covered if t.startswith("cc:")} <= set(live_calls))
         labels = sp_channels.derive_labels(records, names, live)
         beyond = records[0]  # the highest key
         self.assertEqual(labels[beyond["key"]]["status"], "current")

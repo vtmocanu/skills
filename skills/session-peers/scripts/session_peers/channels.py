@@ -1030,7 +1030,8 @@ def session_names(typeds, cache=None):
 
     cc and codex: the registry name. oc: the title among the recent sessions, else
     ``opencode.get_session`` (older and child sessions), at most SESSION_LOOKUPS_MAX lookups and
-    none after the first failure. A failure or a skipped lookup means no name.
+    none after the first failure (a NotFound answer is not a failure but still counts as a lookup).
+    A failure or a skipped lookup means no name.
     """
     cache = {} if cache is None else cache
     names = {}
@@ -1054,9 +1055,11 @@ def session_names(typeds, cache=None):
                 lookups += 1
                 try:
                     title = clip_name(sp_opencode.get_session(sid).get("title"))
+                except sp_opencode.OpenCodeNotFound:
+                    title = None  # the service answered: this session is gone, others may resolve
                 except Exception:
                     title = None
-                    down = True  # the service is unavailable: no further lookups in this call
+                    down = True  # no answer: no further lookups in this call
             if title:
                 names[typed] = title
     return names
@@ -1159,7 +1162,12 @@ def derive_labels(records, names, liveness):
 def label_context(records, cache, liveness_of=None, names_of=None):
     """``(names, liveness)`` for ``derive_labels``: the lead of every buddy record, and the liveness
     of both members of each known pair. No binding file is read. The store is peer-writable, so
-    only the first CHANNEL_MAX_CHANNELS buddy records by key are looked up; the rest get short ids."""
+    only the first CHANNEL_MAX_CHANNELS buddy records by key are looked up. Records past the cap get
+    no lookups of their own (names found for other records may still apply; their liveness is
+    unknown, so they are not stale). Subprocess-backed liveness (any non-``cc:`` kind) is limited to
+    SESSION_LOOKUPS_MAX calls per call here, the rest are ``unverified``; once an ``oc:`` lookup
+    returns ``unverified`` (the service looks down) no further ``oc:`` lookup is made. ``cc:``
+    liveness reads the registry and is not limited."""
     liveness_of = liveness_of or member_liveness
     names_of = names_of or session_names
     names_wanted, live_wanted = set(), set()
@@ -1181,11 +1189,20 @@ def label_context(records, cache, liveness_of=None, names_of=None):
     except Exception:
         names = {}
     liveness = {}
+    spent, oc_down = 0, False
     for typed in live_order:
+        kind = typed.partition(":")[0]
+        if kind != "cc":
+            if spent >= SESSION_LOOKUPS_MAX or (kind == "oc" and oc_down):
+                liveness[typed] = "unverified"
+                continue
+            spent += 1
         try:
             liveness[typed] = liveness_of(typed, cache)
         except Exception:
             liveness[typed] = "unverified"
+        if kind == "oc" and liveness[typed] == "unverified":
+            oc_down = True
     return names, liveness
 
 
