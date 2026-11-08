@@ -710,6 +710,13 @@ def _send_claude(target, args, oc_sender=None):
             sp_reply_wake.forget(reply_id)
         sys.stderr.write("error: %s\n" % exc)
         return _transport_failed(args, msg_id, exc)
+    except sp_claude.FrameUncertain as exc:
+        # The frame may have landed, so a reply-wake grant is kept.
+        sys.stderr.write(
+            "error: outcome unknown: could not confirm delivery to %s: %s; "
+            "check the recipient before resending\n" % (target, exc)
+        )
+        return _transport_failed(args, msg_id, exc)
     except OSError as exc:
         if reply_id:
             sp_reply_wake.forget(reply_id)
@@ -778,6 +785,12 @@ def _send_claude_channel(target, args, sender_sid):
         sp_claude.send_frame(rec["messagingSocketPath"], frame, auth_token=sp_claude.peer_token_for(rec))
     except (sp_codex.ResolveError, ValueError) as exc:
         sys.stderr.write("error: %s\n" % exc)
+        return 1
+    except sp_claude.FrameUncertain as exc:
+        sys.stderr.write(
+            "error: outcome unknown: could not confirm delivery to %s: %s; "
+            "check the recipient before resending\n" % (target, exc)
+        )
         return 1
     except OSError as exc:
         sys.stderr.write("error: could not reach %s: %s\n" % (target, exc))

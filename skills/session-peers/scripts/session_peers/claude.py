@@ -252,8 +252,17 @@ def default_socket_dir():
     return dirs[0] if dirs else "/tmp/cc-socks"
 
 
+class FrameUncertain(OSError):
+    """The frame's own write began and then failed: delivery is unknown."""
+
+
 def send_frame(sock_path, frame, auth_token=None, timeout=10.0):
-    """One NDJSON frame to a peer socket. Raises OSError on a failed connect."""
+    """One NDJSON frame to a peer socket. Raises OSError on a failed connect.
+
+    A failure after the frame's own sendall began raises FrameUncertain (an
+    OSError): part or all of the frame may have reached the peer. Connect and
+    auth-line failures stay plain OSError; nothing of the frame was written.
+    """
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     s.settimeout(timeout)
     try:
@@ -262,7 +271,11 @@ def send_frame(sock_path, frame, auth_token=None, timeout=10.0):
             s.sendall(
                 json.dumps({"type": "auth", "token": auth_token}).encode("utf-8") + b"\n"
             )
-        s.sendall(json.dumps(frame).encode("utf-8") + b"\n")
+        data = json.dumps(frame).encode("utf-8") + b"\n"
+        try:
+            s.sendall(data)
+        except OSError as exc:
+            raise FrameUncertain(*exc.args) from exc
     finally:
         try:
             s.close()
@@ -282,6 +295,23 @@ def deliver_to_record(rec, frame):
         sp_runtime.log("delivery to %r failed: %s" % (rec.get("name") or rec.get("pid"), exc))
         return False
     return True
+
+
+def deliver_to_record_outcome(rec, frame):
+    """deliver_to_record, as "delivered", "failed" or "unknown" (FrameUncertain)."""
+    sock_path = rec.get("messagingSocketPath")
+    if not socket_path_ok(sock_path):
+        sp_runtime.log("refusing to write to %r: symlink or non-allowlisted directory" % sock_path)
+        return "failed"
+    try:
+        send_frame(sock_path, frame, auth_token=peer_token_for(rec))
+    except FrameUncertain as exc:
+        sp_runtime.log("delivery to %r unconfirmed: %s" % (rec.get("name") or rec.get("pid"), exc))
+        return "unknown"
+    except OSError as exc:
+        sp_runtime.log("delivery to %r failed: %s" % (rec.get("name") or rec.get("pid"), exc))
+        return "failed"
+    return "delivered"
 
 
 def _resolve_claude_record(target, exclude=None):

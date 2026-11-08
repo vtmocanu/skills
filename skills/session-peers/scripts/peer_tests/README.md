@@ -23,6 +23,7 @@ python3 -m unittest peer_tests.test_messaging
 | test_shim | Inbound messages, replies, status, recovery, records, and delivery ordering |
 | test_budgets | Reset persistence, allowances, and restart/buddy reply accounting |
 | test_buddy | Binding records, routing, and buddy GC |
+| test_buddy_route | Targeted send through the pair's buddy channel: route, transport outcome, send evidence and dashboard gating |
 | test_cross_home | Shim state and thread discovery under another CODEX_HOME, request mailboxes, hook failure log, shim-name buddies, sender provenance, list titles |
 | test_routes | Typed route check: bare-name advice, ambiguity candidates, Codex request/wait refusals, Claude-to-Claude advice, and delivery re-verification |
 | test_commands | Version pins, doctor, hooks, config readers, and CLI surface |
