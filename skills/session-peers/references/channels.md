@@ -296,7 +296,7 @@ A label names the channel by its pair and is computed at render time:
   channel keys are reserved.
 - A label is display only, never an address: it is not stored, and `send --to`
   takes `send --to '#buddy-<hash>'`, the `#` form `channel list` prints in its
-  `key #buddy-…` field at the end of the line (or `#NAME` for a named channel). `channel members` and
+  `key #buddy-…` field, before any `stale`/`unverified` marker (or `#NAME` for a named channel). `channel members` and
   `channel tail` accept the key with or without `#`; a label is refused.
 - `channel list --json` rows carry `label`, `label_status` (`current`,
   `stale`, `unverified`) and `current_buddy` (the typed id when the pair is

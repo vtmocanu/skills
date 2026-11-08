@@ -141,9 +141,10 @@ Everything is bounded; a request that hits a bound says so in the page
   OpenCode session that exists but has no title counts as checked (short id,
   pass not incomplete). Labels for a channel newer than the last discovery
   pass, or before the first pass, are derived on the request thread without
-  lookups, from the last pass's names: identities that pass named keep their
-  names, identities it did not name (and everything before the first pass)
-  show short ids. Finding the newest send continues past the 25-entry
+  lookups, from the names and liveness the last pass looked up for labels:
+  an identity that pass used in a label keeps its name; any other identity
+  (and everything before the first pass) shows a short id and is never marked
+  stale until the next pass. Finding the newest send continues past the 25-entry
   alert page within the channel's 1 MiB read, reading at most 256 KiB more per
   channel and, across all tracked channels, about a quarter of what is left of
   the 8 MiB request; a channel it cannot settle within that is activity
