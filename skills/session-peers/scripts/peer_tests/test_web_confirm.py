@@ -533,8 +533,13 @@ class ConfirmTeardownTests(ConfirmBase):
             except BaseException as exc:  # re-raised below
                 errors.append(exc)
 
+        # A regressed teardown still journals and appends the refused outcome after `deliver` returns:
+        # pin those stores to this test's own paths so the developer's restored HOME is never written.
+        journal_at, history_at = sp_journal.journal_dir(), sp_channels.history_dir()
         with mock.patch.object(webchat, "JOIN_TIMEOUT", 0.01), \
                 mock.patch.object(test_web_chat, "join_or_fail", join), \
+                mock.patch.object(sp_journal, "journal_dir", lambda: journal_at), \
+                mock.patch.object(sp_channels, "history_dir", lambda: history_at), \
                 mock.patch.object(sp_channels, "_deliver_member", deliver):
             self.confirmed()
             self.assertTrue(entered.wait(10), "the worker never started delivering")
