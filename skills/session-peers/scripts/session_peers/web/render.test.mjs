@@ -1636,7 +1636,7 @@ test("chat: the Browser tally reads acknowledged and counts unverified recipient
   assert.ok(clean.includes("0 of 1 acknowledged") && !clean.includes("unverified)"), clean)
 })
 
-test("chat: a send nothing took says so; mixed, acked and outcome-unknown rows stay Recorded", () => {
+test("chat: an all-refused or skipped send says no delivery confirmed; mixed, acked and outcome-unknown rows stay Recorded", () => {
   const { app } = load()
   app.setState(chatState())
   const render = (recipients, extra = {}) => app.renderSendStatus(sendRow(MID1, Object.assign({ state: "pending", to: Object.keys(recipients), recipients }, extra)))

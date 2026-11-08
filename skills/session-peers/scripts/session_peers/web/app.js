@@ -372,8 +372,8 @@
   // says no delivery was confirmed, not that none happened.
   var NOTHING_DELIVERED = "No delivery confirmed: every recipient was refused or skipped";
 
-  // True when no recipient took the message: each is refused or skipped (never "outcome unknown",
-  // which may have been delivered) and none ACKed. pairs: [{ outcome, ack }].
+  // True when all recipient outcomes are refused or skipped, none ACKed, and no explicit
+  // outcome-unknown is present; delivery may still have occurred. pairs: [{ outcome, ack }].
   function nothingDelivered(pairs) {
     if (!pairs.length) return false;
     return pairs.every(function (p) {
