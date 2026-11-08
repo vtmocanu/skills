@@ -11,6 +11,7 @@ import html.parser
 import pathlib
 import re
 import unittest
+import urllib.parse
 
 SCRIPTS = pathlib.Path(__file__).resolve().parents[1]
 WEB = SCRIPTS / "session_peers" / "web"
@@ -269,13 +270,23 @@ class WebAssetTests(unittest.TestCase):
         scripts = [dict(attrs) for tag, attrs in shell.tags if tag == "script"]
         self.assertEqual([s.get("src") for s in scripts], ["/app.js"])
         links = [dict(attrs) for tag, attrs in shell.tags if tag == "link"]
-        self.assertEqual([(l.get("rel"), l.get("href")) for l in links], [("stylesheet", "/app.css")])
+        # Exactly one extra link: the favicon, an inline SVG data URI (the CSP allows img-src data:).
+        icons = [l for l in links if l.get("rel") == "icon"]
+        self.assertEqual(len(icons), 1)
+        icon = icons[0]["href"]
+        self.assertTrue(icon.startswith("data:image/svg+xml,"), icon)
+        decoded = urllib.parse.unquote(icon[len("data:image/svg+xml,"):])
+        self.assertNotIn("<script", decoded.lower())
+        self.assertNotRegex(decoded, r"(?i)\son[a-z]+\s*=")
+        self.assertNotRegex(decoded.replace(SVG_NS, ""), r"(?i)https?:")
+        self.assertEqual([(l.get("rel"), l.get("href")) for l in links if l.get("rel") != "icon"],
+                         [("stylesheet", "/app.css")])
         for tag, attrs in shell.tags:
             for name, value in attrs:
                 self.assertFalse(name.lower().startswith("on"), "%s %s" % (tag, name))
                 self.assertNotEqual(name.lower(), "style", tag)
                 if name.lower() in ("src", "href", "action", "formaction", "srcset", "poster", "data", "xlink:href"):
-                    self.assertIn((tag, value), [("script", "/app.js"), ("link", "/app.css")])
+                    self.assertIn((tag, value), [("script", "/app.js"), ("link", "/app.css"), ("link", icon)])
         self.assertNotIn("<form", self.html.lower())
         self.assertNotRegex(self.html, r"(?i)javascript:")
 

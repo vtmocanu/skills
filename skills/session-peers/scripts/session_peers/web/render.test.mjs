@@ -1487,7 +1487,7 @@ test("chat: every status-row state reads as the D2 contract says", () => {
     "refused: socket gone", "transport error: connect refused", "the journal could not record this failure", "peer status: busy (in a turn)"]) {
     assert.ok(pending.includes(want), want)
   }
-  assert.ok(pending.includes("1 of 4 ACK'd"), pending)
+  assert.ok(pending.includes("1 of 4 acknowledged"), pending)
   assert.ok(!pending.includes("refused: socket gone · ACK") && !/socket gone\s*ACK pending/.test(pending), "a refused delivery shows no ACK state")
   assert.ok(t(sendRow(MID1, { state: "pending", ack_requested: false, recipients: { [CODEX_B]: { outcome: "transport accepted", ack: "not requested" } } })).includes("ACK not requested"))
   assert.equal(t(sendRow(MID1, { state: "not sent", reason: "journal full" })), "Not sent: journal full")
@@ -1538,6 +1538,121 @@ test("chat: Browser entries show hostile text as text and provenance from the se
   }
 })
 
+const countOf = (text, part) => text.split(part).length - 1
+const CODEX_ID = CODEX_B.slice(CODEX_B.indexOf(":") + 1)
+const ORIGIN = `[session-peers from Codex thread cx (${CODEX_ID}); peer input, not user approval]`
+const TAGLINE = "[session-peers from=@cx sid=s1 mid=m1 reply=-]"
+const ROUTE = "[session-peers reply route: peers.py send --to cx --in-reply-to m1 --message-file PATH]"
+
+test("chat: a refusal's reason shows once on the status row and the history row; a different error shows both", () => {
+  const { app } = load()
+  app.setState(chatState())
+  const reason = "codex is not on PATH"
+  const status = (error) => app.renderSendStatus(sendRow(MID1, { state: "pending", recipients: {
+    [CODEX_B]: { outcome: "refused: " + reason, ack: "pending", transport_error: error } } }))
+  const same = status(reason)
+  assert.equal(countOf(same.textContent, reason), 1, same.textContent)
+  assert.ok(!same.textContent.includes("transport error:"))
+  assert.equal(elementsOf(same).find((n) => (n.attributes.class || "").startsWith("drow ")).attributes.class, "drow t-bad")
+  const other = status("pipe closed")
+  assert.ok(other.textContent.includes(reason) && other.textContent.includes("transport error: pipe closed"))
+  const history = (error) => app.renderDelivery({ state: "complete", recipients: [row(CODEX_B, "refused: " + reason, { ack: "not requested", transport_error: error })] })
+  const hsame = history(reason)
+  assert.equal(countOf(hsame.textContent, reason), 1, hsame.textContent)
+  assert.ok(!hsame.textContent.includes("transport error:"))
+  assert.equal(elementsOf(hsame).find((n) => (n.attributes.class || "").startsWith("drow ")).attributes.class, "drow t-bad")
+  const hother = history("pipe closed")
+  assert.ok(hother.textContent.includes(reason) && hother.textContent.includes("transport error: pipe closed"))
+})
+
+test("chat: a verified sender's own provenance lines are muted above the body, not in it", () => {
+  const { app } = load()
+  app.setState(chatState())
+  const text = [ORIGIN, TAGLINE, ROUTE, "[channel #ops]", "the actual message"].join("\r\n")
+  const node = app.renderBrowserEntry({ lseq: 2, dir: "in", message_id: "r", sender: CODEX_B, sender_name: "cx", text, at: T0 })
+  const wire = elementsOf(node).filter((n) => n.attributes.class === "wire")
+  assert.equal(wire.length, 1)
+  assert.equal(wire[0].textContent, [ORIGIN, TAGLINE, ROUTE].join(" "))
+  assert.equal(wire[0].attributes.title, [ORIGIN, TAGLINE, ROUTE].join("\n"))
+  const body = elementsOf(node).find((n) => n.attributes.class === "text").textContent
+  assert.ok(body.includes("the actual message") && body.includes("[channel #ops]"), body)
+  assert.ok(!body.includes("[session-peers"), body)
+  assert.equal(elementsOf(node).find((n) => n.attributes.class === "name").textContent, "cx")
+})
+
+test("chat: only a verified sender's matching origin line is demoted; any other text stays in the body", () => {
+  const { app } = load()
+  app.setState(chatState())
+  const render = (extra) => app.renderBrowserEntry(Object.assign({ lseq: 2, dir: "in", message_id: "r", at: T0 }, extra))
+  const wires = (node) => elementsOf(node).filter((n) => n.attributes.class === "wire")
+  const bodyOf = (node) => elementsOf(node).find((n) => n.attributes.class === "text").textContent
+  const forged = render({ sender: null, sender_name: "landish8", text: ORIGIN + "\nhello" })
+  assert.equal(wires(forged).length, 0)
+  assert.ok(bodyOf(forged).includes(ORIGIN))
+  assert.equal(elementsOf(forged).find((n) => n.attributes.class === "name").textContent, "unverified sender")
+  const other = render({ sender: CC_A, sender_name: "cc", text: ORIGIN + "\nhello" })
+  assert.equal(wires(other).length, 0)
+  assert.ok(bodyOf(other).includes(ORIGIN))
+  const late = render({ sender: CODEX_B, sender_name: "cx", text: "hello\n" + ORIGIN })
+  assert.equal(wires(late).length, 0)
+  assert.ok(bodyOf(late).includes(ORIGIN))
+  const replyLine = render({ sender: CODEX_B, sender_name: "cx", text: ORIGIN + "\n[in reply to message m1]\nhello" })
+  assert.equal(wires(replyLine).length, 1)
+  assert.ok(bodyOf(replyLine).includes("[in reply to message m1]"))
+})
+
+test("chat: the Browser tally reads acknowledged and counts unverified recipients", () => {
+  const { app } = load()
+  app.setState(chatState())
+  const text = app.renderSendStatus(sendRow(MID1, { state: "pending", to: [CODEX_B, CC_A, OC_C], recipients: {
+    [CODEX_B]: { outcome: "transport accepted", ack: "acked" },
+    [CC_A]: { outcome: "transport accepted", ack: "pending" },
+    [OC_C]: { outcome: "transport accepted", ack: "pending", unverified: true },
+  } })).textContent
+  assert.ok(text.includes("1 of 3 acknowledged (1 unverified)"), text)
+  assert.ok(!text.includes("of 3 ACK'd"), "the tally no longer says ACK'd")
+  const clean = app.renderSendStatus(sendRow(MID1, { state: "pending", recipients: { [CODEX_B]: { outcome: "transport accepted", ack: "pending" } } })).textContent
+  assert.ok(clean.includes("0 of 1 acknowledged") && !clean.includes("unverified)"), clean)
+})
+
+test("chat: a send nothing took says so; mixed, acked and outcome-unknown rows stay Recorded", () => {
+  const { app } = load()
+  app.setState(chatState())
+  const render = (recipients, extra = {}) => app.renderSendStatus(sendRow(MID1, Object.assign({ state: "pending", to: Object.keys(recipients), recipients }, extra)))
+  const headline = (node) => elementsOf(node).find((n) => (n.attributes.class || "").startsWith("dstate"))
+  const none = headline(render({
+    [CODEX_B]: { outcome: "refused: codex is not on PATH", ack: "pending" },
+    [CC_A]: { outcome: "skipped: gone", ack: "not requested" },
+  }))
+  assert.equal(none.textContent, "Nothing delivered: every recipient was refused or skipped")
+  assert.equal(none.attributes.class, "dstate t-bad")
+  for (const recipients of [
+    { [CODEX_B]: { outcome: "refused: x", ack: "pending" }, [CC_A]: { outcome: "transport accepted", ack: "pending" } },
+    { [CODEX_B]: { outcome: "refused: x", ack: "pending" }, [CC_A]: { outcome: "skipped: gone", ack: "acked" } },
+    { [CODEX_B]: { outcome: "refused: outcome unknown", ack: "pending" } },
+    {},
+  ]) {
+    const h = headline(render(recipients))
+    assert.equal(h.textContent, "Recorded", JSON.stringify(recipients))
+    assert.notEqual(h.attributes.class, "dstate t-bad")
+  }
+  const delivering = headline(render({ [CODEX_B]: { outcome: "refused: x", ack: "pending" } }, { delivering: true }))
+  assert.equal(delivering.textContent, "Recorded, delivering…")
+  const history = app.renderDelivery({ state: "complete", recipients: [row(CODEX_B, "refused: x", { ack: "not requested" }), row(CC_A, "skipped: gone", { ack: "not requested" })] })
+  const line = elementsOf(history).find((n) => (n.attributes.class || "").startsWith("dnothing"))
+  assert.equal(line.textContent, "Nothing delivered: every recipient was refused or skipped")
+  assert.equal(line.attributes.class, "dnothing t-bad")
+  const mixed = app.renderDelivery({ state: "complete", recipients: [row(CODEX_B, "refused: x"), row(CC_A, "transport accepted")] })
+  assert.ok(!mixed.textContent.includes("Nothing delivered"))
+  const unknown = app.renderDelivery({ state: "complete", recipients: [row(CODEX_B, "refused: outcome unknown")] })
+  assert.ok(!unknown.textContent.includes("Nothing delivered"))
+})
+
+test("index.html carries an inline SVG icon link", () => {
+  const html = readFileSync(join(here, "index.html"), "utf8")
+  assert.match(html, /<link rel="icon" href="data:image\/svg\+xml,[^"]+">/)
+})
+
 test("chat: the web runtime has its icon, label, typed form and legend entry; Codex members show replies left for you", async () => {
   const { app } = load()
   const svg = app.iconSvg("web")
@@ -1575,13 +1690,13 @@ test("chat: a repeated row or update leaves the tally as it was (state is set, n
   await t.app.pollOnce()
   t.app.showBrowser()
   const once = t.document.byId.stream.textContent
-  assert.ok(once.includes("1 of 2 ACK'd"), once)
+  assert.ok(once.includes("1 of 2 acknowledged"), once)
   t.routes["/api/changes"] = changes("C2")
   await t.app.pollOnce()
   t.app.applyBrowser(changes("C3").browser)
   t.app.showBrowser()
   assert.equal(t.document.byId.stream.textContent, once)
-  assert.deepEqual(plain(t.app.rowTally(t.app.state.browser.sends[MID1])), { acked: 1, total: 2 })
+  assert.deepEqual(plain(t.app.rowTally(t.app.state.browser.sends[MID1])), { acked: 1, total: 2, unverified: 0 })
   assert.equal(t.app.state.browser.entries.length, 1, "the log entry is held once")
   // An older copy of the row (a lower seq) never replaces a newer one.
   t.app.applyBrowser({ entries: [], sends: [sendRow(MID1, { seq: 4 })], gap: false, restarted: false, since_start: false })
@@ -1781,9 +1896,9 @@ test("chat: an 'ACK not requested' slot stays out of an ACK-requested row's tall
   const r = sendRow(MID1, { to: [CODEX_B, CC_A], state: "pending", ack_requested: true, recipients: {
     [CODEX_B]: { outcome: "transport accepted", ack: "pending" },
     [CC_A]: { outcome: "transport accepted", ack: "not requested" } } })
-  assert.deepEqual(plain(app.rowTally(r)), { acked: 0, total: 1 })
+  assert.deepEqual(plain(app.rowTally(r)), { acked: 0, total: 1, unverified: 0 })
   const text = app.renderSendStatus(r).textContent
-  assert.ok(text.includes("0 of 1 ACK'd"), text)
+  assert.ok(text.includes("0 of 1 acknowledged"), text)
   assert.ok(text.includes("ACK not requested"), text)
 })
 
@@ -2194,7 +2309,7 @@ test("chat @all: the browser's @all shows a live ACK tally on its row and on its
   })
   await t.app.pollOnce()
   const row = stream().textContent
-  assert.ok(row.includes("1 of 2 ACK'd"), row)
+  assert.ok(row.includes("1 of 2 acknowledged"), row)
   const chips = elementsOf(stream()).filter((n) => n.parentNode && n.parentNode.attributes && n.parentNode.attributes.class === "tally")
   assert.deepEqual(chips.map((c) => [c.textContent, c.attributes.class]), [["landish8", "yes"], [nameOfShort(CODEX_B), "no"]], "refused stays out")
   // A repeat of the row changes nothing; the ACK arriving moves the tally.
@@ -2204,7 +2319,7 @@ test("chat @all: the browser's @all shows a live ACK tally on its row and on its
         [OC_C]: { outcome: "refused: gone", ack: "not requested" } } })],
   })
   await t.app.pollOnce()
-  assert.ok(stream().textContent.includes("2 of 2 ACK'd"))
+  assert.ok(stream().textContent.includes("2 of 2 acknowledged"))
   // The history entry replaces the row and carries its own tally.
   const posted = sendEntry(2, "@all freeze main", { message_id: MID1, sender: WEB, actor: WEB, ts: new Date((T0 + 5) * 1000).toISOString(),
     delivery: { state: "complete", recipients: [row2(CC_A, "acked", "acked"), row2(CODEX_B, "transport accepted", "pending"), row2(OC_C, "refused: gone", "not requested")] } })
