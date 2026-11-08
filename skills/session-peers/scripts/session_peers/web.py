@@ -31,7 +31,8 @@ SUBPROCESS_MEMBERS_PER_PASS members that need a subprocess (Codex, OpenCode); me
 ``unverified`` and the result's ``discovery`` object carries ``truncated``. The members of each buddy
 channel's current pair are checked first, so those limits cut the other members, and the channel
 labels (``labels``) keep the previous pass's name and liveness for a pair member a pass could not
-check. The pass runs with
+check. Reading the channel records has its own DISCOVERY_PASS_BUDGET deadline, separate from the
+member checks', so a pass may take up to two budgets. The pass runs with
 ``runtime.log`` muted on its thread.
 
 Handler threads must never resolve CODEX_HOME: discovery's ``storage.codex_home_override`` mutates
@@ -254,15 +255,18 @@ def run_discovery(requester=None, previous=None):
                 name = sp_channels.registry_name(kind, ident, by_sid)
                 if name:
                     label_names[typed] = name
+        not_found = set()
         if oc_named and time.monotonic() < deadline:
             try:
-                label_names.update(sp_channels.session_names(oc_named, cache))
+                label_names.update(sp_channels.session_names(oc_named, cache, not_found))
             except Exception:
                 pass
         elif oc_named:  # out of time
             truncated = True
-        # An identity that got no name (out of time, a failed or skipped lookup) keeps what the previous pass found.
-        kept = {t: prev_names[t] for t in oc_named if t not in label_names and isinstance(prev_names.get(t), str)}
+        # An identity that got no name (out of time, a failed or skipped lookup) keeps what the previous pass
+        # found. One the service definitively reported missing (a deleted session) does not: it gets its short id.
+        kept = {t: prev_names[t] for t in oc_named if t not in label_names and t not in not_found
+                and isinstance(prev_names.get(t), str)}
         label_names.update(kept)
         truncated = truncated or bool(kept)
         for typed in live_ids:

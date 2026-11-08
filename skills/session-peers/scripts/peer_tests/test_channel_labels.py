@@ -279,6 +279,26 @@ class NameTests(LabelBase):
             names = sp_channels.session_names([self.lead, oc_recent, oc_old, oc_child, "oc:ses_" + "1" * 26], {})
         self.assertEqual(names, {self.lead: "lead", oc_recent: "recent", oc_old: "older", oc_child: "child"})
 
+    def test_short_ids_clip_the_kind_and_bound_a_value_without_a_colon(self):
+        self.assertEqual(sp_channels._short_id("k" * 100 + ":" + "i" * 100), "k" * 8 + ":" + "i" * 8)
+        self.assertEqual(sp_channels._short_id("z" * 500), "z" * 8)
+        self.assertEqual(sp_channels._short_id("oc:ses_" + "a" * 26), "oc:" + "a" * 8)
+
+    def test_session_names_reports_only_the_definitively_missing_opencode_ids(self):
+        gone, down, ok = "oc:ses_" + "1" * 26, "oc:ses_" + "2" * 26, "oc:ses_" + "3" * 26
+
+        def get_session(sid, *args, **kwargs):
+            if sid == "ses_" + "1" * 26:
+                raise sp_channels.sp_opencode.OpenCodeNotFound("deleted")
+            raise RuntimeError("down")
+
+        missing = set()
+        with mock.patch.object(sp_channels.sp_opencode, "recent_sessions", lambda *a, **k: []), \
+                mock.patch.object(sp_channels.sp_opencode, "get_session", get_session):
+            names = sp_channels.session_names([gone, down, ok], {}, missing)
+        self.assertEqual(names, {})
+        self.assertEqual(missing, {gone})
+
     def test_a_failing_opencode_lookup_gives_no_name_and_the_short_id(self):
         typed = "oc:" + OC_A
 

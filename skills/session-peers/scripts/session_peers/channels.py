@@ -1031,8 +1031,11 @@ def opencode_titles(cache=None):
     return titles
 
 
-def session_names(typeds, cache=None):
+def session_names(typeds, cache=None, not_found=None):
     """``{typed: name}`` for the typed ids that have one.
+
+    With a ``not_found`` set, the typed oc ids that ``opencode.get_session`` definitively reported
+    as not existing are added to it (a failure or a skipped lookup is not added).
 
     cc and codex: the registry name. oc: the title among the recent sessions, else
     ``opencode.get_session`` (older and child sessions), at most SESSION_LOOKUPS_MAX lookups and
@@ -1063,6 +1066,8 @@ def session_names(typeds, cache=None):
                     title = clip_name(sp_opencode.get_session(sid).get("title"))
                 except sp_opencode.OpenCodeNotFound:
                     title = None  # the service answered: this session is gone, others may resolve
+                    if not_found is not None:
+                        not_found.add(typed)
                 except Exception:
                     title = None
                     down = True  # no answer: no further lookups in this call
@@ -1107,10 +1112,12 @@ def pair_of(rec):
 
 
 def _short_id(typed):
-    kind, _sep, ident = str(typed).partition(":")
+    kind, sep, ident = str(typed).partition(":")
+    if not sep:  # no kind: a bare value is bounded like an id
+        return kind[:8]
     if ident.startswith("ses_"):
         ident = ident[len("ses_"):]
-    return "%s:%s" % (kind, ident[:8])
+    return "%s:%s" % (kind[:8], ident[:8])
 
 
 def _escape_other(char):

@@ -2081,7 +2081,6 @@ def _post_activity(snap, now):
 def _row_order(row):
     """Sort key of a state row: #general, posted (newest first), none, unknown; then label, then key.
 
-
     An unreadable row (no activity, no label) is unknown and ties as ``"#" + key``."""
     if row["key"] == GENERAL:
         return (0, 0.0, "", row["key"])
@@ -2116,8 +2115,8 @@ def state_view(discovery, budget=None, now=None, chat=None):
     ``label_status`` (none when unreadable), ``activity`` (``posted`` with ``last_post_ts``, ``none``
     or ``unknown``; only sends count) and the rows are ordered #general, posted newest first, none,
     unknown, then by label and key (a channel whose newest send is stamped more than FUTURE_SKEW seconds
-    after ``now`` is ``unknown`` with ``last_post_ts`` None; an unreadable row has no label, ``label_status`` or ``activity`` and sorts among
-    ``unknown`` as ``"#" + key``); ``index``, ``sessions`` and the cursor keep the tracked order.
+    after ``now`` is ``unknown`` with ``last_post_ts`` None; an unreadable row has no label,
+    ``label_status`` or ``activity`` and sorts among ``unknown`` as ``"#" + key``); ``index``, ``sessions`` and the cursor keep the tracked order.
     No history entries are returned. Each channel's ``alert`` comes from its latest ALERT_WINDOW
     entries (``missing_acks`` when an ``@all`` send there lacks ACKs, ``unverified`` when that could
     not be established, e.g. the budget ran out); older entries are not examined. ``handover_chain``
