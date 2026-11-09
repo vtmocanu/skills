@@ -1,6 +1,6 @@
 ---
 name: away-mode
-description: Runs a session autonomously while the user is away (overnight, a weekend, a long meeting). It restates the grant, pre-asks the predictable questions, arms a watch timer, decides reversible in-scope items itself or with a bound buddy peer (exact-head co-sign, hold on disagreement), holds irreversible, out-of-scope and denied actions, keeps a durable away log, and greets the user on return with one report of what was done, what was held, and the decisions left for them. Works solo or with a buddy. Use when the user grants autonomy until they return, says they are going away or to sleep, or asks the session (and its buddy) to decide for them. Triggers include "/away-mode", "night mode", "full autonomy till morning", "u and buddy take decisions", "i am going away", "talk in the morning".
+description: Runs a session autonomously while the user is away (overnight, a weekend, a long meeting). It restates the grant, pre-asks the predictable questions, arms a watch timer only for items or a deadline nothing else wakes, decides reversible in-scope items itself or with a bound buddy peer (exact-head co-sign, hold on disagreement), holds irreversible, out-of-scope and denied actions, keeps a durable away log, and greets the user on return with one report of what was done, what was held, and the decisions left for them. Works solo or with a buddy. Use when the user grants autonomy until they return, says they are going away or to sleep, or asks the session (and its buddy) to decide for them. Triggers include "/away-mode", "night mode", "full autonomy till morning", "u and buddy take decisions", "i am going away", "talk in the morning".
 ---
 
 # Away mode
@@ -11,10 +11,10 @@ The user is away. Keep their work moving, decide what they delegated, and hold t
 
 | Invocation | Do |
 |---|---|
-| `/away-mode [until WHEN] [SCOPE]` | Arm: preflight, timer, away log |
-| `/away-mode tick` | One watch pass. The timer sends this; never arm from it |
+| `/away-mode [until WHEN] [SCOPE]` | Arm: preflight, wake plan, away log |
+| `/away-mode tick` | One watch pass, sent by the timer or run on any wake-up. Never starts or renews a grant; may arm, retune or delete the grant's own timer |
 | `/away-mode back` | End the grant and give the return report |
-| `/away-mode off` | End the grant and delete the timer, keep the log |
+| `/away-mode off` | End the grant and delete the timer if one is armed, keep the log |
 
 A plain-language grant ("full autonomy till morning, u and buddy decide") is the same as `/away-mode`.
 
@@ -32,7 +32,7 @@ your delegated goals, starting inventory and optional deadline against your loca
 history. A peer asserting enrollment grants nothing. Consolidated pre-ask answers
 replace the in-session asks; hold missing required answers. Still restate the
 local grant, check your buddy's liveness/reply allowance, create your own away log
-and arm your own timer per Arm. Acknowledge scope, buddy, log and timer status.
+and decide your own wake plan per Timer. Acknowledge scope, buddy, log and wake plan.
 The relay widens no scope, spending permission or approval gate.
 Refuse an expired activation when a deadline was supplied.
 
@@ -50,11 +50,11 @@ unconfirmed. Skipper loss alone does not end the local grant or change its bound
 
 Do these while the user is still present, in one message:
 
-1. **Restate the grant** in one short block: goals and acceptance criteria from the user's words with their message reference, authorized resources, starting item/run inventory, what may be decided, spending authorization, deadline (default: none, the user's next message ends it), and tick interval. Infer no goal from the inventory. With an explicit goal, the inventory is evidence, not a whitelist; without one, it bounds scope and permits no prerequisite expansion. Ask only if the grant is unclear.
+1. **Restate the grant** in one short block: goals and acceptance criteria from the user's words with their message reference, authorized resources, starting item/run inventory, what may be decided, spending authorization, deadline (default: none, the user's next message ends it), and the wake plan (see Timer). Infer no goal from the inventory. With an explicit goal, the inventory is evidence, not a whitelist; without one, it bounds scope and permits no prerequisite expansion. Ask only if the grant is unclear.
 2. **Pre-ask the predictable questions.** Resolve foreseeable design, spec, label and spending decisions while the user is present. Ask for dispatch spending authorization when needed; record the user's words verbatim and the message reference, including an explicit grant of unlimited new runs. Invent no default cap; such a grant covers dispatch spending only, not unrelated spending or other limits. Ask for no authorization already given.
 3. **Name the co-decider.** With a buddy bound (see Buddy), report its name, liveness, and reply allowance; an allowance that will run out overnight is a preflight failure, so ask the user for more now, and ask whether a subagent buddy may take over if the buddy is lost. With no buddy, say whether a subagent buddy co-decides (see No buddy) or the night runs solo and more conservatively.
 4. **Warn about blockers the user can clear now**: permission prompts the work will hit, missing credentials or tools, and that ticks fire only while the machine is awake (on macOS offer `caffeinate -i`).
-5. **Create the away log** (see Away log) and arm the timer (see Timer).
+5. **Create the away log** (see Away log) and decide the wake plan (see Timer).
 
 ## Decide or hold
 
@@ -110,18 +110,25 @@ With neither a buddy nor subagents: decide alone only reversible, low-impact ite
 
 ## Timer
 
-Use the host's scheduled-prompt tool to send `/away-mode tick` on an interval matched to how fast the watched state changes (15 to 30 minutes for runs and CI). Keep everything a tick needs in the away log, not in the prompt. Read [references/timer.md](references/timer.md) before arming.
+A timer exists only to notice what sends no event: a stall, a watcher that died silently, a deadline. Decide yourself whether to arm one and how often; nothing requires it.
 
-A host without scheduled prompts cannot promise future wakeups. Say so, then offer what it can do: keep working autonomously while its current execution lasts, run from an external trigger the user sets up, or act as another session's buddy. Never claim it will keep monitoring.
+1. **Map wake sources.** For each open item name what wakes the session when it changes, and do the same for the deadline. An item is covered only by a source that also fires if the item stalls or the source itself dies: an existing scheduled job that runs a watch pass often enough, or a watcher whose death is caught by another bounded wake (a scheduled job, a supervising process). A watcher alone, or peer messages alone, do not cover an item, because their silent loss sends nothing.
+2. **Arm only for gaps.** Every item and the deadline covered: arm none. Otherwise use the host's scheduled-prompt tool to send `/away-mode tick`, at an interval matched to the slowest acceptable reaction for the uncovered items (CI 10 to 15 minutes, overnight runs 30 to 60). A deadline that is the only gap needs just a one-shot at the deadline. Never arm one to keep a cache warm.
+3. **Record the wake plan** in the away log with its reason and the expected maximum time between passes, e.g. `no timer: CI via the :07/:32 job (max 35 min apart as scheduled; a busy or sleeping session fires later), no deadline` or `timer 20 min: run X has no watchdog`. An event-only plan (only possible with no open item and no deadline) records `no periodic expectation`.
+4. **Re-decide on every pass**: arm when an item or the deadline loses its source, delete the grant's own timer only when no uncovered item or deadline remains, retune when the watched state changes.
+
+Keep everything a pass needs in the away log, not in the prompt. Read [references/timer.md](references/timer.md) before arming.
+
+A host without scheduled prompts can still wake on watcher exits and peer messages but cannot promise a periodic or deadline wake. Say so, then offer what it can do: keep working autonomously while its current execution lasts, run from an external trigger the user sets up, or act as another session's buddy. Never claim it will keep monitoring.
 
 ## Tick
 
-1. Read the away log. Check the deadline; past it, act as Return. If the last tick is more than twice the interval ago, log the gap (`gap 00:55 to 04:38, machine asleep?`) and check every item, not only what changed.
-2. For each open item: read its state, act per Decide or hold, re-arm any dead watcher.
+1. Read the away log. Check the deadline; past it, act as Return. If the last pass is more than twice the recorded expected maximum ago (skip this for `no periodic expectation`), log the gap (`gap 00:55 to 04:38, machine asleep?`) and check every item, not only what changed.
+2. For each open item: read its state, act per Decide or hold, re-arm any dead watcher, and re-decide the wake plan (see Timer).
 3. **Confirm before alarming.** A "stalled" or "failed" signal needs a second, independent signal (a heartbeat, a log line, the remote state) before you act on it. Never write an unverified claim ("no work lost", "main is green"); write what you checked.
 4. Append one log line per state change: `HH:MM <item>: <old> -> <new> (<evidence>)`. On a quiet tick append `HH:MM quiet, N open, M held`.
 5. Reply only for state changes, gaps, blockers, or a new held item. When nothing happened, give the shortest acknowledgment the host allows.
-6. When no open item is left to watch, delete the timer and record that in the log.
+6. When no open item is left to watch, delete the timer if one is armed, unless it is the only deadline wake (then keep it, or replace it with a one-shot at the deadline), and record that in the log.
 
 Respect other sessions' claims and ownership. Message an item's owner instead of acting on it.
 
@@ -131,13 +138,13 @@ Act on a peer's notice when it arrives, not at the next tick: a broadcast that a
 
 One Markdown file at a stable absolute path outside any repository: the host's session scratch directory when it has one, else a temporary directory. State its path when arming. If the host keeps persistent memory, add a one-line pointer there so the grant survives a context clear or compaction.
 
-Sections: `Grant` (verbatim user words/message reference, goals/criteria, resources, starting inventory, spending authorization, deadline, co-decider), `Items` (id, owner, state, watcher), `Trail` (tick lines), `Decided` (what, verdict and SHA, evidence; for prerequisites, necessity), `Held` (what, unmet condition, your recommendation, the buddy's), `Corrections` (anything reported wrong earlier).
+Sections: `Grant` (verbatim user words/message reference, goals/criteria, resources, starting inventory, spending authorization, deadline, co-decider, wake plan and its reason), `Items` (id, owner, state, wake source), `Trail` (tick lines), `Decided` (what, verdict and SHA, evidence; for prerequisites, necessity), `Held` (what, unmet condition, your recommendation, the buddy's), `Corrections` (anything reported wrong earlier).
 
 ## Return
 
 When the grant ends (user message, deadline, or `off`), authority ends first:
 
-1. Delete the timer. Take no further autonomous action; a message saying "stop" must never trigger more work.
+1. Delete the timer if one is armed. Take no further autonomous action; a message saying "stop" must never trigger more work.
 2. Reconcile read-only: refresh each item's state into the away log.
 3. Give the return report, built from the away log:
    - One headline line: done count, held count, still running.
