@@ -2,9 +2,9 @@
 
 ## Claude Code
 
-Use `CronList`, `CronCreate`, `CronDelete`. `CronList` freely to discover existing coverage; `CronCreate` only for an uncovered item or deadline (SKILL.md Timer); `CronDelete` only the grant's own timer, when nothing it covers is left uncovered.
+Use `CronList`, `CronCreate`, `CronDelete`. `CronList` freely to discover existing coverage; `CronCreate` only for an uncovered item or deadline (SKILL.md Timer); `CronDelete` only the grant's own timer: when nothing it covers would be left uncovered, to replace it (step 1), or when the grant ends (Return, `off`, Closing).
 
-1. `CronList` first. An existing job counts as a wake source only if it fires often enough and its prompt actually runs a watch pass over the away items; name it in the wake plan and arm nothing for what it covers. If a job with prompt `/away-mode tick` exists, keep it and arm nothing new. To change the interval, delete it first, then arm.
+1. `CronList` first. An existing job counts as a wake source only if it fires often enough and its prompt actually runs a watch pass over the away items; name it in the wake plan and arm nothing for what it covers. If a job with prompt `/away-mode tick` exists, keep it and arm nothing new. To change the interval, delete it, arm the replacement, and confirm it in `CronList` before recording its coverage.
 2. Pick an interval N that divides 60 (10, 15, 20, 30). Pick an offset `o` from 1 to N-1 that avoids minutes 0 and 30, then list `o, o+N, …` below 60. Example for 20 minutes: `7,27,47 * * * *`. Cron cannot express intervals that do not divide 60; say so instead of approximating silently.
 3. `CronCreate` with that cron, `recurring: true`, prompt `/away-mode tick`. For a deadline-only gap, a one-shot instead: pin minute, hour, day and month to the deadline (local time), `recurring: false`.
 4. Tell the user in one line: the interval, that ticks fire only while the session is running, idle, and the machine awake, that a recurring tick may fire up to half the interval late, and that the job stops firing when the session exits, is restored on `--resume`/`--continue`, and expires after 7 days.
