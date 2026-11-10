@@ -303,7 +303,7 @@ def _doctor_environment(add):
     if rc != 127:
         add("ok", "lsof on PATH")
     elif sp_procfd.available():
-        add("warn", "lsof not on PATH (only the lsof fallback needs it; the native probe works)")
+        add("warn", "lsof not on PATH (only the lsof fallback needs it; the native probe library is available)")
     else:
         add("fail", "lsof on PATH (thread liveness needs it)")
     _started, ps_error = sp_process.proc_start_checked(os.getpid())
