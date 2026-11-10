@@ -133,7 +133,7 @@ class NativeProbeTests(Base):
         os.replace(fresh, self.rollout)
         self.assertEqual(sp_codex.thread_is_held(str(self.rollout), child.pid), (False, None))
 
-    def test_a_closed_descriptor_and_a_dead_pid_are_verified_not_held(self):
+    def test_a_dead_pid_is_verified_not_held(self):
         child = self.holders.hold(self.rollout)
         other = self.holders.hold(self.work / "rollout.jsonl")
         self.assertEqual(sp_codex.thread_is_held(str(self.rollout), child.pid)[0], True)
@@ -265,15 +265,40 @@ class NativeProbeFailClosedTests(Base):
 
     def test_a_refused_name_is_unverified_when_scoped(self):
         self.inject(proc_name=_fail_with(errno.EPERM))
-        self.assertIn("permission denied", self.assertUnverified(self.child.pid))
+        self.assertIn("not permitted", self.assertUnverified(self.child.pid))
 
-    def test_a_refused_name_is_skipped_in_the_unscoped_walk(self):
-        # lsof cannot see another user's process either; refusing every name
-        # leaves no codex holder, verified, like lsof's empty answer.
-        self.inject(proc_name=_fail_with(errno.EPERM))
-        holders, verified, _error = sp_process.lsof_holders_checked([str(self.rollout)])
-        self.assertTrue(verified)
-        self.assertEqual(holders, {})
+    def test_a_refused_name_of_our_own_process_is_unverified_unscoped(self):
+        # The walk lists only this UID's processes, so a refusal there may hide
+        # our own Codex holder: never a verified "no holder".
+        real = self.real
+        child = self.child.pid
+
+        def refuse_child(pid, buf, size):
+            if pid == child:
+                ctypes.set_errno(errno.EPERM)
+                return 0
+            return real.proc_name(pid, buf, size)
+
+        self.inject(proc_name=refuse_child)
+        self.assertIn("not permitted", self.assertUnverified())
+
+    def test_the_unscoped_walk_lists_only_this_uids_processes(self):
+        # Another user's processes (launchd is root) are never inspected, so
+        # their refusals cannot reach the answer; ours are all listed.
+        pids = sp_procfd._pids(self.real)
+        self.assertIn(os.getpid(), pids)
+        self.assertIn(self.child.pid, pids)
+        self.assertNotIn(1, pids)
+
+    def test_a_full_pid_list_is_unverified(self):
+        real = self.real
+
+        def full(kind, uid, buf, size):
+            got = real.proc_listpids(kind, uid, buf, size)
+            return size if buf is not None else got
+
+        self.inject(proc_listpids=full)
+        self.assertIn("kept filling", self.assertUnverified())
 
     def test_auto_does_not_retry_a_failed_native_probe_through_lsof(self):
         # Falling back per failure would restore the lsof fork storm under load.
@@ -282,7 +307,7 @@ class NativeProbeFailClosedTests(Base):
         self.assertUnverified(self.child.pid)
 
     def test_a_failed_pid_listing_is_unverified(self):
-        self.inject(proc_listallpids=_fail_with(errno.EIO))
+        self.inject(proc_listpids=_fail_with(errno.EIO))
         self.assertUnverified()
 
     def test_revoked_and_closed_descriptors_are_skipped(self):

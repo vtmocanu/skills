@@ -134,7 +134,7 @@ def lsof_holders_checked(paths, pid=None):
             return out, True, None
         if probe == "native":
             return out, False, sp_procfd.unavailable_reason() or "native holder probe unavailable"
-    scope =["-a", "-p", str(int(pid))] if pid is not None else []
+    scope = ["-a", "-p", str(int(pid))] if pid is not None else []
     rc, stdout, stderr = sp_runtime.run_cmd(
         ["lsof"] + scope + ["-F", "pcn", "--"] + list(paths), timeout=20
     )

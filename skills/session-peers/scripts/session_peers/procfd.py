@@ -15,10 +15,11 @@ command name contains "codex" count.
 
 Fail-closed: anything that leaves the enumeration incomplete or an identity
 unknown raises ProbeError (the caller reports it as unverified), never a
-verified "not held". Two cases are skipped, matching lsof, which cannot see
-them either: another user's process whose name the kernel refuses (EPERM, only
-in the unscoped walk), and a revoked vnode (ENOENT, which lsof prints as
-"(revoked)" with no identity).
+verified "not held". The unscoped walk covers only processes of this effective
+UID (`proc_listpids(PROC_UID_ONLY)`): another user's descriptors are unreadable
+without root, to lsof as well, so any refusal inside the walk is unverified.
+Only a revoked vnode (ENOENT, which lsof prints as "(revoked)" with no
+identity) or a descriptor closed since the listing (EBADF) is skipped.
 """
 
 from __future__ import annotations
@@ -34,6 +35,7 @@ import sys
 _PROC_PIDLISTFDS = 1
 _PROC_PIDFDVNODEPATHINFO = 2
 _PROX_FDTYPE_VNODE = 1
+_PROC_UID_ONLY = 4  # <libproc.h> proc_listpids type
 _PROC_FDINFO = struct.Struct("=iI")  # struct proc_fdinfo { int32 proc_fd; uint32 proc_fdtype; }
 _PROC_FILEINFO_SIZE = 24  # struct proc_fileinfo
 _VNODE_INFO_SIZE = 152  # struct vnode_info, vinfo_stat first
@@ -60,8 +62,10 @@ def _load_libproc():
         lib = ctypes.CDLL(
             ctypes.util.find_library("proc") or "/usr/lib/libproc.dylib", use_errno=True
         )
-        lib.proc_listallpids.argtypes = [ctypes.c_void_p, ctypes.c_int]
-        lib.proc_listallpids.restype = ctypes.c_int
+        lib.proc_listpids.argtypes = [
+            ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_int
+        ]
+        lib.proc_listpids.restype = ctypes.c_int
         lib.proc_name.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
         lib.proc_name.restype = ctypes.c_int
         lib.proc_pidinfo.argtypes = [
@@ -100,26 +104,32 @@ def _errno_text(err):
 
 
 def _pids(lib):
+    """Every pid of this effective UID; a full buffer is retried, then refused."""
+    uid = os.geteuid()
+    size = ctypes.sizeof(ctypes.c_int)
     for _attempt in range(3):
-        count = lib.proc_listallpids(None, 0)
-        if count <= 0:
-            raise ProbeError("proc_listallpids failed: %s" % _errno_text(ctypes.get_errno()))
-        capacity = count + 256
+        ctypes.set_errno(0)
+        need = lib.proc_listpids(_PROC_UID_ONLY, uid, None, 0)
+        if need <= 0:
+            raise ProbeError("proc_listpids failed: %s" % _errno_text(ctypes.get_errno()))
+        capacity = need // size + 256
         buf = (ctypes.c_int * capacity)()
-        got = lib.proc_listallpids(buf, ctypes.sizeof(buf))
+        ctypes.set_errno(0)
+        got = lib.proc_listpids(_PROC_UID_ONLY, uid, buf, ctypes.sizeof(buf))
         if got <= 0:
-            raise ProbeError("proc_listallpids failed: %s" % _errno_text(ctypes.get_errno()))
-        if got < capacity:
-            return [buf[i] for i in range(got) if buf[i] > 0]
-    raise ProbeError("proc_listallpids kept filling its buffer")
+            raise ProbeError("proc_listpids failed: %s" % _errno_text(ctypes.get_errno()))
+        if got % size:
+            raise ProbeError("pid list is ragged (%d bytes)" % got)
+        if got < ctypes.sizeof(buf):
+            return [buf[i] for i in range(got // size) if buf[i] > 0]
+    raise ProbeError("proc_listpids kept filling its buffer")
 
 
 _GONE = object()
-_DENIED = object()
 
 
 def _name(lib, pid):
-    """The command name, _GONE for a reaped pid, _DENIED on EPERM."""
+    """The command name, or _GONE for a reaped pid; a refusal raises."""
     buf = ctypes.create_string_buffer(256)
     ctypes.set_errno(0)
     if lib.proc_name(pid, buf, ctypes.sizeof(buf)) > 0:
@@ -127,8 +137,6 @@ def _name(lib, pid):
     err = ctypes.get_errno()
     if err in (0, errno.ESRCH):
         return _GONE
-    if err == errno.EPERM:
-        return _DENIED
     raise ProbeError("cannot read the name of pid %d: %s" % (pid, _errno_text(err)))
 
 
@@ -194,6 +202,7 @@ def holders(paths, pid=None):
     `paths` must already exist (the caller drops absent ones); each result is
     keyed by the path string it was asked about. With `pid`, only that process
     is inspected: a reaped or non-codex pid holds nothing, a refused one raises.
+    Without it, every process of this effective UID is inspected.
     Raises ProbeError whenever the answer would be incomplete. Returns None when
     the platform has no native probe.
     """
@@ -215,10 +224,6 @@ def holders(paths, pid=None):
         name = _name(lib, candidate)
         if name is _GONE:
             continue
-        if name is _DENIED:
-            if scoped:
-                raise ProbeError("cannot inspect pid %d: permission denied" % candidate)
-            continue  # another user's process: lsof cannot see it either
         if "codex" not in os.path.basename(name).lower():
             continue
         vnodes = _vnodes(lib, candidate)
