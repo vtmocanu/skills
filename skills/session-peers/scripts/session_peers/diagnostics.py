@@ -299,7 +299,7 @@ def _doctor_environment(add):
     )
     add("ok" if codex_v else "fail", "codex on PATH")
     rc, _out, _err = sp_runtime.run_cmd(["lsof", "-v"], timeout=10)
-    add("ok" if rc != 127 else "fail", "lsof on PATH (thread liveness needs it)")
+    add("ok" if rc != 127 else "fail", "lsof on PATH (thread liveness needs it where the native probe is unavailable)")
     _started, ps_error = sp_process.proc_start_checked(os.getpid())
     add(
         "fail" if ps_error else "ok",
