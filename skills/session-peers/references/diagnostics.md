@@ -100,6 +100,13 @@ A running shim's liveness check and its alias refresh for a title no other
 thread carries probe only its known holder pid (`lsof -a -p PID`); a duplicate
 title's refresh probes its same-title contenders, and discovery (`list`, `up`)
 probes all processes.
+On macOS the holder probe runs in-process through libproc, the same question
+as `lsof` (a codex-named process with the file open, matched by device and
+inode) with no fork; other platforms, or a host where libproc cannot load,
+use `lsof`. A native probe that cannot complete (a refused or truncated
+descriptor list) is unverified, never retried through `lsof`.
+`SESSION_PEERS_HOLDER_PROBE=lsof|native|auto` (default `auto`) forces a
+backend for diagnosis.
 Run `list`, `doctor`, and direct `send --to cc:...` with host permission from
 the outset. If permission is unavailable, an `unverified` result is not
 evidence that no session exists. A Claude record missing `procStart` is also

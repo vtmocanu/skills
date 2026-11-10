@@ -53,6 +53,7 @@ MODULES = (
     "peer_tests.test_web_peer",
     "peer_tests.test_web_chat",
     "peer_tests.test_web_confirm",
+    "peer_tests.test_procfd",
 )
 
 # Expose test classes so unittest's existing TestClass[.test_method] selectors

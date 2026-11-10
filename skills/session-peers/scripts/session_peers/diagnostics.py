@@ -54,6 +54,7 @@ import socket
 from . import config as sp_config, constants as sp_constants, protocol as sp_protocol, runtime as sp_runtime
 from . import claude as sp_claude, codex as sp_codex, lifecycle as sp_lifecycle, process as sp_process, storage as sp_storage
 from . import hooks as sp_hooks, maintenance as sp_maintenance, opencode as sp_opencode
+from . import procfd as sp_procfd
 
 # --------------------------------------------------------------------------
 # Commands
@@ -299,7 +300,12 @@ def _doctor_environment(add):
     )
     add("ok" if codex_v else "fail", "codex on PATH")
     rc, _out, _err = sp_runtime.run_cmd(["lsof", "-v"], timeout=10)
-    add("ok" if rc != 127 else "fail", "lsof on PATH (thread liveness needs it)")
+    if rc != 127:
+        add("ok", "lsof on PATH")
+    elif sp_procfd.available():
+        add("warn", "lsof not on PATH (only the lsof fallback needs it; the native probe library is available)")
+    else:
+        add("fail", "lsof on PATH (thread liveness needs it)")
     _started, ps_error = sp_process.proc_start_checked(os.getpid())
     add(
         "fail" if ps_error else "ok",

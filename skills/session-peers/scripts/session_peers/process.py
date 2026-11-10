@@ -5,6 +5,7 @@ import os
 import socket
 import struct
 import sys
+from . import procfd as sp_procfd
 from . import runtime as sp_runtime
 
 # --------------------------------------------------------------------------
@@ -73,6 +74,16 @@ def canon_path(path):
         return path
 
 
+HOLDER_PROBES = ("auto", "native", "lsof")
+
+
+def holder_probe():
+    """`SESSION_PEERS_HOLDER_PROBE`: auto (native where available, else lsof),
+    native (fail rather than fork lsof) or lsof. A test and diagnostic seam."""
+    value = os.environ.get("SESSION_PEERS_HOLDER_PROBE", "auto").strip().lower()
+    return value if value in HOLDER_PROBES else "auto"
+
+
 def lsof_holders_checked(paths, pid=None):
     """(holders, verified, error) for paths a Codex process may hold.
 
@@ -109,6 +120,20 @@ def lsof_holders_checked(paths, pid=None):
     paths = existing
     if not paths:
         return out, True, None
+    probe = holder_probe()
+    if probe != "lsof":
+        try:
+            found = sp_procfd.holders(paths, pid=pid)
+        except sp_procfd.ProbeError as exc:
+            # Never retried through lsof: a per-process failure under load would
+            # bring the fork storm back. Unverified keeps the caller's state.
+            return out, False, str(exc)
+        if found is not None:
+            for path, rows in found.items():
+                out.setdefault(canon_path(path), []).extend(rows)
+            return out, True, None
+        if probe == "native":
+            return out, False, sp_procfd.unavailable_reason() or "native holder probe unavailable"
     scope = ["-a", "-p", str(int(pid))] if pid is not None else []
     rc, stdout, stderr = sp_runtime.run_cmd(
         ["lsof"] + scope + ["-F", "pcn", "--"] + list(paths), timeout=20

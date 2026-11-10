@@ -411,6 +411,9 @@ class Base(unittest.TestCase):
         os.environ["SESSION_PEERS_WAIT_POLL_INTERVAL"] = "0.02"
         os.environ["PATH"] = str(self.bin)
         os.environ["FAKE_LSOF_MAP"] = str(self.lsof_map)
+        # Fixture holders live in the fake lsof's map, not in real descriptors,
+        # so the suite pins the lsof backend; test_procfd covers the native one.
+        os.environ["SESSION_PEERS_HOLDER_PROBE"] = "lsof"
         os.environ.pop("FAKE_LSOF_RC", None)
         os.environ.pop("FAKE_LSOF_STDERR", None)
         os.environ["FAKE_CODEX_LOG"] = str(self.codex_log)
