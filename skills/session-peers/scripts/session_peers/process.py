@@ -140,7 +140,7 @@ def lsof_holders_checked(paths, pid=None):
     )
     if rc != 0 and not (rc == 1 and not stderr.strip()):
         detail = stderr.strip() or stdout.strip() or "lsof exited %d" % rc
-        return out, False, detail
+        return out, False, sp_runtime.bounded(detail)
     pid = None
     cmd = ""
     for line in stdout.splitlines():
