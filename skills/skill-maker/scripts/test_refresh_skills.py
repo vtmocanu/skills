@@ -396,6 +396,37 @@ class RefreshTests(unittest.TestCase):
         self.assertEqual(saved["version"], 2)
         self.assertEqual(saved["skills"]["dependency"]["computedHash"], "new" * 16)
 
+    def test_partial_v2_refresh_keeps_the_untouched_v1_entry_until_refreshed(self):
+        project_lock = self.project / "skills-lock.json"
+        old_beta = entry("org/b", "old")
+        project_lock.write_text(json.dumps({"version": 1, "skills": {
+            "alpha": entry("org/a", "old"), "beta": old_beta}}))
+        beta = self.project / ".agents" / "skills" / "beta"
+        beta.mkdir(parents=True)
+        (beta / "SKILL.md").write_bytes(body("old"))
+        fail_beta = True
+
+        def runner(*args, cwd):
+            if args[1] == "org/b" and fail_beta:
+                return 1
+            name = {"org/a": "alpha", "org/b": "beta"}.get(args[1], "example")
+            stage_skill(cwd, name, metadata=entry(args[1]), version=2)
+            return 0
+
+        self.assertEqual(self.refresh(runner), 1)
+        saved = json.loads(project_lock.read_text())
+        self.assertEqual(saved["version"], 2)
+        self.assertEqual(saved["skills"]["alpha"]["computedHash"], "new" * 16)
+        self.assertEqual(saved["skills"]["beta"], old_beta)
+        self.assertEqual((beta / "SKILL.md").read_bytes(), body("old"))
+
+        fail_beta = False
+        self.assertEqual(self.refresh(runner), 0)
+        saved = json.loads(project_lock.read_text())
+        self.assertEqual(saved["version"], 2)
+        self.assertEqual(saved["skills"]["beta"]["computedHash"], "new" * 16)
+        self.assertEqual((beta / "SKILL.md").read_bytes(), self.new)
+
     def test_unknown_installer_lock_version_is_refused(self):
         def runner(*args, cwd):
             stage_skill(cwd, version=4)

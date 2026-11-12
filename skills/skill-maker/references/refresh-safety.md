@@ -68,7 +68,9 @@ updated. Do not use global refresh to overwrite an untracked authored skill.
 
 Project lock versions 1 and 2 (skills 1.8+) and global lock version 3 are
 validated explicitly; a project lock is relabelled to the installer's version
-when it publishes that installer's entries. The
+when it publishes that installer's entries. Until a later refresh replaces them, entries
+that run did not publish keep version 1 hashes under the version 2 label, so the
+CLI reports them as modified, never as falsely clean. The
 wrapper preserves unrelated global state and original installation timestamps,
 then publishes lock metadata after the files. Vercel's staged `computedHash`
 becomes global `skillFolderHash`, while source URLs, paths, and refs are retained.
