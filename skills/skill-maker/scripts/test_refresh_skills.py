@@ -32,12 +32,12 @@ def entry(source: str = "org/catalog", version: str = "new") -> dict:
 
 
 def stage_skill(cwd: Path, name: str = "example", content: bytes | None = None,
-                metadata: dict | None = None) -> None:
+                metadata: dict | None = None, version: int = 1) -> None:
     skill = cwd / ".agents" / "skills" / name
     skill.mkdir(parents=True, exist_ok=True)
     (skill / "SKILL.md").write_bytes(content or body("new"))
     lock_path = cwd / "skills-lock.json"
-    lock = json.loads(lock_path.read_text()) if lock_path.exists() else {"version": 1, "skills": {}}
+    lock = json.loads(lock_path.read_text()) if lock_path.exists() else {"version": version, "skills": {}}
     lock["skills"][name] = metadata or entry()
     lock_path.write_text(json.dumps(lock))
 
@@ -379,6 +379,61 @@ class RefreshTests(unittest.TestCase):
         saved = json.loads(project_lock.read_text())["skills"]["dependency"]
         self.assertEqual((self.project / saved["source"]).resolve(), source.resolve())
         self.assertEqual(saved["computedHash"], "new")
+
+    def test_installer_lock_version_2_is_published(self):
+        # skills 1.8 stages a version 2 project lock; refusing it froze every refresh.
+        project_lock = self.project / "skills-lock.json"
+        project_lock.write_text(json.dumps({"version": 1, "skills": {"dependency": entry("org/project")}}))
+
+        def runner(*args, cwd):
+            name = "dependency" if args[1] == "org/project" else "example"
+            stage_skill(cwd, name, metadata=entry(args[1]), version=2)
+            return 0
+
+        self.assertEqual(self.refresh(runner), 0)
+        self.assertEqual((self.live / "SKILL.md").read_bytes(), self.new)
+        saved = json.loads(project_lock.read_text())
+        self.assertEqual(saved["version"], 2)
+        self.assertEqual(saved["skills"]["dependency"]["computedHash"], "new" * 16)
+
+    def test_partial_v2_refresh_keeps_the_untouched_v1_entry_until_refreshed(self):
+        project_lock = self.project / "skills-lock.json"
+        old_beta = entry("org/b", "old")
+        project_lock.write_text(json.dumps({"version": 1, "skills": {
+            "alpha": entry("org/a", "old"), "beta": old_beta}}))
+        beta = self.project / ".agents" / "skills" / "beta"
+        beta.mkdir(parents=True)
+        (beta / "SKILL.md").write_bytes(body("old"))
+        fail_beta = True
+
+        def runner(*args, cwd):
+            if args[1] == "org/b" and fail_beta:
+                return 1
+            name = {"org/a": "alpha", "org/b": "beta"}.get(args[1], "example")
+            stage_skill(cwd, name, metadata=entry(args[1]), version=2)
+            return 0
+
+        self.assertEqual(self.refresh(runner), 1)
+        saved = json.loads(project_lock.read_text())
+        self.assertEqual(saved["version"], 2)
+        self.assertEqual(saved["skills"]["alpha"]["computedHash"], "new" * 16)
+        self.assertEqual(saved["skills"]["beta"], old_beta)
+        self.assertEqual((beta / "SKILL.md").read_bytes(), body("old"))
+
+        fail_beta = False
+        self.assertEqual(self.refresh(runner), 0)
+        saved = json.loads(project_lock.read_text())
+        self.assertEqual(saved["version"], 2)
+        self.assertEqual(saved["skills"]["beta"]["computedHash"], "new" * 16)
+        self.assertEqual((beta / "SKILL.md").read_bytes(), self.new)
+
+    def test_unknown_installer_lock_version_is_refused(self):
+        def runner(*args, cwd):
+            stage_skill(cwd, version=4)
+            return 0
+
+        self.assertEqual(self.refresh(runner), 1)
+        self.assertEqual((self.live / "SKILL.md").read_bytes(), self.old)
 
     def test_symlink_and_shape_conflicts_fail_before_any_publish(self):
         outside = self.root / "outside.txt"
