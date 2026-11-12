@@ -66,7 +66,9 @@ and global lock, respectively. Current-project dependencies are taken from the
 launch directory's `skills-lock.json`; authored skills absent from it are not
 updated. Do not use global refresh to overwrite an untracked authored skill.
 
-Project lock version 1 and global lock version 3 are validated explicitly. The
+Project lock versions 1 and 2 (skills 1.8+) and global lock version 3 are
+validated explicitly; a project lock is relabelled to the installer's version
+when it publishes that installer's entries. The
 wrapper preserves unrelated global state and original installation timestamps,
 then publishes lock metadata after the files. Vercel's staged `computedHash`
 becomes global `skillFolderHash`, while source URLs, paths, and refs are retained.

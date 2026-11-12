@@ -32,12 +32,12 @@ def entry(source: str = "org/catalog", version: str = "new") -> dict:
 
 
 def stage_skill(cwd: Path, name: str = "example", content: bytes | None = None,
-                metadata: dict | None = None) -> None:
+                metadata: dict | None = None, version: int = 1) -> None:
     skill = cwd / ".agents" / "skills" / name
     skill.mkdir(parents=True, exist_ok=True)
     (skill / "SKILL.md").write_bytes(content or body("new"))
     lock_path = cwd / "skills-lock.json"
-    lock = json.loads(lock_path.read_text()) if lock_path.exists() else {"version": 1, "skills": {}}
+    lock = json.loads(lock_path.read_text()) if lock_path.exists() else {"version": version, "skills": {}}
     lock["skills"][name] = metadata or entry()
     lock_path.write_text(json.dumps(lock))
 
@@ -379,6 +379,30 @@ class RefreshTests(unittest.TestCase):
         saved = json.loads(project_lock.read_text())["skills"]["dependency"]
         self.assertEqual((self.project / saved["source"]).resolve(), source.resolve())
         self.assertEqual(saved["computedHash"], "new")
+
+    def test_installer_lock_version_2_is_published(self):
+        # skills 1.8 stages a version 2 project lock; refusing it froze every refresh.
+        project_lock = self.project / "skills-lock.json"
+        project_lock.write_text(json.dumps({"version": 1, "skills": {"dependency": entry("org/project")}}))
+
+        def runner(*args, cwd):
+            name = "dependency" if args[1] == "org/project" else "example"
+            stage_skill(cwd, name, metadata=entry(args[1]), version=2)
+            return 0
+
+        self.assertEqual(self.refresh(runner), 0)
+        self.assertEqual((self.live / "SKILL.md").read_bytes(), self.new)
+        saved = json.loads(project_lock.read_text())
+        self.assertEqual(saved["version"], 2)
+        self.assertEqual(saved["skills"]["dependency"]["computedHash"], "new" * 16)
+
+    def test_unknown_installer_lock_version_is_refused(self):
+        def runner(*args, cwd):
+            stage_skill(cwd, version=4)
+            return 0
+
+        self.assertEqual(self.refresh(runner), 1)
+        self.assertEqual((self.live / "SKILL.md").read_bytes(), self.old)
 
     def test_symlink_and_shape_conflicts_fail_before_any_publish(self):
         outside = self.root / "outside.txt"

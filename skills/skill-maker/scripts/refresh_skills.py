@@ -52,11 +52,17 @@ def run(*args: str, cwd: Path) -> int:
         return process.returncode
 
 
-def read_lock(path: Path, version: int) -> dict:
+# Vercel's project lock: version 1 until skills 1.8, version 2 since (same entry
+# shape, new content-hash algorithm). The global lock stays at version 3.
+PROJECT_LOCK_VERSIONS = (1, 2)
+GLOBAL_LOCK_VERSIONS = (3,)
+
+
+def read_lock(path: Path, versions: tuple[int, ...]) -> dict:
     if not path.exists():
-        return {"version": version, "skills": {}}
+        return {"version": versions[-1], "skills": {}}
     data = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(data, dict) or data.get("version") != version or not isinstance(data.get("skills"), dict):
+    if not isinstance(data, dict) or data.get("version") not in versions or not isinstance(data.get("skills"), dict):
         raise ValueError(f"unsupported skills lockfile schema: {path}")
     if any(not isinstance(entry, dict) for entry in data["skills"].values()):
         raise ValueError(f"invalid skill records in lockfile: {path}")
@@ -103,8 +109,8 @@ def source_key(source: str) -> str:
     return base + (separator + ref if separator else "")
 
 
-def staged_entries(stage: Path, destination: Path) -> dict:
-    lock = read_lock(stage / "skills-lock.json", 1)
+def staged_entries(stage: Path, destination: Path) -> tuple[int, dict]:
+    lock = read_lock(stage / "skills-lock.json", PROJECT_LOCK_VERSIONS)
     if not lock["skills"]:
         raise ValueError("installer returned no tracked skills; live files were retained")
     for name, entry in lock["skills"].items():
@@ -114,7 +120,7 @@ def staged_entries(stage: Path, destination: Path) -> dict:
             raise ValueError(f"installer omitted the content hash for {name}")
         if entry["sourceType"] == "local":
             entry["source"] = os.path.relpath((stage / entry["source"]).resolve(), destination)
-    return lock["skills"]
+    return lock["version"], lock["skills"]
 
 
 def global_entry(entry: dict, previous: dict, changed: bool, project: Path) -> dict:
@@ -159,8 +165,12 @@ def install(
             args += ("--full-depth",)
         if runner(*args, cwd=stage):
             raise ValueError(f"staging failed for {source}; live files were retained")
-        entries = staged_entries(stage, project)
-        lock = read_lock(lock_path, 3 if global_scope else 1)
+        staged_version, entries = staged_entries(stage, project)
+        lock = read_lock(lock_path, GLOBAL_LOCK_VERSIONS if global_scope else PROJECT_LOCK_VERSIONS)
+        if not global_scope and lock["version"] < staged_version:
+            # Entries now carry the installer's hash algorithm; label the lock
+            # with it so the CLI does not re-migrate them as version 1 hashes.
+            lock["version"] = staged_version
         pending = lock.get("refreshPending", {})
         plans = []
         # Validate the whole returned batch before publishing anything. The CLI
@@ -235,7 +245,7 @@ def refresh(
     with lock_path.open("a", encoding="utf-8") as lock_file:
         fcntl.flock(lock_file, fcntl.LOCK_EX)
         result, covered = 0, set()
-        initial = read_lock(global_lock, 3)
+        initial = read_lock(global_lock, GLOBAL_LOCK_VERSIONS)
         configured = {source_key(source) for source in (*sources, *best_effort_sources)}
         catalogs = [(s, False) for s in sources] + [(s, True) for s in best_effort_sources]
         for source, optional in catalogs:
@@ -254,7 +264,7 @@ def refresh(
         ):
             if data is None:
                 try:
-                    data = read_lock(target_lock, 1)
+                    data = read_lock(target_lock, PROJECT_LOCK_VERSIONS)
                 except (OSError, ValueError) as error:
                     print(f"skills refresh: {error}", file=sys.stderr)
                     result = 1
