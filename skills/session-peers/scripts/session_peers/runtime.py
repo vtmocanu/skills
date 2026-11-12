@@ -249,6 +249,16 @@ def version_is_newer(installed, pinned) -> bool:
     return a > b
 
 
+ERROR_DETAIL_MAX = 512
+
+
+def bounded(text, limit=ERROR_DETAIL_MAX):
+    """`text` cut to `limit` characters, marking how much was dropped."""
+    if len(text) <= limit:
+        return text
+    return "%s... (%d more characters)" % (text[:limit], len(text) - limit)
+
+
 def run_cmd(argv, timeout=10, env=None, cwd=None):
     """Run a command, returning (rc, stdout, stderr). A missing binary is rc 127."""
     try:
@@ -262,8 +272,12 @@ def run_cmd(argv, timeout=10, env=None, cwd=None):
         )
     except FileNotFoundError:
         return 127, "", "%s: not found" % argv[0]
+    except subprocess.TimeoutExpired:
+        # Name the binary, never the argv: a holder probe passes thousands of
+        # paths, and callers copy this text into every row they report.
+        return 126, "", "%s timed out after %s seconds" % (argv[0], timeout)
     except (OSError, subprocess.SubprocessError) as exc:
-        return 126, "", str(exc)
+        return 126, "", bounded(str(exc))
     return (
         proc.returncode,
         proc.stdout.decode("utf-8", "replace"),

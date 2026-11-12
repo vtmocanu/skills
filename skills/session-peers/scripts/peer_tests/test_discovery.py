@@ -435,6 +435,32 @@ class TestCodexDiscovery(Base):
         self.assertIn("operation not permitted", error)
 
 
+class TestProbeErrorSize(Base):
+    def test_a_timed_out_probe_names_the_binary_not_its_argv(self):
+        argv = ["lsof", "-F", "pcn", "--"] + ["/x/rollout-%04d.jsonl" % i for i in range(2000)]
+        original = sp_runtime.subprocess.run
+
+        def slow(cmd, **kwargs):
+            raise subprocess.TimeoutExpired(cmd, kwargs.get("timeout"))
+
+        sp_runtime.subprocess.run = slow
+        try:
+            rc, _out, err = sp_runtime.run_cmd(argv, timeout=20)
+        finally:
+            sp_runtime.subprocess.run = original
+        self.assertEqual(rc, 126)
+        self.assertEqual(err, "lsof timed out after 20 seconds")
+
+    def test_a_long_lsof_error_is_bounded(self):
+        rollout = self.make_rollout()
+        os.environ["FAKE_LSOF_RC"] = "1"
+        os.environ["FAKE_LSOF_STDERR"] = "x" * 100000
+        _holders, verified, error = sp_process.lsof_holders_checked([str(rollout)])
+        self.assertFalse(verified)
+        self.assertLess(len(error), 600)
+        self.assertIn("more characters", error)
+
+
 class TestResolveThread(Base):
     def test_a_uuid_resolves_directly(self):
         tid, _r = self.one_thread()
