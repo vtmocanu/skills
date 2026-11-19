@@ -39,13 +39,15 @@ def _owner_name(name):
 
 
 def _homes(home):
-    """Best-effort shim homes; unrelated registry noise is not a binding."""
+    """Known homes plus whether bounds or I/O left a valid shim home unseen."""
     homes = {os.path.realpath(home), os.path.realpath(os.path.expanduser("~/.codex"))}
+    incomplete = False
     deadline, remaining = time.monotonic() + SCAN_SECONDS, MAX_BYTES
     try:
         with os.scandir(storage.claude_sessions_dir()) as entries:
             for entry in entries:
                 if time.monotonic() > deadline or remaining <= 0:
+                    incomplete = True
                     break
                 if not entry.name.endswith(".json"):
                     continue
@@ -54,22 +56,28 @@ def _homes(home):
                     remaining -= len(raw)
                     if len(raw) != expected:
                         raise ValueError("registry changed during read")
+                except (OSError, ValueError):
+                    incomplete = True
+                    continue
+                try:
                     rec = json.loads(raw)
-                except (OSError, ValueError, TypeError, RecursionError):
+                except (ValueError, TypeError, RecursionError):
                     continue
                 value = rec.get("codexHome") if isinstance(rec, dict) and rec.get("entrypoint") == "codex" else None
                 if isinstance(value, str) and os.path.isabs(value):
                     homes.add(os.path.realpath(value))
-    except OSError:
+    except FileNotFoundError:
         pass
-    return homes
+    except OSError:
+        incomplete = True
+    return homes, incomplete
 
 
 def roles(members, home=None, known_owner_states=None):
     """lead/buddy/unverified, without writes or a historical-file-count cutoff.
 
-    Only runtime binding filenames can introduce uncertainty. A valid parsed
-    binding names its target exactly; unrelated records need no owner probe.
+    Candidate binding files and possibly unseen shim homes can introduce
+    uncertainty. Valid bindings name their target exactly; unrelated records need no owner probe.
     Unreadable candidate bindings whose owner is not verified gone make the
     remaining queried roles unknown. Keep positive buddy evidence if a later
     read fails. Callers decide admission vs fan-out policy for unknown roles.
@@ -87,7 +95,7 @@ def roles(members, home=None, known_owner_states=None):
         return owner_states[owner] != "gone"
 
     with storage.no_create():
-        homes = _homes(storage.codex_home() if home is None else home)
+        homes, unknown = _homes(storage.codex_home() if home is None else home)
         deadline, remaining = time.monotonic() + SCAN_SECONDS, MAX_BYTES
         for root in sorted(homes):
             if time.monotonic() > deadline or remaining <= 0:
@@ -117,6 +125,7 @@ def roles(members, home=None, known_owner_states=None):
                         try:
                             buddy = _typed(rec.get("buddy") if isinstance(rec, dict) else None)
                         except ValueError:
+                            unknown = active(owner) or unknown
                             continue
                         if buddy in result and active(owner):
                             result[buddy] = "buddy"

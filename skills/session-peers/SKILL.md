@@ -96,7 +96,7 @@ journals it for ACKs), and read with `channel tail NAME`.
   everyone else is a lead. Public-channel joins, creation and handover refuse
   known buddies (stored joins/creation may explicitly use `--allow-buddy`).
   Unknown roles warn but admit without a fan-out override. Fan-out skips current
-  buddies and unreadable candidate bindings unless admitted with that flag;
+  buddies and unverified binding/home-catalogue evidence unless admitted with that flag;
   direct `@name` still interrupts. `#general` join only clears a leave marker and
   grants no buddy fan-out override. Binding never joins shared channels.
   These channel roles grant no review or user-approval authority.

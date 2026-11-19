@@ -59,6 +59,56 @@ class ChannelRoleTests(ChannelSendBase):
             self.assertEqual(channel_roles.roles([self.me], known_owner_states={})[self.me], "unverified")
         self.assertLessEqual(total[0], 513)
 
+    def test_malformed_candidate_binding_shapes_cannot_make_a_buddy_a_lead(self):
+        listener, peer = self.peer_cc("peer")
+        self.public("ops", peer, deliver="all")
+        path = bind(self.me, peer)
+        for value in ({"buddy": peer}, {"buddy": {"uuid": peer.partition(":")[2]}}, []):
+            with self.subTest(value=value):
+                path.write_text(json.dumps(value))
+                self.assertEqual(channel_roles.roles([peer])[peer], "unverified")
+                rc, result, err = self.send(message="note")
+                self.assertEqual(rc, 0, err)
+                self.assertEqual(result["outcomes"][peer], channels.OUTCOME_ROLE_UNKNOWN)
+        self.assertEqual(listener.of_type("user"), [])
+
+    def hidden_home(self):
+        _listener, peer = self.peer_cc("hidden")
+        root = self.root / "hidden-codex"
+        directory = root / "session-peers" / "buddies"
+        directory.mkdir(parents=True)
+        owner = self.me.partition(":")[2]
+        (directory / ("cc-" + owner + ".json")).write_text(json.dumps({
+            "owner": {"kind": "cc", "uuid": owner}, "buddy": {"kind": "cc", "uuid": peer.partition(":")[2]}}))
+        record = self.sessions / "hidden-shim.json"
+        record.write_text(json.dumps(dict(self.sender_rec, entrypoint="codex", codexHome=str(root), sessionId=new_uuid())))
+        return peer, record
+
+    def test_unreadable_home_catalogue_size_does_not_hide_a_binding(self):
+        peer, record = self.hidden_home()
+        value = json.loads(record.read_text())
+        value["padding"] = "x" * 70000
+        record.write_text(json.dumps(value))
+        self.assertEqual(channel_roles.roles([peer])[peer], "unverified")
+
+    def test_home_catalogue_deadline_or_budget_is_unknown_not_lead(self):
+        peer, _record = self.hidden_home()
+        with mock.patch.object(channel_roles, "MAX_BYTES", 128):
+            self.assertEqual(channel_roles.roles([peer])[peer], "unverified")
+        calls = [0]
+        def clock():
+            calls[0] += 1
+            return 0 if calls[0] == 1 else 2
+        with mock.patch.object(channel_roles.time, "monotonic", side_effect=clock):
+            self.assertEqual(channel_roles.roles([peer])[peer], "unverified")
+        registry, scan = sp_storage.claude_sessions_dir(), os.scandir
+        def inaccessible(path):
+            if os.fspath(path) == registry:
+                raise PermissionError("fixture registry unavailable")
+            return scan(path)
+        with mock.patch.object(os, "scandir", side_effect=inaccessible):
+            self.assertEqual(channel_roles.roles([peer])[peer], "unverified")
+
     def test_buddy_join_refuses_until_explicit_override_and_leave_clears_it(self):
         _listener, buddy = self.peer_cc("buddy")
         self.public("ops")
@@ -254,7 +304,9 @@ class GeneralChannelRoleTests(GeneralBase):
         self.as_codex(self.tid)
         self.ok("leave", "general")
         self.ok("join", "general")
-        self.ok("join", "general", "--allow-buddy")  # marker-only; never grants a fan-out override
+        rc, _out, err = self.ch("join", "general", "--allow-buddy")
+        self.assertEqual(rc, 2)
+        self.assertIn("no buddy fan-out override", err)
         self.as_sender()
         self.wall[0] += 61
         rc, result, err = self.post("@all still skips buddies")

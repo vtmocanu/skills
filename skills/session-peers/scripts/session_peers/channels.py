@@ -970,6 +970,8 @@ def _general_marker(action, me):
 
 def _cmd_join(args, me):
     if parse_name(args.name) == sp_constants.CHANNEL_GENERAL:
+        if args.allow_buddy:
+            raise ChannelError("#general has no buddy fan-out override; join without --allow-buddy to clear your leave marker")
         return _general_marker("join", me)
     key = stored_key(args.name)
 

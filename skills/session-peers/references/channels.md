@@ -88,11 +88,12 @@ failed.
   override. A direct `@name` or typed mention still reaches a buddy. Binding
   records are read across configured and shim-recorded homes before planning
   and again just before each paced delivery. Verified-gone binding owners are
-  ignored. Only unreadable candidate binding files, or incomplete reads of known
-  binding stores, block otherwise-unverified fan-out. Unrelated registry noise,
-  legacy shim records without a home and non-binding filenames do not invalidate
-  everyone; home discovery follows existing best-effort rules. Reads are bounded
-  by bytes/time, not historical file counts. Buddy channels are unchanged.
+  ignored. Malformed/unreadable candidate binding files, incomplete binding-store
+  reads, or possibly unseen shim homes block otherwise-unverified fan-out.
+  Malformed registry noise, legacy shim records without a home and non-binding
+  filenames are ignored; unreadable/oversized home records and exhausted home
+  scan bounds stay unverified instead of silently hiding custom-home bindings.
+  Reads are bounded by bytes/time, not historical file counts. Buddy channels are unchanged.
   `#general` join only clears the caller's leave marker; it keeps its derived
   roster and never grants a buddy fan-out override. Use an explicit name there.
 - Mention tokens start at a word boundary outside backticks. Unicode word
