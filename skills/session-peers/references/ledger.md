@@ -147,15 +147,30 @@ and unsafe schemes stay plain text.
 
 For private run URLs or another forge, commit optional `.ledger/links.json`
 inside the local ledger, never the project or skill source. It maps at most 32
-literal labels containing one `<id>` to URL templates containing one `{id}`:
+literal patterns containing one `<id>` to URL templates. A value is either the
+existing href string or an object with exactly `href` and `label`:
 
 ```json
-{"run <id>": "https://factory.example.invalid/runs/{id}"}
+{
+  "run <id>": {"href": "https://factory.example.invalid/runs/{id}", "label": "run {id:8}"},
+  "build <id>": "https://build.example.invalid/jobs/{id}"
+}
 ```
 
-The identifier is URL-encoded. Templates produce links only for HTTP(S).
-Use canonical full IDs when the target requires them; this tool never resolves
-short run IDs. Invalid configuration refuses a table rather than guessing.
+Pattern keys are at most 128 characters. Hrefs are at most 2048 characters and
+contain exactly one `{id}` or `{id:N}` placeholder; N is 1 through 64. Label
+templates are at most 128 characters and may repeat either placeholder or use
+no placeholders. Other brace expressions are refused. `{id}` inserts the full
+identifier; `{id:N}` inserts its first N characters. Href substitutions are
+URL-encoded; display labels are text, escaped in Markdown and rendered as text
+nodes in the dashboard. Labels apply to plain and Markdown tables and the
+Ownership overlay; link tooltips retain the full original label.
+
+Keep `{id}` in the href when the target requires a full ID; use `{id:N}` in the
+label to shorten only its display. This tool never resolves short IDs. String
+values keep their original display label. Templates produce links only for
+HTTP(S), even with a custom label. Invalid configuration refuses a table rather
+than guessing. Changes take effect only after a local ledger commit.
 
 The channel owner runs `channel bind NAME --ledger` from the project to pin its
 ledger above channel history. `channel bind NAME --clear-ledger` removes the

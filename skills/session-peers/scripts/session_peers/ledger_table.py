@@ -8,6 +8,22 @@ from urllib.parse import quote, urlsplit
 
 from . import ledger
 
+ID_PLACEHOLDER = re.compile(r"\{id(?::([1-9]|[1-5][0-9]|6[0-4]))?\}")
+
+
+def valid_template(value, limit, one_id=False):
+    if not isinstance(value, str) or len(value) > limit:
+        return False
+    rest, count = ID_PLACEHOLDER.subn("", value)
+    return "{" not in rest and "}" not in rest and (not one_id or count == 1)
+
+
+def expand_template(template, ident, url=False):
+    def replace(match):
+        value = ident[:int(match[1])] if match[1] else ident
+        return quote(value, safe="") if url else value
+    return ID_PLACEHOLDER.sub(replace, template)
+
 
 def safe_url(value):
     if not isinstance(value, str) or any(ord(c) < 33 or c in '\\<>"`' for c in value):
@@ -60,10 +76,19 @@ def patterns(book, head):
         return {}
     config = json.loads(book._git(book.path, "show", head + ":.ledger/links.json"))
     if (not isinstance(config, dict) or len(config) > 32
-            or any(not isinstance(k, str) or not isinstance(v, str) or len(k) > 128 or len(v) > 2048
-                   or k.count("<id>") != 1 or v.count("{id}") != 1 for k, v in config.items())):
-        raise ledger.LedgerError("invalid .ledger/links.json: use at most 32 'label <id>': 'https://host/{id}' patterns")
+            or any(not isinstance(k, str) or len(k) > 128 or k.count("<id>") != 1
+                   or not valid_pattern(v) for k, v in config.items())):
+        raise ledger.LedgerError("invalid .ledger/links.json: use at most 32 '<id>' patterns with an href string "
+                                "or {href, label}; href needs one {id} or {id:N}, N=1..64 (2048 chars), label at most 128 chars")
     return config
+
+
+def valid_pattern(value):
+    if isinstance(value, str):
+        return valid_template(value, 2048, one_id=True)
+    return (isinstance(value, dict) and set(value) == {"href", "label"}
+            and valid_template(value["href"], 2048, one_id=True)
+            and valid_template(value["label"], 128))
 
 
 def expand_link(label, forge=None, custom=None):
@@ -74,7 +99,11 @@ def expand_link(label, forge=None, custom=None):
         regex = re.escape(pattern).replace(re.escape("<id>"), r"([A-Za-z0-9][A-Za-z0-9._:-]{0,127})")
         match = re.fullmatch(regex, label)
         if match:
-            result["href"] = safe_url(template.replace("{id}", quote(match[1], safe="")))
+            if isinstance(template, dict):
+                result["title"] = str(label)
+                result["label"] = expand_template(template["label"], match[1])
+                template = template["href"]
+            result["href"] = safe_url(expand_template(template, match[1], url=True))
             return result
     match = re.fullmatch(r"(?:(PR)\s+)?([#!])([1-9][0-9]*)", label, re.IGNORECASE)
     if match and isinstance(forge, dict) and safe_url(forge.get("base")):
@@ -130,7 +159,8 @@ def render(view, markdown=False):
             links = []
             for link in item["links"]:
                 label = markdown_text(link["label"]) if markdown else ledger.human(link["label"])
-                links.append("[" + label + "](<" + link["href"].replace("|", "%7C") + ">)" if markdown and link["href"] else label)
+                title = (' "' + markdown_text(link["title"]).replace('"', "&quot;") + '"') if "title" in link else ""
+                links.append("[" + label + "](<" + link["href"].replace("|", "%7C") + ">" + title + ")" if markdown and link["href"] else label)
             text = markdown_text if markdown else ledger.human
             rows.append([text(item["slug"]), text(item["title"]), item["status"], " ".join(links), item["updated"]])
         if markdown:

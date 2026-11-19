@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.54.0] - 2026-11-19
+
+### Added
+
+- `session-peers`: optional ledger link labels with `{id}` and `{id:N}` substitutions, shared by text/Markdown tables and the Ownership overlay. Full original labels remain in link tooltips; existing string patterns keep working.
+
 ## [0.53.0] - 2026-11-19
 
 ### Added

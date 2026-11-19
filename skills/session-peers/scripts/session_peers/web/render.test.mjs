@@ -3032,6 +3032,51 @@ test("ledger panel is a real table, escapes labels and refuses unsafe links", ()
   assert.ok(app.renderLedger({ state: "unavailable" }).textContent.includes("unavailable"))
 })
 
+test("ledger display labels stay text and preserve the full original tooltip", () => {
+  const { app, document } = load()
+  const view = ledgerFixture()
+  view.groups[0].items[0].links = [
+    { label: "run abcdefgh <img onerror='bad'>", href: "https://example.invalid/runs/abcdefgh-1234", title: "run abcdefgh-1234" },
+    { label: "<script>plain</script>", href: "javascript:alert(1)", title: "run original" },
+    { label: "legacy", href: "https://example.invalid/legacy" },
+  ]
+  const node = app.renderLedger(view)
+  const elements = elementsOf(node)
+  const links = elements.filter((n) => n.tagName === "a")
+  assert.equal(links.length, 2)
+  assert.equal(links[0].textContent, "run abcdefgh <img onerror='bad'>")
+  assert.equal(links[0].attributes.href, "https://example.invalid/runs/abcdefgh-1234")
+  assert.equal(links[0].attributes.title, "run abcdefgh-1234")
+  assert.equal(links[1].attributes.title, "https://example.invalid/legacy")
+  assert.ok(node.textContent.includes("<script>plain</script>"))
+  assert.ok(!elements.some((n) => n.tagName === "script" || n.tagName === "img"))
+  assert.deepEqual(document.htmlWrites, [])
+})
+
+test("ownership overlay uses display labels and updates their original tooltip in place", async () => {
+  const view = ledgerFixture()
+  const link = { label: "run abcdefgh", href: "https://example.invalid/runs/abcdefgh-1234", title: "run abcdefgh-1234" }
+  view.groups[0].items[0].links = [link]
+  const t = bootFixture({ "/api/ledger/": view })
+  await t.app.ready
+  const pin = t.app.state.pinDOM
+  pin.button.dispatch("click")
+  const popup = pin.popup
+  popup.scrollTop = 37
+  let anchor = elementsOf(pin.content).find((n) => n.tagName === "a")
+  assert.equal(anchor.textContent, link.label)
+  assert.equal(anchor.attributes.title, link.title)
+  link.label = "run ijklmnop"
+  link.title = "run ijklmnop-5678"
+  link.href = "https://example.invalid/runs/ijklmnop-5678"
+  await t.app.refreshLedger()
+  anchor = elementsOf(pin.content).find((n) => n.tagName === "a")
+  assert.equal(anchor.textContent, link.label)
+  assert.equal(anchor.attributes.title, link.title)
+  assert.equal(pin.popup, popup)
+  assert.equal(popup.scrollTop, 37)
+})
+
 test("ledger refreshes without channel messages and loses current status on failed reads", async () => {
   const env = bootFixture({ "/api/ledger/": ledgerFixture() })
   assert.equal(await env.app.ready, true)
