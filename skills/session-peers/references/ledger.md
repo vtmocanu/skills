@@ -43,7 +43,7 @@ automatic buddy reminders discover only the default derived key.
 ```sh
 peers.py ledger init
 peers.py ledger add ITEM --title 'Owed verification' --body-file NOTE --link URL
-peers.py ledger claim ITEM --lease 4h
+peers.py ledger claim ITEM --lease 24h
 peers.py ledger update ITEM --status blocked --body-file NOTE
 peers.py ledger update ITEM --append-file ADDITION
 peers.py ledger release ITEM
@@ -58,9 +58,10 @@ detected by the existing session-peers rules; `--as cc:UUID`, `codex:UUID` or
 name, never its ownership identity. Git authors use `session-peers NAME` and a
 local synthetic email, not the user's Git identity.
 
-- `add` claims the new item for four hours. `claim` renews your own lease or
-  claims an unowned item. Leases accept positive minutes or hours up to four
-  hours. An expired lease never authorizes takeover. A verified journal
+- `add` claims the new item for 24 hours. `claim` renews your own lease or
+  claims an unowned item, defaulting to 24 hours. Leases accept positive minutes,
+  hours or days up to seven days (for example `30m`, `24h`, `7d`). An expired
+  lease never authorizes takeover. A verified journal
   handover, or the existing complete-registry/liveness evidence of a departed
   owner, permits a new explicit claim. Live and unverified owners block it.
 - `update`, `release` and `done` require the current owner under the write lock.
@@ -72,7 +73,8 @@ local synthetic email, not the user's Git identity.
   also valid YAML. The Markdown body is free text. Slugs use the key charset.
 - Import reads regular top-level `*.md` files, skipping README.md and REPO.md.
   It preserves each whole original document as the body, plus source path and
-  SHA-256 provenance. Items start open and unclaimed; legacy owner/Grants text
+  SHA-256 provenance. The first `# Heading` supplies the title, otherwise the
+  filename slug is used. Items start open and unclaimed; legacy owner/Grants text
   inside their bodies is context only. One batch produces one commit. Any
   collision or unreadable input refuses the entire batch before writing.
 - `init` writes generic rules. It refreshes the committed README only if its

@@ -24,6 +24,8 @@ META = ".ledger/metadata.json"
 FORMAT = 1
 LOCK_TIMEOUT = 5.0
 GIT_TIMEOUT = 5.0
+DEFAULT_LEASE = "24h"
+MAX_LEASE_SECONDS = 7 * 86400
 _now = time.time
 
 
@@ -316,7 +318,7 @@ class Ledger:
                 if slug in existing:
                     raise LedgerError("item already exists: " + slug)
                 item = {"format": FORMAT, "title": args.title, "status": "open", "owner": owner,
-                        "lease_until": lease_end("4h"), "updated": stamp(),
+                        "lease_until": lease_end(DEFAULT_LEASE), "updated": stamp(),
                         "links": args.link or [], "body": source_text(args.body_file)}
             else:
                 if slug not in existing:
@@ -365,7 +367,9 @@ class Ledger:
             if slug in existing:
                 raise LedgerError("import collision: " + slug)
             original = path.read_bytes().decode("utf-8")
-            item = {"format": FORMAT, "title": slug, "status": "open", "owner": None,
+            heading = re.search(r"^# ([^\r\n]+)", original, re.MULTILINE)
+            title = (heading.group(1).strip() if heading else "") or slug
+            item = {"format": FORMAT, "title": title, "status": "open", "owner": None,
                     "lease_until": None, "updated": stamp(), "links": [],
                     "provenance": {"file": str(path.resolve()),
                                    "sha256": hashlib.sha256(original.encode()).hexdigest()},
@@ -395,12 +399,12 @@ class Ledger:
 
 
 def lease_end(value):
-    match = re.fullmatch(r"([1-9][0-9]*)(m|h)", value)
+    match = re.fullmatch(r"([1-9][0-9]*)(m|h|d)", value)
     if not match:
-        raise LedgerError("lease must be e.g. 30m or 4h (maximum 4h)")
-    seconds = int(match[1]) * (60 if match[2] == "m" else 3600)
-    if seconds > 4 * 3600:
-        raise LedgerError("lease maximum is 4h")
+        raise LedgerError("lease must be e.g. 30m, 24h or 7d (maximum 7d)")
+    seconds = int(match[1]) * {"m": 60, "h": 3600, "d": 86400}[match[2]]
+    if seconds > MAX_LEASE_SECONDS:
+        raise LedgerError("lease maximum is 7d")
     return dt.datetime.fromtimestamp(_now() + seconds, dt.timezone.utc).isoformat().replace("+00:00", "Z")
 
 
@@ -534,7 +538,7 @@ def register(sub):
                 group.add_argument("--append-file")
                 command.add_argument("--status", choices=("open", "blocked", "done"))
         if name == "claim":
-            command.add_argument("--lease", default="4h")
+            command.add_argument("--lease", default=DEFAULT_LEASE)
         if name == "import-dir":
             command.add_argument("directory")
         if name == "relocate":

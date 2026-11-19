@@ -12,7 +12,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from session_peers import ledger, cli, buddy, channels
+from session_peers import ledger, cli, buddy, channels, journal
 
 ME = "cc:11111111-1111-4111-8111-111111111111"
 OTHER = "codex:22222222-2222-4222-8222-222222222222"
@@ -37,7 +37,7 @@ class LedgerTests(unittest.TestCase):
 
     def args(self, **kwargs):
         return argparse.Namespace(slug="work", title="Owed check", body_file=None,
-                                  append_file=None, status=None, link=None, lease="4h", **kwargs)
+                                  append_file=None, status=None, link=None, lease="24h", **kwargs)
 
     def add(self, slug="work", body=""):
         args = self.args()
@@ -198,13 +198,48 @@ class LedgerTests(unittest.TestCase):
         for value in ("../outside", "..", "/tmp/out", "a/b", "", ".", "x\ny"):
             with self.subTest(value=value), self.assertRaises(ledger.LedgerError):
                 ledger.safe_key(value)
-        for value in ("0h", "5h", "-1h", "1d", "240m0"):
+        for value in ("0h", "169h", "-1h", "8d", "240m0"):
             with self.subTest(value=value), self.assertRaises(ledger.LedgerError):
                 ledger.lease_end(value)
         self.assertTrue(ledger.lease_end("15m").endswith("Z"))
         with mock.patch.dict(os.environ, {"XDG_DATA_HOME": str(self.repo / "inside")}):
             with self.assertRaisesRegex(ledger.LedgerError, "outside the project"):
                 ledger.Ledger(self.repo)
+
+    def test_default_lease_is_one_day_and_explicit_lease_is_at_most_seven_days(self):
+        with mock.patch.object(ledger, "_now", return_value=1_000_000):
+            item = self.add()
+            self.assertEqual(ledger.timestamp(item["lease_until"]), 1_000_000 + 86400)
+            args = cli.build_parser().parse_args(["ledger", "claim", "work"])
+            self.assertEqual(args.lease, "24h")
+            self.assertEqual(ledger.timestamp(ledger.lease_end("7d")), 1_000_000 + 7 * 86400)
+            self.assertEqual(ledger.timestamp(ledger.lease_end("168h")), 1_000_000 + 7 * 86400)
+            with self.assertRaises(ledger.LedgerError):
+                ledger.lease_end("10081m")
+
+    def test_import_uses_first_h1_title_and_preserves_document(self):
+        source = self.base / "titled-source"
+        source.mkdir()
+        body = "## Context\r\n# Pending rollout\r\n# Later heading\r\nKeep original text.\r\n"
+        (source / "rollout.md").write_bytes(body.encode("utf-8"))
+        (source / "untitled.md").write_text("## Not a title\nKeep this too.\n")
+        self.book.mutate("import-dir", argparse.Namespace(directory=str(source)), self.owner)
+        self.assertEqual(self.item("rollout")["title"], "Pending rollout")
+        self.assertEqual(self.item("rollout")["body"], body)
+        self.assertEqual(self.item("untitled")["title"], "untitled")
+
+    def test_inbox_handover_json_stays_json_when_ledger_has_items(self):
+        self.add()
+        grant = {"type": "handover", "from": ME, "to": OTHER, "through_seq": 1}
+        self.assertIsNotNone(ledger.summary(self.repo))
+        with mock.patch.object(journal, "caller", return_value=ME), \
+                mock.patch.object(journal, "handover", return_value=grant), \
+                mock.patch.object(journal, "_write_receipt"), \
+                mock.patch.object(ledger, "print_summary") as reminder, \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(cli.main(["inbox", "handover", "--to", OTHER, "--json"]), 0)
+        self.assertEqual(json.loads(output.getvalue()), grant)
+        reminder.assert_not_called()
 
     def test_no_remote_and_inherited_git_config_cannot_redirect_or_execute(self):
         marker = self.base / "hook-ran"
@@ -380,3 +415,16 @@ class LedgerReminderTests(unittest.TestCase):
             self.assertEqual(channels.cmd_handover(argparse.Namespace(to=OTHER)), 0)
         reminder.assert_called_once_with()
         mutation.assert_not_called()
+
+    def test_handover_human_reminder_guard_and_current_parser_contract(self):
+        with mock.patch.object(channels, "_caller_or_none", return_value=ME), \
+                mock.patch.object(channels, "_grant_recorded", return_value=True), \
+                mock.patch.object(channels, "_successor_label", return_value="successor"), \
+                mock.patch.object(channels, "_lifecycle_records", return_value=([], True)), \
+                mock.patch.object(ledger, "print_summary") as reminder, \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(channels.cmd_handover(argparse.Namespace(to=OTHER, json=True)), 0)
+        reminder.assert_not_called()
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as refused:
+            cli.build_parser().parse_args(["handover", "--to", OTHER, "--json"])
+        self.assertEqual(refused.exception.code, 2)

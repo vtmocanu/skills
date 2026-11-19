@@ -10,7 +10,8 @@ session-peers or binding a buddy. Before handover, leave or ending, run
   project instructions. A handover transfers no approvals or spending rights.
 - Keep credentials and secrets out. This ledger is private local data; never
   copy it into a project, attach a remote, fetch, push or publish it.
-- Claim an item before acting or editing. Renew while working. An expired
+- Claim an item before acting or editing. Claims default to 24 hours and allow
+  up to seven days; repeat `ledger claim ITEM` to renew while working. An expired
   lease is not a handover: a live or unverified owner still blocks takeover.
 - Protected holds and landing claim boards outrank notes. Link those records;
   do not replace them or duplicate issue requirements here.
