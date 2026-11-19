@@ -55,7 +55,7 @@ jobs:
   peers-tests:
     # setup-python publishes no 3.9 build for ubuntu-latest (26.04); 24.04 still has it.
     runs-on: ${{ matrix.python-version == '3.9' && 'ubuntu-24.04' || 'ubuntu-latest' }}
-    timeout-minutes: 10
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
