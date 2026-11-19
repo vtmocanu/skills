@@ -446,6 +446,8 @@ class Server(http.server.ThreadingHTTPServer):
 
     def __init__(self, port=0, chat=False, clock=None):
         self.token = secrets.token_bytes(32).hex()
+        self.instance = None
+        self.code_digest = None
         self.role_home = sp_storage.codex_home()  # capture before discovery's environment override
         from . import journal
         try:
@@ -657,7 +659,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
         parts = self._parts()
         path = parts.path
         if path.startswith("/api/"):
-            self._check_token()
+            if path == "/api/instance" and self.server.instance is not None and self.headers.get_all("X-Peers-Probe") is not None:
+                from . import web_lifecycle
+                if not web_lifecycle.valid_probe(self.server.token, self._single("X-Peers-Probe"), self._single("X-Peers-Proof")):
+                    raise _Refused(403)
+            else:
+                self._check_token()
             return self._api(path, parts.query)
         if path in _ASSETS:
             return self._static(path)
@@ -893,6 +900,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
         return number
 
     def _api(self, path, query):
+        if path == "/api/instance" and self.server.instance is not None:
+            self._query(query, ())
+            payload = {"service": "session-peers-web", "pid": os.getpid(),
+                       "instance": self.server.instance, "code_digest": self.server.code_digest,
+                       "read_only": self.server.chat is None}
+            if self.headers.get_all("X-Peers-Probe") is not None:
+                from . import web_lifecycle
+                payload["proof"] = web_lifecycle.probe_proof(self.server.token, self._single("X-Peers-Probe"), payload)
+            return self._send_json(200, payload)
         if path.startswith("/api/ledger/"):
             key = path[len("/api/ledger/"):]
             if not sp_constants.CHANNEL_NAME_RE.fullmatch(key):
@@ -958,16 +974,47 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 
 def cmd_web(args):
-    port = args.port
+    from . import web_lifecycle
+    stable = any(getattr(args, flag, False) for flag in ("ensure", "url", "stop", "rotate_token", "restart"))
+    persistent_chat = bool(getattr(args, "persist_token", False))
     chat = bool(getattr(args, "chat", False))
+    if (chat and stable) or (persistent_chat and not chat) or (getattr(args, "restart", False) and not getattr(args, "ensure", False)):
+        sys.stderr.write("error: stable management flags are read-only; --restart needs --ensure, --persist-token needs --chat\n")
+        return 2
+    if getattr(args, "stop", False) and args.port is not None:
+        sys.stderr.write("error: --stop uses the recorded port; change --port only after stopping\n")
+        return 2
+    port = args.port if args.port is not None else 0
+    if (stable or persistent_chat) and args.port == 0:
+        sys.stderr.write("error: a stored --port must be 1024-65535, not 0\n")
+        return 2
     if port != 0 and not 1024 <= port <= 65535:
         sys.stderr.write("error: --port must be 0 (any free port) or 1024-65535\n")
         return 2
+    try:
+        if getattr(args, "managed_child", False):
+            return web_lifecycle.child(args, sys.modules[__name__])
+        if stable:
+            return web_lifecycle.command(args)
+        if persistent_chat:
+            return web_lifecycle.persistent_chat(args, sys.modules[__name__])
+        return _ephemeral(port, chat)
+    except (OSError, ValueError, web_lifecycle.LifecycleError) as exc:
+        sys.stderr.write("error: %s\n" % exc)
+        return 1
+
+
+def _ephemeral(port, chat):
     try:
         server = Server(port, chat=chat)
     except OSError as exc:
         sys.stderr.write("error: cannot listen on 127.0.0.1:%d: %s\n" % (port, exc.strerror or exc))
         return 1
+    return serve(server)
+
+
+def serve(server, ready=None):
+    chat = server.chat is not None
     stopping = False
 
     def on_signal(_signum, _frame):
@@ -995,7 +1042,10 @@ def cmd_web(args):
                 return 1
         serving = threading.Thread(target=server.serve_forever, name="peers-web-serve", daemon=True)
         serving.start()
-        print("http://127.0.0.1:%d/#token=%s" % (server.port, server.token), flush=True)
+        if ready is not None:
+            ready()
+        else:
+            print("http://127.0.0.1:%d/#token=%s" % (server.port, server.token), flush=True)
         while not stopping:
             time.sleep(0.5)
     finally:

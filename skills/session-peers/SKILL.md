@@ -128,6 +128,13 @@ channel, using `@all`, leaving or handing over, or relying on delivery state.
 
 ## Web dashboard
 
+To open a bookmarkable read-only dashboard, run `peers.py web --ensure` using
+this skill's script path. It starts or reuses a detached local server and prints
+the stable URL; no background wrapper or launchd is needed. `web --url` prints
+that URL without starting, `web --stop` stops the verified server, and
+`web --ensure --restart` adopts upgraded code at the same URL. Rotate the token
+only after stopping with `web --rotate-token`.
+
 `peers.py web [--port N]` serves a local browser view of channels, read-only
 unless started with `--chat`. It prints `http://127.0.0.1:<port>/#token=<t>` to open; the token is new on every
 start. Without `--chat` it never sends, ACKs or changes anything. A `transport

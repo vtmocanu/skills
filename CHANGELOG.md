@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.56.0] - 2026-11-19
+
+### Added
+
+- `session-peers`: opt-in stable dashboard URLs with detached `web --ensure`, private configuration, verified reuse/stop and explicit same-URL code restarts. Token rotation requires a stopped server. Optional persistent chat credentials remain separate; plain web/chat keep fresh tokens and ephemeral ports. No service manager is installed.
+
 ## [0.55.0] - 2026-11-19
 
 ### Changed

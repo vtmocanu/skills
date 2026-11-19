@@ -501,7 +501,16 @@ def _register_maintenance(sub):
     p_doctor.set_defaults(func=sp_diagnostics.cmd_doctor)
 
     p_web = sub.add_parser("web", help="local dashboard (read-only; --chat adds a browser peer and sending)")
-    p_web.add_argument("--port", type=int, default=0, help="TCP port on 127.0.0.1 (0 or 1024-65535; default: ephemeral)")
+    p_web.add_argument("--port", type=int, default=None, help="TCP port on 127.0.0.1 (plain web: ephemeral; --ensure: stored, initially 8765)")
+    actions = p_web.add_mutually_exclusive_group()
+    actions.add_argument("--ensure", action="store_true", help="start or reuse a detached read-only dashboard at its stable URL")
+    actions.add_argument("--url", action="store_true", help="print the stable read-only URL without starting a server")
+    actions.add_argument("--stop", action="store_true", help="stop only the verified recorded read-only dashboard")
+    actions.add_argument("--rotate-token", action="store_true", help="rotate the stopped read-only dashboard's token and print its URL")
+    p_web.add_argument("--restart", action="store_true", help="with --ensure, replace verified older code at the same URL")
+    p_web.add_argument("--persist-token", action="store_true", help="with --chat, use a separate saved chat token and port")
+    p_web.add_argument("--managed-child", action="store_true", help=argparse.SUPPRESS)
+    p_web.add_argument("--lock-fd", type=int, default=-1, help=argparse.SUPPRESS)
     p_web.add_argument(
         "--chat", action="store_true",
         help="chat mode: register a browser peer (web-<user>) and accept POST /api/send; "

@@ -1,5 +1,5 @@
 """Eagerly load runtime modules before a shim starts serving."""
 
-from . import buddy, budgets, channel_mentions, channel_reads, channel_roles, channels, claude, cli, codex, config, constants, diagnostics, hooks, identity, journal, lifecycle, maintenance, messaging, process, protocol, requests, rollout, routes, runtime, shim, storage, topics
+from . import buddy, budgets, channel_mentions, channel_reads, channel_roles, channels, claude, cli, codex, config, constants, diagnostics, hooks, identity, journal, lifecycle, maintenance, messaging, process, protocol, requests, rollout, routes, runtime, shim, storage, topics, web_lifecycle
 
 runtime.LOADED_CODE_DIGEST = runtime.code_digest(runtime.runtime_code_files())
