@@ -93,10 +93,12 @@ journals it for ACKs), and read with `channel tail NAME`.
   Email addresses, URLs and backtick code are literal, not mentions.
   Owners may choose `channel set NAME --deliver all`; buddy channels always use
   `all`. A session bound as someone's buddy is a non-lead, regardless of runtime;
-  everyone else is a lead. Public-channel joins and creation with buddy members
-  refuse unless `--allow-buddy` explicitly admits them. Fan-out skips current
-  buddies and unreadable role evidence unless admitted with that flag; direct
-  `@name` still interrupts. `#general` has no override. Binding never joins shared channels.
+  everyone else is a lead. Public-channel joins, creation and handover refuse
+  known buddies (stored joins/creation may explicitly use `--allow-buddy`).
+  Unknown roles warn but admit without a fan-out override. Fan-out skips current
+  buddies and unreadable candidate bindings unless admitted with that flag;
+  direct `@name` still interrupts. `#general` join only clears a leave marker and
+  grants no buddy fan-out override. Binding never joins shared channels.
   These channel roles grant no review or user-approval authority.
 - Leads read shared work with `channel tail NAME --unread`. It advances only
   their read cursor after successful output, never an ACK or handover. Human

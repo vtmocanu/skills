@@ -24,6 +24,41 @@ class ChannelRoleTests(ChannelSendBase):
     def public(self, name, *members, **kwargs):
         return channels.create_channel(name, self.me, members, **kwargs)
 
+    def test_more_than_a_thousand_unrelated_bindings_do_not_hide_a_lead(self):
+        directory = pathlib.Path(sp_storage.buddies_dir())
+        unrelated = new_uuid()
+        for _ in range(1100):
+            owner = new_uuid()
+            (directory / ("cc-" + owner + ".json")).write_text(json.dumps({
+                "owner": {"kind": "cc", "uuid": owner}, "buddy": {"kind": "cc", "uuid": unrelated}}))
+        self.assertEqual(channel_roles.roles([self.me])[self.me], "lead")
+
+    def test_nonbinding_noise_and_legacy_shim_home_records_do_not_poison_roles(self):
+        (self.sessions / "noise.json").write_text("{broken")
+        (self.sessions / "legacy-shim.json").write_text(json.dumps({"entrypoint": "codex"}))
+        directory = pathlib.Path(sp_storage.buddies_dir())
+        (directory / "noise.json").write_text("[]")
+        (directory / "large-noise.json").write_text("x" * 70000)
+        os.mkfifo(directory / "noise-fifo.json")
+        self.assertEqual(channel_roles.roles([self.me])[self.me], "lead")
+
+    def test_malformed_bindings_still_consume_the_byte_budget(self):
+        directory = pathlib.Path(sp_storage.buddies_dir())
+        for _ in range(10):
+            (directory / ("cc-" + new_uuid() + ".json")).write_text("{" + "x" * 180)
+        empty = self.root / "empty-registry"
+        empty.mkdir()
+        total, pread = [0], os.pread
+        def read(*args):
+            data = pread(*args)
+            total[0] += len(data)
+            return data
+        with mock.patch.object(channel_roles, "MAX_BYTES", 512), \
+                mock.patch.object(sp_storage, "claude_sessions_dir", return_value=str(empty)), \
+                mock.patch.object(os, "pread", side_effect=read):
+            self.assertEqual(channel_roles.roles([self.me], known_owner_states={})[self.me], "unverified")
+        self.assertLessEqual(total[0], 513)
+
     def test_buddy_join_refuses_until_explicit_override_and_leave_clears_it(self):
         _listener, buddy = self.peer_cc("buddy")
         self.public("ops")
@@ -52,6 +87,7 @@ class ChannelRoleTests(ChannelSendBase):
         self.public("ops")
         tid, _rollout = self.one_thread()
         actor = self.as_codex(tid)
+        bind(actor, self.me)  # owning a binding does not make its owner the buddy
         self.ok("join", "ops")
         self.assertIn(actor, channels.read_channel("ops")["members"])
 
@@ -72,8 +108,9 @@ class ChannelRoleTests(ChannelSendBase):
         self.one_thread()
         listener, buddy = self.peer_cc("reviewer")
         self.public("ops", buddy)
-        bind(self.me, buddy)
-        (pathlib.Path(sp_storage.buddies_dir()) / "broken.json").write_text("{")
+        path = bind(self.me, buddy)
+        path.write_text("{")
+        self.assertEqual(channel_roles.roles([buddy])[buddy], "unverified")
         rc, result, err = self.send(message="@reviewer please review")
         self.assertEqual(rc, 0, err)
         self.assertEqual(result["outcomes"][buddy], channels.OUTCOME_ACCEPTED)
@@ -113,13 +150,16 @@ class ChannelRoleTests(ChannelSendBase):
         ghost = "cc:" + new_uuid()
         path = bind(ghost, peer)
         self.assertEqual(channel_roles.roles([peer])[peer], "lead")
+        path.unlink()
+        path = bind(self.me, peer)
         path.write_text("{")
         rc, result, err = self.send(message="note")
         self.assertEqual(rc, 0, err)
         self.assertEqual(result["outcomes"][peer], channels.OUTCOME_ROLE_UNKNOWN)
         self.assertEqual(listener.of_type("user"), [])
-        with self.assertRaises(channels.ChannelError):
+        with mock.patch("sys.stderr", new=io.StringIO()) as output:
             self.public("other", peer)
+        self.assertIn("warning:", output.getvalue())
         path.unlink()
         rc, result, err = self.send(message="later note")
         self.assertEqual(rc, 0, err)
@@ -139,17 +179,59 @@ class ChannelRoleTests(ChannelSendBase):
         (directory / (owner_kind + "-" + owner_id + ".json")).write_text(json.dumps({"owner": {"kind": owner_kind, "uuid": owner_id},
                                                           "buddy": {"kind": "cc", "uuid": peer.partition(":")[2]}}))
         self.assertEqual(channel_roles.roles([peer])[peer], "buddy")
-        os.mkfifo(directory / "fifo.json")
-        self.assertEqual(channel_roles.roles([peer])[peer], "unverified")
+        owner2 = "cc:" + new_uuid()
+        os.mkfifo(directory / (owner2.replace(":", "-", 1) + ".json"))
+        with mock.patch.object(channels, "member_liveness", return_value="unverified"):
+            other = "cc:" + new_uuid()
+            result = channel_roles.roles([peer, other])
+            self.assertEqual(result[peer], "buddy")
+            self.assertEqual(result[other], "unverified")
 
-    def test_contradictory_owner_is_unknown_and_uuid_case_does_not_hide_a_buddy(self):
+    def test_binding_filename_owns_record_and_uuid_case_does_not_hide_a_buddy(self):
         _listener, peer = self.peer_cc("peer")
         path = bind(self.me, peer.upper().replace("CC:", "cc:"))
         self.assertEqual(channel_roles.roles([peer])[peer], "buddy")
         value = json.loads(path.read_text())
         value["owner"]["uuid"] = new_uuid()  # not the owner whose binding file this is
         path.write_text(json.dumps(value))
-        self.assertEqual(channel_roles.roles([peer])[peer], "unverified")
+        self.assertEqual(channel_roles.roles([peer])[peer], "buddy")
+
+    def test_unknown_admission_warns_but_does_not_grant_fanout_override(self):
+        _listener, peer = self.peer_cc("peer")
+        self.public("ops")
+        path = bind(self.me, peer)
+        path.write_text("{")
+        self.as_cc(peer.partition(":")[2])
+        rc, _out, err = self.ch("join", "ops")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("warning:", err)
+        self.assertNotIn(peer, channels.read_channel("ops")["allow_buddy"])
+
+    def test_public_handover_refuses_a_buddy_target_without_mutating_membership(self):
+        _listener, peer = self.peer_cc("buddy")
+        self.public("ops")
+        bind(self.me, peer)
+        before = channels.read_channel("ops")
+        with self.assertRaises(channels.ChannelError):
+            channels.change_membership("ops", channels._handover_mutator(self.me, peer, "buddy"), self.me)
+        self.assertEqual(channels.read_channel("ops"), before)
+
+    def test_a_buddy_that_also_owns_a_binding_is_still_skipped(self):
+        listener, peer = self.peer_cc("both")
+        _leaf, leaf = self.peer_cc("leaf")
+        self.public("ops", peer, deliver="all")
+        bind(self.me, peer)
+        bind(peer, leaf)
+        rc, result, err = self.send(message="note")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(result["outcomes"][peer], channels.OUTCOME_BUDDY)
+        self.assertEqual(listener.of_type("user"), [])
+
+    def test_unverified_binding_owner_does_not_become_verified_gone(self):
+        _listener, peer = self.peer_cc("peer")
+        bind(self.me, peer)
+        with mock.patch.object(channels, "member_liveness", return_value="unverified"):
+            self.assertEqual(channel_roles.roles([peer])[peer], "buddy")
 
 
 class GeneralChannelRoleTests(GeneralBase):
@@ -170,12 +252,15 @@ class GeneralChannelRoleTests(GeneralBase):
         self.assertEqual(result["outcomes"][buddy], channels.OUTCOME_ACCEPTED)
         self.assertEqual(len(self.queue_calls()), 1)
         self.as_codex(self.tid)
-        rc, _out, err = self.ch("join", "general")
-        self.assertEqual(rc, 2)
-        self.assertNotIn("--allow-buddy", err)
-        self.assertIn("read on demand", err)
-        rc, _out, _err = self.ch("join", "general", "--allow-buddy")
-        self.assertEqual(rc, 2)
+        self.ok("leave", "general")
+        self.ok("join", "general")
+        self.ok("join", "general", "--allow-buddy")  # marker-only; never grants a fan-out override
+        self.as_sender()
+        self.wall[0] += 61
+        rc, result, err = self.post("@all still skips buddies")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(result["outcomes"][buddy], channels.OUTCOME_BUDDY)
+        self.assertEqual(len(self.queue_calls()), 1)
 
 
 class BrowserChannelRoleTests(ChatBase):

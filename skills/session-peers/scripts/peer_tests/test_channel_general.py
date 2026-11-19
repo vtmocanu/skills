@@ -247,22 +247,16 @@ class GeneralBroadcastTests(GeneralBase):
 
 
 class GeneralDiscoveryGapTests(GeneralBase):
-    def test_incomplete_role_inventory_blocks_broadcast_but_plain_posts_report_discovery_gaps(self):
+    def test_an_incomplete_claude_registry_read_is_reported_with_the_broadcast(self):
         (self.sessions / "broken.json").write_text("{not json")
         rc, result, err = self.post()
-        self.assertEqual(rc, 1)
-        self.assertIsNone(result)
-        self.assertEqual(self.journal_entries(), [])
-        self.assertEqual(self.send_entries("general"), [])
-        self.nothing_delivered()
-        rc, result, err = self.post("plain note")
         self.assertEqual(rc, 0, err)
         gaps = result["discovery_incomplete"]
         self.assertEqual(len(gaps), 1)
         self.assertTrue(gaps[0].startswith("Claude registry: "), gaps)
         self.assertEqual(self.send_entries("general")[0]["data"]["discovery_incomplete"], gaps)
         self.wall[0] += 61
-        rc, out, err = self.cli("send", "--to", "#general", "--message", "plain note again")
+        rc, out, err = self.cli("send", "--to", "#general", "--message", "@all again")
         self.assertEqual(rc, 0, err)
         self.assertIn("note: discovery incomplete: Claude registry: ", out)
         self.assertIn("Claude registry: ", json.dumps(self.general_members()["discovery_incomplete"]))

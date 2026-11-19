@@ -6,93 +6,124 @@ import stat
 import time
 from . import identity, journal, storage
 
-MAX_FILES = 1024
 MAX_BYTES = 2 * 1024 * 1024
+SCAN_SECONDS = 1.0
+
+
+def _read(path, remaining):
+    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > min(65536, remaining):
+            raise ValueError("unreadable binding inventory")
+        raw = os.pread(fd, info.st_size + 1, 0)
+        return raw, info.st_size
+    finally:
+        os.close(fd)
+
+
+def _typed(value):
+    if not isinstance(value, dict) or not identity.valid_ident(value.get("kind"), value.get("uuid")):
+        raise ValueError("invalid binding identity")
+    return journal._norm("%s:%s" % (value["kind"], value["uuid"]))
+
+
+def _owner_name(name):
+    if not name.endswith(".json"):
+        return None
+    kind, sep, ident = name[:-5].partition("-")
+    try:
+        return _typed({"kind": kind, "uuid": ident}) if sep else None
+    except ValueError:
+        return None
+
+
+def _homes(home):
+    """Best-effort shim homes; unrelated registry noise is not a binding."""
+    homes = {os.path.realpath(home), os.path.realpath(os.path.expanduser("~/.codex"))}
+    deadline, remaining = time.monotonic() + SCAN_SECONDS, MAX_BYTES
+    try:
+        with os.scandir(storage.claude_sessions_dir()) as entries:
+            for entry in entries:
+                if time.monotonic() > deadline or remaining <= 0:
+                    break
+                if not entry.name.endswith(".json"):
+                    continue
+                try:
+                    raw, expected = _read(entry.path, remaining)
+                    remaining -= len(raw)
+                    if len(raw) != expected:
+                        raise ValueError("registry changed during read")
+                    rec = json.loads(raw)
+                except (OSError, ValueError, TypeError, RecursionError):
+                    continue
+                value = rec.get("codexHome") if isinstance(rec, dict) and rec.get("entrypoint") == "codex" else None
+                if isinstance(value, str) and os.path.isabs(value):
+                    homes.add(os.path.realpath(value))
+    except OSError:
+        pass
+    return homes
 
 
 def roles(members, home=None, known_owner_states=None):
-    """lead/buddy/unverified, failing closed when the binding inventory is incomplete.
+    """lead/buddy/unverified, without writes or a historical-file-count cutoff.
 
-    Missing stores mean no bindings. Read errors, malformed files, symlinks,
-    FIFOs and bounded-scan exhaustion mean unknown. Only a verified-gone owner
-    makes its still-stored binding inactive. No files are created or changed.
+    Only runtime binding filenames can introduce uncertainty. A valid parsed
+    binding names its target exactly; unrelated records need no owner probe.
+    Unreadable candidate bindings whose owner is not verified gone make the
+    remaining queried roles unknown. Keep positive buddy evidence if a later
+    read fails. Callers decide admission vs fan-out policy for unknown roles.
     """
     from . import channels
     members = tuple(members)
     result = {member: "lead" for member in members}
-    remaining, files, deadline = MAX_BYTES, 0, time.monotonic() + 1.0
+    owner_states, cache = {}, {}
+    unknown = False
 
-    def read(path):
-        nonlocal remaining, files
-        files += 1
-        if files > MAX_FILES or time.monotonic() > deadline:
-            raise ValueError("binding inventory exceeds bounds")
-        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
-        try:
-            info = os.fstat(fd)
-            if not stat.S_ISREG(info.st_mode) or info.st_size > min(65536, remaining):
-                raise ValueError("unreadable binding inventory")
-            raw = os.pread(fd, info.st_size + 1, 0)
-            remaining -= len(raw)
-            if len(raw) != info.st_size or remaining < 0:
-                raise ValueError("binding inventory changed during read")
-            value = json.loads(raw)
-            if not isinstance(value, dict):
-                raise ValueError("invalid binding inventory")
-            return value
-        finally:
-            os.close(fd)
+    def active(owner):
+        if owner not in owner_states:
+            owner_states[owner] = (channels.member_liveness(owner, cache) if known_owner_states is None
+                                   else known_owner_states.get(owner, "unverified"))
+        return owner_states[owner] != "gone"
 
-    def entries(directory):
-        nonlocal files
-        try:
-            if not stat.S_ISDIR(os.lstat(directory).st_mode):
-                raise ValueError("unreadable binding directory")
-            with os.scandir(directory) as stream:
-                for entry in stream:
-                    files += 1
-                    if files > MAX_FILES or time.monotonic() > deadline:
-                        raise ValueError("binding inventory exceeds bounds")
-                    if entry.name.endswith(".json"):
-                        yield entry.path
-        except FileNotFoundError:
-            return
-
-    def typed(value):
-        if not isinstance(value, dict) or not identity.valid_ident(value.get("kind"), value.get("uuid")):
-            raise ValueError("invalid binding identity")
-        return journal._norm("%s:%s" % (value["kind"], value["uuid"]))
-
-    try:
-        with storage.no_create():
-            homes = [storage.codex_home() if home is None else home, os.path.expanduser("~/.codex")]
-            for path in entries(storage.claude_sessions_dir()):
-                rec = read(path)
-                if rec.get("entrypoint") == "codex":
-                    home = rec.get("codexHome")
-                    if not isinstance(home, str) or not os.path.isabs(home):
-                        raise ValueError("unknown shim home")
-                    homes.append(home)
-            homes = set(os.path.realpath(home) for home in homes)
-            if len(homes) > 32:
-                raise ValueError("too many configured homes")
-            owner_states, cache = {}, {}
-            for home in sorted(homes):
-                for path in entries(os.path.join(home, "session-peers", "buddies")):
-                    rec = read(path)
-                    owner, buddy = typed(rec.get("owner")), typed(rec.get("buddy"))
-                    filename = os.path.basename(path)
-                    if not owner.startswith("oc:"):
-                        filename = filename.lower()
-                    if filename != owner.replace(":", "-", 1) + ".json":
-                        raise ValueError("binding owner contradicts its path")
-                    if buddy not in result:
-                        continue
-                    if owner not in owner_states:
-                        owner_states[owner] = (channels.member_liveness(owner, cache) if known_owner_states is None
-                                               else known_owner_states.get(owner, "unverified"))
-                    if owner_states[owner] != "gone":
-                        result[buddy] = "buddy"
-    except (OSError, ValueError, TypeError, RecursionError):
-        return {member: "unverified" for member in members}
+    with storage.no_create():
+        homes = _homes(storage.codex_home() if home is None else home)
+        deadline, remaining = time.monotonic() + SCAN_SECONDS, MAX_BYTES
+        for root in sorted(homes):
+            if time.monotonic() > deadline or remaining <= 0:
+                unknown = True
+                break
+            directory = os.path.join(root, "session-peers", "buddies")
+            try:
+                if not stat.S_ISDIR(os.lstat(directory).st_mode):
+                    raise OSError("unreadable binding directory")
+                with os.scandir(directory) as entries:
+                    for entry in entries:
+                        if time.monotonic() > deadline or remaining <= 0:
+                            unknown = True
+                            break
+                        owner = _owner_name(entry.name)
+                        if owner is None:
+                            continue
+                        try:
+                            raw, expected = _read(entry.path, remaining)
+                            remaining -= len(raw)
+                            if len(raw) != expected:
+                                raise ValueError("binding changed during read")
+                            rec = json.loads(raw)
+                        except (OSError, ValueError, TypeError, RecursionError):
+                            unknown = active(owner) or unknown
+                            continue
+                        try:
+                            buddy = _typed(rec.get("buddy") if isinstance(rec, dict) else None)
+                        except ValueError:
+                            continue
+                        if buddy in result and active(owner):
+                            result[buddy] = "buddy"
+            except FileNotFoundError:
+                continue
+            except OSError:
+                unknown = True
+    if unknown:
+        result = {member: "unverified" if role == "lead" else role for member, role in result.items()}
     return result

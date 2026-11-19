@@ -65,8 +65,10 @@ class QuietChannelTests(ChannelSendBase):
         _listener, peer = self.peer_cc("beta")
         self.channel("ops")
         for token in ("nobody", peer):
-            rc, _result, _err = self.send(message="@" + token)
+            rc, _result, err = self.send(message="@" + token)
             self.assertNotEqual(rc, 0)
+            self.assertIn(r"\@name", err)
+            self.assertIn("`@name`", err)
             self.assertEqual(self.send_entries(), [])
             self.assertEqual(self.journal_entries(), [])
         self.nothing_delivered()

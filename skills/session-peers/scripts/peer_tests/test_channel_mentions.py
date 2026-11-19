@@ -3,19 +3,22 @@
 import unittest
 import subprocess
 import sys
+from pathlib import Path
 
 from session_peers import channel_mentions
+
+_SCRIPTS_DIR = Path(__file__).resolve().parent.parent
 
 
 class MentionGrammarTests(unittest.TestCase):
     def test_large_nonmention_prefix_finishes_within_bounded_child(self):
         code = "from session_peers.channel_mentions import parse; assert parse('x'*200000+' https://example.invalid/@all')['tokens'] == []"
-        result = subprocess.run([sys.executable, "-c", code], capture_output=True, timeout=3)
+        result = subprocess.run([sys.executable, "-c", code], cwd=_SCRIPTS_DIR, capture_output=True, timeout=3)
         self.assertEqual(result.returncode, 0, result.stderr.decode())
 
     def test_many_distinct_mentions_finish_within_bounded_child(self):
         code = "from session_peers.channel_mentions import parse; body=' '.join('@u%d'%i for i in range(80000)); assert len(body)<1048576; assert len(parse(body)['tokens'])==80000"
-        result = subprocess.run([sys.executable, "-c", code], capture_output=True, timeout=3)
+        result = subprocess.run([sys.executable, "-c", code], cwd=_SCRIPTS_DIR, capture_output=True, timeout=3)
         self.assertEqual(result.returncode, 0, result.stderr.decode())
 
     def test_word_boundaries_typed_ids_and_sentence_punctuation(self):

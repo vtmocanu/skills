@@ -66,6 +66,7 @@ def delivery_mode(rec):
     return "all" if rec.get("deliver") == "all" else "mentions"
 ACK_NOT_REQUESTED = "ACK not requested (unverified)"
 ACK_NOT_REQUESTED_ASKED = "ACK not requested"
+_LITERAL_MENTION_HINT = r"To post literally, write \@name or `@name`."
 
 # Deliveries to Claude targets are at least this far apart (seconds). Tests
 # patch ``_clock`` and ``_sleep``; nothing else sleeps.
@@ -969,9 +970,6 @@ def _general_marker(action, me):
 
 def _cmd_join(args, me):
     if parse_name(args.name) == sp_constants.CHANNEL_GENERAL:
-        if args.allow_buddy:
-            raise ChannelError("--allow-buddy applies only to stored channels; #general has no buddy fan-out overrides")
-        _require_leads([me], override_hint=False)
         return _general_marker("join", me)
     key = stored_key(args.name)
 
@@ -1580,10 +1578,12 @@ def _successor_label(target):
 
 def _handover_mutator(me, target, label):
     def mutate(rec):
+        if me not in rec["members"] and rec["owner"] != me:
+            return None
+        if rec["kind"] != "buddy":
+            _require_leads([target], override_hint=False)
         if me in rec["members"]:
             rec["members"].remove(me)
-        elif rec["owner"] != me:
-            return None
         if target not in rec["members"]:
             if len(rec["members"]) >= sp_constants.CHANNEL_MAX_MEMBERS:
                 raise ChannelError(
@@ -2044,7 +2044,7 @@ def _mention_targets(body, members, cache):
     for token in intent["names"]:
         member = _resolve_mention(token)
         if member not in members:
-            raise ChannelError("mentioned %s is not a member of this channel; nothing was recorded or sent" % token)
+            raise ChannelError("mentioned %s is not a member of this channel; nothing was recorded or sent. %s" % (token, _LITERAL_MENTION_HINT))
         if member not in named:
             named.append(member)
     targets = list(members) if intent["all"] else list(named)
@@ -2060,10 +2060,12 @@ def _mention_targets(body, members, cache):
 def _require_leads(members, override_hint=True):
     from . import channel_roles
     for member, role in channel_roles.roles(members).items():
-        if role != "lead":
+        if role == "buddy":
             hint = ("Use --allow-buddy to explicitly admit it" if override_hint else
-                    "#general has no buddy admission override; use channel tail general to read on demand")
-            raise ChannelError("%s is a current buddy or its role is unverified; shared channels are for leads. %s" % (member, hint))
+                    "Choose a lead for public-channel handover")
+            raise ChannelError("%s is a current buddy; shared channels are for leads. %s" % (member, hint))
+        if role == "unverified":
+            sys.stderr.write("warning: buddy role for %s is unverified; admission allowed without a fan-out override\n" % member)
 
 
 def _role_skip(key, member, direct=(), rec=None, evidence=None):
@@ -2109,15 +2111,14 @@ def _resolve_mention(token):
         pass
     browsers = [rec for rec in sp_claude.claude_record_by_name(token, include_web=True)
                 if sp_claude.is_web_record(rec)]
-    literal_hint = r"To post literally, write \@name or `@name`."
     try:
         found = sp_identity.resolve_typed(token)
     except sp_codex.ResolveNotFound:
         found = None
     except (sp_codex.ResolveError, ValueError) as exc:
-        raise ChannelError("cannot resolve mention @%s: %s. %s" % (token, exc, literal_hint)) from exc
+        raise ChannelError("cannot resolve mention @%s: %s. %s" % (token, exc, _LITERAL_MENTION_HINT)) from exc
     if len(browsers) + int(found is not None) != 1:
-        raise ChannelError("mention @%s is unknown or ambiguous; use a full typed member id. %s" % (token, literal_hint))
+        raise ChannelError("mention @%s is unknown or ambiguous; use a full typed member id. %s" % (token, _LITERAL_MENTION_HINT))
     return (sp_journal._norm("web:" + browsers[0]["sessionId"]) if browsers else
             sp_journal._norm("%s:%s" % (found["kind"], found["uuid"])))
 

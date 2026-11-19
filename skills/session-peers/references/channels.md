@@ -33,7 +33,7 @@ failed.
 
 | Command | Effect |
 | --- | --- |
-| `channel create NAME [--member ADDR]... [--deliver mentions\|all] [--allow-buddy]` | Create a channel you own; default quiet `mentions`. Buddy or unverified-role members (including the creator) need the explicit override. |
+| `channel create NAME [--member ADDR]... [--deliver mentions\|all] [--allow-buddy]` | Create a channel you own; default quiet `mentions`. Known buddy members (including the creator) need the explicit override; unknown roles warn and admit without one. |
 | `channel set NAME --deliver mentions\|all` | Owner changes notification mode. Buddy channels always use `all` and refuse this command. |
 | `channel join NAME [--allow-buddy]` / `channel leave NAME` | Add or remove yourself. A current buddy needs the override on a stored channel. Buddy channels cannot be joined. |
 | `channel remove NAME ADDR` | Owner only: the current owner (its creator, the lead of a buddy channel, or a handover successor). Accepts a typed id of a session that no longer exists. |
@@ -78,17 +78,23 @@ failed.
   In `all` mode every other member is notified, as before. Buddy mode is fixed
   to `all`. Lead is a role, not a runtime: a session bound as someone else's
   buddy is a non-lead; every other session (including solo Codex) is a lead.
-  Public joins and creation with buddy members refuse unless `--allow-buddy`
-  explicitly admits them. The flag is stored per member; leaving or removal
-  clears it, and handover never implicitly transfers it. Binding itself never
+  Public joins and creation with known buddy members refuse unless `--allow-buddy`
+  explicitly admits them. Unknown role evidence warns but allows admission,
+  without granting a fan-out override. The flag is stored per member; leaving or removal
+  clears it. Public-channel handover refuses a known buddy target and never implicitly
+  transfers an override. Binding itself never
   joins shared channels. These channel roles grant no review or user-approval authority.
 - Fan-out (`@here`, `@all`, or `all` mode) skips current buddies without that
   override. A direct `@name` or typed mention still reaches a buddy. Binding
   records are read across configured and shim-recorded homes before planning
   and again just before each paced delivery. Verified-gone binding owners are
-  ignored; unreadable, malformed or incomplete evidence blocks fan-out. Buddy
-  channels are unchanged. `#general` keeps its derived roster but never has a
-  buddy fan-out override; use an explicit name there.
+  ignored. Only unreadable candidate binding files, or incomplete reads of known
+  binding stores, block otherwise-unverified fan-out. Unrelated registry noise,
+  legacy shim records without a home and non-binding filenames do not invalidate
+  everyone; home discovery follows existing best-effort rules. Reads are bounded
+  by bytes/time, not historical file counts. Buddy channels are unchanged.
+  `#general` join only clears the caller's leave marker; it keeps its derived
+  roster and never grants a buddy fan-out override. Use an explicit name there.
 - Mention tokens start at a word boundary outside backticks. Unicode word
   characters, dots, hyphens and colons are allowed; trailing dots/colons are
   sentence punctuation. Names outside that grammar use full typed ids. Emails,
