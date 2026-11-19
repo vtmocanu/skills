@@ -71,6 +71,23 @@ class QuietChannelTests(ChannelSendBase):
             self.assertEqual(self.journal_entries(), [])
         self.nothing_delivered()
 
+    def test_unknown_mentions_explain_literal_escape_without_writing(self):
+        self.sender_cc()
+        self.one_thread()
+        self.channel("ops")
+        for token in ("@coderabbitai", "@types/node", "@4213"):
+            with self.subTest(token=token):
+                rc, _result, err = self.send(message="Reference " + token)
+                self.assertNotEqual(rc, 0)
+                self.assertIn(r"\@name", err)
+                self.assertIn("`@name`", err)
+                self.assertEqual(self.send_entries(), [])
+                self.assertEqual(self.journal_entries(), [])
+        for text in (r"Reference \@coderabbitai", "Reference `@types/node`", r"Reference \@4213"):
+            rc, _result, err = self.send(message=text)
+            self.assertEqual(rc, 0, err)
+        self.nothing_delivered()
+
     def test_ambiguous_name_refuses_before_any_send_or_journal(self):
         self.sender_cc()
         self.one_thread()

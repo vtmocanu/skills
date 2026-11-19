@@ -2109,14 +2109,15 @@ def _resolve_mention(token):
         pass
     browsers = [rec for rec in sp_claude.claude_record_by_name(token, include_web=True)
                 if sp_claude.is_web_record(rec)]
+    literal_hint = r"To post literally, write \@name or `@name`."
     try:
         found = sp_identity.resolve_typed(token)
     except sp_codex.ResolveNotFound:
         found = None
     except (sp_codex.ResolveError, ValueError) as exc:
-        raise ChannelError("cannot resolve mention @%s: %s" % (token, exc)) from exc
+        raise ChannelError("cannot resolve mention @%s: %s. %s" % (token, exc, literal_hint)) from exc
     if len(browsers) + int(found is not None) != 1:
-        raise ChannelError("mention @%s is unknown or ambiguous; use a full typed member id" % token)
+        raise ChannelError("mention @%s is unknown or ambiguous; use a full typed member id. %s" % (token, literal_hint))
     return (sp_journal._norm("web:" + browsers[0]["sessionId"]) if browsers else
             sp_journal._norm("%s:%s" % (found["kind"], found["uuid"])))
 
