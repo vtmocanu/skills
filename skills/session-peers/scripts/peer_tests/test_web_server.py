@@ -311,6 +311,15 @@ class StaticAndApiTests(WebBase):
         members = {m["typed"]: m for c in view["channels"] for m in c["members"]}
         self.assertEqual(members[self.me]["name"], "alpha-renamed")
 
+    def test_native_shell_activity_is_working_without_weakening_liveness(self):
+        self.ops_channel()
+        self.write_record(os.getpid(), "native-shell", self.me.partition(":")[2], str(self.socks / "x.sock"), status="shell")
+        found = web.run_discovery()
+        self.assertEqual(found["liveness"][self.me], "live")
+        self.assertEqual(found["activity"][self.me], "working")
+        session = next(s for s in self.ok("/api/state")["sessions"] if s["member"] == self.me)
+        self.assertEqual(session["display_name"], "native-shell")
+
     def test_a_channel_page_is_one_bounded_page(self):
         self.ops_channel()
         self.send("--record")

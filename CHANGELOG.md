@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.55.0] - 2026-11-19
+
+### Changed
+
+- `session-peers`: dashboard sessions display thread titles separately from unique addresses, and buddy channels appear under Direct. Reciprocal pairs group visually while retaining both independently routed histories. Native Claude shell activity shows Working; unknown activity no longer disguises verified liveness.
+
 ## [0.54.0] - 2026-11-19
 
 ### Added

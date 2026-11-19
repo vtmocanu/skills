@@ -855,6 +855,21 @@ class WebdataBoundedReadTests(WebdataBase):
 
 
 class WebdataMemberTests(WebdataBase):
+    def test_display_title_uses_the_same_bounded_snapshot_as_the_budget(self):
+        tid = new_uuid()
+        self.shim_state(tid, thread_name="same as the lead", name="codex-unique")
+        with mock.patch.object(webdata, "_read_shim_state", wraps=webdata._read_shim_state) as read:
+            details = webdata.member_details("codex:" + tid, "live", "idle", home=str(self.codex_dir))
+        self.assertEqual(details["display_name"], "same as the lead")
+        self.assertEqual(details["address"], "codex:" + tid)
+        self.assertEqual(read.call_count, 1)
+        limited = webdata.member_details("codex:" + tid, "live", "idle", home=str(self.codex_dir), budget=webdata.Budget(1))
+        self.assertNotIn("display_name", limited)
+        self.assertTrue(limited["partial"])
+        with mock.patch.object(webdata, "_read_shim_state") as read:
+            webdata.member_details("codex:../../outside", "live", home=str(self.codex_dir))
+            read.assert_not_called()
+
     def shim_state(self, tid, **state):
         path = pathlib.Path(self.codex_dir) / "session-peers" / (tid + ".json")
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -1562,6 +1577,22 @@ class WebdataStateViewTests(WebdataBase):
     def alerts(self, **kw):
         view = webdata.state_view(EMPTY, **kw)
         return {row["key"]: row["alert"] for row in view["channels"]}
+
+    def test_state_keeps_address_names_and_adds_display_title_and_current_pair(self):
+        typed = "codex:" + self.tid
+        key = sp_channels.buddy_channel_add(self.me, typed)
+        WebdataMemberTests.shim_state(self, self.tid, thread_name="Shared display title")
+        discovery = dict(EMPTY, general=([self.me, typed], None, []), names={typed: "codex-unique"},
+                         homes={self.tid: str(self.codex_dir)}, liveness={self.me: "live", typed: "live"})
+        view = webdata.state_view(discovery)
+        session = next(s for s in view["sessions"] if s["member"] == typed)
+        self.assertEqual(session["name"], "codex-unique")
+        self.assertEqual(session["display_name"], "Shared display title")
+        self.assertEqual(session["address"], typed)
+        channel = next(c for c in view["channels"] if c["key"] == key)
+        self.assertEqual(channel["current_buddy"], typed)
+        self.assertEqual(channel["owner"], self.me)
+        self.assertEqual(next(m for m in channel["members"] if m["typed"] == typed)["name"], "codex-unique")
 
     def test_shape_general_first_and_no_history(self):
         self.send()

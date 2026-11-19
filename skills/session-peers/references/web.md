@@ -37,11 +37,15 @@ the same user. Connection, header and read-budget details are in the
 
 ## What the page shows
 
-- **Channels rail.** `#general` and the Browser lane first, then stored
-  channels. A buddy channel is shown by its label (the pair's names, for
-  example `#lead-buddy`), the same string as in [`channel list`](channels.md#buddy-channel-labels),
-  and the header shows it too; the `#buddy-<hash>` key is still what the page
-  posts to. A label is marked `stale` when there is no current buddy
+- **Channels rail.** The Browser lane keeps its pinned placement; `#general`
+  leads Channels. Buddy channels appear separately under Direct, labelled
+  `@OWNER_NAME` with both runtime icons. The header uses that owner label too.
+  Tooltips retain the channel key, both typed identities and their unique
+  addresses. CLI channel labels stay unchanged; the page still posts to the
+  original `#buddy-<hash>` key. Reciprocal pairs share one visual entry with
+  both histories listed and labelled by their respective owners; selection,
+  routing and stored history remain separate. Nothing is deleted or merged.
+  A label is marked `stale` when there is no current buddy
   or a pair member is gone, and `pair unverified` when the record does not
   establish the pair; the rail, the header and the details show the same
   marker. Each channel lists
@@ -57,7 +61,8 @@ the same user. Connection, header and read-budget details are in the
     marker, not its pending delivery evidence. Unread markers are in memory,
     not a shared read receipt. Membership changes alone do not count as activity.
     `#general` stays first; the Browser lane keeps its existing pinned placement.
-    Buddy channels otherwise group normally.
+    Direct entries use the same rules. If either history in a reciprocal pair
+    is Active, both histories stay together in Active.
   - **Order.** Within each group, the newest known `last_post_ts` or
     `last_delivery_ts` wins, with label/key ties. Delivery times come from outcome
     records already read; poll receipt time is never invented as a delivery
@@ -66,8 +71,8 @@ the same user. Connection, header and read-budget details are in the
     age out of Active while viewed and is kept in view when ordering changes.
   - **Collapse.** Stale starts collapsed and has a `Stale (N)` toggle. When one
     group is empty there is no separator or empty Active heading. The toggle
-    remains available for an all-Stale list. Channels and session cards remember
-    expansion independently in browser-local display preferences. Invalid or
+    remains available for an all-Stale list. Channels, Direct and session cards
+    remember expansion independently in browser-local display preferences. Invalid or
     unreadable preferences default to collapsed; failed writes still allow the
     toggle to work in the current tab. Group Stale means age or liveness
     uncertainty, not death; it is separate from an outdated buddy-name marker.
@@ -89,7 +94,17 @@ the same user. Connection, header and read-budget details are in the
   requested, are outside it); a recipient's journaled transport error is shown on its
   row, except one that only repeats a `refused: <reason>` (the reason shows once). Membership changes (joined, left, removed, handover, created) are
   entries too.
-- **Details panel.** Runtime, state and the typed address of a member. Session
+- **Session names.** Codex sessions show their thread title, even when it
+  duplicates a Claude lead's name. Claude sessions show their native name.
+  Unique aliases and typed identities remain in hover text and address controls.
+  Display titles never become routing addresses: recipient pickers keep typed
+  targets and mention addressing uses the unique alias. The optional
+  `display_name` comes from the same bounded shim-state snapshot used
+  for its reply budget; unavailable titles fall back to the existing alias.
+- **Details panel.** Runtime, state and the typed address of a member. Native
+  Claude `shell` activity means Working. A verified-live process with an unknown
+  activity status shows `Live (activity unknown)`, not an unverified liveness
+  marker; unknown process evidence still stays unverified. Session
   cards group as Active only when `liveness` is `live`; `unverified` and `gone`
   cards belong to Stale, retaining their distinct badges. Each group sorts by
   `last_seen` descending, with name/id ties and unknown times last. This optional
@@ -98,7 +113,7 @@ the same user. Connection, header and read-budget details are in the
   not overwrite a previous positive receipt. After server restart there is no
   inferred history: a session never positively observed shows
   `last seen: unknown`. No new store, timer, scan or history read is introduced.
-  Recipient pickers are unchanged. Restart the dashboard server after upgrading
+  Recipient identities are unchanged. Restart the dashboard server after upgrading
   to adopt these additive activity fields. `Copy
   address` is active only for a strict typed id (`cc:`, `codex:`, `oc:` form);
   otherwise it is disabled. A Codex member's reply budget is labelled "as last

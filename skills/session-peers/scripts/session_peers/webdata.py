@@ -1265,12 +1265,12 @@ def _read_shim_state(path, budget):
     return (state if isinstance(state, dict) else None), False
 
 
-def _reply_budget(tid, home, now, budget, requester=None):
-    """``(reply budget dict or None, skipped)``; see ``codex_reply_budget``."""
+def _reply_budget(tid, home, now, budget, requester=None, snapshot=None):
+    """``(reply budget dict or None, skipped)``; optional snapshot shares the title's bounded read."""
     if not isinstance(tid, str) or not sp_constants.UUID_RE.fullmatch(tid) or not isinstance(home, str) or not home:
         return None, False
     base = os.path.join(home, "session-peers")
-    state, skipped = _read_shim_state(os.path.join(base, "%s.json" % tid), budget)
+    state, skipped = snapshot if snapshot is not None else _read_shim_state(os.path.join(base, "%s.json" % tid), budget)
     if state is None:
         return None, skipped
     sid = requester if requester is not None else state.get("budget_sender_sid")
@@ -1351,12 +1351,18 @@ def member_details(typed, liveness, activity=None, now=None, budget=None, home=N
         out["last_seen"] = last_seen
     if kind == "codex":
         budget = budget if budget is not None else Budget()
-        if not isinstance(home, str) or not home:
+        if not isinstance(home, str) or not home or not sp_constants.UUID_RE.fullmatch(ident):
             out["reply_budget"], skipped = None, False
             out["budget_unknown"] = True
         else:
             try:
-                out["reply_budget"], skipped = _reply_budget(ident, home, now, budget)
+                snapshot = _read_shim_state(os.path.join(home, "session-peers", "%s.json" % ident), budget)
+                state, _skipped = snapshot
+                if state is not None:
+                    title = sp_channels.clip_name(state.get("thread_name"))
+                    if title:
+                        out["display_name"] = title
+                out["reply_budget"], skipped = _reply_budget(ident, home, now, budget, snapshot=snapshot)
             except Exception:  # the file is peer-writable: whatever it holds, the view still works
                 out["reply_budget"], skipped = None, False
         if skipped:
@@ -2244,6 +2250,9 @@ def state_view(discovery, budget=None, now=None, chat=None, viewer=None):
             "alert": alert, "coverage": cover,
             "deliver": sp_channels.delivery_mode(record),
         }
+        if record["kind"] == "buddy":
+            _owner, current, pair_status = sp_channels.pair_of(record)
+            row["current_buddy"] = current if pair_status == sp_channels.PAIR_KNOWN else None
         label = ({"label": "#" + GENERAL, "status": sp_channels.LABEL_CURRENT} if key == GENERAL
                  else labels.get(key))
         if label is not None:
@@ -2266,6 +2275,9 @@ def state_view(discovery, budget=None, now=None, chat=None, viewer=None):
                     member["typed"], liveness.get(member["typed"]), activity.get(member["typed"]), now, budget,
                     home=homes.get(member["typed"].partition(":")[2]),
                     last_seen=(discovery.get("last_seen") or {}).get(member["typed"]))
+                if member.get("name"):
+                    details["name"] = member["name"]
+                    details.setdefault("display_name", member["name"])
                 partial = partial or bool(details.get("partial"))
                 if chat is not None and member["typed"].startswith("codex:"):
                     left = (discovery.get("replies_left") or {}).get(member["typed"])

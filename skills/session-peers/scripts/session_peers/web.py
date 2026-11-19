@@ -104,7 +104,7 @@ SECURITY_HEADERS = (
 _DIGITS_RE = re.compile(r"[0-9]{1,16}")
 _JSON_TYPE_RE = re.compile(r"application/json(?:\s*;\s*charset=utf-8)?", re.IGNORECASE)
 _CURSOR_RE = re.compile(r"[A-Za-z0-9_-]{1,65536}")
-_ACTIVITY = {"busy": "working", "idle": "idle"}
+_ACTIVITY = {"busy": "working", "shell": "working", "idle": "idle"}
 _OC_ACTIVITY = {"running": "working", "idle": "idle"}
 DRAIN_READS = 16
 
