@@ -210,7 +210,7 @@
   }
 
   var S = {
-    token: null, state: null, names: table(), members: table(), sessions: table(), rows: table(),
+    token: null, state: null, names: table(), displayNames: table(), members: table(), sessions: table(), rows: table(),
     selected: "general", view: "conv", pages: table(), pendingNotes: table(), loading: table(), pageErrors: table(),
     all: null, search: null, cursor: null, polls: 0, failures: 0, polling: false, stopped: false, timer: null,
     needState: false, live: { mode: "starting" }, liveText: null, untracked: 0, journalGap: false, pane: "main",
@@ -220,11 +220,11 @@
     // Per channel key {a: "posted" | "none" | "unknown" | null, ts}: the state's activity, then live polls.
     activity: table(), ledgers: table(), ledgerGen: table(),
     deliverySeen: table(), unreadChannels: table(), renderedRail: null,
-    staleOpen: { channels: false, sessions: false }, pinOpen: table(), pinDOM: null
+    staleOpen: { channels: false, direct: false, sessions: false }, pinOpen: table(), pinDOM: null
   };
 
   var RT_LABEL = { claude: "Claude Code", codex: "Codex", oc: "OpenCode", web: "Browser", unknown: "Unknown runtime" };
-  var STATE_LABEL = { working: "Working", idle: "Idle", unverified: "Unverified", gone: "Gone" };
+  var STATE_LABEL = { working: "Working", idle: "Idle", live: "Live (activity unknown)", unverified: "Unverified", gone: "Gone" };
 
   function str(value) {
     return typeof value === "string" ? value : (value === null || value === undefined ? "" : String(value));
@@ -244,7 +244,7 @@
   }
 
   function nameOf(typed) {
-    var name = S.names[typed];
+    var name = S.displayNames[typed] || S.names[typed];
     return name ? name : shortId(typed);
   }
 
@@ -340,13 +340,28 @@
     var typed = member.typed;
     var rt = rtOf(typed);
     var state = member.state || "unverified";
-    return el("span", { class: "who " + rt + (state === "gone" ? " is-gone" : ""), title: str(typed) },
+    if (state === "unverified" && sessionLiveness(member) === "live") state = "live";
+    return el("span", { class: "who " + rt + (state === "gone" ? " is-gone" : ""), title: addressTitle(typed) },
       hicon(rt), el("span", { class: "nm" }, nameOf(typed)), stateDot(state),
       el("span", { class: "sr" }, "(" + (own(STATE_LABEL, state) || "Unverified") + ")"));
   }
 
   function nameRef(typed) {
-    return el("span", { class: "ref", title: str(typed) }, nameOf(typed));
+    return el("span", { class: "ref", title: addressTitle(typed) }, nameOf(typed));
+  }
+
+  function addressTitle(typed) {
+    return str(typed) + (S.names[typed] ? " · @" + S.names[typed] : "");
+  }
+
+  function directText(row) {
+    return "@" + nameOf(row.owner);
+  }
+
+  function directTitle(row) {
+    var members = Array.isArray(row.members) ? row.members : [];
+    return "Channel: #" + row.key + " · Owner: " + addressTitle(row.owner) + " · Members: " +
+      members.map(function (m) { return addressTitle(m.typed); }).join(", ");
   }
 
   // The server's label for a channel (derived by the server, shown as text), else "".
@@ -356,6 +371,9 @@
 
   function chanLabel(key) {
     var row = S.rows[key];
+    if (row && row.kind === "buddy") return [el("span", { class: "direct-label", title: directTitle(row) },
+      (row.current_buddy ? [row.owner, row.current_buddy] : (row.members || []).slice(0, 2).map(function (m) { return m.typed; }))
+        .map(function (typed) { return hicon(rtOf(typed)); }), el("span", { class: "direct-name" }, directText(row)))];
     var label = serverLabel(row);
     if (label) return label.charAt(0) === "#" ? [el("span", { class: "chan" }, "#"), label.slice(1)] : [label];
     var display = row && typeof row.display === "string" ? row.display : str(key);
@@ -377,6 +395,7 @@
 
   function chanText(key) {
     var row = S.rows[key];
+    if (row && row.kind === "buddy") return directText(row);
     var label = serverLabel(row);
     if (label) return label;
     var display = row && typeof row.display === "string" ? row.display : str(key);
@@ -491,7 +510,7 @@
       out.push(on(button, "click", function () {
         S.staleOpen[kind] = !S.staleOpen[kind];
         saveSidebarPrefs();
-        if (kind === "channels") renderLanes(false);
+        if (kind === "channels" || kind === "direct") renderLanes(false);
         else withFocus(function () { fill($("info"), renderDetails(S.rows[S.selected])); });
       }));
       if (S.staleOpen[kind]) groups.stale.forEach(function (row) { out.push(render(row)); });
@@ -501,7 +520,7 @@
 
   function railOrder() {
     var groups = channelGroups(S.state, S.view === "conv" ? S.selected : null);
-    return groups.active.map(function (r) { return str(r.key); }).join("\n") + "\n--stale:" + S.staleOpen.channels + "\n" +
+    return groups.active.map(function (r) { return str(r.key); }).join("\n") + "\n--stale:" + S.staleOpen.channels + ":" + S.staleOpen.direct + "\n" +
       groups.stale.map(function (r) { return str(r.key); }).join("\n");
   }
 
@@ -1081,7 +1100,7 @@
     return web ? ["claude", "codex", "oc", "web"] : ["claude", "codex", "oc"];
   }
 
-  function renderLane(row, current, select) {
+  function renderLane(row, current, select, compact) {
     var key = str(row.key);
     var members = Array.isArray(row.members) ? row.members : [];
     var body;
@@ -1095,6 +1114,8 @@
           return el("span", { class: "who " + rt, title: counts[rt] + " " + RT_LABEL[rt] }, hicon(rt), String(counts[rt]),
             el("span", { class: "sr" }, RT_LABEL[rt] + (counts[rt] === 1 ? " session" : " sessions")));
         }))];
+    } else if (compact) {
+      body = null; // Both identities remain in the hover text and the selected history's details.
     } else {
       var chain = chainText(row);
       body = [el("div", { class: "lineage" }, chain || (members.length + " member" + (members.length === 1 ? "" : "s"))),
@@ -1113,9 +1134,33 @@
   }
 
   function renderRail(state, selected, select) {
-    return sidebarGroups("channels", channelGroups(state, selected), function (row) {
+    var rows = state && Array.isArray(state.channels) ? state.channels : [];
+    function section(kind, title, buddy) {
+      var subset = rows.filter(function (row) { return (row.kind === "buddy") === buddy; });
+      if (!subset.length) return [];
+      return [el("div", { class: "group-label section-label" }, title)].concat(sidebarGroups(kind, channelGroups({ channels: subset }, selected), function (row) {
       return renderLane(row, row.key === selected, select || function () {});
+      }));
+    }
+    var direct = rows.filter(function (r) { return r.kind === "buddy"; });
+    var groups = channelGroups({ channels: direct }, selected), paired = table(), ordered = [];
+    groups.active.concat(groups.stale).forEach(function (row) {
+      var reverse = row.current_buddy && direct.find(function (r) {
+        return r.owner === row.current_buddy && r.current_buddy === row.owner;
+      });
+      var key = reverse ? [row.owner, row.current_buddy].sort(cmpCodePoints).join("|") : row.key;
+      if (!paired[key]) { paired[key] = { rows: [], active: false }; ordered.push(paired[key]); }
+      paired[key].rows.push(row);
+      if (groups.active.indexOf(row) >= 0) paired[key].active = true;
     });
+    var directGroups = { active: ordered.filter(function (g) { return g.active; }), stale: ordered.filter(function (g) { return !g.active; }) };
+    var directNodes = direct.length ? [el("div", { class: "group-label section-label" }, "Direct")].concat(
+      sidebarGroups("direct", directGroups, function (group) {
+        var histories = group.rows.map(function (row) { return renderLane(row, row.key === selected, select || function () {}, group.rows.length > 1); });
+        return group.rows.length > 1 ? el("div", { class: "direct-pair" },
+          el("div", { class: "pair-title" }, "Reciprocal pair · " + group.rows.length + " histories"), histories) : histories[0];
+      })) : [];
+    return section("channels", "Channels", false).concat(directNodes);
   }
 
   // The shim saves its requester as a bare Claude session id (budget_sender_sid): name it through
@@ -1169,6 +1214,7 @@
     var state = details.state || member.state || "unverified";
     var liveness = sessionLiveness(member);
     if (liveness !== "live") state = liveness === "gone" ? "gone" : "unverified";
+    else if (state === "unverified") state = "live";
     var kv = [el("dt", null, "State"), el("dd", null, own(STATE_LABEL, state) || "Unverified"),
       el("dt", null, "Address"), el("dd", { class: "mono" }, address)];
     if (rt === "codex") kv = kv.concat(budgetNodes(details));
@@ -1809,7 +1855,7 @@
         if (box.checked) C.targets[c.typed] = true; else delete C.targets[c.typed];
         updateComposerState();
       });
-      out.push(el("label", { class: "who pick " + rt + (gone ? " is-gone" : ""), title: c.typed + (gone ? " (gone)" : "") },
+      out.push(el("label", { class: "who pick " + rt + (gone ? " is-gone" : ""), title: addressTitle(c.typed) + (gone ? " (gone)" : "") },
         box, hicon(rt), el("span", { class: "nm" }, nameOf(c.typed))));
     });
     if (!cands.length && ctx.kind === "browser") out.push(el("span", { class: "muted" }, "No live sessions to message."));
@@ -2255,7 +2301,7 @@
 
   function setState(data) {
     S.state = data && typeof data === "object" ? data : { channels: [], sessions: [] };
-    var names = table(), members = table(), rows = table(), sessions = table();
+    var names = table(), displayNames = table(), members = table(), rows = table(), sessions = table();
     (Array.isArray(S.state.channels) ? S.state.channels : []).forEach(function (row) {
       if (!row || typeof row !== "object") return;
       rows[str(row.key)] = row;
@@ -2269,6 +2315,7 @@
       if (!s || typeof s !== "object") return;
       sessions[str(s.member)] = s;
       if (typeof s.name === "string" && s.name && !names[str(s.member)]) names[str(s.member)] = s.name;
+      if (typeof s.display_name === "string" && s.display_name) displayNames[str(s.member)] = s.display_name;
     });
     var chat = S.state.chat && typeof S.state.chat === "object" && typeof S.state.chat.peer === "string" ? S.state.chat : null;
     S.chat = chat;
@@ -2279,7 +2326,7 @@
     } else if (S.view === "browser") {
       S.view = "conv";
     }
-    S.names = names; S.members = members; S.rows = rows; S.sessions = sessions;
+    S.names = names; S.displayNames = displayNames; S.members = members; S.rows = rows; S.sessions = sessions;
     S.activity = table();  // a fresh state supersedes what polls inferred
     if (typeof S.state.untracked === "number") S.untracked = S.state.untracked;
     if (!rows[S.selected]) S.selected = rows.general ? "general" : (S.state.channels && S.state.channels[0] ? str(S.state.channels[0].key) : "general");
@@ -3172,12 +3219,13 @@
   }
 
   function loadSidebarPrefs() {
-    S.staleOpen = { channels: false, sessions: false };
+    S.staleOpen = { channels: false, direct: false, sessions: false };
     try {
       var value = root.localStorage && root.localStorage.getItem(SIDEBAR_PREF_KEY);
       var parsed = value ? JSON.parse(value) : null;
       if (parsed && typeof parsed === "object") {
         S.staleOpen.channels = parsed.channels === true;
+        S.staleOpen.direct = parsed.direct === true;
         S.staleOpen.sessions = parsed.sessions === true;
       }
     } catch (_err) { /* default collapsed when storage cannot be read */ }
@@ -3186,7 +3234,7 @@
   function saveSidebarPrefs() {
     try {
       if (root.localStorage) root.localStorage.setItem(SIDEBAR_PREF_KEY,
-        JSON.stringify({ channels: !!S.staleOpen.channels, sessions: !!S.staleOpen.sessions }));
+        JSON.stringify({ channels: !!S.staleOpen.channels, direct: !!S.staleOpen.direct, sessions: !!S.staleOpen.sessions }));
     } catch (_err) { /* the toggle still works for this tab */ }
   }
 

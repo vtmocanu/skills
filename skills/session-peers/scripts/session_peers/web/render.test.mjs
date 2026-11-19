@@ -403,7 +403,7 @@ test("rail: #general first, member states, handover chain, alert badges, no unre
   state.channels[1].last_post_ts = "2026-11-07T12:41:00+00:00"
   state.channels[2].activity = "none"
   app.setState(state)
-  const lanes = app.renderRail(app.state.state, "ops", () => {})
+  const lanes = app.renderRail(app.state.state, "ops", () => {}).filter((n) => n.attributes.class === "lane")
   assert.equal(lanes.length, 3)
   assert.ok(lanes[0].textContent.startsWith("#general"))
   const badge = elementsOf(lanes[0]).find((n) => n.attributes.class === "badge alert")
@@ -938,7 +938,7 @@ test("nits: budget gap wording, acked rows with a transport error, #general coun
   assert.equal(app.gapNote({ reason: "budget" }), "Not all new entries could be read in this update (read budget) — reloaded the latest page.")
   const d = app.renderDelivery({ state: "complete", recipients: [row(CODEX_B, "acked", { ack: "acked", transport_error: "late pipe error" })] })
   assert.equal(elementsOf(d).find((n) => (n.attributes.class || "").startsWith("drow ")).attributes.class, "drow t-ok")
-  const lanes = app.renderRail(app.state.state, "general", () => {})
+  const lanes = app.renderRail(app.state.state, "general", () => {}).filter((n) => n.attributes.class === "lane")
   const srs = elementsOf(lanes[0]).filter((n) => n.attributes.class === "sr").map((n) => n.textContent)
   assert.deepEqual(srs, ["Claude Code session", "Codex session", "OpenCode sessions"])
   const chipSr = elementsOf(lanes[1]).filter((n) => n.attributes.class === "sr").map((n) => n.textContent)
@@ -2420,7 +2420,7 @@ test("stale channels collapse by default and the display-only preference persist
   toggle.dispatch("click")
   assert.deepEqual(laneNames(t), ["#general", "#old"])
   const write = t.storageLog.filter((r) => r[0] === "set" && r[1] === t.app.SIDEBAR_PREF_KEY).at(-1)
-  assert.deepEqual(JSON.parse(write[2]), { channels: true, sessions: false })
+  assert.deepEqual(JSON.parse(write[2]), { channels: true, direct: false, sessions: false })
   assert.ok(!write[2].includes("old") && !write[2].includes(CC_A), "storage holds no peer data")
   const u = bootFixture({ "/api/state": state }, { staleOpen: false, storageValues: { [t.app.SIDEBAR_PREF_KEY]: write[2] } })
   await u.app.ready
@@ -3015,6 +3015,88 @@ test("delivery-mode changes refresh the selected channel label on the next poll"
   t.routes["/api/changes"] = quiet("MODE1", { channels: { ops: { entries: [{ seq: 2, kind: "other", event: "channel.delivery", text: "delivery changed" }] } } })
   await t.app.pollOnce()
   assert.ok(t.document.byId.sub.textContent.includes("delivery: all"))
+})
+
+test("display titles never replace recipient identities or unique hover addresses", async () => {
+  const state = chatState()
+  state.sessions.find((s) => s.member === CODEX_B).display_name = "landish8 <img>"
+  state.channels.forEach((c) => c.members.forEach((m) => {
+    if (m.typed === CODEX_B) m.name = "codex-unique"
+  }))
+  const t = chatBoot({ state })
+  await t.app.ready
+  await t.app.selectChannel("ops")
+  const pick = elementsOf(composer(t)).find((n) => n.attributes.class === "who pick codex")
+  assert.ok(pick.textContent.includes("landish8 <img>"))
+  assert.ok(pick.attributes.title.includes("@codex-unique"))
+  assert.ok(pick.attributes.title.includes(CODEX_B))
+  setBox(pickBoxes(t).find((n) => n.attributes["data-focus"] === "pick:" + CODEX_B), true)
+  typeText(t, "please review")
+  await t.app.submitCompose()
+  assert.deepEqual(t.sends[0].body.to, [CODEX_B])
+  assert.equal(t.app.state.names[CODEX_B], "codex-unique")
+  assert.ok(!elementsOf(composer(t)).some((n) => n.tagName === "img"))
+  assert.deepEqual(t.document.htmlWrites, [])
+})
+
+test("Direct separates buddy pairs, names only the owner, and keeps stale selection visible", () => {
+  const { app } = load()
+  const state = stateFixture()
+  state.channels.push({ key: "buddy-new", kind: "buddy", owner: CC_A, label: "#lead-buddy", label_status: "current",
+    members: [{ typed: CC_A, name: "lead", state: "idle" }, { typed: CODEX_B, name: "buddy-address", state: "idle" }], activity: "none" })
+  app.setState(state)
+  const rail = app.renderRail(state, "buddy-new", () => {})
+  assert.ok(rail.some((n) => n.textContent === "Direct"))
+  const lane = rail.find((n) => n.attributes["data-focus"] === "lane:buddy-new")
+  const label = elementsOf(lane).find((n) => n.attributes.class === "lanename")
+  assert.equal(label.textContent, "@lead")
+  assert.equal(elementsOf(label).filter((n) => n.tagName === "svg").length, 2)
+  assert.ok(elementsOf(label).some((n) => (n.attributes.title || "").includes(CODEX_B) && n.attributes.title.includes("buddy-address")))
+  assert.equal(lane.attributes["aria-current"], "true")
+  assert.ok(!label.textContent.includes("buddy-address"))
+  const closed = app.renderRail(state, "general", () => {})
+  assert.ok(!closed.some((n) => n.attributes["data-focus"] === "lane:buddy-new"))
+  assert.ok(closed.some((n) => n.attributes["data-focus"] === "stale:direct"))
+})
+
+test("verified live with unknown activity never displays an unverified liveness marker", () => {
+  const { app } = load()
+  const state = stateFixture()
+  state.sessions[0].liveness = "live"
+  state.sessions[0].state = "unverified"
+  app.setState(state)
+  const details = app.renderDetails(app.state.rows.general)
+  assert.ok(textOf(details).includes("Live (activity unknown)"))
+  const card = details.flatMap(elementsOf).find((n) => (n.attributes.class || "").split(" ").includes("card") && n.textContent.includes(CC_A))
+  assert.ok(card)
+  assert.ok(!elementsOf(card).some((n) => n.attributes.class === "dot unv"))
+})
+
+test("reciprocal Direct histories form one entry without merging their route keys", async () => {
+  const state = stateFixture()
+  state.channels.push(
+    { key: "buddy-a", kind: "buddy", owner: CC_A, current_buddy: CODEX_B, activity: "none", members: state.channels[0].members },
+    { key: "buddy-b", kind: "buddy", owner: CODEX_B, current_buddy: CC_A, activity: "none", members: state.channels[0].members })
+  const t = bootFixture({ "/api/state": state, "/api/channel/buddy-b": pageFixture("buddy-b", []) }, { staleOpen: false })
+  await t.app.ready
+  let toggle = elementsOf(t.document.byId.lanes).find((n) => n.attributes["data-focus"] === "stale:direct")
+  assert.equal(toggle.textContent, "Stale (1)", "counts pairs rather than duplicate histories")
+  toggle.dispatch("click")
+  let pairs = elementsOf(t.document.byId.lanes).filter((n) => n.attributes.class === "direct-pair")
+  assert.equal(pairs.length, 1)
+  assert.ok(pairs[0].textContent.includes("2 histories"))
+  const lanes = elementsOf(pairs[0]).filter((n) => n.attributes.class === "lane")
+  assert.deepEqual(lanes.map((n) => n.attributes["data-focus"]), ["lane:buddy-a", "lane:buddy-b"])
+  const pref = t.storageLog.filter((r) => r[0] === "set" && r[1] === t.app.SIDEBAR_PREF_KEY).at(-1)
+  assert.equal(JSON.parse(pref[2]).direct, true)
+  const u = bootFixture({ "/api/state": state }, { staleOpen: false, storageValues: { [t.app.SIDEBAR_PREF_KEY]: pref[2] } })
+  await u.app.ready
+  assert.equal(elementsOf(u.document.byId.lanes).filter((n) => n.attributes.class === "direct-pair").length, 1)
+  lanes[1].dispatch("click")
+  await settle()
+  assert.equal(t.app.state.selected, "buddy-b")
+  assert.ok(t.calls.some((c) => c.url.startsWith("/api/channel/buddy-b")))
+  assert.ok(elementsOf(t.document.byId.lanes).some((n) => n.attributes.class === "direct-pair"), "selected pair stays active")
 })
 
 test("ledger panel is a real table, escapes labels and refuses unsafe links", () => {
