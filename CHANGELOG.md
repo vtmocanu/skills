@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.52.0] - 2026-11-19
+
+### Added
+
+- `session-peers`: Active/Stale groups for dashboard channels and session cards, with collapsed stale counts and browser-local display preferences. Selected channels and known unread/pending work remain visible. Last-seen timestamps use positive discovery receipts retained only by the running server; unknown remains unknown.
+
 ## [0.51.0] - 2026-11-19
 
 ### Added

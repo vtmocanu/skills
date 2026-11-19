@@ -6,7 +6,7 @@
  * Rendering safety: every element is built by el(); peer prose enters text nodes and only
  * validated HTTP(S) targets enter link attributes. el() refuses attributes and tags outside
  * its allowlists. The access token lives in one variable, is sent as X-Peers-Token and is never stored.
- * The only storage use is the colour theme (THEME_KEY).
+ * Storage holds only the colour theme and stale-section display preferences.
  *
  * Icons: the Claude mark is simple-icons claude.svg (CC0-1.0); the OpenAI mark used for Codex
  * is Bootstrap Icons 1.13.1 openai.svg (MIT, see THIRD_PARTY_NOTICES.md); the OpenCode glyph
@@ -17,6 +17,8 @@
 
   var SVG_NS = "http://www.w3.org/2000/svg";
   var THEME_KEY = "session-peers-web-theme";
+  var SIDEBAR_PREF_KEY = "session-peers-web-stale-sections";
+  var ACTIVE_SECONDS = 24 * 60 * 60;
   var POLL_MS = 2000;
   var BACKOFF_MAX_MS = 30000;
   var STATE_EVERY = 5;
@@ -198,7 +200,9 @@
     // Chat mode only (state.chat): the Browser feed and the composer's own state.
     chat: null, browser: null, compose: null,
     // Per channel key {a: "posted" | "none" | "unknown" | null, ts}: the state's activity, then live polls.
-    activity: table(), ledgers: table(), ledgerGen: table()
+    activity: table(), ledgers: table(), ledgerGen: table(),
+    deliverySeen: table(), unreadChannels: table(), renderedRail: null,
+    staleOpen: { channels: false, sessions: false }
   };
 
   var RT_LABEL = { claude: "Claude Code", codex: "Codex", oc: "OpenCode", web: "Browser", unknown: "Unknown runtime" };
@@ -387,31 +391,100 @@
     return { a: typeof row.activity === "string" && own(ACTIVITIES, row.activity) ? row.activity : null, ts: row.last_post_ts };
   }
 
-  function rowRank(row) {
-    if (str(row.key) === "general") return 0;
-    var a = activityOf(row).a;
-    return a === "posted" ? 1 : a === "none" ? 2 : 3;
+  function channelTime(row) {
+    var posted = activityOf(row), stamps = [];
+    if (posted.a === "posted") stamps.push(sortStamp(posted.ts));
+    if (row.last_delivery_ts !== undefined && row.last_delivery_ts !== null) stamps.push(sortStamp(row.last_delivery_ts));
+    if (own(S.deliverySeen, str(row.key))) stamps.push(sortStamp(S.deliverySeen[str(row.key)]));
+    return stamps.length ? Math.max.apply(Math, stamps) : 0;
   }
 
-  function compareRows(x, y) {
-    var rx = rowRank(x), ry = rowRank(y);
-    if (rx !== ry) return rx - ry;
-    if (rx === 1) {
-      var nx = sortStamp(activityOf(x).ts), ny = sortStamp(activityOf(y).ts);
-      if (nx !== ny) return ny > nx ? 1 : -1;  // never a subtraction: two infinities would give NaN
+  function pendingDelivery(delivery) {
+    if (!delivery || typeof delivery !== "object") return false;
+    if (["in progress", "unknown", "unverified"].indexOf(delivery.state) >= 0) return true;
+    return (Array.isArray(delivery.recipients) ? delivery.recipients : []).some(function (r) {
+      return r && r.ack !== "acked" && !refusedState(r.state) && (r.ack === "pending" || r.ack === "unverified" ||
+        ["in progress", "unknown", "unverified", "queued (thread paused)", "not woken (OpenCode idle)"].indexOf(r.state) >= 0);
+    });
+  }
+
+  function channelAttention(row) {
+    var key = str(row.key), page = S.pages[key];
+    if (row.alert || row.unreadable || row.unread || row.pending || S.unreadChannels[key]) return true;
+    if (page && page.entries.some(function (e) { return e && pendingDelivery(e.delivery); })) return true;
+    return !!(S.browser && Object.keys(S.browser.sends).some(function (mid) {
+      var r = S.browser.sends[mid];
+      if (!r || r.kind !== "channel" || (r.channel !== key && r.to !== "#" + key)) return false;
+      var tally = rowTally(r);
+      return r.delivering === true || r.state === "queued" ||
+        (r.state === "pending" && (tally.acked < tally.total || tally.unverified > 0));
+    }));
+  }
+
+  function channelGroups(state, selected, now) {
+    now = now === undefined ? Date.now() / 1000 : now;
+    var groups = { active: [], stale: [] };
+    (state && Array.isArray(state.channels) ? state.channels : []).forEach(function (row) {
+      if (!row || typeof row !== "object") return;
+      var at = channelTime(row);
+      var active = row.key === "general" || row.key === selected || channelAttention(row) ||
+        (isFinite(at) && at > 0 && at <= now && at >= now - ACTIVE_SECONDS);
+      groups[active ? "active" : "stale"].push(row);
+    });
+    function compare(a, b) {
+      if (a.key === "general" || b.key === "general") return a.key === b.key ? 0 : a.key === "general" ? -1 : 1;
+      var x = channelTime(a), y = channelTime(b);
+      return x !== y ? (y > x ? 1 : -1) : cmpCodePoints(serverLabel(a) || "#" + a.key, serverLabel(b) || "#" + b.key) || cmpCodePoints(str(a.key), str(b.key));
     }
-    var kx = str(x.key), ky = str(y.key);
-    var c = cmpCodePoints(serverLabel(x) || "#" + kx, serverLabel(y) || "#" + ky);
-    return c || cmpCodePoints(kx, ky);
+    groups.active.sort(compare); groups.stale.sort(compare);
+    return groups;
   }
 
-  function orderedRows(state) {
-    var rows = state && Array.isArray(state.channels) ? state.channels.filter(function (r) { return r && typeof r === "object"; }) : [];
-    return rows.slice().sort(compareRows);
+  function sessionLiveness(member) {
+    var detail = S.sessions[member.typed] || {};
+    return detail.liveness || member.liveness || (member.state === "gone" ? "gone" : "unverified");
+  }
+
+  function sessionSeen(member) {
+    var at = sortStamp((S.sessions[member.typed] || {}).last_seen || member.last_seen);
+    return isFinite(at) && at > 0 && isFinite(new Date(at * 1000).getTime()) ? at : 0;
+  }
+
+  function sessionGroups(members) {
+    var groups = { active: [], stale: [] };
+    members.forEach(function (m) { groups[sessionLiveness(m) === "live" ? "active" : "stale"].push(m); });
+    function compare(a, b) {
+      var x = sessionSeen(a), y = sessionSeen(b);
+      return x !== y ? (y > x ? 1 : -1) : cmpCodePoints(nameOf(a.typed), nameOf(b.typed)) || cmpCodePoints(str(a.typed), str(b.typed));
+    }
+    groups.active.sort(compare); groups.stale.sort(compare);
+    return groups;
+  }
+
+  function sidebarGroups(kind, groups, render) {
+    var out = [];
+    if (groups.active.length && groups.stale.length) out.push(el("div", { class: "group-label" }, "Active"));
+    groups.active.forEach(function (row) { out.push(render(row)); });
+    if (groups.stale.length) {
+      var key = "stale:" + kind;
+      var button = el("button", { type: "button", class: "group-toggle" + (groups.active.length ? " group-split" : ""),
+        "aria-expanded": String(S.staleOpen[kind]), "aria-label": "Stale (" + groups.stale.length + ")", "data-focus": key }, "Stale (" + groups.stale.length + ")");
+      S.focusables[key] = button;
+      out.push(on(button, "click", function () {
+        S.staleOpen[kind] = !S.staleOpen[kind];
+        saveSidebarPrefs();
+        if (kind === "channels") renderLanes(false);
+        else withFocus(function () { fill($("info"), renderDetails(S.rows[S.selected])); });
+      }));
+      if (S.staleOpen[kind]) groups.stale.forEach(function (row) { out.push(render(row)); });
+    }
+    return out;
   }
 
   function railOrder() {
-    return orderedRows(S.state).map(function (r) { return str(r.key); }).join("\n");
+    var groups = channelGroups(S.state, S.view === "conv" ? S.selected : null);
+    return groups.active.map(function (r) { return str(r.key); }).join("\n") + "\n--stale:" + S.staleOpen.channels + "\n" +
+      groups.stale.map(function (r) { return str(r.key); }).join("\n");
   }
 
   function note(text, tone) {
@@ -851,7 +924,7 @@
     } else if (key === "general") {
       var counts = { claude: 0, codex: 0, oc: 0, web: 0 };
       members.forEach(function (m) { var rt = rtOf(m.typed); if (rt in counts) counts[rt] += 1; });
-      body = [el("div", { class: "lineage" }, "Every live session on this machine"),
+      body = [el("div", { class: "lineage" }, "Sessions discovered on this machine"),
         el("div", { class: "members" }, fleetRuntimes(members).map(function (rt) {
           return el("span", { class: "who " + rt, title: counts[rt] + " " + RT_LABEL[rt] }, hicon(rt), String(counts[rt]),
             el("span", { class: "sr" }, RT_LABEL[rt] + (counts[rt] === 1 ? " session" : " sessions")));
@@ -874,9 +947,9 @@
   }
 
   function renderRail(state, selected, select) {
-    // Sorted on a copy: state.channels keeps the server's tracked order.
-    var rows = orderedRows(state);
-    return rows.map(function (row) { return renderLane(row, row.key === selected, select || function () {}); });
+    return sidebarGroups("channels", channelGroups(state, selected), function (row) {
+      return renderLane(row, row.key === selected, select || function () {});
+    });
   }
 
   // The shim saves its requester as a bare Claude session id (budget_sender_sid): name it through
@@ -928,6 +1001,8 @@
     var rt = rtOf(member.typed);
     var address = typeof details.address === "string" ? details.address : str(member.typed);
     var state = details.state || member.state || "unverified";
+    var liveness = sessionLiveness(member);
+    if (liveness !== "live") state = liveness === "gone" ? "gone" : "unverified";
     var kv = [el("dt", null, "State"), el("dd", null, own(STATE_LABEL, state) || "Unverified"),
       el("dt", null, "Address"), el("dd", { class: "mono" }, address)];
     if (rt === "codex") kv = kv.concat(budgetNodes(details));
@@ -939,6 +1014,7 @@
       el("div", { class: "srow" }, chip({ typed: member.typed, state: state }),
         el("span", { class: "muted" }, (member.runtime || RT_LABEL[rt]) + (row && row.owner === member.typed ? ", owner" : ""))),
       el("dl", { class: "kv" }, kv),
+      el("div", { class: "muted lastseen" }, "last seen: ", sessionSeen(member) > 0 ? ledgerTime(new Date(sessionSeen(member) * 1000).toISOString(), true) : "unknown"),
       el("div", { class: "acts" }, copyButton(address)));
   }
 
@@ -968,13 +1044,14 @@
       out.push(el("div", { class: "card" }, el("b", null, "Everyone"),
         el("dl", { class: "kv" }, fleetRuntimes(members).map(function (rt) {
           var mine = members.filter(function (m) { return rtOf(m.typed) === rt; });
-          var working = mine.filter(function (m) { return m.state === "working"; }).length;
-          return [el("dt", null, hicon(rt), " " + RT_LABEL[rt]), el("dd", null, mine.length + " live, " + working + " working")];
+          var live = mine.filter(function (m) { return sessionLiveness(m) === "live"; });
+          var working = live.filter(function (m) { return m.state === "working"; }).length;
+          return [el("dt", null, hicon(rt), " " + RT_LABEL[rt]), el("dd", null, live.length + " live, " + working + " working")];
         }))));
       out.push(renderAllCard());
     }
     if (row.unreadable) out.push(note("Membership record unreadable.", "warn"));
-    members.forEach(function (m) { out.push(renderMemberCard(m, row)); });
+    out = out.concat(sidebarGroups("sessions", sessionGroups(members), function (m) { return renderMemberCard(m, row); }));
     var chain = chainText(row);
     if (chain) {
       out.push(el("div", { class: "card small" }, el("b", null, "Earlier sessions in this channel"), el("div", null, chain),
@@ -2048,7 +2125,7 @@
 
   function refreshState() {
     return api("/api/state").then(function (data) {
-      var orderBefore = railOrder();
+      var orderBefore = S.renderedRail || railOrder();
       var headBefore = headerSignature();
       setState(data);
       if (!S.cursor && typeof data.cursor === "string") S.cursor = data.cursor;
@@ -2200,6 +2277,7 @@
   // phone (where the list disappears), move focus to its title.
   function selectChannel(key, opts) {
     S.selected = key;
+    delete S.unreadChannels[key];
     S.view = "conv";
     S.search = null;
     var ready = S.pages[key] ? Promise.resolve() : loadLatest(key);
@@ -2469,7 +2547,7 @@
   function applyChanges(data) {
     if (!data || typeof data !== "object") return Promise.resolve(false);
     var changed = false;
-    var orderBefore = railOrder();
+    var orderBefore = S.renderedRail || railOrder();
     var activityMoved = false;
     var reloads = [];
     var chans = data.channels && typeof data.channels === "object" ? data.channels : {};
@@ -2482,12 +2560,21 @@
         return;
       }
       if (c.gap) {
+        if (S.view !== "conv" || S.selected !== key) S.unreadChannels[key] = true;
         reloads.push([key, c.gap]);
         if (S.allInflight && !(S.all && S.all.read[key]) && S.allInflight[key] !== "new") S.allInflight[key] = Infinity;
         if (S.all && (S.all.covered[key] || S.all.read[key] || !S.all.next) && markAllStale(chanText(key) + " has entries this view could not stream; it may be incomplete.")) changed = true;
         return;
       }
       if (Array.isArray(c.entries) && c.entries.length) {
+        if (c.entries.some(function (e) { return e && (e.kind === "send" || e.kind === "outcome"); })) {
+          if (S.view !== "conv" || S.selected !== key) S.unreadChannels[key] = true;
+        }
+        c.entries.forEach(function (e) {
+          var at = e && sortStamp(e.ts);
+          if (e && e.kind === "outcome" && isFinite(at) && at > sortStamp(S.deliverySeen[key]) &&
+              at <= Date.now() / 1000 + FUTURE_SKEW) S.deliverySeen[key] = e.ts;
+        });
         if (noteActivity(key, c.entries)) activityMoved = true;
         if (appendEntries(key, c.entries)) changed = true;
       }
@@ -2497,7 +2584,12 @@
       if (typeof key === "string" && setActivity(key, "unknown")) activityMoved = true;
     });
     var updates = Array.isArray(data.updates) ? data.updates : [];
-    updates.forEach(function (u) { if (applyUpdate(u)) changed = true; });
+    updates.forEach(function (u) {
+      if (u && typeof u.channel === "string" && S.rows[u.channel]) {
+        if (S.view !== "conv" || S.selected !== u.channel) S.unreadChannels[u.channel] = true;
+      }
+      if (applyUpdate(u)) changed = true;
+    });
     var browserChanged = applyBrowser(data.browser);
     if (browserChanged) changed = true;
     Object.keys(S.loading).forEach(function (key) { S.loading[key].updates = S.loading[key].updates.concat(updates); });
@@ -2742,6 +2834,7 @@
     withFocus(function () {
       fill($("lanes"), [S.chat ? renderBrowserLane() : null].concat(renderRail(S.state, S.view === "conv" ? S.selected : null, selectChannel)));
     });
+    S.renderedRail = railOrder();
     // The rail was reordered: keep the selected lane in view.
     var lane = keepSelectedVisible && S.view === "conv" ? S.focusables["lane:" + S.selected] : null;
     if (lane && typeof lane.scrollIntoView === "function") lane.scrollIntoView({ block: "nearest" });
@@ -2902,11 +2995,30 @@
   }
 
   // ------------------------------------------------------------------------
-  // Theme (the only stored value)
+  // Display preferences only: no tokens, messages, names or peer identities.
   // ------------------------------------------------------------------------
 
   function storedTheme() {
     try { return root.localStorage ? root.localStorage.getItem(THEME_KEY) : null; } catch (e) { return null; }
+  }
+
+  function loadSidebarPrefs() {
+    S.staleOpen = { channels: false, sessions: false };
+    try {
+      var value = root.localStorage && root.localStorage.getItem(SIDEBAR_PREF_KEY);
+      var parsed = value ? JSON.parse(value) : null;
+      if (parsed && typeof parsed === "object") {
+        S.staleOpen.channels = parsed.channels === true;
+        S.staleOpen.sessions = parsed.sessions === true;
+      }
+    } catch (_err) { /* default collapsed when storage cannot be read */ }
+  }
+
+  function saveSidebarPrefs() {
+    try {
+      if (root.localStorage) root.localStorage.setItem(SIDEBAR_PREF_KEY,
+        JSON.stringify({ channels: !!S.staleOpen.channels, sessions: !!S.staleOpen.sessions }));
+    } catch (_err) { /* the toggle still works for this tab */ }
   }
 
   function applyTheme(theme) {
@@ -2967,6 +3079,7 @@
 
   function start() {
     applyTheme(storedTheme());
+    loadSidebarPrefs();
     S.token = readToken();
     watchHash();
     renderLegend();
@@ -2996,10 +3109,11 @@
     renderRail: renderRail, renderDetails: renderDetails, renderMain: renderMain, applyChanges: applyChanges,
     applyUpdate: applyUpdate, pollOnce: pollOnce, setState: setState, selectChannel: selectChannel, showAll: showAll,
     loadAll: loadAll, runSearch: runSearch, tallyOf: tallyOf, copyable: copyable, gapNote: gapNote, start: start,
-    toggleTheme: toggleTheme, THEME_KEY: THEME_KEY,
+    toggleTheme: toggleTheme, THEME_KEY: THEME_KEY, SIDEBAR_PREF_KEY: SIDEBAR_PREF_KEY,
     applyBrowser: applyBrowser, renderSendStatus: renderSendStatus, renderBrowserEntry: renderBrowserEntry, renderComposer: renderComposer,
     submitCompose: submitCompose, postSend: postSend, sendErrorText: sendErrorText, showBrowser: showBrowser, rowTally: rowTally,
-    readPreview: readPreview, renderLedger: renderLedger, bodyNodes: bodyNodes, refreshLedger: refreshLedger
+    readPreview: readPreview, renderLedger: renderLedger, bodyNodes: bodyNodes, refreshLedger: refreshLedger,
+    channelGroups: channelGroups, sessionGroups: sessionGroups
   };
   // A read-only view of the model for tests and debugging: everything but the token.
   Object.defineProperty(root.PeersApp, "state", {

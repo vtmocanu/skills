@@ -2758,6 +2758,17 @@ def oversized_line(seq, kind="channel.note"):
 
 
 class WebdataActivityTests(WebdataBase):
+    def test_recent_outcome_adds_delivery_time_without_changing_post_activity(self):
+        now = time.time()
+        old, recent = iso(now - 172800), iso(now - 30)
+        data = send_data("old send")
+        self.chan("delivered", [encode(make_entry("delivered", 1, "channel.send", data, ts=old)),
+                                encode(make_entry("delivered", 2, "channel.outcome",
+                                                  {"message_id": data["message_id"], "outcomes": []}, ts=recent))])
+        _view, rows = self.view(now=now)
+        self.assertEqual(rows["delivered"]["last_post_ts"], old)
+        self.assertEqual(rows["delivered"]["last_delivery_ts"], recent)
+
     def ago(self, seconds):
         return iso(time.time() - seconds)
 

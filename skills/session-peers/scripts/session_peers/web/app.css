@@ -332,4 +332,10 @@ aside h2{font-size:15px;margin:0 0 10px;font-weight:700;overflow-wrap:anywhere}
 .ledger-owner th{color:var(--ink-2);padding-top:12px}
 .ledger-panel a{overflow-wrap:anywhere}
 .ledger-panel td:last-child{white-space:nowrap}
+.group-label,.group-toggle{font:600 12px/1.5 var(--sans);color:var(--ink-2);padding:8px 10px}
+.group-toggle{display:block;width:100%;text-align:left;background:transparent;border:0;cursor:pointer}
+.group-toggle::before{content:"▸";display:inline-block;width:16px}
+.group-toggle[aria-expanded="true"]::before{content:"▾"}
+.group-split{border-top:1px solid var(--line);margin-top:10px}
+.lastseen{margin:6px 0;font-size:11px}
 @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}

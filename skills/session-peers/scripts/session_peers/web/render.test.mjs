@@ -111,8 +111,8 @@ function textOf(nodes) {
   return [].concat(nodes).filter(Boolean).map((n) => n.textContent).join("\n")
 }
 
-function makeStorage(log) {
-  const data = {}
+function makeStorage(log, initial = {}) {
+  const data = Object.assign(Object.create(null), initial)
   return {
     getItem(k) { log.push(["get", k]); return Object.prototype.hasOwnProperty.call(data, k) ? data[k] : null },
     setItem(k, v) { log.push(["set", k, v]); data[k] = String(v) },
@@ -132,7 +132,7 @@ function makeFetch(routes, calls) {
   }
 }
 
-function load({ location, fetch, storageLog, media } = {}) {
+function load({ location, fetch, storageLog, storageValues, storageProvider, media } = {}) {
   const document = makeDocument()
   const timers = []
   const log = storageLog || []
@@ -141,7 +141,7 @@ function load({ location, fetch, storageLog, media } = {}) {
     document, console, URL,
     setTimeout: (fn, ms) => { if (typeof fn !== "function") throw new Error("string timer"); timers.push({ fn, ms }); return timers.length },
     clearTimeout() {},
-    localStorage: makeStorage(log),
+    localStorage: storageProvider || makeStorage(log, storageValues),
     sessionStorage: makeStorage(log),
     structuredClone,
     windowListeners: {},
@@ -185,7 +185,7 @@ function stateFixture() {
         members: [{ typed: CC_A, runtime: "Claude Code", state: "working", name: "landish8" }, { typed: CODEX_B, runtime: "Codex", state: "idle" }],
         handover_chain: [], alert: "missing_acks",
         coverage: { native_claude: true, opencode: { enumerated: false, error: "boom" }, discovery_incomplete: ["Codex: the thread state could not be read"] } },
-      { key: "ops", name: "ops", display: "ops", kind: "named", owner: CC_A,
+      { key: "ops", name: "ops", display: "ops", kind: "named", owner: CC_A, activity: "posted", last_post_ts: new Date(Date.now() - 1000).toISOString(),
         members: [{ typed: CC_A, runtime: "Claude Code", state: "working", name: "landish8" }, { typed: CODEX_B, runtime: "Codex", state: "idle" }],
         handover_chain: [], alert: null, coverage: { native_claude: true } },
     ],
@@ -423,14 +423,16 @@ test("details: runtime, state, typed address, copy only for strict ids, Codex bu
   const state = stateFixture()
   state.channels[1].members.push({ typed: "codex:not-a-uuid", state: "unverified" })
   app.setState(state)
+  app.state.staleOpen.sessions = true  // inspect all copy/budget controls in this component test
   const nodes = app.renderDetails(app.state.rows.ops)
   const text = textOf(nodes)
   assert.ok(text.includes("Claude Code"))
   assert.ok(text.includes(CC_A))
   assert.ok(text.includes("93 of 100 toward landish8"))
   assert.ok(text.includes("as last saved by the shim"))
-  assert.ok(text.includes("Reply budget") && text.includes("unknown"), "a Codex member without shim data reads unknown")
-  const buttons = nodes.flatMap(elementsOf).filter((n) => n.tagName === "button")
+  const unknownCard = nodes.find((n) => n.textContent.includes("codex:not-a-uuid"))
+  assert.ok(unknownCard.textContent.includes("Reply budgetunknown"), "the missing shim's own budget is unknown")
+  const buttons = nodes.flatMap(elementsOf).filter((n) => n.tagName === "button" && n.textContent === "Copy address")
   assert.equal(buttons.length, 3)
   assert.equal(buttons[0].attributes["aria-disabled"], undefined)
   assert.equal(buttons[2].attributes["aria-disabled"], "true")
@@ -439,7 +441,7 @@ test("details: runtime, state, typed address, copy only for strict ids, Codex bu
   assert.ok(!text.includes("Ping") && !text.includes("shim log") && !text.includes("Open gates"))
 })
 
-function bootFixture(extraRoutes = {}, { media, hash } = {}) {
+function bootFixture(extraRoutes = {}, { media, hash, staleOpen = true, storageValues, storageProvider } = {}) {
   const calls = []
   const routes = Object.assign({
     "/api/ledger/": { state: "unbound" },
@@ -448,11 +450,14 @@ function bootFixture(extraRoutes = {}, { media, hash } = {}) {
     "/api/channel/ops": pageFixture("ops", [sendEntry(1, "first in ops")]),
   }, extraRoutes)
   const location = { hash: hash === undefined ? "#token=" + "ab".repeat(32) : hash, pathname: "/", search: "" }
-  const env = load({ location, fetch: makeFetch(routes, calls), media })
+  // Legacy interaction tests inspect the full lists. Grouping tests explicitly
+  // use staleOpen:false to exercise the product's collapsed default.
+  storageValues = storageValues || (staleOpen ? { "session-peers-web-stale-sections": JSON.stringify({ channels: true, sessions: true }) } : {})
+  const env = load({ location, fetch: makeFetch(routes, calls), media, storageValues, storageProvider })
   return Object.assign(env, { calls, routes, location })
 }
 
-test("the token travels only as X-Peers-Token, the hash is cleared, and nothing but the theme is stored", async () => {
+test("the token travels only as X-Peers-Token, the hash is cleared, and only display preferences are stored", async () => {
   const env = bootFixture()
   assert.equal(await env.app.ready, true)
   assert.ok(env.calls.length >= 2)
@@ -471,7 +476,7 @@ test("the token travels only as X-Peers-Token, the hash is cleared, and nothing 
   assert.equal(env.location.hash, "")
   assert.equal(env.historyCalls.length, 1)
   assert.equal(env.historyCalls[0][2], "/")
-  assert.ok(env.storageLog.every((op) => op[1] === env.app.THEME_KEY), JSON.stringify(env.storageLog))
+  assert.ok(env.storageLog.every((op) => [env.app.THEME_KEY, env.app.SIDEBAR_PREF_KEY].includes(op[1])), JSON.stringify(env.storageLog))
   assert.ok(!JSON.stringify(env.storageLog).includes("abab"))
   const themeButton = () => env.document.byId.themebox.childNodes[0]
   assert.equal(themeButton().attributes["aria-pressed"], "false")
@@ -622,7 +627,7 @@ test("a failed first state read is retried by the poll before any /api/changes c
 test("a rail lane is selectable by keyboard", async () => {
   const env = bootFixture()
   await env.app.ready
-  const lane = env.document.byId.lanes.childNodes[1]
+  const lane = elementsOf(env.document.byId.lanes).find((n) => n.attributes["data-focus"] === "lane:ops")
   assert.equal(lane.attributes.role, "button")
   assert.equal(lane.attributes.tabindex, "0")
   lane.dispatch("keydown", { key: "Enter" })
@@ -2379,6 +2384,181 @@ const orderState = (rows) => {
 }
 const stampAt = (secondsAgo) => new Date(Date.now() - secondsAgo * 1000).toISOString()
 
+test("sidebar channel groups use post/delivery recency and preserve attention and selection", () => {
+  const { app } = load()
+  const now = 1000000
+  const state = { channels: [
+    lblRow("never", "#never", "none"),
+    lblRow("old", "#old", "posted", now - 200000),
+    lblRow("selected", "#selected", "posted", now - 300000),
+    lblRow("unread", "#unread", "posted", now - 150000, { unread: true }),
+    lblRow("pending", "#pending", "none", null, { pending: true }),
+    lblRow("delivery", "#delivery", "posted", now - 200000, { last_delivery_ts: now - 2 }),
+    lblRow("recent", "#recent", "posted", now - 1),
+    lblRow("general", "#general", "none"),
+    lblRow("buddy-old", "#buddy-old", "posted", now - 400000, { kind: "buddy" }),
+  ], sessions: [] }
+  app.setState(state)
+  const groups = app.channelGroups(state, "selected", now)
+  assert.deepEqual(Array.from(groups.active, (r) => r.key), ["general", "recent", "delivery", "unread", "selected", "pending"])
+  assert.deepEqual(Array.from(groups.stale, (r) => r.key), ["old", "buddy-old", "never"])
+  assert.equal(state.channels[0].key, "never", "sorting never mutates server order")
+  const boundary = app.channelGroups({ channels: [lblRow("edge", "#edge", "posted", now - 86400), lblRow("past", "#past", "posted", now - 86401)] }, null, now)
+  assert.deepEqual(Array.from(boundary.active, (r) => r.key), ["edge"])
+  assert.deepEqual(Array.from(boundary.stale, (r) => r.key), ["past"])
+  assert.deepEqual(Array.from(app.channelGroups({ channels: [lblRow("constructor", "#constructor", "none")] }, null, now).stale, (r) => r.key), ["constructor"])
+})
+
+test("stale channels collapse by default and the display-only preference persists", async () => {
+  const state = orderState([lblRow("old", "#old", "posted", stampAt(172800))])
+  const t = bootFixture({ "/api/state": state }, { staleOpen: false })
+  await t.app.ready
+  assert.deepEqual(laneNames(t), ["#general"])
+  const toggle = buttonNamed(t.document.byId.lanes, "Stale (1)")
+  assert.equal(toggle.attributes["aria-expanded"], "false")
+  assert.equal(toggle.attributes["aria-label"], "Stale (1)")
+  toggle.dispatch("click")
+  assert.deepEqual(laneNames(t), ["#general", "#old"])
+  const write = t.storageLog.filter((r) => r[0] === "set" && r[1] === t.app.SIDEBAR_PREF_KEY).at(-1)
+  assert.deepEqual(JSON.parse(write[2]), { channels: true, sessions: false })
+  assert.ok(!write[2].includes("old") && !write[2].includes(CC_A), "storage holds no peer data")
+  const u = bootFixture({ "/api/state": state }, { staleOpen: false, storageValues: { [t.app.SIDEBAR_PREF_KEY]: write[2] } })
+  await u.app.ready
+  assert.deepEqual(laneNames(u), ["#general", "#old"])
+  buttonNamed(u.document.byId.lanes, "Stale (1)").dispatch("click")
+  assert.deepEqual(laneNames(u), ["#general"])
+})
+
+test("stale preference failures are safe and malformed values default to collapsed", async () => {
+  const state = orderState([lblRow("old", "#old", "none")])
+  const broken = { getItem() { throw new Error("blocked storage") }, setItem() { throw new Error("full storage") } }
+  const t = bootFixture({ "/api/state": state }, { staleOpen: false, storageProvider: broken })
+  await t.app.ready
+  assert.deepEqual(laneNames(t), ["#general"])
+  assert.doesNotThrow(() => buttonNamed(t.document.byId.lanes, "Stale (1)").dispatch("click"))
+  assert.deepEqual(laneNames(t), ["#general", "#old"])
+  for (const value of ["not JSON", '{"channels":"true"}', "null"]) {
+    const u = bootFixture({ "/api/state": state }, { staleOpen: false, storageValues: { [t.app.SIDEBAR_PREF_KEY]: value } })
+    await u.app.ready
+    assert.deepEqual(laneNames(u), ["#general"])
+  }
+})
+
+test("selected and locally unread channels never disappear into collapsed stale groups", async () => {
+  const state = orderState([lblRow("old", "#old", "posted", stampAt(172800)), lblRow("pending", "#pending", "none", null, { alert: "missing_acks" })])
+  const t = bootFixture({ "/api/state": state, "/api/channel/old": pageFixture("old", []) }, { staleOpen: false })
+  await t.app.ready
+  assert.deepEqual(laneNames(t), ["#general", "#pending"])
+  t.routes["/api/changes"] = quiet("U1", { channels: { old: { entries: [sendEntry(2, "unseen", { ts: stampAt(172800), delivery: null })], gap: null } } })
+  await t.app.pollOnce()
+  assert.ok(laneNames(t).includes("#old"), "unread remains visible even when its stamp is old")
+  await t.app.selectChannel("old")
+  assert.equal(laneOf(t, "old").attributes["aria-current"], "true")
+  t.routes["/api/state"] = state
+  for (let i = 0; i < 5; i++) { t.routes["/api/changes"] = quiet("U" + (i + 2)); await t.app.pollOnce() }
+  assert.ok(laneNames(t).includes("#old"))
+  assert.equal(t.app.channelGroups(t.app.state.state, "old").stale.some((r) => r.key === "old"), false)
+})
+
+test("existing quiet polls age channels into Stale without moving the viewed channel", async () => {
+  const state = orderState([lblRow("aging", "#aging", "posted", stampAt(86399))])
+  const t = bootFixture({ "/api/state": state, "/api/channel/aging": pageFixture("aging", []) }, { staleOpen: false })
+  await t.app.ready
+  assert.ok(laneNames(t).includes("#aging"))
+  const initialTimers = t.timers.length
+  let now = Date.now() + 2000
+  t.context.Date = class extends Date { static now() { return now } }
+  t.routes["/api/changes"] = quiet("AGE1")
+  await t.app.pollOnce()
+  assert.deepEqual(laneNames(t), ["#general"])
+  assert.ok(buttonNamed(t.document.byId.lanes, "Stale (1)"))
+  await t.app.selectChannel("aging")
+  now += 172800000
+  t.routes["/api/changes"] = quiet("AGE2")
+  await t.app.pollOnce()
+  assert.ok(laneNames(t).includes("#aging"))
+  assert.equal(laneOf(t, "aging").attributes["aria-current"], "true")
+  assert.equal(t.timers.length, initialTimers, "group ageing adds no timer")
+})
+
+test("session groups use liveness and positive last-seen evidence, not busy state", async () => {
+  const state = stateFixture()
+  state.channels[1].members = [{ typed: OC_C, state: "idle" }, { typed: CODEX_B, state: "idle" }, { typed: CC_A, state: "working" }]
+  state.sessions = [
+    { member: CC_A, liveness: "live", state: "working", last_seen: stampAt(60) },
+    { member: CODEX_B, liveness: "gone", state: "idle", last_seen: stampAt(10) },
+    { member: OC_C, liveness: "unverified", state: "idle" },
+  ]
+  const t = bootFixture({ "/api/state": state }, { staleOpen: false })
+  await t.app.ready
+  await t.app.selectChannel("ops")
+  const groups = t.app.sessionGroups(state.channels[1].members)
+  assert.deepEqual(Array.from(groups.active, (m) => m.typed), [CC_A])
+  assert.deepEqual(Array.from(groups.stale, (m) => m.typed), [CODEX_B, OC_C])
+  const info = t.document.byId.info
+  assert.ok(!info.textContent.includes(OC_C), "stale member cards start collapsed")
+  buttonNamed(info, "Stale (2)").dispatch("click")
+  const cards = elementsOf(info).filter((n) => n.attributes.class === "card")
+  assert.ok(cards[0].textContent.includes(CC_A))
+  assert.ok(cards[1].textContent.includes(CODEX_B) && cards[1].textContent.includes("Gone"))
+  assert.ok(cards[2].textContent.includes(OC_C) && cards[2].textContent.includes("Unverified"))
+  assert.ok(cards[2].textContent.includes("last seen: unknown"))
+  const write = t.storageLog.filter((r) => r[0] === "set" && r[1] === t.app.SIDEBAR_PREF_KEY).at(-1)
+  assert.equal(JSON.parse(write[2]).sessions, true)
+  state.sessions[1].liveness = "live"
+  t.app.setState(state)
+  assert.deepEqual(Array.from(t.app.sessionGroups(state.channels[1].members).active, (m) => m.typed), [CODEX_B, CC_A])
+})
+
+test("cached pending deliveries keep an old unselected channel active until resolved", async () => {
+  const state = orderState([lblRow("old", "#old", "posted", stampAt(172800))])
+  const pending = sendEntry(1, "held", { message_id: "old-message", ts: stampAt(172800), delivery: { state: "complete", recipients: [row(CC_A, "queued (thread paused)", { ack: "pending" })] } })
+  const t = bootFixture({ "/api/state": state, "/api/channel/old": pageFixture("old", [pending]) }, { staleOpen: false })
+  await t.app.ready
+  await t.app.selectChannel("old")
+  await t.app.selectChannel("general")
+  const future = Date.now() / 1000 + 172800
+  assert.ok(t.app.channelGroups(state, "general", future).active.some((r) => r.key === "old"))
+  await t.app.selectChannel("old")
+  t.routes["/api/changes"] = quiet("RESOLVED", { updates: [{ message_id: "old-message", recipient: CC_A, ack: "acked", state: "acked" }] })
+  await t.app.pollOnce()
+  await t.app.selectChannel("general")
+  assert.ok(t.app.channelGroups(state, "general", future).stale.some((r) => r.key === "old"))
+})
+
+test("one-sided or empty groups have no separator and recent deliveries activate quiet channels", () => {
+  const { app } = load()
+  const active = { channels: [lblRow("general", "#general", "none")], sessions: [] }
+  app.setState(active)
+  let nodes = app.renderRail(active, "general", () => {})
+  assert.ok(!nodes.flatMap(elementsOf).some((n) => (n.attributes.class || "").includes("group-split")))
+  assert.ok(!textOf(nodes).includes("Stale ("))
+  const stale = { channels: [lblRow("old", "#old", "none")], sessions: [] }
+  app.setState(stale)
+  nodes = app.renderRail(stale, null, () => {})
+  assert.ok(textOf(nodes).includes("Stale (1)"))
+  assert.ok(!nodes.flatMap(elementsOf).some((n) => (n.attributes.class || "").includes("group-split")))
+  assert.deepEqual(Array.from(app.renderRail({ channels: [] }, null, () => {})), [])
+  const state = orderState([lblRow("delivered", "#delivered", "posted", stampAt(172800), { last_delivery_ts: stampAt(1) })])
+  app.setState(state)
+  assert.deepEqual(Array.from(app.channelGroups(state, null).active, (r) => r.key), ["general", "delivered"])
+})
+
+test("browser pending channel sends are attention until their acknowledgements resolve", async () => {
+  const state = chatState()
+  state.channels.push(lblRow("old", "#old", "posted", stampAt(172800)))
+  const t = chatBoot({ state })
+  await t.app.ready
+  const pending = sendRow(MID1, { kind: "channel", channel: "old", to: "#old", state: "pending", seq: 1,
+    recipients: { [CC_A]: { outcome: "queued (thread paused)", ack: "pending" } } })
+  t.app.applyBrowser({ entries: [], sends: [pending], gap: false, restarted: false, since_start: false })
+  assert.ok(t.app.channelGroups(state, "general").active.some((r) => r.key === "old"))
+  pending.seq = 2
+  pending.recipients[CC_A].ack = "acked"
+  t.app.applyBrowser({ entries: [], sends: [pending], gap: false, restarted: false, since_start: false })
+  assert.ok(t.app.channelGroups(state, "general").stale.some((r) => r.key === "old"))
+})
+
 test("labels: the rail and the header show the server label, with markup as text", async () => {
   const hostile = "#<img src=x onerror=alert(1)>"
   const t = bootFixture({ "/api/state": orderState([lblRow("pair1", "#fire·dc10", "none"), lblRow("pair2", hostile, "none")]),
@@ -2412,7 +2592,7 @@ test("rail: activity unknown is its own visible note, never shown for none or po
   assert.ok(!laneOf(t, "c").textContent.includes("activity unknown"))
 })
 
-test("rail order: #general, posted newest first, none, unknown last; ties by label (code points) then key; the state is not reordered", async () => {
+test("rail order: #general and attention first, then stale newest first with label/key ties; server order is unchanged", async () => {
   const state = orderState([
     lblRow("k-unk", "#zz", "unknown"),
     chRow("k-unreadable", { unreadable: true, alert: "unverified", members: [] }),
@@ -2426,9 +2606,9 @@ test("rail order: #general, posted newest first, none, unknown last; ties by lab
   const t = bootFixture({ "/api/state": state })
   await t.app.ready
   const keys = elementsOf(t.document.byId.lanes).filter((n) => (n.attributes["data-focus"] || "").startsWith("lane:")).map((n) => n.attributes["data-focus"].slice(5))
-  // none ties by code point: "#none" < "#Ａ" < "#\u{1F600}" (a UTF-16 compare would put the emoji before Ａ).
-  // Unknown rows last, by "#" + key against label: "#k-unreadable" < "#zz".
-  assert.deepEqual(keys, ["general", "k2", "k1", "k-old", "k-none", "k-bmp", "k0", "k-unreadable", "k-unk"])
+  // The unreadable/attention row stays Active. Unknown and no-post stale rows
+  // tie by Unicode code point once their known timestamps are equal.
+  assert.deepEqual(keys, ["general", "k-unreadable", "k2", "k1", "k-old", "k-none", "k-unk", "k-bmp", "k0"])
   assert.deepEqual(t.app.state.state.channels.map((r) => r.key).slice(0, 3), ["general", "k-unk", "k-unreadable"])
 })
 
@@ -2470,14 +2650,16 @@ test("poll: an oversized placeholder alone, or after a send, makes the channel u
   await t.app.ready
   t.routes["/api/changes"] = quiet("C1", { channels: { a: { entries: [{ seq: null, kind: "oversized", oversized: true }], gap: null } } })
   await t.app.pollOnce()
-  assert.deepEqual(laneNames(t), ["#general", "#b", "#c", "#a"])
+  assert.deepEqual(laneNames(t), ["#general", "#b", "#a", "#c"])
   assert.ok(laneOf(t, "a").textContent.includes("activity unknown"))
   t.routes["/api/changes"] = quiet("C2", { channels: { b: { entries: [sendEntry(7, "x", { ts: stampAt(3) }), { seq: 8, kind: "oversized", oversized: true }], gap: null } } })
   await t.app.pollOnce()
-  assert.deepEqual(laneNames(t), ["#general", "#c", "#a", "#b"])
+  assert.deepEqual(laneNames(t), ["#general", "#b", "#a", "#c"], "unread keeps b Active even when its activity is uncertain")
+  assert.ok(laneOf(t, "b").textContent.includes("activity unknown"))
   t.routes["/api/changes"] = quiet("C3", { channels: { b: { entries: [{ seq: 8, kind: "oversized", oversized: true }, sendEntry(9, "y", { ts: stampAt(2) })], gap: null } } })
   await t.app.pollOnce()
-  assert.deepEqual(laneNames(t), ["#general", "#b", "#c", "#a"])
+  assert.deepEqual(laneNames(t), ["#general", "#b", "#a", "#c"])
+  assert.ok(!laneOf(t, "b").textContent.includes("activity unknown"))
 })
 
 test("poll: activity_unknown flips a known channel; a send stamped past the skew is unknown", async () => {
@@ -2485,17 +2667,18 @@ test("poll: activity_unknown flips a known channel; a send stamped past the skew
   await t.app.ready
   t.routes["/api/changes"] = quiet("C1", { activity_unknown: ["a"] })
   await t.app.pollOnce()
-  assert.deepEqual(laneNames(t), ["#general", "#b", "#c", "#a"])
+  assert.deepEqual(laneNames(t), ["#general", "#b", "#a", "#c"])
   assert.ok(laneOf(t, "a").textContent.includes("activity unknown"))
   const ahead = new Date(Date.now() + 400 * 1000).toISOString()
   t.routes["/api/changes"] = quiet("C2", { channels: { c: { entries: [sendEntry(6, "future", { ts: ahead })], gap: null } } })
   await t.app.pollOnce()
-  assert.deepEqual(laneNames(t), ["#general", "#b", "#a", "#c"])
+  assert.deepEqual(laneNames(t), ["#general", "#c", "#b", "#a"], "the unread future-stamped send stays Active ahead of stale b")
   assert.ok(laneOf(t, "c").textContent.includes("activity unknown"))
   const near = new Date(Date.now() + 100 * 1000).toISOString()
   t.routes["/api/changes"] = quiet("C3", { channels: { c: { entries: [sendEntry(7, "skewed", { ts: near })], gap: null } } })
   await t.app.pollOnce()
   assert.equal(laneNames(t)[1], "#c", "within the skew a send counts")
+  assert.ok(!laneOf(t, "c").textContent.includes("activity unknown"))
 })
 
 test("poll: a reorder keeps the selected lane current and scrolls it into view", async () => {
@@ -2509,7 +2692,7 @@ test("poll: a reorder keeps the selected lane current and scrolls it into view",
   t.document.createElement = (tag) => { const n = realCreate(tag); n.scrollIntoView = (o) => calls.push([n, o]); return n }
   await t.app.pollOnce()
   t.document.createElement = realCreate
-  assert.deepEqual(laneNames(t), ["#general", "#b", "#a", "#c"])
+  assert.deepEqual(laneNames(t), ["#general", "#b", "#c", "#a"], "selected c stays Active ahead of stale a")
   assert.equal(laneOf(t, "c").attributes["aria-current"], "true")
   assert.equal(calls.length, 1)
   assert.ok(calls[0][0] === laneOf(t, "c"))
@@ -2642,7 +2825,7 @@ test("refresh: a state refresh that reorders the rail scrolls the selected lane 
   assert.ok(calls[0][0] === laneOf(t, "c"))
 })
 
-test("refresh: the server's order replaces what polls inferred, and an activity change without a reorder does not scroll", async () => {
+test("refresh: server activity replaces inferred activity while selection stays Active without extra scrolling", async () => {
   const t = pollOrderBoot()
   await t.app.ready
   await t.app.selectChannel("c")
@@ -2655,7 +2838,7 @@ test("refresh: the server's order replaces what polls inferred, and an activity 
     lblRow("b", "#b", "posted", "2026-02-01T00:00:00+00:00"),
     lblRow("c", "#c", "none"), lblRow("zz", "#zz", "none")])
   await t.app.pollOnce()
-  assert.deepEqual(laneNames(t), ["#general", "#a", "#b", "#c", "#zz"])
+  assert.deepEqual(laneNames(t), ["#general", "#c", "#a", "#b", "#zz"])
   const calls = []
   const realCreate = t.document.createElement
   t.document.createElement = (tag) => { const n = realCreate(tag); n.scrollIntoView = (o) => calls.push([n, o]); return n }
@@ -2663,7 +2846,7 @@ test("refresh: the server's order replaces what polls inferred, and an activity 
   await t.app.pollOnce()
   t.document.createElement = realCreate
   assert.ok(laneOf(t, "zz").textContent.includes("activity unknown"))
-  assert.deepEqual(laneNames(t), ["#general", "#a", "#b", "#c", "#zz"])
+  assert.deepEqual(laneNames(t), ["#general", "#c", "#a", "#b", "#zz"])
   assert.equal(calls.length, 0)
 })
 
@@ -2831,6 +3014,6 @@ test("refresh: a state refresh that keeps the order does not scroll", async () =
   await t.app.pollOnce()
   t.document.createElement = realCreate
   assert.ok(fetched >= 1, "the state was refreshed")
-  assert.deepEqual(laneNames(t), ["#general", "#a", "#b", "#c", "#zz"])
+  assert.deepEqual(laneNames(t), ["#general", "#c", "#a", "#b", "#zz"])
   assert.equal(calls.length, 0)
 })

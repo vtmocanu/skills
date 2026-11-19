@@ -187,16 +187,17 @@ class WebAssetTests(unittest.TestCase):
         for name in ("onclick", "href", "src", "style", "srcdoc", "xlink:href"):
             self.assertNotIn('"%s"' % name, self.js.split("function attrAllowed")[0].split("var ATTRS")[1])
 
-    def test_storage_holds_only_the_theme(self):
-        key = re.search(r'var THEME_KEY = "([^"]+)";', self.js)
-        self.assertIsNotNone(key)
-        self.assertNotIn("token", key.group(1).lower())
+    def test_storage_holds_only_display_preferences(self):
+        for name in ("THEME_KEY", "SIDEBAR_PREF_KEY"):
+            key = re.search(r'var %s = "([^"]+)";' % name, self.js)
+            self.assertIsNotNone(key)
+            self.assertNotIn("token", key.group(1).lower())
         for match in re.finditer(r"localStorage(\s*\.\s*(\w+)|\s*\[)?", self.js):
             member = match.group(2)
             if match.group(1) is None:
                 continue  # a bare presence check
             self.assertIn(member, ("getItem", "setItem", "removeItem"), match.group(0))
-            self.assertRegex(self.js[match.end():match.end() + 12], r"^\(THEME_KEY\b")
+            self.assertRegex(self.js[match.end():match.end() + 24], r"^\((?:THEME_KEY|SIDEBAR_PREF_KEY)\b")
 
     def test_requests_go_only_to_the_api_with_the_header(self):
         self.assertEqual(len(re.findall(r"\bfetch\s*\(", self.js)), 1)
@@ -225,7 +226,7 @@ class WebAssetTests(unittest.TestCase):
 
     def test_server_keyed_tables_have_no_prototype(self):
         # A channel named "constructor" must not hit Object.prototype: no {} table keyed by data.
-        self.assertNotRegex(self.js, r"\b(?:names|members|rows|sessions|pages|pendingNotes|covered|focusables|loading|pageErrors)\s*[:=]\s*\{\s*\}")
+        self.assertNotRegex(self.js, r"\b(?:names|members|rows|sessions|pages|pendingNotes|covered|focusables|loading|pageErrors|deliverySeen|unreadChannels)\s*[:=]\s*\{\s*\}")
         self.assertIn("Object.create(null)", self.js)
         # Copies go into a prototype-free table: an own "__proto__" key from JSON.parse would
         # otherwise hit the __proto__ setter of a {} target and swap the copy's prototype.

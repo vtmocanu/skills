@@ -221,6 +221,10 @@ def run_discovery(requester=None, previous=None):
                     seen.add(typed)
                     members.append(typed)
         cache, liveness, activity, names, homes = {}, {}, {}, {}, {}
+        prev = previous if isinstance(previous, dict) else {}
+        previous_seen = prev.get("last_seen") if isinstance(prev.get("last_seen"), dict) else {}
+        last_seen = {typed: previous_seen[typed] for typed in members
+                     if isinstance(previous_seen.get(typed), str) and sp_webdata._stamp(previous_seen[typed]) > 0}
         deadline, subprocess_left = time.monotonic() + DISCOVERY_PASS_BUDGET, SUBPROCESS_MEMBERS_PER_PASS
         checked, unchecked = set(), []
         pair_ids = set(live_ids)
@@ -243,11 +247,12 @@ def run_discovery(requester=None, previous=None):
             checked.add(typed)
             try:
                 liveness[typed] = sp_channels.member_liveness(typed, cache)
+                if liveness[typed] == "live":
+                    last_seen[typed] = sp_runtime.now_iso()
             except Exception:
                 liveness[typed] = "unverified"
             return True
 
-        prev = previous if isinstance(previous, dict) else {}
         prev_unchecked = prev.get("unchecked") if isinstance(prev.get("unchecked"), list) else []
         prev_deferred = prev.get("label_deferred") if isinstance(prev.get("label_deferred"), list) else []
         prev_failed = prev.get("label_failed") if isinstance(prev.get("label_failed"), list) else []
@@ -335,7 +340,7 @@ def run_discovery(requester=None, previous=None):
             else:
                 label_live[typed] = prev_live.get(typed) if prev_live.get(typed) in ("live", "gone", "unverified") else "unverified"
         labels = sp_channels.derive_labels(list(records.values()), label_names, label_live)
-        found = {"general": general, "liveness": liveness, "activity": activity, "names": names,
+        found = {"general": general, "liveness": liveness, "activity": activity, "names": names, "last_seen": last_seen,
                  "homes": homes, "stale": False, "pending": False, "truncated": truncated,
                  "unchecked": unchecked, "label_deferred": label_deferred, "label_failed": label_failed, "labels": labels, "label_names": label_names,
                  "label_liveness": label_live}
