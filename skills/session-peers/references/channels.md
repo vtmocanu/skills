@@ -56,6 +56,8 @@ failed.
   [topics](topics.md) variables) and `gap:` reporting. Every entry records its
   sender; a message entry keeps the body, so history never depends on the
   journal for it.
+- Upgrade every sender copy before relying on quiet delivery. Older code
+  ignores the `deliver` field and can still fan out a stored-channel post.
 
 ## Sending
 

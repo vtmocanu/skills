@@ -3004,6 +3004,19 @@ test("stored-channel broadcasts preview and confirm the same channel; direct pic
   assert.equal(t.sends[1].body.confirm, NONCE)
 })
 
+test("delivery-mode changes refresh the selected channel label on the next poll", async () => {
+  const state = stateFixture()
+  state.channels.find((c) => c.key === "ops").deliver = "mentions"
+  const t = bootFixture({ "/api/state": state })
+  await t.app.ready
+  await t.app.selectChannel("ops")
+  assert.ok(t.document.byId.sub.textContent.includes("delivery: mentions"))
+  state.channels.find((c) => c.key === "ops").deliver = "all"
+  t.routes["/api/changes"] = quiet("MODE1", { channels: { ops: { entries: [{ seq: 2, kind: "other", event: "channel.delivery", text: "delivery changed" }] } } })
+  await t.app.pollOnce()
+  assert.ok(t.document.byId.sub.textContent.includes("delivery: all"))
+})
+
 test("ledger panel is a real table, escapes labels and refuses unsafe links", () => {
   const { app, document } = load()
   const node = app.renderLedger(ledgerFixture())

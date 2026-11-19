@@ -120,9 +120,9 @@ checks in order, and each refusal has an empty `{}` body:
    `text` a non-empty string of at most `MAX_TEXT_CHARS` that encodes as UTF-8,
    `ack` a bool, `to` one `#` channel key or 1-64 distinct typed addresses with
    no `web:`; `confirm` a string of 1 to `CONFIRM_MAX` (128) characters, only
-   with `to` `#general` and an `@all` text.
-8. A plain `#general` post, or text matching `channels.ALL_RE` to any route but
-   `#general` (403). An `@all` to `#general` goes to `_post_all` after the 503
+   with a channel destination and a literal-safe `@all` token.
+8. A plain `#general` post, or a literal-safe `@all` to picked recipients is
+   refused (403). A channel `@all` goes to `_post_all` after the 503
    check (step 9): no `confirm` is a preview, a `confirm` is a confirm.
 9. Chat has started (503).
 10. `SendGate`, under one lock: the rate limits (1 per second, 30 per rolling

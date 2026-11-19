@@ -1070,6 +1070,15 @@ def _other_text(entry, data):
         return ""
 
 
+def _all_post(data):
+    if data.get("targeted"):
+        return False
+    if "mention_all" in data:
+        return data["mention_all"] is True
+    body = data.get("body")
+    return isinstance(body, str) and sp_channels.ALL_RE.match(body) is not None
+
+
 def entry_view(entry, delivery=None, general=False):
     """One history entry as dashboard JSON (before string hygiene)."""
     if entry.get("oversized"):
@@ -1089,7 +1098,7 @@ def entry_view(entry, delivery=None, general=False):
         out["mentioned"] = [_ident(m) for m in data.get("mentioned", [])[:sp_constants.CHANNEL_MAX_MEMBERS]
                             if isinstance(m, str)] if isinstance(data.get("mentioned"), list) else []
         intent = sp_channels.sp_mentions.parse(body) if "mention_all" not in data and not data.get("targeted") else {}
-        out["mention_all"] = data.get("mention_all") is True or intent.get("all") is True
+        out["mention_all"] = _all_post(data)
         out["mention_here"] = data.get("mention_here") is True or intent.get("here") is True
         if delivery is not None:
             out["delivery"] = delivery
@@ -2030,9 +2039,7 @@ def _alert(snap, rows_of):
         if entry.get("kind") != sp_channels.EVENT_SEND:
             continue
         data = entry.get("data") if isinstance(entry.get("data"), dict) else {}
-        body = data.get("body")
-        if not (data.get("journaled") and isinstance(body, str) and sp_channels.ALL_RE.match(body)
-                and not data.get("targeted")):
+        if not (data.get("journaled") and _all_post(data)):
             continue
         delivery = rows_of[entry["seq"]]
         tally = ack_tally(delivery["recipients"])
@@ -2192,8 +2199,7 @@ def state_view(discovery, budget=None, now=None, chat=None, viewer=None):
                 continue
             found[entry["seq"]] = send_state(snap, entry)
             data = entry.get("data") if isinstance(entry.get("data"), dict) else {}
-            if (data.get("journaled") and isinstance(data.get("body"), str)
-                    and sp_channels.ALL_RE.match(data["body"]) and not data.get("targeted")):
+            if data.get("journaled") and _all_post(data):
                 want.append(data.get("message_id"))
         states[key] = found
     journal_ctx = read_journal_context(budget, want)

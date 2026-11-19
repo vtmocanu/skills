@@ -112,6 +112,17 @@ class QuietChannelTests(ChannelSendBase):
         self.tail_json("ops", "--unread")
         self.assertEqual(self.journal_entries(), before)
 
+    def test_middle_text_broadcast_keeps_dashboard_missing_ack_alerts(self):
+        from session_peers import webdata
+        self.sender_cc()
+        _listener, peer = self.peer_cc("beta")
+        self.channel("ops", peer)
+        rc, _result, err = self.send(message="please @all review")
+        self.assertEqual(rc, 0, err)
+        view = webdata.state_view({"general": ([], None, []), "liveness": {self.me: "live", peer: "live"}})
+        ops = next(row for row in view["channels"] if row["key"] == "ops")
+        self.assertEqual(ops["alert"], "missing_acks")
+
     def test_here_requires_positive_live_evidence(self):
         self.sender_cc()
         _a, live = self.peer_cc("beta")

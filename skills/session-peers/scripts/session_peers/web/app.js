@@ -2287,7 +2287,7 @@
 
   function headerSignature() {
     var row = S.rows[S.selected];
-    return S.selected + "\n" + chanText(S.selected) + "\n" + (row && row.label_status);
+    return S.selected + "\n" + chanText(S.selected) + "\n" + (row && row.label_status) + "\n" + (row && row.deliver);
   }
 
   function refreshState() {
@@ -2738,6 +2738,7 @@
           if (S.view !== "conv" || S.selected !== key) S.unreadChannels[key] = true;
         }
         c.entries.forEach(function (e) {
+          if (e && e.event === "channel.delivery") S.needState = true;
           var at = e && sortStamp(e.ts);
           if (e && e.kind === "outcome" && isFinite(at) && at > sortStamp(S.deliverySeen[key]) &&
               at <= Date.now() / 1000 + FUTURE_SKEW) S.deliverySeen[key] = e.ts;
