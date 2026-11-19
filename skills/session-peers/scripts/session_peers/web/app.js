@@ -518,9 +518,9 @@
     } catch (_err) { return false; }
   }
 
-  function linkNode(label, href, focusKey) {
+  function linkNode(label, href, focusKey, title) {
     return safeURL(href) ? el("a", { href: href, target: "_blank", rel: "noopener noreferrer",
-      "data-focus": focusKey || null, title: focusKey ? href : null }, label) : String(label);
+      "data-focus": focusKey || null, title: title == null ? (focusKey ? href : null) : str(title) }, label) : String(label);
   }
 
   function textLinks(text) {
@@ -607,7 +607,7 @@
         cells.push(el("td", null, el("span", { class: "badge ledger-status " + (item.status === "blocked" ? "warn" : item.status === "done" ? "ok" : "") }, str(item.status))));
         cells.push(el("td", { class: "ledger-links" }, (Array.isArray(item.links) ? item.links : []).map(function (link, index) {
           var key = "ledger-link:" + str(item.slug) + ":" + index;
-          var node = linkNode(str(link.label), link.href, key);
+          var node = linkNode(str(link.label), link.href, key, link.title);
           if (node && node.nodeType === 1) panel._ledgerFocus[key] = node;
           return [node, " "];
         })));

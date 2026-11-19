@@ -90,6 +90,67 @@ class LedgerTableTests(unittest.TestCase):
         (self.book.path / ".ledger/links.json").write_text("not committed")
         self.assertEqual(ledger_table.project(self.book, head), view)
 
+    def test_custom_label_templates_share_cli_and_dashboard_projection(self):
+        args = self.args()
+        args.link = ["run abcdefgh-1234", "build abcdefgh-1234"]
+        self.book.mutate("add", args, self.owner)
+        config = {"run <id>": {"href": "https://example.invalid/runs/{id}",
+                                "label": "run {id:8} [<{id}>] | *done*"},
+                  "build <id>": "https://example.invalid/builds/{id}"}
+        self.book.commit({".ledger/links.json": json.dumps(config)}, "label patterns", self.owner)
+        head, _meta = self.book.snapshot()
+        view = ledger_table.project(self.book, head)
+        links = view["groups"][0]["items"][0]["links"]
+        self.assertEqual(links[0], {"label": "run abcdefgh [<abcdefgh-1234>] | *done*",
+                                    "href": "https://example.invalid/runs/abcdefgh-1234",
+                                    "title": "run abcdefgh-1234"})
+        self.assertEqual(links[1], {"label": "build abcdefgh-1234",
+                                    "href": "https://example.invalid/builds/abcdefgh-1234"})
+        plain = self.run_cli("table").stdout
+        self.assertIn(links[0]["label"], plain)
+        markdown = self.run_cli("table", "--markdown").stdout
+        self.assertIn(r"run abcdefgh \[&lt;abcdefgh-1234&gt;\] \| \*done\*", markdown)
+        self.assertIn("https://example.invalid/runs/abcdefgh-1234", markdown)
+        self.assertIn(' "run abcdefgh-1234")', markdown)
+        bound = {"key": self.book.key, "anchor": str(self.book.anchor), "forge": None}
+        panel = ledger_web.view(bound, webdata.Budget())
+        self.assertEqual(panel["groups"], view["groups"])
+
+    def test_custom_template_validation_and_placeholder_bounds(self):
+        def read(value):
+            self.book.commit({".ledger/links.json": json.dumps(value)}, "pattern bounds", self.owner)
+            head, _meta = self.book.snapshot()
+            return ledger_table.patterns(self.book, head)
+        valid = {"run <id>": {"href": "https://example.invalid/{id:64}", "label": "{id:1}/{id:64}/{id}"}}
+        self.assertEqual(read(valid), valid)
+        self.assertEqual(ledger_table.expand_link("run abc", custom=valid),
+                         {"label": "a/abc/abc", "href": "https://example.invalid/abc", "title": "run abc"})
+        invalid = [
+            {"href": "https://example.invalid/{id}", "label": "x" * 129},
+            {"href": "https://example.invalid/" + "x" * 2048 + "{id}", "label": "run"},
+            {"href": "https://example.invalid/{id}/{id:8}", "label": "run"},
+            {"href": "https://example.invalid/{id:0}", "label": "run"},
+            {"href": "https://example.invalid/{id}", "label": "{id:65}"},
+            {"href": "https://example.invalid/{id}", "label": "{other}"},
+            {"href": "https://example.invalid/{id}", "label": "{id:8"},
+            {"href": "https://example.invalid/{id}", "label": 42},
+            {"href": "https://example.invalid/{id}"},
+            {"href": "https://example.invalid/{id}", "label": "run", "lable": "typo"},
+            "https://example.invalid/{id:999}",
+        ]
+        for value in invalid:
+            with self.subTest(value=value), self.assertRaisesRegex(ledger.LedgerError, "links.json"):
+                read({"run <id>": value})
+        for value in ({"run <id>": "https://example.invalid/{id}"} | {"p%d <id>" % i: "https://example.invalid/{id}" for i in range(32)},
+                      {"x" * 129 + "<id>": "https://example.invalid/{id}"}):
+            with self.assertRaises(ledger.LedgerError):
+                read(value)
+
+    def test_custom_label_never_makes_an_unsafe_href_clickable(self):
+        config = {"run <id>": {"href": "javascript:{id}", "label": "safe looking {id:8}"}}
+        self.assertEqual(ledger_table.expand_link("run abc", custom=config),
+                         {"label": "safe looking abc", "href": None, "title": "run abc"})
+
     def test_default_owner_name_comes_from_discovery_and_explicit_name_wins(self):
         args = argparse.Namespace(as_identity=ME, name=None)
         with mock.patch.object(channels, "session_names", return_value={ME: "coordination"}) as discovery:
