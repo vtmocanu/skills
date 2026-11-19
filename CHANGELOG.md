@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.51.0] - 2026-11-19
+
+### Added
+
+- `session-peers`: built-in ledger tables with safe forge/run links, discovered owner names, and owner-controlled channel bindings for a live read-only dashboard ownership panel. Message URLs are clickable and fenced blocks render as monospace code.
+
 ## [0.50.0] - 2026-11-19
 
 ### Added

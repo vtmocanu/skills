@@ -863,6 +863,7 @@ def cmd_channel(args):
         "create": _cmd_create, "join": _cmd_join, "leave": _cmd_leave,
         "remove": _cmd_remove, "list": _cmd_list, "members": _cmd_members,
         "tail": _cmd_tail,
+        "bind": _cmd_bind,
     }
     handler = handlers.get(getattr(args, "channel_cmd", None))
     if handler is None:
@@ -880,6 +881,30 @@ def _require(key):
     if rec is None:
         raise ChannelError("no channel named #%s; run `peers.py channel list`" % key)
     return rec
+
+
+def _cmd_bind(args, me):
+    from . import ledger, ledger_web
+    key = stored_key(args.name)
+    if _require(key)["owner"] != me:
+        raise ChannelError("only the channel owner can bind its ledger")
+    try:
+        bound = None if args.clear_ledger else ledger_web.binding()
+    except (ledger.LedgerError, OSError, ValueError) as exc:
+        raise ChannelError("cannot bind ledger: " + _reason(exc)) from exc
+
+    def mutate(rec):
+        if rec["owner"] != me:
+            raise ChannelError("only the channel owner can bind its ledger")
+        if bound is None:
+            rec.pop("ledger", None)
+        else:
+            rec["ledger"] = bound
+        return None, None
+
+    change_membership(key, mutate, me)
+    print(("cleared ledger binding for #%s" if bound is None else "bound ledger to #%s") % key)
+    return 0
 
 
 def _cmd_create(args, me):

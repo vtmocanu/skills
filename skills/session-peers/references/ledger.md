@@ -14,6 +14,9 @@ peers.py ledger list --mine
 peers.py ledger list --all --json
 peers.py ledger show ITEM
 peers.py ledger log ITEM
+peers.py ledger table
+peers.py ledger table --markdown
+peers.py ledger table --all --json
 ```
 
 Use the installed script's full path in place of `peers.py`. `path` prints the
@@ -122,3 +125,49 @@ when unfinished items exist. It counts blocked items as open and expired claims
 as stale. No items, no ledger, any discovery failure or a one-second whole-check
 timeout produces no reminder. Existing JSON output stays unchanged. There is
 no SessionStart hook and no change to hook installation.
+
+## Ownership tables and the live dashboard
+
+`ledger table` groups unfinished owned items by owner. `--owned` makes that
+default explicit; `--all` includes unowned and done items. The columns are item,
+title, status, links and updated. Plain output aligns columns in a monospace
+terminal; `--markdown` emits GFM tables and `--json` returns structured groups,
+expanded links, the source commit and the unowned-open count. Display names come
+from discovery when adding or claiming; `--name` overrides them. An unavailable
+name falls back to a short typed identity in table output. A repeated claim
+renews the lease and refreshes its recorded display name.
+
+Link shortcuts use the current origin for CLI tables, without network access:
+GitHub `#N` means `/issues/N`, `PR #N` or `!N` means `/pull/N`. GitLab uses
+`/-/issues/N` or `/-/merge_requests/N`. Known hosts are github.com, gitlab.com,
+and hosts beginning `gitlab.`; unknown hosts leave shortcuts plain. HTTP(S)
+origins keep their web port; SSH origins use HTTPS without the SSH port. Origin
+credentials are never retained. Full HTTP(S) URLs pass through; unknown labels
+and unsafe schemes stay plain text.
+
+For private run URLs or another forge, commit optional `.ledger/links.json`
+inside the local ledger, never the project or skill source. It maps at most 32
+literal labels containing one `<id>` to URL templates containing one `{id}`:
+
+```json
+{"run <id>": "https://factory.example.invalid/runs/{id}"}
+```
+
+The identifier is URL-encoded. Templates produce links only for HTTP(S).
+Use canonical full IDs when the target requires them; this tool never resolves
+short run IDs. Invalid configuration refuses a table rather than guessing.
+
+The channel owner runs `channel bind NAME --ledger` from the project to pin its
+ledger above channel history. `channel bind NAME --clear-ledger` removes the
+binding. Only the owner can change it. The binding stores the key, canonical
+anchor and credential-free forge web base. Re-bind after changing the origin
+or relocating the ledger; an anchor mismatch reads unavailable.
+
+The dashboard reads committed HEAD through its token-protected channel ledger
+endpoint on selection and each live poll, even without new messages. It shows
+a real HTML table and observation time. Failed reads replace the cached table
+with an unavailable notice. Read limits are one second, 1 MiB of Git output,
+256 items, 256 links total, and 1 MiB of rendered JSON. The request's existing
+byte allowance also applies. Exceeding a limit reads unavailable, never an
+empty ownership list. The reader creates no directories, lock files, commits
+or refreshes. Binding is a CLI mutation; the web panel is read-only.

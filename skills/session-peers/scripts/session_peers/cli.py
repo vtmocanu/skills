@@ -439,6 +439,11 @@ def _register_channels(sub):
     )
     p_join = csub.add_parser("join", help="join a channel")
     p_join.add_argument("name", metavar="NAME")
+    p_bind = csub.add_parser("bind", help="owner binds the cwd repository's ledger to a channel")
+    p_bind.add_argument("name", metavar="NAME")
+    mode = p_bind.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--ledger", action="store_true")
+    mode.add_argument("--clear-ledger", action="store_true")
     p_leave = csub.add_parser("leave", help="leave a channel")
     p_leave.add_argument("name", metavar="NAME")
     p_remove = csub.add_parser("remove", help="remove a member (owner only)")
@@ -458,7 +463,7 @@ def _register_channels(sub):
         % (sp_constants.TOPIC_TAIL_DEFAULT, sp_constants.TOPIC_TAIL_MAX),
     )
     p_tail.add_argument("--json", action="store_true", help="machine-readable output")
-    for parser in (p_create, p_join, p_leave, p_remove, p_list, p_members, p_tail):
+    for parser in (p_create, p_join, p_bind, p_leave, p_remove, p_list, p_members, p_tail):
         parser.set_defaults(func=sp_channels.cmd_channel)
     p_chan.set_defaults(func=sp_channels.cmd_channel, channel_cmd=None)
 

@@ -133,12 +133,13 @@ class WebAssetTests(unittest.TestCase):
         attrs = re.search(r"var ATTRS = \[([^\]]*)\]", self.js).group(1)
         tag_names = re.findall(r'"([^"]*)"', tags)
         attr_names = re.findall(r'"([^"]*)"', attrs)
-        # Exact sets: any addition is a deliberate edit here. The composer's form controls are allowed;
-        # nothing that loads, navigates, submits or runs is (no script, iframe, a, img, form, style...;
-        # no on*, href, src, action, formaction, style, srcdoc, value, name, form, autofocus).
+        # Exact sets: additions require deliberate review. Links have scoped
+        # HTTP(S), target and rel checks in el(), covered by render.test.mjs;
+        # href is still forbidden in the general attribute allowlist. Tables
+        # and pre are inert. No script, iframe, img, form, style or on* handler.
         self.assertEqual(sorted(tag_names), sorted({
             "div", "span", "p", "b", "i", "code", "button", "ul", "li", "dl", "dt", "dd", "h1", "h2", "small",
-            "strong", "label", "input", "textarea"}))
+            "strong", "label", "input", "textarea", "a", "pre", "table", "thead", "tbody", "tr", "th", "td"}))
         self.assertEqual(len(tag_names), len(set(tag_names)))
         self.assertEqual(sorted(attr_names), sorted({
             "class", "role", "title", "type", "tabindex", "checked", "disabled", "placeholder", "rows", "maxlength"}))
@@ -295,11 +296,31 @@ class WebAssetTests(unittest.TestCase):
     def test_no_external_urls_in_any_asset(self):
         for name, text in (("app.js", self.js), ("app.css", self.css), ("index.html", self.html)):
             stripped = text.replace(SVG_NS, "")
+            if name == "app.js":
+                # Protocol names in safeURL() are identifiers, not destinations.
+                # Exempt only the reviewed comparisons, not arbitrary protocol
+                # literals elsewhere that could construct a destination.
+                stripped = stripped.replace('url.protocol === "http:"', 'url.protocol === HTTP_SCHEME')
+                stripped = stripped.replace('url.protocol === "https:"', 'url.protocol === HTTPS_SCHEME')
             self.assertNotRegex(stripped, r"(?i)\bhttps?:", name)
             self.assertNotRegex(stripped, r"(?i)fonts\.(?:googleapis|gstatic)", name)
             self.assertNotRegex(stripped, r"(?i)[\"'(=]\s*//[a-z0-9]", name)  # protocol-relative
         self.assertNotRegex(self.css, r"(?i)@import|url\s*\(")
         self.assertNotRegex(self.css, r"(?i)expression\s*\(")
+
+    def test_protocol_identifiers_do_not_hide_embedded_external_urls(self):
+        original = self.js
+        for addition in ('var target = "https://example.invalid/track";',
+                         'var target = "http:" + "//example.invalid/track";',
+                         'var target = "http:" + "/" + "/example.invalid/track";',
+                         'var target = "//example.invalid/track";'):
+            with self.subTest(addition=addition):
+                self.js = original + "\n" + addition
+                try:
+                    with self.assertRaises(AssertionError):
+                        self.test_no_external_urls_in_any_asset()
+                finally:
+                    self.js = original
 
     # -- notices ------------------------------------------------------------
 

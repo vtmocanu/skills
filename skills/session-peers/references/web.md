@@ -417,3 +417,22 @@ a transport error. Without `--record` it is refused.
 A session-peers copy that predates `--chat` does not know `web:` records and
 drops them when it rewrites a journal it shares. Upgrade every copy that
 shares the journal before using `--chat`.
+
+## Live repository ledger
+
+A channel owner can run `peers.py channel bind NAME --ledger` in a repository
+with a ledger. Its committed ownership table appears above that channel's
+history, independently of change-note messages. It refreshes on selection and
+each live poll, and shows its observation time. A failed, oversized, timed-out
+or mismatched read shows unavailable instead of retaining a current label.
+The endpoint is `GET /api/ledger/CHANNEL`, under the same loopback, Host and
+token checks as other dashboard reads. It accepts no query or filesystem path.
+The channel's owner-controlled binding selects the ledger; the canonical anchor
+must still match its committed metadata. No web action changes ledger content.
+See [ledger](ledger.md#ownership-tables-and-the-live-dashboard) for limits,
+bindings and private link patterns.
+
+HTTP(S) URLs in message text and fenced blocks are clickable. Fenced blocks
+render as monospace code, not literal fence markers. Peer text stays in text
+nodes; only validated HTTP(S) URLs enter anchor attributes, with
+`rel="noopener noreferrer"`. No Markdown HTML is interpreted.
