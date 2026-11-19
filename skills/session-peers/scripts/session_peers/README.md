@@ -34,6 +34,7 @@ the reply command included in a request envelope.
 | channel_roles | Read-only current binding inventory for runtime-neutral lead admission and fan-out filtering |
 | webdata | Dashboard read model: bounded, read-only snapshots of channel history, journal ACK state and discovery, the poll cursor and the per-view JSON |
 | web | Dashboard HTTP server (loopback, token, GET only; one POST route in chat mode), the discovery worker and the `web` command; serves the static assets in `web/` (`index.html`, `app.css`, `app.js`); see Dashboard server below |
+| web_lifecycle | Opt-in stable read-only URL, private config/log/pidfile, detached startup and verified reuse/stop/restart; separate persistent chat credentials |
 | webchat | Chat mode state: the Browser feed log, status rows, `SendGate` (rate limits and queue capacity) and the single `SendWorker` |
 | webpeer | The browser peer `web:<uuid>`: lock, registry record, socket and journaled inbox |
 | maintenance | Owned bridge metadata and buddy garbage collection |
@@ -83,9 +84,11 @@ insertion order and argument defaults.
 User-facing behaviour is in `references/web.md`; the server's own guards are:
 
 - Host must be exactly `127.0.0.1:<port>` or `localhost:<port>` (403), as a
-  DNS-rebinding guard. Only GET is accepted (405); a request body is refused
+  DNS-rebinding guard. Read-only mode accepts GET; chat also accepts POST `/api/send`.
+  A body on a GET is refused
   (400). `/`, `/app.css` and `/app.js` load without the token; every `/api/*`
-  route needs `X-Peers-Token` (403).
+  route needs `X-Peers-Token` (403), except the instance-health route also accepts
+  domain-separated token proofs that authorize no data route.
 - At most 16 connections at once; extra connections are closed unanswered. The
   request line and headers must arrive within 2 s and every connection's socket
   is cut after 10 s; its slot is held until the handler returns. The 8 MiB
@@ -97,7 +100,7 @@ User-facing behaviour is in `references/web.md`; the server's own guards are:
   `Cache-Control: no-store` and same-origin resource/opener policies. Errors
   have an empty `{}` body. No request is logged.
 - The loopback bind keeps the server off the network, but any local user or
-  process can reach the port; the per-start token alone guards `/api/*`, so
+  process can reach the port; the dashboard token guards `/api/*`, so
   anyone who obtains it can read the API. Neither defends against a hostile
   process of the same user.
 

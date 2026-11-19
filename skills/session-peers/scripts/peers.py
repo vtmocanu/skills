@@ -47,6 +47,9 @@ Subcommands::
     peers.py gc [--days 7] [--dry-run]
     peers.py doctor
     peers.py web [--port N] [--chat]
+    peers.py web --ensure [--restart] [--port N]
+    peers.py web --url|--stop|--rotate-token
+    peers.py web --chat --persist-token [--port N]
 
 Python 3.9+, stdlib only (D3).  macOS and Linux only.
 """

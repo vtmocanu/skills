@@ -4,11 +4,46 @@
 history, who is in them and the ACK state of recorded messages. It reads the
 channel store and the [journal](journal.md); by default it never sends, ACKs,
 marks, hands over or changes anything, and it creates or changes no
-session-peers file. `peers.py web --chat` is the one exception: it registers a
+session-peers file. Opt-in `web --ensure` writes private lifecycle state and
+starts a detached read-only server, without message or ACK writes.
+`peers.py web --chat` registers a
 browser peer and sends on purpose, see [Chat mode](#chat-mode---chat). The
 rest of this page, up to that section, describes the default mode.
 
 ## Start it
+
+For a stable bookmark, run `peers.py web --ensure` using the skill's script path.
+It starts a detached server or reuses the verified running instance, prints its
+URL and exits. It survives the launching session ending. No service manager or
+launchd is installed. State is shared across runtimes and `CODEX_HOME` values in
+`~/.codex/session-peers/web/`: directory 0700, config, pidfile, lock and log 0600.
+The config holds the read-only port and token. The private log can contain the
+bookmark URL; do not publish it.
+
+- First creation tries port 8765, then the first free port above it, and records
+  that choice. A later foreign port holder causes a refusal, never a silent new
+  URL. `web --url --port N` changes the stored port only after the recorded
+  server is stopped; stored ports accept 1024-65535, not 0.
+- `web --url` prints the URL without starting or probing a server. First use
+  initializes its config, including a temporary free-port check.
+- `web --stop` signals only the recorded PID after its process start/domain
+  and token-authenticated instance check match. Missing or reused PIDs are stale,
+  not kill targets; uncertain process or HTTP evidence refuses the signal.
+- After an upgrade, `--ensure` refuses to silently reuse older code and names
+  `web --ensure --restart`. Restart stops the verified instance and starts the
+  installed code at the same port and token. The recorded digest covers loaded
+  Python code and dashboard assets. A changed source path alone does not count
+  as a code upgrade.
+- `web --rotate-token` requires a stopped server, saves a new read-only token
+  and prints the new URL without starting. Run `--ensure` to serve it. Old
+  bookmarked tokens are then refused. Port/token changes are not implicit stops.
+- The authenticated `/api/instance` health route has no discovery work. Reuse
+  also requires the pidfile and a read-only instance, not just a matching port.
+  Health uses domain-separated request/response challenge proofs, so a foreign
+  listener never receives the saved token. These proofs authorize no data route.
+  A bounded file lock serializes start/stop/restart across sessions.
+
+Plain `web` retains its original foreground, ephemeral behavior:
 
 Run `<this skill's directory>/scripts/peers.py web [--port N]`. `--port` is `0`
 (default, any free port) or 1024-65535; anything else exits 2, and a port that
@@ -23,13 +58,13 @@ Open that exact URL in a browser on the same machine. Remote access is not
 supported: the server listens on `127.0.0.1` only.
 
 - The server listens on loopback only and, without `--chat`, accepts GET only; it is read-only.
-- The token is new on every start and travels in the URL fragment (never sent
+- The plain-mode token is new on every start and travels in the URL fragment (never sent
   to the server or logged); the page keeps it in memory and sends it as
   `X-Peers-Token`.
 - A reload or a copied link without the fragment cannot read data (403).
 
 The loopback bind keeps the server off the network, but any local user or
-process on the machine can reach the port; the per-start token is what guards
+process on the machine can reach the port; the token is what guards
 `/api/*`, so anyone who obtains it (for example from the printed URL or the
 browser history) can read the API. Neither defends against a hostile process of
 the same user. Connection, header and read-budget details are in the
@@ -216,6 +251,16 @@ holds for reading; the differences are listed here.
 <this skill's directory>/scripts/peers.py web --chat [--port N]
 ```
 
+Plain chat stays foreground with a fresh token and ephemeral port. Optional
+`web --chat --persist-token [--port N]` saves a separate chat token and port in
+`web/chat.json` (0600), initially port 8766 or the first free one above it.
+Its token never equals the read-only token, and its port is stored independently.
+This mode is still
+foreground, with a fresh browser-peer identity on each start; stop it with
+SIGINT/SIGTERM. Read-only `--ensure`, `--url`, `--stop`, `--rotate-token` and
+`--restart` cannot be combined with `--chat`. A read-only bookmark never gains
+send authority. Without `--persist-token`, chat reads neither saved token.
+
 One `web --chat` runs per OS user. It takes an exclusive lock on
 `~/.codex/session-peers/web-chat.lock` (under the home directory, not
 `CODEX_HOME`, so two homes cannot both start one) and holds it until the process
@@ -225,7 +270,8 @@ Startup also removes `CLAUDE_CODE_SESSION_ID`, `CLAUDE_CODE_MESSAGING_SOCKET`,
 `CODEX_THREAD_ID`, `CODEX_SESSION_ID` and `OPENCODE_SESSION_ID` from the
 server's own environment, so a browser send is never attributed to the session
 that happened to launch the server. Without `--chat` the server accepts GET
-only (a POST is 405), registers no peer and writes no file.
+only (a POST is 405) and registers no peer. Plain mode writes no file;
+`--ensure` writes only its private lifecycle state.
 
 ### Identity and provenance
 

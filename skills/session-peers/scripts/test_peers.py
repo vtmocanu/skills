@@ -54,6 +54,7 @@ MODULES = (
     "peer_tests.test_shim_route",
     "peer_tests.test_webdata",
     "peer_tests.test_web_server",
+    "peer_tests.test_web_lifecycle",
     "peer_tests.test_web_assets",
     "peer_tests.test_web_routing",
     "peer_tests.test_web_peer",
