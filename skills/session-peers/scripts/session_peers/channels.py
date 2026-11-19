@@ -49,6 +49,9 @@ OUTCOME_ACCEPTED = "transport accepted"
 OUTCOME_PAUSED = "queued (thread paused)"
 OUTCOME_NOT_WOKEN = "not woken (OpenCode idle)"
 OUTCOME_GONE = "skipped: gone"
+OUTCOME_BUDDY = "skipped: current buddy"
+OUTCOME_ROLE_UNKNOWN = "skipped: buddy role unverified"
+ROLE_OUTCOMES = (OUTCOME_BUDDY, OUTCOME_ROLE_UNKNOWN)
 OUTCOME_REFUSED = "refused: "
 STATE_IN_PROGRESS = "in progress"
 STATE_UNKNOWN = "unknown"
@@ -220,6 +223,8 @@ def read_channel(key):
         if member not in members:
             members.append(member)
     rec = dict(rec, members=members)
+    if "allow_buddy" in rec:
+        rec["allow_buddy"] = _allowed_buddies(rec)
     if not isinstance(rec.get("handed_over_at"), str):
         rec.pop("handed_over_at", None)  # optional; a non-string reads as never handed over
     return rec
@@ -338,7 +343,7 @@ def read_history(key, since=None, limit=sp_constants.TOPIC_TAIL_DEFAULT):
     return sp_topics.topic_tail(topic_name(key), since=since, limit=limit, base=history_dir())
 
 
-def create_channel(name, owner, members=(), kind="named", display=None, reserved_ok=False, deliver="mentions"):
+def create_channel(name, owner, members=(), kind="named", display=None, reserved_ok=False, deliver="mentions", allow_buddy=False):
     """Create a channel owned by ``owner`` (a typed id); the owner is a member.
 
     Membership is written before the ``channel.created`` entry. ``reserved_ok``
@@ -359,6 +364,8 @@ def create_channel(name, owner, members=(), kind="named", display=None, reserved
         if member not in roster:
             roster.append(member)
     _check_member_cap(len(roster))
+    if kind != "buddy" and not allow_buddy:
+        _require_leads(roster)
     with _flock(os.path.join(channels_root(), STORE_LOCK)):
         _clean_tmp()
         if read_channel(key) is not None:
@@ -374,6 +381,7 @@ def create_channel(name, owner, members=(), kind="named", display=None, reserved
             "key": key, "display": display or key, "kind": kind, "owner": owner,
             "members": roster, "created_at": sp_runtime.now_iso(),
             "deliver": "all" if kind == "buddy" else deliver,
+            "allow_buddy": list(roster) if allow_buddy and kind != "buddy" else [],
         }
         if kind == "buddy":
             rec["current_buddy"] = None  # buddy_channel_add sets it next, under the channel lock
@@ -402,6 +410,8 @@ def change_membership(key, mutate, actor):
         if change is None:
             return rec, None
         event, data = change
+        if "allow_buddy" in new:
+            new["allow_buddy"] = [m for m in new["allow_buddy"] if m in new["members"]]
         if event is None:
             _write_record(new)
             return new, None
@@ -923,7 +933,7 @@ def _cmd_bind(args, me):
 def _cmd_create(args, me):
     exclude = me.partition(":")[2]
     members = [_canon_member(m, exclude=exclude) for m in args.member or []]
-    rec = create_channel(args.name, me, members, deliver=args.deliver)
+    rec = create_channel(args.name, me, members, deliver=args.deliver, allow_buddy=args.allow_buddy)
     print("created #%s (%d members)" % (rec["key"], len(rec["members"])))
     return 0
 
@@ -958,16 +968,22 @@ def _general_marker(action, me):
 
 
 def _cmd_join(args, me):
-    if any(rec.get("kind") == "buddy" and rec.get("owner") != me and pair_of(rec)[1] == me
-           for rec in list_channels()):
-        print("note: bound buddies normally stay out of shared channels and talk to their lead; joining is still allowed")
     if parse_name(args.name) == sp_constants.CHANNEL_GENERAL:
+        if args.allow_buddy:
+            raise ChannelError("--allow-buddy applies only to stored channels; #general has no buddy fan-out overrides")
+        _require_leads([me], override_hint=False)
         return _general_marker("join", me)
     key = stored_key(args.name)
 
     def mutate(rec):
         if rec["kind"] == "buddy":
             raise ChannelError("buddy channels are joined through buddy set")
+        if not args.allow_buddy:
+            _require_leads([me])
+        if args.allow_buddy and me not in rec.setdefault("allow_buddy", []):
+            rec["allow_buddy"].append(me)
+            if me in rec["members"]:
+                return None, None
         if me in rec["members"]:
             return None
         _check_member_cap(len(rec["members"]) + 1)
@@ -1995,6 +2011,11 @@ def _deliver_member(args, member, sender, mid, text, snapshot, never_wake=True, 
             if refused is not None:
                 rc = refused
             else:
+                role_filter = getattr(member_args, "channel_role_filter", None)
+                if role_filter is not None:
+                    skipped = _role_skip(role_filter[0], member, role_filter[1])
+                    if skipped is not None:
+                        return skipped  # latest role read, after pacing and route checks
                 rc = sp_messaging._dispatch_send(
                     member_args, sender.partition(":")[2] if sender.startswith("cc:") else None
                 )
@@ -2032,7 +2053,53 @@ def _mention_targets(body, members, cache):
             if member_liveness(member, cache) == "live" and member not in targets:
                 targets.append(member)
     mentioned = list(members) if intent["all"] or intent["here"] else named
+    intent["direct"] = named
     return intent, targets, mentioned
+
+
+def _require_leads(members, override_hint=True):
+    from . import channel_roles
+    for member, role in channel_roles.roles(members).items():
+        if role != "lead":
+            hint = ("Use --allow-buddy to explicitly admit it" if override_hint else
+                    "#general has no buddy admission override; use channel tail general to read on demand")
+            raise ChannelError("%s is a current buddy or its role is unverified; shared channels are for leads. %s" % (member, hint))
+
+
+def _role_skip(key, member, direct=(), rec=None, evidence=None):
+    if member in direct:
+        return None
+    rec = ({"kind": "general", "members": []} if key == sp_constants.CHANNEL_GENERAL else
+           rec if rec is not None else read_channel(key))
+    if rec is None:
+        return OUTCOME_ROLE_UNKNOWN
+    if rec.get("kind") == "buddy" or member in _allowed_buddies(rec):
+        return None
+    from . import channel_roles
+    role = (evidence if evidence is not None else channel_roles.roles([member])).get(member, "unverified")
+    return None if role == "lead" else OUTCOME_BUDDY if role == "buddy" else OUTCOME_ROLE_UNKNOWN
+
+
+def _allowed_buddies(rec):
+    raw = rec.get("allow_buddy")
+    return [m for m in raw if isinstance(m, str) and m in rec.get("members", [])] if isinstance(raw, list) else []
+
+
+def preview_direct_mentions(body, members, names):
+    """HTTP preview uses cached names only; the send worker resolves definitively."""
+    direct = []
+    for token in sp_mentions.parse(body)["names"]:
+        try:
+            member = sp_journal._norm(token)
+        except ValueError:
+            matches = [m for m, name in names.items() if name == token]
+            if len(matches) != 1:
+                raise ChannelError("mention not known unambiguously in cached discovery")
+            member = matches[0]
+        if member not in members:
+            raise ChannelError("mentioned peer is not a channel member")
+        direct.append(member)
+    return direct
 
 
 def _resolve_mention(token):
@@ -2075,14 +2142,22 @@ def _prepare_send(key, sender, body, mid, record, authorised=False, pointer=None
     plain_general = general and not intent["tokens"]
     selected = others if mode == "all" or (plain_general and record) else [m for m in others if m in targets]
     recorded = {m: "recorded (not mentioned)" for m in others if m not in selected}
+    from . import channel_roles
+    checked = [m for m in selected if m not in intent["direct"] and m not in _allowed_buddies(rec)]
+    evidence = channel_roles.roles(checked) if checked and not plain_general and rec.get("kind") != "buddy" else {}
+    for member in list(selected):
+        skipped = None if plain_general else _role_skip(key, member, intent["direct"], rec, evidence)
+        if skipped is not None:
+            selected.remove(member)
+            recorded[member] = skipped
     if mode == "mentions" and intent["here"] and not is_all:
         for member in others:
-            if member in mentioned and member not in selected:
+            if member in mentioned and member not in selected and recorded.get(member) not in ROLE_OUTCOMES:
                 recorded[member] = "recorded (@here requires live evidence)"
     if plain_general:
         recorded = {}  # retain #general's existing record-only JSON and explicit ACK journal semantics
     delivers = bool(selected) and not plain_general
-    if quiet_record and mode == "mentions" and not selected:
+    if quiet_record and not is_all and not selected and (mode == "mentions" or recorded):
         journaled, pointer = False, False
     gone = [m for m in selected if member_liveness(m, cache) == "gone"]
     live = [m for m in selected if m not in gone]
@@ -2106,7 +2181,8 @@ def _prepare_send(key, sender, body, mid, record, authorised=False, pointer=None
         key=key, sender=sender, body=body, mid=mid, coverage=coverage, gaps=gaps, general=general,
         is_all=is_all, journaled=journaled, pointer=pointer, delivers=delivers, snapshot=snapshot,
         gone=gone, live=list(live), deliver=deliver, excluded=excluded,
-        recorded=recorded, mentioned=mentioned, mention_all=is_all, mention_here=intent["here"], mode=mode)
+        recorded=recorded, mentioned=mentioned, mention_all=is_all, mention_here=intent["here"], mode=mode,
+        direct=intent["direct"], role_direct=list(members) if rec.get("kind") == "buddy" else intent["direct"])
 
 
 def _record_journal(plan):
@@ -2138,14 +2214,20 @@ def _append_send(plan, extra=None):
     was journaled; no retry.
     """
     delivery = "fanout" if plan.delivers and plan.snapshot else "none"
+    # Targeted buddy sends carry literal text to one frozen peer and retain
+    # their original plan/history shape, without channel mention metadata.
+    mentions = {} if (extra or {}).get("targeted") else {
+        "mentioned": list(plan.mentioned), "mention_all": plan.mention_all,
+        "direct_mentions": list(plan.direct),
+        "mention_here": plan.mention_here, "delivery_mode": plan.mode,
+        "recorded": dict(plan.recorded),
+    }
     data = {
         "sender": plan.sender, "body": plan.body, "message_id": plan.mid, "journaled": plan.journaled,
         "delivery": delivery, "recipients": list(plan.snapshot),
         "excluded": [{"member": m, "reason": r} for m, r in plan.excluded],
         "opencode_coverage": plan.coverage,
-        "mentioned": list(plan.mentioned), "mention_all": plan.mention_all,
-        "mention_here": plan.mention_here, "delivery_mode": plan.mode,
-        "recorded": dict(plan.recorded),
+        **mentions,
         **({"discovery_incomplete": plan.gaps} if plan.gaps else {}),
         **(extra or {}),
     }
@@ -2221,7 +2303,7 @@ def _send(args):
             return _report(payload, 1 if plan.excluded else 0, as_json, plan.journaled, "recorded in #%s (nothing delivered)" % key
                            if not plan.delivers else "recorded in #%s (no other members)" % key)
         return _fan_out(args, lock, payload, as_json, (key, plan.sender, mid, plan.body, plan.journaled),
-                        (plan.snapshot, plan.gone, plan.deliver, plan.excluded))
+                        (plan.snapshot, plan.gone, plan.deliver, plan.excluded), direct=plan.role_direct)
     finally:
         if lock is not None:
             # Only a crash or an unexpected exception gets here with the lock
@@ -2230,7 +2312,7 @@ def _send(args):
 
 
 def _deliver_all(args, lock, send, members, guard=None, pointer=None, ack=True,
-                 never_wake=True, wake=False, unknown_ok=False, payloads=None):
+                 never_wake=True, wake=False, unknown_ok=False, payloads=None, direct=()):
     """Deliver serially, append the one outcome entry, then release the lock.
 
     ``(outcomes, notes, update_failed, problem)``; ``problem`` is the ChannelError
@@ -2242,6 +2324,8 @@ def _deliver_all(args, lock, send, members, guard=None, pointer=None, ack=True,
     ``payloads`` pass to ``_deliver_member``; the defaults are the fan-out's.
     """
     key, sender, mid, body, journaled = send
+    args = copy.copy(args)
+    args.channel_role_filter = (key, tuple(direct))
     snapshot, gone, deliver, excluded = members
     pointer = journaled if pointer is None else pointer
     _failpoint("send_after_history")
@@ -2266,7 +2350,9 @@ def _deliver_all(args, lock, send, members, guard=None, pointer=None, ack=True,
             outcomes[member] = _deliver_member(
                 args, member, sender, mid, text, snap, never_wake=never_wake, wake=wake,
                 unknown_ok=unknown_ok, payloads=payloads)
-        if is_claude:
+        if outcomes[member] in ROLE_OUTCOMES:
+            notes[member] = ACK_NOT_REQUESTED_ASKED
+        elif is_claude:
             last_claude = _clock()
         if journaled and outcomes[member].startswith(OUTCOME_REFUSED):
             # transport_failed returns its ``rc`` (0 here) only when the append worked.
@@ -2289,10 +2375,10 @@ def _deliver_all(args, lock, send, members, guard=None, pointer=None, ack=True,
     return outcomes, notes, update_failed, problem
 
 
-def _fan_out(args, lock, payload, as_json, send, members):
+def _fan_out(args, lock, payload, as_json, send, members, direct=()):
     """`_deliver_all` for the CLI: fold the result into ``payload`` and report it."""
     key, _sender, mid, _body, journaled = send
-    outcomes, notes, update_failed, problem = _deliver_all(args, lock, send, members)
+    outcomes, notes, update_failed, problem = _deliver_all(args, lock, send, members, direct=direct)
     payload["outcomes"].update(outcomes)
     if notes:
         payload["notes"] = notes
@@ -2403,7 +2489,7 @@ def send_as_web(key, web_sender, body, ack, mid, deliver_guard=None, expected_re
         outcomes, notes, update_failed, problem = _deliver_all(
             _web_member_args(web_sender), lock, (key, sender, mid, body, True),
             (plan.snapshot, plan.gone, plan.deliver, plan.excluded), guard=deliver_guard,
-            pointer=ask, ack=ask)
+            pointer=ask, ack=ask, direct=plan.role_direct)
     finally:
         if lock is not None:
             lock.abandon()  # a no-op after a normal release; after a crash the file stays, as for a dead sender
@@ -2644,7 +2730,7 @@ def send_targeted(args, key, sender, recipient):
         outcomes, notes, update_failed, problem = _deliver_all(
             args, lock, (key, sender, mid, plan.body, plan.journaled),
             (plan.snapshot, plan.gone, plan.deliver, plan.excluded),
-            never_wake=False, wake=plan.wake, unknown_ok=True, payloads=payloads)
+            never_wake=False, wake=plan.wake, unknown_ok=True, payloads=payloads, direct=plan.snapshot)
     finally:
         if lock is not None:
             lock.abandon()  # a no-op after a normal release
@@ -2808,6 +2894,8 @@ def delivery_rows(data, state, outcomes, acks):
                 row["ack"] = "not requested"
             if row["ack"] == STATE_ACKED:
                 row["state"] = STATE_ACKED
+            elif row_state in ROLE_OUTCOMES:
+                row["ack"] = "not requested"
         rows.append(row)
     return rows
 

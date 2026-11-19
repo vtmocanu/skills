@@ -33,9 +33,9 @@ failed.
 
 | Command | Effect |
 | --- | --- |
-| `channel create NAME [--member ADDR]... [--deliver mentions\|all]` | Create a channel you own; default quiet `mentions`. `ADDR` is a typed id or a name (ambiguity is refused). |
+| `channel create NAME [--member ADDR]... [--deliver mentions\|all] [--allow-buddy]` | Create a channel you own; default quiet `mentions`. Buddy or unverified-role members (including the creator) need the explicit override. |
 | `channel set NAME --deliver mentions\|all` | Owner changes notification mode. Buddy channels always use `all` and refuse this command. |
-| `channel join NAME` / `channel leave NAME` | Add or remove yourself. Idempotent (`already a member of`, `not a member of`). Buddy channels cannot be joined. |
+| `channel join NAME [--allow-buddy]` / `channel leave NAME` | Add or remove yourself. A current buddy needs the override on a stored channel. Buddy channels cannot be joined. |
 | `channel remove NAME ADDR` | Owner only: the current owner (its creator, the lead of a buddy channel, or a handover successor). Accepts a typed id of a session that no longer exists. |
 | `channel list [--json]` | Stored channels with [label](#buddy-channel-labels), kind, member count, your role (`owner`, `member`, `-`) and owner; a buddy channel also shows its key, and a label that is not current shows `stale` or `unverified`. `--json` adds `label`, `label_status` and `current_buddy`. |
 | `channel members NAME [--json]` | Members with `live`, `unverified` or `gone` ([liveness](#liveness)); the owner is marked. |
@@ -76,8 +76,19 @@ failed.
   before history or journal writes. `@here` selects positively live members
   (not unverified or gone); `@all` selects everyone. Sender is excluded.
   In `all` mode every other member is notified, as before. Buddy mode is fixed
-  to `all`. A bound buddy joining shared channels gets a soft reminder to talk
-  to its lead instead; binding itself never joins shared channels.
+  to `all`. Lead is a role, not a runtime: a session bound as someone else's
+  buddy is a non-lead; every other session (including solo Codex) is a lead.
+  Public joins and creation with buddy members refuse unless `--allow-buddy`
+  explicitly admits them. The flag is stored per member; leaving or removal
+  clears it, and handover never implicitly transfers it. Binding itself never
+  joins shared channels. These channel roles grant no review or user-approval authority.
+- Fan-out (`@here`, `@all`, or `all` mode) skips current buddies without that
+  override. A direct `@name` or typed mention still reaches a buddy. Binding
+  records are read across configured and shim-recorded homes before planning
+  and again just before each paced delivery. Verified-gone binding owners are
+  ignored; unreadable, malformed or incomplete evidence blocks fan-out. Buddy
+  channels are unchanged. `#general` keeps its derived roster but never has a
+  buddy fan-out override; use an explicit name there.
 - Mention tokens start at a word boundary outside backticks. Unicode word
   characters, dots, hyphens and colons are allowed; trailing dots/colons are
   sentence punctuation. Names outside that grammar use full typed ids. Emails,
@@ -116,6 +127,7 @@ entry when the fan-out finishes (a 64-recipient post costs two entries):
 | `recorded` | `--record` on `#general`: journaled, nothing delivered. |
 | `recorded (not mentioned)` | History only for this member; no notification or ACK recipient. |
 | `recorded (@here requires live evidence)` | This member lacked positive live evidence for `@here`. |
+| `skipped: current buddy` / `skipped: buddy role unverified` | Fan-out was withheld; an explicit name or stored-channel admission override can reach this member. |
 | `unknown` | The frame may have arrived (an uncertain transport, or a published buddy send with no outcome). Never retried. |
 
 A journaled member the journal cannot address is `refused: <reason>` with the
@@ -200,7 +212,7 @@ kind of peer (such as a browser peer) is excluded by construction.
 
 A literal-safe `@all` token anywhere in the body, on
 `#general` or a stored channel, is a broadcast: it is always journaled
-(each recipient is asked to `ack`) and delivered to every member except the
+(each recipient is asked to `ack`) and delivered to eligible members except the
 sender.
 
 - At most 64 recipients per post; over that it is refused (rc 2) before

@@ -1364,7 +1364,7 @@ test("chat: in #general the composer takes @all only: plain text shows the reaso
   assert.equal(t.app.state.selected, "general")
   assert.ok(composer(t).childNodes.length > 0)
   assert.equal(textareaOf(t).disabled, false, "editable: @all posts are open")
-  assert.equal(textareaOf(t).placeholder, "Start with @all to reach every #general member")
+  assert.equal(textareaOf(t).placeholder, "Start with @all to reach eligible #general members")
   assert.equal(sendButton(t).disabled, true, "nothing typed yet")
   assert.equal(pickBoxes(t).length, 0, "no picker: the target is #general")
   assert.ok(elementsOf(composer(t)).some((n) => n.attributes.class === "who chanpick fixed" && n.textContent.startsWith("#general")))
@@ -2312,9 +2312,9 @@ test("chat @all: #general's details hold the corrected 'How @all works' card", a
   await t.app.ready
   const info = textOf(t.document.byId.info)
   assert.ok(info.includes("How @all works"))
-  for (const want of ["The post goes to the #general members discovery found.",
+  for (const want of ["The post goes to eligible #general members discovery found.",
     "Preview recipients lists them; nothing is sent until you confirm that list.",
-    "Gone or refused members, idle OpenCode sessions (not woken) and discovery gaps show as their recorded outcomes.",
+    "Buddies are skipped unless directly named. Gone or refused members, idle OpenCode sessions (not woken) and discovery gaps show as their recorded outcomes.",
     "If membership changes between your preview and the send, nothing is sent and you are asked to preview again."]) {
     assert.ok(info.includes(want), want)
   }

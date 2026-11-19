@@ -88,12 +88,16 @@ journals it for ACKs), and read with `channel tail NAME`.
 
 - Channels default to quiet `mentions` delivery, including existing records.
   History keeps the post; interrupt with `@name`, a full typed id, `@here`
-  (positively live members) or `@all` (all members, bounded and journaled).
+  (positively live members) or `@all` (eligible members, bounded and journaled).
   Names resolve once; unknown, ambiguous or non-member mentions refuse the post.
   Email addresses, URLs and backtick code are literal, not mentions.
   Owners may choose `channel set NAME --deliver all`; buddy channels always use
-  `all`. Bound buddies normally stay out of shared channels and talk to their
-  lead; joining is allowed with a reminder. Binding never joins shared channels.
+  `all`. A session bound as someone's buddy is a non-lead, regardless of runtime;
+  everyone else is a lead. Public-channel joins and creation with buddy members
+  refuse unless `--allow-buddy` explicitly admits them. Fan-out skips current
+  buddies and unreadable role evidence unless admitted with that flag; direct
+  `@name` still interrupts. `#general` has no override. Binding never joins shared channels.
+  These channel roles grant no review or user-approval authority.
 - Leads read shared work with `channel tail NAME --unread`. It advances only
   their read cursor after successful output, never an ACK or handover. Human
   list/buddy/handover output adds bounded unread reminders; JSON shapes stay
@@ -101,7 +105,7 @@ journals it for ACKs), and read with `channel tail NAME`.
 
 - `#general` is derived from the sessions `list` discovers (OpenCode only those
   recently updated). A plain post there is recorded, not delivered; a body
-  mentioning a member or `@here` notifies that set; `@all` reaches every member,
+  mentioning a member or `@here` notifies that eligible set; `@all` reaches eligible members,
   is journaled for ACKs, and is limited
   to 64 recipients and one per sender per 60 s. Each post prints what OpenCode
   discovery covered: it is not "every session".

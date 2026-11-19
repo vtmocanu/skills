@@ -44,6 +44,7 @@ MODULES = (
     "peer_tests.test_channel_mentions",
     "peer_tests.test_channel_quiet",
     "peer_tests.test_channel_quiet_web",
+    "peer_tests.test_channel_roles",
     "peer_tests.test_channel_send",
     "peer_tests.test_channel_general",
     "peer_tests.test_channel_lifecycle",

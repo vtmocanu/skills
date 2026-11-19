@@ -56,7 +56,7 @@ class ChannelSendBase(ChannelBase):
     def channel(self, name, *members, owner=None):
         # These transport/journal fixtures intentionally exercise all-member fan-out.
         # Quiet defaults and mention filtering have their own acceptance tests.
-        return sp_channels.create_channel(name, owner or self.me, list(members), deliver="all")
+        return sp_channels.create_channel(name, owner or self.me, list(members), deliver="all", allow_buddy=True)
 
     def send(self, *extra, name="ops", message="freeze main"):
         rc, out, err = self.cli("send", "--to", "#" + name, "--message", message, "--json", *extra)

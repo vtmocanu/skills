@@ -29,6 +29,9 @@ the reply command included in a request envelope.
 | hooks | Hook installation, trust metadata, and startup reconciliation |
 | topics | Pull-only shared logs, retention, identity, and cursor commands |
 | channels | Channel store under the user-wide root, membership-first history, member liveness, and the `channel` commands |
+| channel_mentions | Literal-safe mention intent, without resolution or writes |
+| channel_reads | Per-reader progress and bounded human unread reminders, never ACKs |
+| channel_roles | Read-only current binding inventory for runtime-neutral lead admission and fan-out filtering |
 | webdata | Dashboard read model: bounded, read-only snapshots of channel history, journal ACK state and discovery, the poll cursor and the per-view JSON |
 | web | Dashboard HTTP server (loopback, token, GET only; one POST route in chat mode), the discovery worker and the `web` command; serves the static assets in `web/` (`index.html`, `app.css`, `app.js`); see Dashboard server below |
 | webchat | Chat mode state: the Browser feed log, status rows, `SendGate` (rate limits and queue capacity) and the single `SendWorker` |

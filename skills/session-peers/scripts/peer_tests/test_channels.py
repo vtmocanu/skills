@@ -206,7 +206,7 @@ class ChannelCommandTests(ChannelBase):
 
     def test_shim_member_is_stored_as_codex_and_removable_by_its_cc_spelling(self):
         tid = new_uuid()
-        self.write_record(os.getppid(), "shimmy", tid, str(self.socks / "shim.sock"), entrypoint="codex")
+        self.write_record(os.getppid(), "shimmy", tid, str(self.socks / "shim.sock"), entrypoint="codex", codexHome=os.environ["CODEX_HOME"])
         self.ok("create", "mix", "--member", "cc:" + tid)
         self.assertEqual(sp_channels.read_channel("mix")["members"], [self.me, "codex:" + tid])
         self.assertIn("removed codex:" + tid, self.ok("remove", "mix", "cc:" + tid))

@@ -446,6 +446,7 @@ class Server(http.server.ThreadingHTTPServer):
 
     def __init__(self, port=0, chat=False, clock=None):
         self.token = secrets.token_bytes(32).hex()
+        self.role_home = sp_storage.codex_home()  # capture before discovery's environment override
         from . import journal
         try:
             self.viewer = journal.caller()
@@ -713,8 +714,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if key != sp_constants.CHANNEL_GENERAL and rec is None:
             raise _Refused(409)
         roster = found["general"][0] if rec is None else rec["members"]
+        role_rec = rec if rec is not None else {"kind": "general", "members": []}
+        try:
+            direct = sp_channels.preview_direct_mentions(text, roster, found.get("names") or {})
+        except sp_channels.ChannelError:
+            raise _Refused(409)
+        checked = [m for m in roster if m != typed and m not in direct and m not in sp_channels._allowed_buddies(role_rec)]
+        from . import channel_roles
+        evidence = (channel_roles.roles(checked, home=self.server.role_home, known_owner_states=liveness)
+                    if checked and role_rec.get("kind") != "buddy" else {})
         for member in dict.fromkeys(roster):
             if member == typed:
+                continue
+            skipped = sp_channels._role_skip(key, member, direct, role_rec, evidence)
+            if skipped is not None:
+                excluded.append({"member": member, "reason": skipped})
                 continue
             # Only an incomplete check of #general itself refuses; `truncated` may concern other channels.
             if member in unchecked or member not in liveness:

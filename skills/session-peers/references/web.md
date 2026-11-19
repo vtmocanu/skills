@@ -245,6 +245,12 @@ Channel `@all` broadcasts require preview and confirmation. A plain `#general`
 post and an `@all` to picked members are refused with 403. Stored channels may
 keep quiet posts in history without notifying anyone; the Browser row says
 `Recorded, no notifications`, with no journal or ACK recipients.
+Broadcast previews omit current buddies without stored-channel overrides and
+show the skip reason. The worker rechecks current bindings before journal
+publication and immediately before transport; a changed confirmed recipient
+set refuses before publication. HTTP role previews use the captured server home
+and cached owner liveness, never resolve `CODEX_HOME` in a handler. Explicit
+names and buddy channels remain exempt from fan-out filtering.
 Channels show their `mentions` or `all` delivery mode. Posts with frozen typed
 mentions of the viewer, or `@here`/`@all`, are highlighted. Chat uses the browser
 peer as viewer; a read-only page uses the launcher identity captured before

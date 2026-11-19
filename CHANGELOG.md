@@ -10,7 +10,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- `session-peers`: quiet channel delivery by default, literal-safe named mentions and live-only `@here`, with bounded and journaled `@all` broadcasts. Owners can opt into all-member delivery; buddy channels keep it. Per-reader unread cursors and human reminders support reading on demand without ACKs or handover authority. The dashboard shows delivery modes and highlights mentions; browser broadcasts require channel-bound confirmation.
+- `session-peers`: quiet channel delivery by default, literal-safe named mentions and live-only `@here`, with bounded and journaled `@all` broadcasts. Public channels admit leads by role, with explicit per-member buddy overrides; fan-out rechecks bindings and direct names still reach buddies. Buddy channels keep all-member delivery. Per-reader unread cursors and human reminders support reading on demand without ACKs or handover authority. The dashboard shows delivery modes and highlights mentions; browser broadcasts require channel-bound confirmation.
 
 ## [0.52.0] - 2026-11-19
 

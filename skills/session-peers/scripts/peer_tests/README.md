@@ -32,6 +32,7 @@ python3 -m unittest peer_tests.test_messaging
 | test_channel_mentions | Literal-safe Unicode mention grammar and bounded large-input scanning |
 | test_channel_quiet | Quiet defaults, canonical targets, buddy invariants and per-reader progress without ACKs |
 | test_channel_quiet_web | Real HTTP quiet posts and route-bound channel broadcast previews |
+| test_channel_roles | Runtime-neutral lead admission, explicit buddy overrides and live fan-out role checks |
 | test_journal | Session-peers journal: retrieval identity, handovers, ACKs, retention, crash recovery, integrity, and the read-only view |
 | test_journal_cli | Journal command line: `send --record`, recorded requests and replies, exit codes 75 and 76, `record`, `inbox` journal commands and `ack` |
 | test_upgrade | Source digests and replacing an installed copy under a running shim |

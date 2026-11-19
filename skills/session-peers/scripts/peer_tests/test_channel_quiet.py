@@ -23,7 +23,7 @@ class QuietChannelTests(ChannelSendBase):
         rec.update(kind="buddy", deliver="mentions")
         self.assertEqual(channels.delivery_mode(rec), "all")
 
-    def test_buddy_mode_is_fixed_and_join_only_warns(self):
+    def test_buddy_mode_is_fixed(self):
         other = "cc:" + new_uuid()
         rec = channels.create_channel("buddy-test", other, [self.me], kind="buddy", reserved_ok=True)
         self.assertEqual(rec["deliver"], "all")
@@ -31,10 +31,6 @@ class QuietChannelTests(ChannelSendBase):
             row["current_buddy"] = self.me
             return None, None
         channels.change_membership("buddy-test", bind, other)
-        self.channel("ops", owner=other)
-        result = self.ok("join", "ops")
-        self.assertIn("buddies normally stay out", result)
-        self.assertIn(self.me, channels.read_channel("ops")["members"])
         self.as_cc(other.partition(":")[2])
         rc, _out, err = self.ch("set", "buddy-test", "--deliver", "all")
         self.assertNotEqual(rc, 0)

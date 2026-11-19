@@ -1187,8 +1187,8 @@
   // #general's "How @all works" card (the mock's, corrected for #162 M2): it promises only what is
   // recorded, never that every session gets a turn. The preview step exists only in chat mode.
   var ALL_CARD = [
-    "The post goes to the #general members discovery found.",
-    "Gone or refused members, idle OpenCode sessions (not woken) and discovery gaps show as their recorded outcomes.",
+    "The post goes to eligible #general members discovery found.",
+    "Buddies are skipped unless directly named. Gone or refused members, idle OpenCode sessions (not woken) and discovery gaps show as their recorded outcomes.",
     "Every recipient is asked for an ACK; the tally shows who has not answered."
   ];
   var ALL_CARD_CHAT = [
@@ -1742,7 +1742,7 @@
 
   function composeTo(ctx) {
     var C = S.compose;
-    // #general takes no picks: an @all post there addresses every member (after a confirmation).
+    // #general takes no picks: @all addresses eligible members after confirmation.
     if (ctx.kind === "general") return "#general";
     if (ctx.kind === "channel" && C.channel) return "#" + ctx.key;
     if (ctx.kind !== "channel" && ctx.kind !== "browser") return null;
@@ -1788,8 +1788,8 @@
     var out = [];
     C.boxes = [];
     if (ctx.kind === "general") {
-      out.push(el("span", { class: "who chanpick fixed", title: "An @all post reaches every #general member after you confirm the recipient list" },
-        el("span", { class: "nm" }, chanText("general")), el("span", { class: "muted" }, "everyone, after you confirm")));
+      out.push(el("span", { class: "who chanpick fixed", title: "An @all post reaches eligible #general members after you confirm the recipient list" },
+        el("span", { class: "nm" }, chanText("general")), el("span", { class: "muted" }, "eligible members, after you confirm")));
       return out;
     }
     if (ctx.kind === "channel") {
@@ -1856,7 +1856,7 @@
     var channelBroadcast = allText && ctx.kind === "channel" && C.channel;
     var plainGeneral = general && !allText && !!value.trim();
     n.text.disabled = !!blocked;
-    var placeholder = general ? "Start with @all to reach every #general member" : "Ask, steer or brief a session";
+    var placeholder = general ? "Start with @all to reach eligible #general members" : "Ask, steer or brief a session";
     if (n.text.placeholder !== placeholder) n.text.placeholder = placeholder;
     // An @all always asks for ACKs: in #general the box shows that, checked and fixed.
     if (general || channelBroadcast) {
