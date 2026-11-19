@@ -1632,6 +1632,9 @@ def cmd_handover(args):
             print("handed over #%s to %s" % (key, sp_journal._human(target)))
     if not moved and not failed:
         print("no stored channels to hand over")
+    if not getattr(args, "json", False):
+        from . import ledger
+        ledger.print_summary()
     return 1 if failed else 0
 
 

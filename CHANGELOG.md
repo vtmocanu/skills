@@ -6,6 +6,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.50.0] - 2026-11-19
+
+### Added
+
+- `session-peers`: private, local-only Git handover ledgers shared by a repository's worktrees, with explicit claims, imports, relocation, committed-state reads and fail-closed ownership and recovery. The skill derives their location; human buddy and handover output adds a bounded discovery reminder without hooks or changes to existing JSON output.
+
 ### Added
 
 - CI: a separate workflow runs checksum-verified gitleaks on pull-request commits and every push to main, without cancelling pending push scans.

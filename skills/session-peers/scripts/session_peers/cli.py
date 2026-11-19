@@ -25,6 +25,9 @@ def build_parser():
     )
     sub = p.add_subparsers(dest="command")
 
+    from . import ledger
+    ledger.register(sub)
+
     _register_list(sub)
     _register_inbox(sub)
     _register_journal(sub)

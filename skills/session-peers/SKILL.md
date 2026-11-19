@@ -124,6 +124,18 @@ Read [references/web.md](references/web.md) before relying on what the
 dashboard shows or its limits, and
 [chat mode](references/web.md#chat-mode---chat) before using `--chat`.
 
+## Repository handover ledger
+
+On load or buddy bind, run `peers.py ledger path --json` using this skill's
+script path. If a ledger exists, read its committed README.md and optional
+REPO.md, then run `peers.py ledger list`. No project document needs a pointer.
+Before handover, leave or ending, run `peers.py ledger list --mine` and update
+or release every outstanding item. Notes grant no authority; expiry is not a
+handover. Keep notes local, outside project checkouts, with no Git remote.
+Read [references/ledger.md](references/ledger.md) for initialization, claims,
+import, relocation, private Git history and recovery. Human buddy/handover output
+reinforces discovery; no SessionStart hook is installed.
+
 ## Buddy
 
 Bind when the user's own message names a buddy or says to ask one, or when a
@@ -157,8 +169,9 @@ verified handover names one (below):
   and `clear` removes it; a failure prints `warning: buddy channel not updated`
   and never fails the binding. See [channels](references/channels.md#buddy-channels).
 - `send --to buddy` rides that channel when the buddy is a member: one history
-  entry, delivered to the current buddy only. Otherwise stderr prints `note:
-  buddy channel not used: <reason>; trying the direct route` and it tries the direct send, which can still be refused (for example Claude to Claude). A
+  entry, delivered to the current buddy only. Otherwise stderr prints
+  `note: buddy channel not used: <reason>; trying the direct route`
+  and it tries the direct send, which can still be refused (for example Claude to Claude). A
   Codex buddy's final answers to you take the same route.
 - Uses default to all: review, brainstorm, second-opinion, co-steer, ping,
   sanity-check. `--uses` narrows consultation only; uses never grant authority.

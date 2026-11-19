@@ -258,8 +258,8 @@ resolves as before.
   candidates after `pick one typed ID:`. `buddy set`, `up`, `restart`, `down`
   and `budget` print the same candidate lines.
 - **Check and delivery agree**: delivery re-verifies the checked identity and
-  refuses, sending nothing, with `<target> changed between the route check and
-  delivery` (rc 1).
+  refuses, sending nothing, with `<target> changed between the route check and delivery`
+  (rc 1).
 
 | Sender | Verb and target | Result |
 | --- | --- | --- |

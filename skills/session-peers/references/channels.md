@@ -66,8 +66,8 @@ failed.
 - `--wake`, `--allow-reply-wake`, `--in-reply-to` and `--from-*` are refused
   (rc 2): channel sends never wake and carry no reply route override.
 - The body goes to history, then each member except the sender gets it in turn.
-  Each delivery starts with `[channel #<name> message <mid> from <sender> to
-  <recipient>]`, so no two deliveries are byte-identical; a journaled message
+  Each delivery starts with `[channel #<name> message <mid> from <sender> to <recipient>]`,
+  so no two deliveries are byte-identical; a journaled message
   adds the `inbox get`/`ack` pointer line after it. The body is peer-supplied
   data wrapped like any peer message.
 - Claude deliveries are at least 1 s apart. A channel send never wakes an idle
@@ -222,8 +222,8 @@ sender.
   is renamed to the successor. Nothing else moves: no budgets, no buddy
   bindings, no reply allowance, no approvals.
 - An unreadable channel record anywhere in the store (corrupt, oversized or
-  with wrong fields) makes `leave` and `handover` report `could not read
-  #<key>` and exit 1, even if the caller is not in that channel. The other
+  with wrong fields) makes `leave` and `handover` report `could not read #<key>`
+  and exit 1, even if the caller is not in that channel. The other
   channels are still processed, and `leave` still writes the `#general` marker.
   To recover, fix or delete `~/.codex/session-peers/channels/<key>.json` by
   hand; no command removes a record.
@@ -243,8 +243,8 @@ names only the latest. Remove an earlier buddy with `channel remove`, or it
 runs `channel leave`.
 
 - Upkeep runs only when the caller is the binding's owner (`buddy set --as
-  OTHER` is not). A failure never fails the binding: stderr prints `warning:
-  buddy channel not updated: <reason>`.
+  OTHER` is not). A failure never fails the binding: stderr prints
+  `warning: buddy channel not updated: <reason>`.
 - A lead that handed its buddy channel over gets no new one; the warning names
   the successor that owns it.
 - Nobody joins a buddy channel with `channel join`.
@@ -330,8 +330,8 @@ A label names the channel by its pair and is computed at render time:
   `channel` and `outcomes`. Exit 1 on a refused or `unknown` outcome. A gone
   buddy, a message oversize once the header is added, or a journal preflight
   failure records and sends nothing and exits 1.
-- Otherwise stderr prints `note: buddy channel not used: <reason>; trying the
-  direct route` and the direct send runs; it can still fail or be refused, so
+- Otherwise stderr prints `note: buddy channel not used: <reason>; trying the direct route`
+  and the direct send runs; it can still fail or be refused, so
   the note is not a delivery report. Reasons: no buddy channel, the buddy is
   not a member, `--from-*`, `--allow-reply-wake` or `--in-reply-to`, the caller
   is not the binding's owner, a sender identity error, the buddy's id is not a

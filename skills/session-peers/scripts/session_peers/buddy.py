@@ -364,6 +364,9 @@ def _print_buddy(args, rec, status):
         print(json.dumps(payload, indent=2, sort_keys=True))
     else:
         print(_buddy_line(rec, status))
+        if (getattr(args, "buddy_cmd", None) or "show") in ("show", "set"):
+            from . import ledger
+            ledger.print_summary()
 
 
 def cmd_buddy(args):
