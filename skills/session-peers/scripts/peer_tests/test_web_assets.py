@@ -173,10 +173,12 @@ class WebAssetTests(unittest.TestCase):
         # describedBy() is the one other setter: it links the composer's reason, and names nothing else.
         d_start, d_end = function_body(self.js, "describedBy")
         self.assertEqual(re.findall(r'setAttribute\(\s*("[^"]*"|[^,]*)', self.js[d_start:d_end]), ['"aria-describedby"'])
+        p_start, p_end = function_body(self.js, "pinAttributes")
+        self.assertEqual(re.findall(r'setAttribute\(\s*("[^"]*"|[^,]*)', self.js[p_start:p_end]), ['"aria-expanded"', '"title"'])
         uses = [m.start() for m in re.finditer(r"setAttribute(?:NS)?\b", self.js)]
         self.assertTrue(uses, "el() sets attributes")
         for pos in uses:
-            self.assertTrue(start <= pos < end or d_start <= pos < d_end, "setAttribute outside el() at offset %d" % pos)
+            self.assertTrue(start <= pos < end or d_start <= pos < d_end or p_start <= pos < p_end, "unaudited setAttribute at offset %d" % pos)
         self.assertIsNone(re.search(r"\.\s*attributes\s*\[|\bsetAttributeNode\b|\.\s*(?:href|src|style)\s*=", self.js))
 
     def test_el_enforces_an_attribute_allowlist(self):
@@ -188,7 +190,7 @@ class WebAssetTests(unittest.TestCase):
             self.assertNotIn('"%s"' % name, self.js.split("function attrAllowed")[0].split("var ATTRS")[1])
 
     def test_storage_holds_only_display_preferences(self):
-        for name in ("THEME_KEY", "SIDEBAR_PREF_KEY"):
+        for name in ("THEME_KEY", "SIDEBAR_PREF_KEY", "PIN_PREF_KEY"):
             key = re.search(r'var %s = "([^"]+)";' % name, self.js)
             self.assertIsNotNone(key)
             self.assertNotIn("token", key.group(1).lower())
@@ -197,7 +199,18 @@ class WebAssetTests(unittest.TestCase):
             if match.group(1) is None:
                 continue  # a bare presence check
             self.assertIn(member, ("getItem", "setItem", "removeItem"), match.group(0))
-            self.assertRegex(self.js[match.end():match.end() + 24], r"^\((?:THEME_KEY|SIDEBAR_PREF_KEY)\b")
+            self.assertRegex(self.js[match.end():match.end() + 24], r"^\((?:THEME_KEY|SIDEBAR_PREF_KEY|PIN_PREF_KEY)\b")
+
+    def test_ownership_pin_has_no_closed_scroller_and_respects_reduced_motion(self):
+        host = re.search(r"#ledgerhost\{([^}]+)\}", self.css).group(1)
+        self.assertNotIn("overflow", host)
+        self.assertIn("position:relative", host)
+        popup = re.search(r"\.ledger-popup\{([^}]+)\}", self.css).group(1)
+        self.assertIn("position:absolute", popup)
+        self.assertIn("max-height:60vh", popup)
+        self.assertIn("overflow:auto", popup)
+        self.assertRegex(self.css, r"prefers-reduced-motion:reduce[^}]+animation:none!important")
+        self.assertLess(self.html.index('id="ledgerhost"'), self.html.index('id="stream"'))
 
     def test_requests_go_only_to_the_api_with_the_header(self):
         self.assertEqual(len(re.findall(r"\bfetch\s*\(", self.js)), 1)

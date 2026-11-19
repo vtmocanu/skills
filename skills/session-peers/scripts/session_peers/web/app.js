@@ -6,7 +6,7 @@
  * Rendering safety: every element is built by el(); peer prose enters text nodes and only
  * validated HTTP(S) targets enter link attributes. el() refuses attributes and tags outside
  * its allowlists. The access token lives in one variable, is sent as X-Peers-Token and is never stored.
- * Storage holds only the colour theme and stale-section display preferences.
+ * Storage holds only display preferences: theme, stale sections and channel pin choices.
  *
  * Icons: the Claude mark is simple-icons claude.svg (CC0-1.0); the OpenAI mark used for Codex
  * is Bootstrap Icons 1.13.1 openai.svg (MIT, see THIRD_PARTY_NOTICES.md); the OpenCode glyph
@@ -18,6 +18,7 @@
   var SVG_NS = "http://www.w3.org/2000/svg";
   var THEME_KEY = "session-peers-web-theme";
   var SIDEBAR_PREF_KEY = "session-peers-web-stale-sections";
+  var PIN_PREF_KEY = "session-peers-web-ownership-pins";
   var ACTIVE_SECONDS = 24 * 60 * 60;
   var POLL_MS = 2000;
   var BACKOFF_MAX_MS = 30000;
@@ -90,7 +91,7 @@
         if (value === null || value === undefined || value === false) return;
         var linkAttr = name === "a" && !svg && ((key === "href" && safeURL(value)) ||
           (key === "target" && value === "_blank") || (key === "rel" && value === "noopener noreferrer"));
-        var tableAttr = name === "th" && key === "colspan" && value === 5;
+        var tableAttr = name === "th" && key === "colspan" && (value === 4 || value === 5);
         if (!linkAttr && !tableAttr && !attrAllowed(key, svg)) throw new Error("el: attribute not allowed: " + key);
         node.setAttribute(key, value === true ? "true" : String(value));
       });
@@ -202,7 +203,7 @@
     // Per channel key {a: "posted" | "none" | "unknown" | null, ts}: the state's activity, then live polls.
     activity: table(), ledgers: table(), ledgerGen: table(),
     deliverySeen: table(), unreadChannels: table(), renderedRail: null,
-    staleOpen: { channels: false, sessions: false }
+    staleOpen: { channels: false, sessions: false }, pinOpen: table(), pinDOM: null
   };
 
   var RT_LABEL = { claude: "Claude Code", codex: "Codex", oc: "OpenCode", web: "Browser", unknown: "Unknown runtime" };
@@ -500,8 +501,9 @@
     } catch (_err) { return false; }
   }
 
-  function linkNode(label, href) {
-    return safeURL(href) ? el("a", { href: href, target: "_blank", rel: "noopener noreferrer" }, label) : String(label);
+  function linkNode(label, href, focusKey) {
+    return safeURL(href) ? el("a", { href: href, target: "_blank", rel: "noopener noreferrer",
+      "data-focus": focusKey || null, title: focusKey ? href : null }, label) : String(label);
   }
 
   function textLinks(text) {
@@ -554,24 +556,48 @@
     return isNaN(date.getTime()) ? str(value) : date.toISOString().slice(0, seconds ? 19 : 16).replace("T", " ") + " UTC";
   }
 
+  function relativeUpdated(value) {
+    var seconds = Math.floor((Date.now() - new Date(value).getTime()) / 1000);
+    if (!isFinite(seconds)) return "unknown";
+    var future = seconds < 0, age = Math.abs(seconds), count, unit;
+    if (age < 60) return future ? "soon" : "just now";
+    if (age < 3600) { count = Math.floor(age / 60); unit = "m"; }
+    else if (age < 86400) { count = Math.floor(age / 3600); unit = "h"; }
+    else { count = Math.floor(age / 86400); unit = "d"; }
+    return future ? "in " + count + unit : count + unit + " ago";
+  }
+
   function renderLedger(view) {
     if (!view || view.state === "unbound") return null;
-    var panel = el("div", { class: "ledger-panel", role: "region", "aria-label": "Repository ownership ledger" },
-      el("h2", null, "Ownership ledger"));
+    var panel = el("div", { class: "ledger-panel", role: "region", "aria-label": "Repository ownership ledger" });
+    panel._ledgerTimes = [];
+    panel._ledgerFocus = table();
     if (view.state !== "current") {
       append(panel, el("p", { class: "note warn" }, "Ledger unavailable. Refreshing live ownership could not be verified."));
       return panel;
     }
-    append(panel, el("small", null, "Committed ledger · " + ledgerTime(view.observed_at, true) + " · " + str(view.unowned_open) + " unowned open"));
+    var groups = Array.isArray(view.groups) ? view.groups : [];
+    var hasTitle = groups.some(function (g) { return g.items.some(function (i) { return str(i.title) && str(i.title) !== str(i.slug); }); });
+    panel.classList.add(hasTitle ? "has-titles" : "no-titles");
+    var headers = hasTitle ? ["Item", "Title", "Status", "Links", "Updated"] : ["Item", "Status", "Links", "Updated"];
     var tab = el("table", null, el("thead", null, el("tr", null,
-      ["Item", "Title", "Status", "Links", "Updated"].map(function (label) { return el("th", null, label); }))));
-    (Array.isArray(view.groups) ? view.groups : []).forEach(function (group) {
-      var body = el("tbody", null, el("tr", { class: "ledger-owner" }, el("th", { colspan: 5 }, str(group.owner))));
+      headers.map(function (label) { return el("th", { class: "ledger-col-" + label.toLowerCase() }, label); }))));
+    groups.forEach(function (group) {
+      var body = el("tbody", null, el("tr", { class: "ledger-owner" }, el("th", { colspan: headers.length, title: str(group.owner) }, str(group.owner))));
       (Array.isArray(group.items) ? group.items : []).forEach(function (item) {
-        append(body, el("tr", null, el("td", { class: "mono" }, str(item.slug)), el("td", null, str(item.title)),
-          el("td", null, str(item.status)), el("td", null,
-            (Array.isArray(item.links) ? item.links : []).map(function (link) { return [linkNode(str(link.label), link.href), " "]; })),
-          el("td", { title: str(item.updated) }, ledgerTime(item.updated, false))));
+        var cells = [el("td", null, el("span", { class: "mono ledger-slug", title: str(item.slug) }, str(item.slug)))];
+        if (hasTitle) cells.push(el("td", null, el("span", { class: "ledger-title", title: str(item.title) }, str(item.title) === str(item.slug) ? "" : str(item.title))));
+        cells.push(el("td", null, el("span", { class: "badge ledger-status " + (item.status === "blocked" ? "warn" : item.status === "done" ? "ok" : "") }, str(item.status))));
+        cells.push(el("td", { class: "ledger-links" }, (Array.isArray(item.links) ? item.links : []).map(function (link, index) {
+          var key = "ledger-link:" + str(item.slug) + ":" + index;
+          var node = linkNode(str(link.label), link.href, key);
+          if (node && node.nodeType === 1) panel._ledgerFocus[key] = node;
+          return [node, " "];
+        })));
+        var updated = el("td", { title: str(item.updated), class: "ledger-updated" }, relativeUpdated(item.updated));
+        panel._ledgerTimes.push({ node: updated, at: item.updated });
+        cells.push(updated);
+        append(body, el("tr", null, cells));
       });
       append(tab, body);
     });
@@ -579,16 +605,132 @@
     return panel;
   }
 
+  function pinAttributes(button, open, title) {
+    // Audited in test_web_assets: fixed inert attributes only, no generic setter.
+    button.setAttribute("aria-expanded", String(!!open));
+    button.setAttribute("title", str(title));
+  }
+
+  function insideNode(parent, node) {
+    while (node) { if (node === parent) return true; node = node.parentNode; }
+    return false;
+  }
+
+  function setPinOpen(key, open, focus) {
+    S.pinOpen[key] = !!open;
+    savePinPrefs();
+    paintLedger(key);
+    if (focus && S.pinDOM && S.pinDOM.key === key && S.pinDOM.button.focus) S.pinDOM.button.focus();
+  }
+
+  function fitPin(dom) {
+    var area = dom.owners, tokens = dom.ownerTokens;
+    fill(area, tokens);
+    dom.more.textContent = "";
+    if (area.clientWidth > 0 && area.scrollWidth > 0) {
+      while (area.childNodes.length && area.scrollWidth > area.clientWidth) {
+        area.removeChild(area.childNodes[area.childNodes.length - 1]);
+        dom.more.textContent = "+" + (tokens.length - area.childNodes.length) + " more";
+      }
+    } else {
+      var budget = Math.max(0, (dom.host.clientWidth || 700) - 230), used = 0, kept = 0;
+      tokens.some(function (node) { var width = node.scrollWidth || node.textContent.length * 7 + 14; if (used + width > budget) return true; used += width; kept++; return false; });
+      while (area.childNodes.length > kept) area.removeChild(area.childNodes[area.childNodes.length - 1]);
+      if (kept < tokens.length) dom.more.textContent = "+" + (tokens.length - kept) + " more";
+    }
+    dom.width = dom.host.clientWidth;
+  }
+
+  function flashPin(node) {
+    node.classList.remove("pin-changed");
+    void node.offsetWidth;  // restart the CSS-only, reduced-motion-aware emphasis
+    node.classList.add("pin-changed");
+  }
+
+  function newPin(host, key) {
+    var label = el("span", { class: "pin-label" }, el("span", { "aria-hidden": "true" }, "📌 "), "Ownership");
+    var owners = el("span", { class: "pin-owners" });
+    var more = el("span", { class: "pin-more" });
+    var unowned = el("span", { class: "pin-unowned" });
+    var button = el("button", { type: "button", class: "ledger-pin", "aria-expanded": "false", "data-focus": "ownership-pin:" + key }, label, owners, more, unowned);
+    var dom = { host: host, key: key, button: button, label: label, owners: owners, more: more, unowned: unowned,
+      popup: null, content: null, signature: null, summary: null, counts: null, ownerNodes: table(), ownerTokens: [] };
+    on(button, "click", function () { setPinOpen(key, !S.pinOpen[key], false); });
+    on(button, "keydown", function (event) {
+      if (event.key === "Enter" || event.key === " ") { event.preventDefault(); setPinOpen(key, !S.pinOpen[key], false); }
+    });
+    fill(host, button);
+    return dom;
+  }
+
+  function updatePin(dom, view) {
+    var open = S.pinOpen[dom.key] === true;
+    var groups = view.state === "current" ? (Array.isArray(view.groups) ? view.groups : []).map(function (group, index) {
+      return { id: str(group.owner_id) || "owner:" + str(group.owner) + ":" + index, name: str(group.owner), count: group.items.length };
+    }).sort(function (a, b) { return b.count - a.count || cmpCodePoints(a.name, b.name) || cmpCodePoints(a.id, b.id); }) : [];
+    var summary = JSON.stringify([view.state, groups, view.unowned_open]);
+    if (summary !== dom.summary) {
+      var counts = table(), previous = dom.counts, nodes = table(), changed = [];
+      dom.ownerTokens = groups.map(function (group) {
+        counts[group.id] = group.count;
+        var node = dom.ownerNodes[group.id] || el("span", { class: "pin-owner" });
+        nodes[group.id] = node;
+        node.textContent = " · " + group.name + " " + group.count;
+        if (!open && previous && previous[group.id] !== group.count) { flashPin(node); changed.push(node); }
+        return node;
+      });
+      dom.unowned.textContent = view.state === "current" ? " · " + str(view.unowned_open) + " unowned" : " · unavailable";
+      if (!open && previous && dom.unownedCount !== view.unowned_open) flashPin(dom.unowned);
+      if (!open && previous && Object.keys(previous).some(function (id) { return !Object.prototype.hasOwnProperty.call(counts, id); })) flashPin(dom.label);
+      dom.counts = view.state === "current" ? counts : null;
+      dom.unownedCount = view.unowned_open;
+      dom.summary = summary;
+      dom.ownerNodes = nodes;
+      fitPin(dom);
+      if (!open && dom.more.textContent && changed.some(function (node) { return node.parentNode !== dom.owners; })) flashPin(dom.more);
+    } else if (dom.width !== dom.host.clientWidth) fitPin(dom);
+    pinAttributes(dom.button, open, view.state === "current" ? "Committed ledger " + str(view.commit) + " · " + ledgerTime(view.observed_at, true) : "Ledger unavailable");
+    S.focusables["ownership-pin:" + dom.key] = dom.button;
+    if (!open) {
+      if (dom.popup) dom.host.removeChild(dom.popup);
+      dom.popup = dom.content = null; dom.signature = null;
+      return;
+    }
+    if (!dom.popup) {
+      dom.popup = el("div", { class: "ledger-popup", role: "region", "aria-label": "Ownership table" });
+      append(dom.host, dom.popup);
+    }
+    var signature = JSON.stringify([view.state, view.groups]);
+    if (signature !== dom.signature) {
+      var scroll = dom.popup.scrollTop, focused = document.activeElement;
+      var focusKey = insideNode(dom.popup, focused) && focused.getAttribute ? focused.getAttribute("data-focus") : null;
+      dom.content = renderLedger(view);
+      fill(dom.popup, dom.content);
+      if (focusKey && dom.content && dom.content._ledgerFocus[focusKey]) dom.content._ledgerFocus[focusKey].focus({ preventScroll: true });
+      dom.popup.scrollTop = scroll;
+      dom.signature = signature;
+    } else if (dom.content) {
+      dom.content._ledgerTimes.forEach(function (record) { var text = relativeUpdated(record.at); if (record.node.textContent !== text) record.node.textContent = text; });
+    }
+    if (dom.content) Object.keys(dom.content._ledgerFocus).forEach(function (key) { S.focusables[key] = dom.content._ledgerFocus[key]; });
+  }
+
   function paintLedger(key) {
     var host = $("ledgerhost");
     if (!host) return;
     try {
-      fill(host, key ? renderLedger(S.ledgers[key]) : null);
+      host.classList.remove("ledger-error");
+      var view = key && S.ledgers[key];
+      if (!view || view.state === "unbound") { fill(host, null); S.pinDOM = null; return; }
+      if (!S.pinDOM || S.pinDOM.key !== key || S.pinDOM.host !== host) S.pinDOM = newPin(host, key);
+      updatePin(S.pinDOM, view);
     } catch (_err) {
       if (key) S.ledgers[key] = { state: "unavailable" };
       // Do not use el() for the fallback: element/attribute creation may be
       // exactly what failed. Keep this optional panel out of the history path.
       host.textContent = "Ledger unavailable. The ownership table could not be rendered.";
+      host.classList.add("ledger-error");
+      S.pinDOM = null;
     }
   }
 
@@ -3021,6 +3163,25 @@
     } catch (_err) { /* the toggle still works for this tab */ }
   }
 
+  function loadPinPrefs() {
+    S.pinOpen = table();
+    try {
+      var value = root.localStorage && root.localStorage.getItem(PIN_PREF_KEY);
+      var parsed = typeof value === "string" && value.length <= 24000 ? JSON.parse(value) : null;
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) Object.keys(parsed).slice(0, 256).forEach(function (key) {
+        if (/^[a-z0-9-]{1,64}$/.test(key) && typeof parsed[key] === "boolean") S.pinOpen[key] = parsed[key];
+      });
+    } catch (_err) { /* default closed without usable preferences */ }
+  }
+
+  function savePinPrefs() {
+    try {
+      var values = table();
+      Object.keys(S.pinOpen).filter(function (key) { return /^[a-z0-9-]{1,64}$/.test(key) && typeof S.pinOpen[key] === "boolean"; }).slice(-256).forEach(function (key) { values[key] = S.pinOpen[key]; });
+      if (root.localStorage) root.localStorage.setItem(PIN_PREF_KEY, JSON.stringify(values));
+    } catch (_err) { /* the open/closed choice still works for this tab */ }
+  }
+
   function applyTheme(theme) {
     var html = document.documentElement;
     if (!html || !html.classList) return;
@@ -3064,6 +3225,17 @@
   function wire() {
     if (S.wired) return;
     S.wired = true;
+    if (typeof root.addEventListener === "function") {
+      root.addEventListener("click", function (event) {
+        var dom = S.pinDOM;
+        if (dom && S.pinOpen[dom.key] && !insideNode(dom.host, event.target)) setPinOpen(dom.key, false, false);
+      }, true);
+      root.addEventListener("keydown", function (event) {
+        var dom = S.pinDOM;
+        if (event.key === "Escape" && dom && S.pinOpen[dom.key]) { event.preventDefault(); setPinOpen(dom.key, false, true); }
+      });
+      root.addEventListener("resize", function () { if (S.pinDOM) fitPin(S.pinDOM); });
+    }
     var q = $("q");
     on(q, "keydown", function (event) {
       if (event.key !== "Enter") return;
@@ -3080,6 +3252,7 @@
   function start() {
     applyTheme(storedTheme());
     loadSidebarPrefs();
+    loadPinPrefs();
     S.token = readToken();
     watchHash();
     renderLegend();
@@ -3109,7 +3282,7 @@
     renderRail: renderRail, renderDetails: renderDetails, renderMain: renderMain, applyChanges: applyChanges,
     applyUpdate: applyUpdate, pollOnce: pollOnce, setState: setState, selectChannel: selectChannel, showAll: showAll,
     loadAll: loadAll, runSearch: runSearch, tallyOf: tallyOf, copyable: copyable, gapNote: gapNote, start: start,
-    toggleTheme: toggleTheme, THEME_KEY: THEME_KEY, SIDEBAR_PREF_KEY: SIDEBAR_PREF_KEY,
+    toggleTheme: toggleTheme, THEME_KEY: THEME_KEY, SIDEBAR_PREF_KEY: SIDEBAR_PREF_KEY, PIN_PREF_KEY: PIN_PREF_KEY,
     applyBrowser: applyBrowser, renderSendStatus: renderSendStatus, renderBrowserEntry: renderBrowserEntry, renderComposer: renderComposer,
     submitCompose: submitCompose, postSend: postSend, sendErrorText: sendErrorText, showBrowser: showBrowser, rowTally: rowTally,
     readPreview: readPreview, renderLedger: renderLedger, bodyNodes: bodyNodes, refreshLedger: refreshLedger,

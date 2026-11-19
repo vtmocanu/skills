@@ -476,7 +476,7 @@ test("the token travels only as X-Peers-Token, the hash is cleared, and only dis
   assert.equal(env.location.hash, "")
   assert.equal(env.historyCalls.length, 1)
   assert.equal(env.historyCalls[0][2], "/")
-  assert.ok(env.storageLog.every((op) => [env.app.THEME_KEY, env.app.SIDEBAR_PREF_KEY].includes(op[1])), JSON.stringify(env.storageLog))
+  assert.ok(env.storageLog.every((op) => [env.app.THEME_KEY, env.app.SIDEBAR_PREF_KEY, env.app.PIN_PREF_KEY].includes(op[1])), JSON.stringify(env.storageLog))
   assert.ok(!JSON.stringify(env.storageLog).includes("abab"))
   const themeButton = () => env.document.byId.themebox.childNodes[0]
   assert.equal(themeButton().attributes["aria-pressed"], "false")
@@ -2872,6 +2872,95 @@ function ledgerFixture(commit = "a".repeat(40)) {
       links: [{ label: "PR #42", href: "https://github.com/a/b/pull/42" }, { label: "unsafe", href: "javascript:alert(1)" }] }] }] }
 }
 
+test("ownership pin is closed by default, sorted by count and truncated", async () => {
+  const view = ledgerFixture()
+  const row = view.groups[0].items[0]
+  view.groups = [{ owner_id: "small", owner: "Small", items: [row] },
+    { owner_id: "large", owner: "Large", items: [row, row, row] }]
+  const t = bootFixture({ "/api/ledger/": view })
+  await t.app.ready
+  const pin = t.app.state.pinDOM
+  assert.equal(pin.button.attributes["aria-expanded"], "false")
+  assert.equal(pin.popup, null, "closed pin creates no second scrolling region")
+  assert.ok(pin.button.textContent.includes("Ownership"))
+  assert.ok(pin.button.textContent.indexOf("Large 3") < pin.button.textContent.indexOf("Small 1"))
+  assert.ok(pin.button.textContent.includes("2 unowned"))
+  pin.host.clientWidth = 240
+  for (const fn of t.context.windowListeners.resize) fn({})
+  assert.equal(pin.more.textContent, "+2 more")
+})
+
+test("ownership pin toggles by keyboard, click, Escape and outside click; persists per channel", async () => {
+  const t = bootFixture({ "/api/ledger/": ledgerFixture() })
+  await t.app.ready
+  const pin = t.app.state.pinDOM
+  pin.button.dispatch("keydown", { key: "Enter" })
+  assert.ok(pin.popup)
+  for (const fn of t.context.windowListeners.click) fn({ target: pin.popup })
+  assert.ok(pin.popup, "inside click retains overlay")
+  for (const fn of t.context.windowListeners.keydown) fn({ key: "Escape", preventDefault() {} })
+  assert.equal(pin.popup, null)
+  assert.equal(t.document.activeElement, pin.button)
+  pin.button.dispatch("keydown", { key: " " })
+  assert.ok(pin.popup)
+  for (const fn of t.context.windowListeners.click) fn({ target: t.document.byId.stream })
+  assert.equal(pin.popup, null)
+  pin.button.dispatch("click")
+  const saved = t.storageLog.filter((r) => r[0] === "set" && r[1] === t.app.PIN_PREF_KEY).at(-1)[2]
+  assert.deepEqual(JSON.parse(saved), { general: true })
+  const u = bootFixture({ "/api/ledger/": ledgerFixture() }, { storageValues: { [t.app.PIN_PREF_KEY]: saved } })
+  await u.app.ready
+  assert.ok(u.app.state.pinDOM.popup)
+  await u.app.selectChannel("ops")
+  assert.equal(u.app.state.pinDOM.popup, null, "other channel defaults closed")
+})
+
+test("ownership overlay keeps its node, table and scroll on unchanged polls; compact cells retain full tooltips", async () => {
+  const view = ledgerFixture()
+  const row = view.groups[0].items[0]
+  row.title = row.slug
+  const t = bootFixture({ "/api/ledger/": view })
+  await t.app.ready
+  setNow(t, Date.parse("2026-11-19T10:00:00Z"))
+  const pin = t.app.state.pinDOM
+  pin.button.dispatch("click")
+  const popup = pin.popup, content = pin.content
+  popup.scrollTop = 91
+  assert.equal(elementsOf(content).filter((n) => n.tagName === "th").length, 5, "four columns plus owner header")
+  assert.ok(!content.textContent.includes("Title"))
+  assert.ok(content.textContent.includes("2h ago"))
+  assert.ok(elementsOf(content).some((n) => n.attributes.title === row.slug))
+  assert.ok(elementsOf(content).some((n) => n.attributes.title === row.updated))
+  assert.ok(elementsOf(content).some((n) => n.attributes.class?.includes("ledger-status")))
+  view.commit = "b".repeat(40)
+  await t.app.refreshLedger()
+  assert.equal(pin.popup, popup)
+  assert.equal(pin.content, content, "receipt changes do not rebuild the table")
+  assert.equal(popup.scrollTop, 91)
+  row.status = "blocked"
+  await t.app.refreshLedger()
+  assert.equal(pin.popup, popup)
+  assert.equal(popup.scrollTop, 91, "changed table restores scroll")
+  assert.ok(pin.content.textContent.includes("blocked"))
+})
+
+test("collapsed pin emphasizes changed counts without timers; malformed or unavailable storage stays usable", async () => {
+  for (const raw of ["not json", "[]", '{"general":"yes"}']) {
+    const t = bootFixture({ "/api/ledger/": ledgerFixture() }, { storageValues: { "session-peers-web-ownership-pins": raw } })
+    await t.app.ready
+    assert.equal(t.app.state.pinDOM.popup, null)
+  }
+  const view = ledgerFixture()
+  const t = bootFixture({ "/api/ledger/": view }, { storageProvider: { getItem() { throw Error("blocked") }, setItem() { throw Error("blocked") } } })
+  await t.app.ready
+  const pin = t.app.state.pinDOM
+  view.groups[0].items.push({ ...view.groups[0].items[0], slug: "43" })
+  await t.app.refreshLedger()
+  assert.ok(pin.ownerTokens[0].classList.contains("pin-changed"))
+  pin.button.dispatch("click")
+  assert.ok(pin.popup)
+})
+
 test("ledger panel is a real table, escapes labels and refuses unsafe links", () => {
   const { app, document } = load()
   const node = app.renderLedger(ledgerFixture())
@@ -2880,7 +2969,7 @@ test("ledger panel is a real table, escapes labels and refuses unsafe links", ()
   assert.equal(elements.filter((n) => n.tagName === "a").length, 1)
   assert.ok(node.textContent.includes("lead <img>"))
   assert.ok(node.textContent.includes("Review <script>"))
-  assert.ok(node.textContent.includes("2026-11-19 08:00 UTC"))
+  assert.ok(elements.some((n) => n.attributes.title === "2026-11-19T08:00:00Z"))
   assert.ok(!elements.some((n) => n.tagName === "script" || n.tagName === "img"))
   assert.deepEqual(document.htmlWrites, [])
   assert.equal(app.renderLedger({ state: "unbound" }), null)
@@ -2925,6 +3014,7 @@ test("a ledger render exception shows unavailable and the next poll still runs",
     return create(tag)
   }
   try {
+    env.app.state.pinDOM.button.dispatch("click")
     await env.app.pollOnce().catch(() => {})
     assert.ok(failures > 0, "the ledger render was exercised")
     assert.equal(env.app.state.polling, false)

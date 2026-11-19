@@ -119,7 +119,8 @@ the same user. Connection, header and read-budget details are in the
   actor and member text in each channel's newest 200 entries, in batches with
   `Load more`.
 - **Live.** The page polls every 2 s (backing off after failures), remembers a
-  light or dark theme and the two Stale-expansion booleans in `localStorage`,
+  light or dark theme, the two Stale-expansion booleans and channel-keyed
+  ownership-pin expansion choices in `localStorage`,
   and has a phone layout. The theme default follows the system. No token,
   message, peer identifier, session name or activity timestamp is stored there.
 
@@ -444,9 +445,18 @@ shares the journal before using `--chat`.
 ## Live repository ledger
 
 A channel owner can run `peers.py channel bind NAME --ledger` in a repository
-with a ledger. Its committed ownership table appears above that channel's
-history, independently of change-note messages. It refreshes on selection and
-each live poll, and shows its observation time. A failed, oversized, timed-out
+with a ledger. A fixed Ownership pin above history shows owner counts (largest
+first) and the unowned count. Wide summaries truncate with `+N more`; changed
+counts briefly highlight while collapsed, respecting reduced-motion preferences.
+Click, Enter or Space opens a compact table overlay without resizing history.
+Escape, an outside click or another pin click closes it. The overlay scrolls
+within 60% of the viewport; closed pins add no second scrolling region.
+Expansion is remembered per channel in this browser, default closed, and remains
+usable when storage is unavailable. Polls preserve the overlay and its scroll.
+Slugs truncate with full tooltips, redundant titles disappear, statuses use small
+badges, and relative update times retain exact UTC tooltips. It refreshes on
+selection and each live poll; the pin tooltip shows its observation time.
+A failed, oversized, timed-out
 or mismatched read shows unavailable instead of retaining a current label.
 The endpoint is `GET /api/ledger/CHANNEL`, under the same loopback, Host and
 token checks as other dashboard reads. It accepts no query or filesystem path.

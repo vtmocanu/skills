@@ -11,6 +11,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Added
 
 - `session-peers`: Active/Stale groups for dashboard channels and session cards, with collapsed stale counts and browser-local display preferences. Selected channels and known unread/pending work remain visible. Last-seen timestamps use positive discovery receipts retained only by the running server; unknown remains unknown.
+- `session-peers`: compact Ownership pin with owner counts and an optional table overlay that preserves history layout and scroll. Per-channel expansion, keyboard controls, relative timestamps and reduced-motion-aware count highlights stay local to the browser.
 
 ## [0.51.0] - 2026-11-19
 
