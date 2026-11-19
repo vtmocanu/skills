@@ -1578,6 +1578,22 @@ class WebdataStateViewTests(WebdataBase):
         view = webdata.state_view(EMPTY, **kw)
         return {row["key"]: row["alert"] for row in view["channels"]}
 
+    def test_state_keeps_address_names_and_adds_display_title_and_current_pair(self):
+        typed = "codex:" + self.tid
+        key = sp_channels.buddy_channel_add(self.me, typed)
+        WebdataMemberTests.shim_state(self, self.tid, thread_name="Shared display title")
+        discovery = dict(EMPTY, general=([self.me, typed], None, []), names={typed: "codex-unique"},
+                         homes={self.tid: str(self.codex_dir)}, liveness={self.me: "live", typed: "live"})
+        view = webdata.state_view(discovery)
+        session = next(s for s in view["sessions"] if s["member"] == typed)
+        self.assertEqual(session["name"], "codex-unique")
+        self.assertEqual(session["display_name"], "Shared display title")
+        self.assertEqual(session["address"], typed)
+        channel = next(c for c in view["channels"] if c["key"] == key)
+        self.assertEqual(channel["current_buddy"], typed)
+        self.assertEqual(channel["owner"], self.me)
+        self.assertEqual(next(m for m in channel["members"] if m["typed"] == typed)["name"], "codex-unique")
+
     def test_shape_general_first_and_no_history(self):
         self.send()
         discovery = dict(EMPTY, general=([self.me, "codex:" + self.tid], {"state": "ok"}, ["claude read failed"]),
