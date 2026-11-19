@@ -1154,6 +1154,20 @@ def _build_views(groups, budget):
     return built, journal_ctx
 
 
+def ledger_panel(key, budget=None):
+    from . import ledger_web
+    _check_key(key)
+    if key == sp_constants.CHANNEL_GENERAL:
+        return {"state": "unbound"}  # derived channel: no owner-written binding record
+    budget = budget if budget is not None else Budget()
+    record = _read_record(key, budget)
+    if record is None:
+        return {"state": "unavailable", "reason": "Channel record unavailable"}
+    if "ledger" not in record:
+        return {"state": "unbound"}
+    return _clean(ledger_web.view(record["ledger"], budget))
+
+
 def channel_page(key, before=None, limit=PAGE_MAX, budget=None, members=None, now=None):
     """One page of a channel's history, oldest entry first, as JSON-ready data.
 

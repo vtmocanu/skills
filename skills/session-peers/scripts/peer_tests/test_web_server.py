@@ -379,7 +379,7 @@ class ChangesOverHttpTests(WebBase):
 
 
 class HygieneTests(WebBase):
-    API = ("/api/state", "/api/channel/general", "/api/changes?since=abc", "/api/all", "/api/search?q=a")
+    API = ("/api/state", "/api/channel/general", "/api/ledger/general", "/api/changes?since=abc", "/api/all", "/api/search?q=a")
 
     def test_api_without_a_valid_token_is_403_with_an_empty_object(self):
         wrong = "0" * 64

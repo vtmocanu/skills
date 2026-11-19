@@ -138,7 +138,7 @@ function load({ location, fetch, storageLog, media } = {}) {
   const log = storageLog || []
   const historyCalls = []
   const context = {
-    document, console,
+    document, console, URL,
     setTimeout: (fn, ms) => { if (typeof fn !== "function") throw new Error("string timer"); timers.push({ fn, ms }); return timers.length },
     clearTimeout() {},
     localStorage: makeStorage(log),
@@ -255,10 +255,13 @@ test("el() refuses event handlers, URLs, inline style and unknown tags", () => {
     assert.throws(() => app.el("div", { [name]: "x" }), /not allowed/, name)
     assert.throws(() => app.el("svg:path", { [name]: "x" }), /not allowed/, "svg " + name)
   }
-  for (const tag of ["img", "script", "iframe", "a", "style", "svg:image", "svg:script", "svg:foreignObject"]) {
+  for (const tag of ["img", "script", "iframe", "style", "svg:image", "svg:script", "svg:foreignObject"]) {
     assert.throws(() => app.el(tag), /not allowed/, tag)
   }
   assert.throws(() => app.el("div", { d: "M0 0" }), /not allowed/, "svg attributes only on svg elements")
+  for (const url of ["javascript:alert(1)", "data:text/html,x", "//example.invalid", "https://x/\nalert"]) {
+    assert.throws(() => app.el("a", { href: url }), /not allowed/)
+  }
   const node = app.el("button", { class: "x", type: "button", "aria-label": "y", "data-seq": 3, title: "<b>" }, "<b>bold</b>", 3, null, ["a"])
   assert.equal(node.textContent, "<b>bold</b>3a")
   assert.ok(node.childNodes.every((c) => c.nodeType === 3))
@@ -439,6 +442,7 @@ test("details: runtime, state, typed address, copy only for strict ids, Codex bu
 function bootFixture(extraRoutes = {}, { media, hash } = {}) {
   const calls = []
   const routes = Object.assign({
+    "/api/ledger/": { state: "unbound" },
     "/api/state": stateFixture(),
     "/api/channel/general": pageFixture("general", [sendEntry(1, "@all freeze", { delivery: { state: "complete", recipients: [row(CODEX_B, "transport accepted", { ack: "pending" })] }, tally: { acked: 0, total: 1, missing: [CODEX_B], unverified: 0 } })]),
     "/api/channel/ops": pageFixture("ops", [sendEntry(1, "first in ops")]),
@@ -2661,6 +2665,70 @@ test("refresh: the server's order replaces what polls inferred, and an activity 
   assert.ok(laneOf(t, "zz").textContent.includes("activity unknown"))
   assert.deepEqual(laneNames(t), ["#general", "#a", "#b", "#c", "#zz"])
   assert.equal(calls.length, 0)
+})
+
+test("message autolinks and fences use safe DOM nodes", () => {
+  const { app, document } = load()
+  const nodes = app.bodyNodes('See https://example.invalid/a?x=1&y=2. <img src=x> javascript:alert(1)\n```\nitem   https://example.invalid/task\n```')
+  const elements = nodes.filter((n) => n && typeof n === "object").flatMap(elementsOf)
+  const links = elements.filter((n) => n.tagName === "a")
+  assert.equal(links.length, 2)
+  assert.equal(links[0].attributes.href, "https://example.invalid/a?x=1&y=2")
+  for (const link of links) {
+    assert.equal(link.attributes.rel, "noopener noreferrer")
+    assert.equal(link.attributes.target, "_blank")
+  }
+  assert.ok(elements.some((n) => n.tagName === "pre"))
+  assert.ok(!elements.some((n) => n.tagName === "img" || n.tagName === "script"))
+  assert.deepEqual(document.htmlWrites, [])
+})
+
+function ledgerFixture(commit = "a".repeat(40)) {
+  return { state: "current", commit, observed_at: "2026-11-19T09:00:00Z", unowned_open: 2,
+    groups: [{ owner: "lead <img>", items: [{ slug: "42", title: "Review <script>", status: "open", updated: "2026-11-19T08:00:00Z",
+      links: [{ label: "PR #42", href: "https://github.com/a/b/pull/42" }, { label: "unsafe", href: "javascript:alert(1)" }] }] }] }
+}
+
+test("ledger panel is a real table, escapes labels and refuses unsafe links", () => {
+  const { app, document } = load()
+  const node = app.renderLedger(ledgerFixture())
+  const elements = elementsOf(node)
+  assert.ok(elements.some((n) => n.tagName === "table"))
+  assert.equal(elements.filter((n) => n.tagName === "a").length, 1)
+  assert.ok(node.textContent.includes("lead <img>"))
+  assert.ok(node.textContent.includes("Review <script>"))
+  assert.ok(node.textContent.includes("2026-11-19 08:00 UTC"))
+  assert.ok(!elements.some((n) => n.tagName === "script" || n.tagName === "img"))
+  assert.deepEqual(document.htmlWrites, [])
+  assert.equal(app.renderLedger({ state: "unbound" }), null)
+  assert.ok(app.renderLedger({ state: "unavailable" }).textContent.includes("unavailable"))
+})
+
+test("ledger refreshes without channel messages and loses current status on failed reads", async () => {
+  const env = bootFixture({ "/api/ledger/": ledgerFixture() })
+  assert.equal(await env.app.ready, true)
+  assert.equal(env.app.state.ledgers.general.commit, "a".repeat(40))
+  env.routes["/api/ledger/"] = ledgerFixture("b".repeat(40))
+  env.routes["/api/changes"] = quiet("LEDGER1")
+  await env.app.pollOnce()
+  assert.equal(env.app.state.ledgers.general.commit, "b".repeat(40))
+  env.routes["/api/ledger/"] = { __status: 503 }
+  await env.app.refreshLedger()
+  assert.equal(env.app.state.ledgers.general.state, "unavailable")
+  assert.equal(env.app.state.ledgers.general.commit, undefined)
+})
+
+test("an older ledger response cannot replace a newer committed view", async () => {
+  const env = bootFixture({ "/api/ledger/": ledgerFixture() })
+  await env.app.ready
+  let finishOld
+  env.routes["/api/ledger/"] = () => new Promise((resolve) => { finishOld = resolve })
+  const old = env.app.refreshLedger()
+  env.routes["/api/ledger/"] = ledgerFixture("b".repeat(40))
+  await env.app.refreshLedger()
+  finishOld(ledgerFixture("c".repeat(40)))
+  await old
+  assert.equal(env.app.state.ledgers.general.commit, "b".repeat(40))
 })
 
 const orderOf = async (stamps) => {

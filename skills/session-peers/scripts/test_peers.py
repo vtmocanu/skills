@@ -20,6 +20,7 @@ import unittest
 
 MODULES = (
     "peer_tests.test_ledger",
+    "peer_tests.test_ledger_table",
     "peer_tests.test_protocol",
     "peer_tests.test_discovery",
     "peer_tests.test_rollout",

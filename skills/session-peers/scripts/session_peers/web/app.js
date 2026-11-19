@@ -3,9 +3,9 @@
  * the server runs in chat mode (/api/state has "chat"): then a composer POSTs /api/send and the
  * Browser view shows the browser peer's own conversation and status rows.
  *
- * Rendering safety: every element is built by el(); text only ever enters the page as text
- * nodes; el() refuses any attribute outside a short allowlist and any tag outside a short
- * list. The access token lives in one variable, is sent as X-Peers-Token and is never stored.
+ * Rendering safety: every element is built by el(); peer prose enters text nodes and only
+ * validated HTTP(S) targets enter link attributes. el() refuses attributes and tags outside
+ * its allowlists. The access token lives in one variable, is sent as X-Peers-Token and is never stored.
  * The only storage use is the colour theme (THEME_KEY).
  *
  * Icons: the Claude mark is simple-icons claude.svg (CC0-1.0); the OpenAI mark used for Codex
@@ -66,7 +66,7 @@
 
   // label, input and textarea build the chat composer; their attributes are inert (no URL, no handler).
   var HTML_TAGS = ["div", "span", "p", "b", "i", "code", "button", "ul", "li", "dl", "dt", "dd", "h1", "h2", "small", "strong",
-    "label", "input", "textarea"];
+    "label", "input", "textarea", "a", "pre", "table", "thead", "tbody", "tr", "th", "td"];
   var SVG_TAGS = ["svg", "path", "g"];
   var ATTRS = ["class", "role", "title", "type", "tabindex", "checked", "disabled", "placeholder", "rows", "maxlength"];
   var SVG_ATTRS = ["viewBox", "d", "fill", "stroke", "stroke-width", "stroke-linecap", "stroke-linejoin", "fill-rule", "clip-rule", "xmlns"];
@@ -86,7 +86,10 @@
       Object.keys(attrs).forEach(function (key) {
         var value = attrs[key];
         if (value === null || value === undefined || value === false) return;
-        if (!attrAllowed(key, svg)) throw new Error("el: attribute not allowed: " + key);
+        var linkAttr = name === "a" && !svg && ((key === "href" && safeURL(value)) ||
+          (key === "target" && value === "_blank") || (key === "rel" && value === "noopener noreferrer"));
+        var tableAttr = name === "th" && key === "colspan" && value === 5;
+        if (!linkAttr && !tableAttr && !attrAllowed(key, svg)) throw new Error("el: attribute not allowed: " + key);
         node.setAttribute(key, value === true ? "true" : String(value));
       });
     }
@@ -195,7 +198,7 @@
     // Chat mode only (state.chat): the Browser feed and the composer's own state.
     chat: null, browser: null, compose: null,
     // Per channel key {a: "posted" | "none" | "unknown" | null, ts}: the state's activity, then live polls.
-    activity: table()
+    activity: table(), ledgers: table(), ledgerGen: table()
   };
 
   var RT_LABEL = { claude: "Claude Code", codex: "Codex", oc: "OpenCode", web: "Browser", unknown: "Unknown runtime" };
@@ -416,7 +419,32 @@
   }
 
   // Text segments of a body: an @all lead and `code` spans become elements, all as text.
-  function bodyNodes(body) {
+  function safeURL(value) {
+    if (typeof value !== "string" || !/^https?:\/\/[^\s<>"'`\\]+$/i.test(value)) return false;
+    try {
+      var url = new root.URL(value);
+      return (url.protocol === "http:" || url.protocol === "https:") && !!url.hostname;
+    } catch (_err) { return false; }
+  }
+
+  function linkNode(label, href) {
+    return safeURL(href) ? el("a", { href: href, target: "_blank", rel: "noopener noreferrer" }, label) : String(label);
+  }
+
+  function textLinks(text) {
+    var out = [], regex = /https?:\/\/[^\s<>"'`\\]+/gi, at = 0, match;
+    while (out.length < 512 && (match = regex.exec(text))) {
+      var url = match[0].replace(/[.,;!]+$/, "");
+      out.push(text.slice(at, match.index));
+      out.push(linkNode(url, url));
+      out.push(match[0].slice(url.length));
+      at = match.index + match[0].length;
+    }
+    out.push(text.slice(at));
+    return out;
+  }
+
+  function inlineNodes(body) {
     var text = str(body);
     var out = [];
     if (ALL_RE.test(text)) {
@@ -426,9 +454,70 @@
     var parts = text.split(/`([^`\n]{1,200})`/);
     for (var i = 0; i < parts.length; i++) {
       if (i % 2 === 1) out.push(el("code", null, parts[i]));
-      else if (parts[i]) out.push(parts[i]);
+      else if (parts[i]) out = out.concat(textLinks(parts[i]));
     }
     return out;
+  }
+
+  function bodyNodes(body) {
+    var lines = str(body).split("\n"), out = [], plain = [], code = null, opening = "";
+    lines.forEach(function (line) {
+      if (code !== null) {
+        if (/^```[ \t]*\r?$/.test(line)) {
+          out.push(el("pre", { class: "fenced" }, el("code", null, textLinks(code.join("\n")))));
+          code = null;
+        } else code.push(line);
+      } else if (/^```[^\r\n]*\r?$/.test(line)) {
+        out = out.concat(inlineNodes(plain.join("\n") + (plain.length ? "\n" : "")));
+        plain = []; opening = line; code = [];
+      } else plain.push(line);
+    });
+    if (code !== null) plain = plain.concat([opening], code);
+    return out.concat(inlineNodes(plain.join("\n")));
+  }
+
+  function ledgerTime(value, seconds) {
+    var date = new Date(value);
+    return isNaN(date.getTime()) ? str(value) : date.toISOString().slice(0, seconds ? 19 : 16).replace("T", " ") + " UTC";
+  }
+
+  function renderLedger(view) {
+    if (!view || view.state === "unbound") return null;
+    var panel = el("div", { class: "ledger-panel", role: "region", "aria-label": "Repository ownership ledger" },
+      el("h2", null, "Ownership ledger"));
+    if (view.state !== "current") {
+      append(panel, el("p", { class: "note warn" }, "Ledger unavailable. Refreshing live ownership could not be verified."));
+      return panel;
+    }
+    append(panel, el("small", null, "Committed ledger · " + ledgerTime(view.observed_at, true) + " · " + str(view.unowned_open) + " unowned open"));
+    var tab = el("table", null, el("thead", null, el("tr", null,
+      ["Item", "Title", "Status", "Links", "Updated"].map(function (label) { return el("th", null, label); }))));
+    (Array.isArray(view.groups) ? view.groups : []).forEach(function (group) {
+      var body = el("tbody", null, el("tr", { class: "ledger-owner" }, el("th", { colspan: 5 }, str(group.owner))));
+      (Array.isArray(group.items) ? group.items : []).forEach(function (item) {
+        append(body, el("tr", null, el("td", { class: "mono" }, str(item.slug)), el("td", null, str(item.title)),
+          el("td", null, str(item.status)), el("td", null,
+            (Array.isArray(item.links) ? item.links : []).map(function (link) { return [linkNode(str(link.label), link.href), " "]; })),
+          el("td", { title: str(item.updated) }, ledgerTime(item.updated, false))));
+      });
+      append(tab, body);
+    });
+    append(panel, tab);
+    return panel;
+  }
+
+  function refreshLedger() {
+    if (S.view !== "conv") return Promise.resolve();
+    var key = S.selected;
+    var generation = (S.ledgerGen[key] || 0) + 1;
+    S.ledgerGen[key] = generation;
+    return api("/api/ledger/" + encodeURIComponent(key)).then(function (view) {
+      if (S.ledgerGen[key] === generation) S.ledgers[key] = view;
+    }, function () {
+      if (S.ledgerGen[key] === generation) S.ledgers[key] = { state: "unavailable" };
+    }).then(function () {
+      if (S.view === "conv" && S.selected === key) fill($("ledgerhost"), renderLedger(S.ledgers[key]));
+    });
   }
 
   // ------------------------------------------------------------------------
@@ -585,7 +674,7 @@
           el("div", { class: "vtext" }, bodyNodes(v.text)),
           v.sha ? el("div", { class: "pin" }, "Pinned ", el("span", { class: "mono" }, str(v.sha))) : null)));
     } else {
-      body.push(el("p", { class: "text" }, bodyNodes(entry.body)));
+      body.push(el("div", { class: "text" }, bodyNodes(entry.body)));
     }
     if (entry.tally || (entry.delivery && ALL_RE.test(str(entry.body)) && entry.journaled)) body.push(renderTally(entry));
     if (!opts.search) body.push(renderDelivery(entry.delivery));
@@ -2108,7 +2197,7 @@
     return ready.then(function () { if (S.view === "conv" && S.selected === key) renderMain({ toBottom: true }); }, function (err) {
       if (S.view === "conv" && S.selected === key) renderMain({});
       showError(err);
-    });
+    }).then(refreshLedger);
   }
 
   function newAll() {
@@ -2499,8 +2588,7 @@
       renderLive();
       return false;
     }).then(function (result) {
-      S.polling = false;
-      return result;
+      return refreshLedger().then(function () { S.polling = false; return result; });
     });
   }
 
@@ -2667,6 +2755,7 @@
 
   function renderMain(opts) {
     opts = opts || {};
+    fill($("ledgerhost"), S.view === "conv" ? renderLedger(S.ledgers[S.selected]) : null);
     var stream = $("stream");
     var stick = stream && typeof stream.scrollHeight === "number" ? stream.scrollHeight - stream.scrollTop - (stream.clientHeight || 0) < 48 : true;
     var prevTop = stream ? stream.scrollTop : 0;
@@ -2897,7 +2986,7 @@
     toggleTheme: toggleTheme, THEME_KEY: THEME_KEY,
     applyBrowser: applyBrowser, renderSendStatus: renderSendStatus, renderBrowserEntry: renderBrowserEntry, renderComposer: renderComposer,
     submitCompose: submitCompose, postSend: postSend, sendErrorText: sendErrorText, showBrowser: showBrowser, rowTally: rowTally,
-    readPreview: readPreview
+    readPreview: readPreview, renderLedger: renderLedger, bodyNodes: bodyNodes, refreshLedger: refreshLedger
   };
   // A read-only view of the model for tests and debugging: everything but the token.
   Object.defineProperty(root.PeersApp, "state", {

@@ -57,12 +57,7 @@ def git(directory, *args, timeout=GIT_TIMEOUT, allowed=(0,), author=None, input_
                    GIT_COMMITTER_NAME="session-peers " + name,
                    GIT_AUTHOR_EMAIL="session-peers@localhost",
                    GIT_COMMITTER_EMAIL="session-peers@localhost")
-    command = ["git", "--no-pager", "-c", "core.hooksPath=" + os.devnull,
-               "-c", "commit.gpgsign=false", "-c", "core.fsmonitor=false",
-               "-c", "core.untrackedCache=false", "-c", "protocol.allow=never",
-               "-c", "gc.auto=0", "-c", "maintenance.auto=false",
-               "-c", "core.excludesFile=" + os.devnull,
-               "-c", "core.attributesFile=" + os.devnull, *args]
+    command = git_command(*args)
     result = subprocess.run(command, cwd=str(directory), env=env,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             timeout=timeout, check=False, umask=0o077,
@@ -70,6 +65,15 @@ def git(directory, *args, timeout=GIT_TIMEOUT, allowed=(0,), author=None, input_
     if result.returncode not in allowed:
         raise LedgerError("local git %s failed (exit %d); files preserved" % (args[0], result.returncode))
     return result.stdout if raw else result.stdout.decode("utf-8")
+
+
+def git_command(*args):
+    return ["git", "--no-pager", "-c", "core.hooksPath=" + os.devnull,
+               "-c", "commit.gpgsign=false", "-c", "core.fsmonitor=false",
+               "-c", "core.untrackedCache=false", "-c", "protocol.allow=never",
+               "-c", "gc.auto=0", "-c", "maintenance.auto=false",
+               "-c", "core.excludesFile=" + os.devnull,
+               "-c", "core.attributesFile=" + os.devnull, *args]
 
 
 def human(value):
@@ -190,7 +194,14 @@ def decode(text, slug):
 def caller(args):
     ident = identity.caller_identity(args)
     typed = ident["kind"] + ":" + ident["uuid"]
-    return {"id": typed, "name": human(getattr(args, "name", None) or ident.get("name") or typed)}
+    name = getattr(args, "name", None) or ident.get("name")
+    if not name:
+        from . import channels
+        try:
+            name = channels.session_names([typed], max_lookups=1).get(typed)
+        except Exception:  # display lookup is best effort; typed ownership stays authoritative
+            name = None
+    return {"id": typed, "name": human(name or typed)}
 
 
 def can_take(old, new):
@@ -202,6 +213,8 @@ def can_take(old, new):
 
 
 class Ledger:
+    def _git(self, *args, **kwargs):
+        return git(*args, **kwargs)
     def __init__(self, cwd=None, key=None):
         cwd = Path(cwd or os.getcwd()).resolve()
         self.anchor = anchor_for(cwd)
@@ -227,12 +240,12 @@ class Ledger:
         if self.path.is_symlink() or not (self.path / ".git").is_dir() or (self.path / ".git").is_symlink():
             raise LedgerError("ledger must be its own local Git repository")
         # `remote` includes empty remote sections; config catches remote.* custom keys.
-        if (git(self.path, "remote").strip()
-                or git(self.path, "config", "--get-regexp", r"^remote\.", allowed=(0, 1)).strip()):
+        if (self._git(self.path, "remote").strip()
+                or self._git(self.path, "config", "--get-regexp", r"^remote\.", allowed=(0, 1)).strip()):
             raise LedgerError("ledger has a configured remote; remove it locally before continuing")
-        head = git(self.path, "rev-parse", "--verify", "HEAD").strip()
+        head = self._git(self.path, "rev-parse", "--verify", "HEAD").strip()
         try:
-            meta = json.loads(git(self.path, "show", head + ":" + META))
+            meta = json.loads(self._git(self.path, "show", head + ":" + META))
             if meta["format"] != FORMAT or not isinstance(meta["anchor"], str):
                 raise ValueError("invalid metadata")
         except (ValueError, KeyError, TypeError) as exc:
@@ -251,10 +264,12 @@ class Ledger:
 
     def read(self, head, slug):
         safe_key(slug)
-        return decode(git(self.path, "show", head + ":items/" + slug + ".md"), slug)
+        return decode(self._git(self.path, "show", head + ":items/" + slug + ".md"), slug)
 
-    def items(self, head):
-        names = git(self.path, "ls-tree", "--name-only", head, "items/").splitlines()
+    def items(self, head, max_items=None):
+        names = self._git(self.path, "ls-tree", "--name-only", head, "items/").splitlines()
+        if max_items is not None and len(names) > max_items:
+            raise LedgerError("ledger item limit reached")
         for name in names:
             if not name.startswith("items/") or not name.endswith(".md"):
                 raise LedgerError("unexpected ledger item path")
@@ -263,7 +278,7 @@ class Ledger:
             return []
         # One process for all bodies keeps the bounded reminder useful with a
         # real handover backlog, rather than spawning Git once per note.
-        objects = io.BytesIO(git(self.path, "cat-file", "--batch", raw=True,
+        objects = io.BytesIO(self._git(self.path, "cat-file", "--batch", raw=True,
                                  input_text="".join(head + ":" + name + "\n" for name in names)))
         result = []
         for name in names:
@@ -463,6 +478,12 @@ def cmd_ledger(args):
                 print(line)
             return 0
         ledger = Ledger(key=getattr(args, "repo_key", None))
+        if action == "table":
+            from . import ledger_table
+            head, _meta = ledger.snapshot()
+            result = ledger_table.project(ledger, head, ledger_table.current_forge(os.getcwd()), all_items=args.all)
+            print(json.dumps(result, ensure_ascii=False, indent=2) if args.json else ledger_table.render(result, args.markdown))
+            return 0
         if action == "path":
             if ledger.exists():
                 ledger.snapshot()
@@ -515,11 +536,17 @@ def register(sub):
     parser.add_argument("--repo-key", help="explicit identity key, not a directory")
     commands = parser.add_subparsers(dest="ledger_cmd", required=True)
     for name in ("path", "init", "list", "show", "add", "update", "claim", "release", "done",
-                 "log", "import-dir", "relocate", "summary"):
+                 "log", "import-dir", "relocate", "summary", "table"):
         command = commands.add_parser(name)
         command.set_defaults(func=cmd_ledger)
         command.add_argument("--repo-key", default=argparse.SUPPRESS)
-        command.add_argument("--json", action="store_true")
+        output = command.add_mutually_exclusive_group()
+        output.add_argument("--json", action="store_true")
+        if name == "table":
+            output.add_argument("--markdown", action="store_true")
+            selection = command.add_mutually_exclusive_group()
+            selection.add_argument("--owned", action="store_true")
+            selection.add_argument("--all", action="store_true")
         command.add_argument("--as", dest="as_identity", help="full typed session identity")
         command.add_argument("--name", help="owner display name (identity stays typed)")
         if name in ("show", "add", "update", "claim", "release", "done", "log"):

@@ -135,6 +135,11 @@ handover. Keep notes local, outside project checkouts, with no Git remote.
 Read [references/ledger.md](references/ledger.md) for initialization, claims,
 import, relocation, private Git history and recovery. Human buddy/handover output
 reinforces discovery; no SessionStart hook is installed.
+Use `ledger table` for an ownership snapshot (`--markdown` or `--json`), rather
+than assembling tables by hand. A channel owner can run
+`channel bind NAME --ledger` in the repo to pin its live, read-only ledger table
+above that channel's dashboard history. Link shortcuts and private run patterns
+are described in the ledger reference.
 
 ## Buddy
 

@@ -865,6 +865,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
         return number
 
     def _api(self, path, query):
+        if path.startswith("/api/ledger/"):
+            key = path[len("/api/ledger/"):]
+            if not sp_constants.CHANNEL_NAME_RE.fullmatch(key):
+                raise _Refused(400)
+            self._query(query, ())
+            return self._send_json(200, sp_webdata.ledger_panel(key))
         if path == "/api/state":
             self._query(query, ())
             found = self.server.discovery.get()
