@@ -367,6 +367,8 @@ def _print_buddy(args, rec, status):
         if (getattr(args, "buddy_cmd", None) or "show") in ("show", "set"):
             from . import ledger
             ledger.print_summary()
+            from . import channel_reads
+            channel_reads.print_summary()
 
 
 def cmd_buddy(args):

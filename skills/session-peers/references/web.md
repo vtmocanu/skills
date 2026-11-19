@@ -241,14 +241,25 @@ release you can address:
   distinct typed addresses): a direct send to each, resolved by the worker.
   A `web:` address is refused.
 
-`@all` in `#general` is the one broadcast the page can send, and only after a
-preview and a confirmation, see [`@all` in #general](#all-in-general). A plain
-`#general` post and an `@all` to any other route (a stored channel or picked
-members) are refused with 403.
+Channel `@all` broadcasts require preview and confirmation. A plain `#general`
+post and an `@all` to picked members are refused with 403. Stored channels may
+keep quiet posts in history without notifying anyone; the Browser row says
+`Recorded, no notifications`, with no journal or ACK recipients.
+Broadcast previews omit current buddies without stored-channel overrides and
+show the skip reason. The worker rechecks current bindings before journal
+publication and immediately before transport; a changed confirmed recipient
+set refuses before publication. HTTP role previews use the captured server home
+and cached owner liveness, never resolve `CODEX_HOME` in a handler. Explicit
+names and buddy channels remain exempt from fan-out filtering.
+Channels show their `mentions` or `all` delivery mode. Posts with frozen typed
+mentions of the viewer, or `@here`/`@all`, are highlighted. Chat uses the browser
+peer as viewer; a read-only page uses the launcher identity captured before
+discovery. An unknown viewer gets only broadcast highlighting, never guessed
+name matching.
 
 ### `@all` in #general
 
-A post to `#general` whose text matches the `@all` pattern (`^@all(\s|$)`, see
+A post to `#general` or a stored channel containing a literal-safe `@all` token (see
 [channels](channels.md#all)) takes two requests: a preview, then a confirm. The
 page shows the preview in a confirm dialog listing the recipients and the
 excluded members; nothing is sent until the person confirms. Both requests are
@@ -272,7 +283,7 @@ the request's `ack` is accepted but ignored.
   used is stale (the key is absent otherwise), so the page can say so.
 - **Confirm.** The same body plus `"confirm": "<nonce>"` (exactly these four
   keys; the nonce is a string of 1-128 characters and only valid with
-  `#general` and an `@all` text, else 400). The nonce is bound to the route, the
+  a channel and an `@all` text, else 400). The nonce is bound to the route, the
   browser peer, the exact recipient set, a hash of the message text, ACK
   (always requested) and the expiry. It is checked and consumed atomically, so
   it works once.
@@ -292,8 +303,7 @@ the request's `ack` is accepted but ignored.
   existing per-sender allowance ([channels](channels.md#all)); a second one in
   that window reads `not sent: at most one @all per sender every 60 seconds ...`.
   A restart gives the browser peer a new identity, and so a fresh allowance.
-- **Still refused.** A plain `#general` post and an `@all` to a stored channel
-  or to picked members stay 403.
+- **Still refused.** A plain `#general` post and an `@all` to picked members stay 403.
 - **Restart.** Nonces are kept in server memory only (at most 32, the oldest
   evicted), so a restart invalidates every outstanding one: preview again.
 
@@ -341,11 +351,11 @@ A 429 accepts and charges nothing. Every refusal has an empty `{}` body:
 | Code | Refused because |
 | --- | --- |
 | 400 | Bad JSON or fields (duplicate keys, extra fields, a numeral over 32 characters, text that is not valid UTF-8 such as a lone surrogate, a `web:` recipient), any `Transfer-Encoding`, a query string on `/api/send`, or a missing, repeated, non-numeric or zero `Content-Length`. |
-| 403 | Host, token or `Origin` rejected (`Origin` must be `http://` plus the Host), a plain `#general` post, or an `@all` to any route but `#general`. |
+| 403 | Host, token or `Origin` rejected (`Origin` must be `http://` plus the Host), a plain `#general` post, or an `@all` to picked members. |
 | 404 | A GET to an unknown path, or a malformed request target. |
 | 405 | A POST to a path other than `/api/send`, a method other than GET or POST, or any POST when `--chat` is off. |
 | 408 | The body was short or arrived too slowly. |
-| 409 | Only for `@all` in `#general`. A preview: discovery pending, a `#general` member unchecked or without a liveness entry, no recipients, or more than 64. A confirm: the nonce is unknown, expired, used or bound to different text. |
+| 409 | For channel `@all`. A preview: discovery pending, a member unchecked or without a liveness entry, unreadable channel, no recipients, or more than 64. A confirm: the nonce is unknown, expired, used or bound to a different route or text. |
 | 413 | `Content-Length` over 1 MiB. |
 | 415 | `Content-Type` is not a single `application/json` (charset utf-8 allowed). |
 | 429 | Rate limit hit or queue full (on a confirm the nonce stays usable). |

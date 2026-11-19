@@ -6,6 +6,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.53.0] - 2026-11-19
+
+### Added
+
+- `session-peers`: quiet channel delivery by default, literal-safe named mentions and live-only `@here`, with bounded and journaled `@all` broadcasts. Public channels admit leads by role, with explicit per-member buddy overrides; fan-out rechecks bindings and direct names still reach buddies. Buddy channels keep all-member delivery. Per-reader unread cursors and human reminders support reading on demand without ACKs or handover authority. The dashboard shows delivery modes and highlights mentions; browser broadcasts require channel-bound confirmation.
+
+### Changed
+
+- `session-peers`: existing named channels now default to quiet mention delivery. Upgrade every sender copy before relying on it; older copies ignore delivery modes and buddy filtering.
+- `session-peers`: a literal-safe `@all` anywhere in a post now broadcasts and consumes the existing 60-second sender allowance; it previously had to lead the post. An unresolvable `@word` refuses the whole post. Escape it as `\@word` or use backticks to post it literally.
+
 ## [0.52.0] - 2026-11-19
 
 ### Added

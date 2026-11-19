@@ -6,9 +6,11 @@ it writes to no store and refuses every method but GET. Started with ``--chat`` 
 browser peer (``webpeer``) and accepts one write, ``POST /api/send``, whose checks run in this order:
 host, method and target, token, ``Origin`` equal to the page's own origin, a single JSON
 ``Content-Type``, body framing (no ``Transfer-Encoding``, one digits-only ``Content-Length`` of 1 to
-BODY_MAX), the body read inside the connection deadline, strict ``{to, text, ack}`` JSON (plus ``confirm`` for an ``@all`` to ``#general``), the refusals
-(``#general`` unless an ``@all``, and an ``@all`` anywhere else; an ``@all`` to ``#general`` is a
-preview answered ``200`` with a confirm nonce, then a confirm), and the send gate
+BODY_MAX), the body read inside the connection deadline, strict ``{to, text, ack}`` JSON
+(plus ``confirm`` for a channel ``@all``), and the send gate. Plain ``#general`` posts and
+direct-recipient broadcasts are refused; any channel ``@all`` previews recipients with a
+single-use route-bound nonce before acceptance. Quiet channel posts may record history
+without notifying anyone. The send gate
 (``webchat.SendGate``). A passed send is answered ``202 {"message_id", "state": "queued"}``: accepted in memory only, committed later by the
 single worker in ``webchat``. Every refusal body is ``{}``.
 
@@ -444,6 +446,12 @@ class Server(http.server.ThreadingHTTPServer):
 
     def __init__(self, port=0, chat=False, clock=None):
         self.token = secrets.token_bytes(32).hex()
+        self.role_home = sp_storage.codex_home()  # capture before discovery's environment override
+        from . import journal
+        try:
+            self.viewer = journal.caller()
+        except journal.JournalError:
+            self.viewer = None  # highlighting only, never a sending identity
         # Chat mode: `chat` holds the (not yet started) services; None keeps the server read-only.
         self.chat = sp_webchat.Chat(clock or time.monotonic, lambda: _DISCOVERY_LOCK) if chat else None
         self.discovery = Discovery(self._requester if chat else None)
@@ -669,13 +677,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         length = self._content_length()
         body = self._read_body(length)
         to, text, ack, confirm = self._parse_send(body)
-        is_all = sp_channels.ALL_RE.match(text) is not None
+        is_all = sp_channels.sp_mentions.parse(text)["all"]
         if to == sp_constants.CHANNEL_GENERAL or is_all:
-            # Only an `@all` to #general is open (preview, then confirm); a plain #general post and an
-            # `@all` anywhere else stay refused.
-            if not (to == sp_constants.CHANNEL_GENERAL and is_all):
+            if not isinstance(to, str) or not is_all:
                 raise _Refused(403)
-            return self._post_all(text, confirm)
+            return self._post_all(text, confirm, key=to)
         chat = self.server.chat
         if not chat.ready:
             raise _Refused(503)
@@ -684,13 +690,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             raise _Refused(429)
         self._send_json(202, {"message_id": mid, "state": "queued"})
 
-    def _post_all(self, text, confirm):
-        """An `@all` to #general. ACK is always requested, so the request's ``ack`` is not consulted."""
+    def _post_all(self, text, confirm, key=sp_constants.CHANNEL_GENERAL):
+        """A channel `@all`; ACK is required and the nonce binds this exact channel."""
         chat = self.server.chat
         if not chat.ready:
             raise _Refused(503)
         if confirm is not None:
-            status, mid = chat.confirm_all(confirm, text)
+            status, mid = chat.confirm_all(confirm, text, key=key)
             if status == sp_webchat.CONFIRM_STALE:
                 raise _Refused(409)
             if status == sp_webchat.CONFIRM_LIMITED:
@@ -704,8 +710,25 @@ class Handler(http.server.BaseHTTPRequestHandler):
         liveness = found.get("liveness") or {}
         unchecked = set(found.get("unchecked") or ())
         recipients, excluded = [], []
-        for member in dict.fromkeys(found["general"][0]):
+        rec = None if key == sp_constants.CHANNEL_GENERAL else sp_webdata._read_record(key, sp_webdata.Budget())
+        if key != sp_constants.CHANNEL_GENERAL and rec is None:
+            raise _Refused(409)
+        roster = found["general"][0] if rec is None else rec["members"]
+        role_rec = rec if rec is not None else {"kind": "general", "members": []}
+        try:
+            direct = sp_channels.preview_direct_mentions(text, roster, found.get("names") or {})
+        except sp_channels.ChannelError:
+            raise _Refused(409)
+        checked = [m for m in roster if m != typed and m not in direct and m not in sp_channels._allowed_buddies(role_rec)]
+        from . import channel_roles
+        evidence = (channel_roles.roles(checked, home=self.server.role_home, known_owner_states=liveness)
+                    if checked and role_rec.get("kind") != "buddy" else {})
+        for member in dict.fromkeys(roster):
             if member == typed:
+                continue
+            skipped = sp_channels._role_skip(key, member, direct, role_rec, evidence)
+            if skipped is not None:
+                excluded.append({"member": member, "reason": skipped})
                 continue
             # Only an incomplete check of #general itself refuses; `truncated` may concern other channels.
             if member in unchecked or member not in liveness:
@@ -717,7 +740,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if not recipients or len(recipients) > sp_channels.ALL_MAX_RECIPIENTS:
             raise _Refused(409)
         recipients.sort()
-        nonce = chat.preview_all(text, recipients)
+        nonce = chat.preview_all(text, recipients, key=key)
         reply = {
             "confirm": nonce, "expires_in": sp_webchat.NONCE_TTL, "recipients": recipients,
             "excluded": sorted(excluded, key=lambda x: x["member"]),
@@ -771,7 +794,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     @staticmethod
     def _parse_send(body):
         """``(to, text, ack, confirm)`` of a strict ``{to, text, ack}`` JSON body, or one that also carries
-        ``confirm`` (a bounded string, allowed only for an `@all` to #general; None when absent). 400 for anything else."""
+        ``confirm`` (a bounded string, allowed only for a channel `@all`; None when absent). 400 for anything else."""
         def no_duplicates(pairs):
             keys = [k for k, _v in pairs]
             if len(set(keys)) != len(keys):
@@ -803,9 +826,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if type(text) is not str or not 1 <= len(text) <= sp_constants.MAX_TEXT_CHARS or type(ack) is not bool:
             raise _Refused(400)
         if "confirm" in obj:
-            # A nonce belongs to an `@all` to #general and to nothing else.
-            if (type(confirm) is not str or not 1 <= len(confirm) <= CONFIRM_MAX or to != "#" + sp_constants.CHANNEL_GENERAL
-                    or sp_channels.ALL_RE.match(text) is None):
+            # A nonce belongs to a channel broadcast, never direct recipients.
+            if (type(confirm) is not str or not 1 <= len(confirm) <= CONFIRM_MAX or not isinstance(to, str) or not to.startswith("#")
+                    or not sp_channels.sp_mentions.parse(text)["all"]):
                 raise _Refused(400)
         try:
             text.encode("utf-8")
@@ -880,7 +903,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._query(query, ())
             found = self.server.discovery.get()
             chat = self.server.chat
-            view = sp_webdata.state_view(found, chat=chat.info() if chat is not None and chat.ready else None)
+            view = sp_webdata.state_view(found, chat=chat.info() if chat is not None and chat.ready else None,
+                                        viewer=self.server.viewer)
             if found.get("truncated"):
                 view["discovery"]["truncated"] = True
             return self._send_json(200, view)

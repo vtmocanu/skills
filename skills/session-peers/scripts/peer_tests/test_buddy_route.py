@@ -112,6 +112,8 @@ class SendTargetedTests(TargetedBase):
         self.assertEqual(rc, 0, err)
         data = self.sends()[0]["data"]
         self.assertEqual((data["recipients"], data["journaled"]), ([self.y], False))
+        self.assertNotIn("mentioned", data)
+        self.assertNotIn("mention_all", data)
         self.assertEqual(self.journal_entries(), [])
         self.assertEqual(len(self.queue_calls()), 1)
         self.assertNotIn("journal", json.loads(out))

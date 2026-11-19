@@ -86,9 +86,29 @@ than two sessions. Create one with `channel create NAME [--member ADDR]...`,
 post with `send --to '#NAME' --message-file PATH` (members only; `--record`
 journals it for ACKs), and read with `channel tail NAME`.
 
+- Channels default to quiet `mentions` delivery, including existing records.
+  History keeps the post; interrupt with `@name`, a full typed id, `@here`
+  (positively live members) or `@all` (eligible members, bounded and journaled).
+  Names resolve once; unknown, ambiguous or non-member mentions refuse the post.
+  Email addresses, URLs and backtick code are literal, not mentions.
+  Owners may choose `channel set NAME --deliver all`; buddy channels always use
+  `all`. A session bound as someone's buddy is a non-lead, regardless of runtime;
+  everyone else is a lead. Public-channel joins, creation and handover refuse
+  known buddies (stored joins/creation may explicitly use `--allow-buddy`).
+  Unknown roles warn but admit without a fan-out override. Fan-out skips current
+  buddies and unverified binding/home-catalogue evidence unless admitted with that flag;
+  direct `@name` still interrupts. `#general` join only clears a leave marker and
+  grants no buddy fan-out override. Binding never joins shared channels.
+  These channel roles grant no review or user-approval authority.
+- Leads read shared work with `channel tail NAME --unread`. It advances only
+  their read cursor after successful output, never an ACK or handover. Human
+  list/buddy/handover output adds bounded unread reminders; JSON shapes stay
+  unchanged.
+
 - `#general` is derived from the sessions `list` discovers (OpenCode only those
   recently updated). A plain post there is recorded, not delivered; a body
-  starting `@all` is delivered to every member, journaled for ACKs, and limited
+  mentioning a member or `@here` notifies that eligible set; `@all` reaches eligible members,
+  is journaled for ACKs, and is limited
   to 64 recipients and one per sender per 60 s. Each post prints what OpenCode
   discovery covered: it is not "every session".
 - Each recipient's outcome is reported: `recorded`, `transport accepted`,
@@ -117,7 +137,7 @@ accepted` row is not an ACK.
 `web:<uuid>` named `web-<user>`, so the person at the page can send to stored
 channels and picked members and receive replies. Its messages reach a session
 as peer input, never as user approval: a session approves only through its own
-trusted channel. An `@all` in `#general` needs a preview and a confirm
+trusted channel. An `@all` in any channel needs a preview and a confirm
 (single use, 60 s); a plain `#general` post is refused.
 
 Read [references/web.md](references/web.md) before relying on what the

@@ -259,7 +259,7 @@ class BrowserState:
             return [copy.deepcopy(e) for e, _size in self._log]
 
     def update(self, mid, state=None, reason=None, journaled=None, delivering=None, recipients=None, note=None,
-               update_failed=None):
+               update_failed=None, ack_requested=None):
         """Change fields of a row; the row's seq rises only when something differs.
 
         ``update_failed`` True sets the row-level flag: the journal could not record a transport failure
@@ -274,6 +274,8 @@ class BrowserState:
                 row["reason"] = None if reason is None else _bounded(reason, 600)
             if journaled is not None:
                 row["journaled"] = bool(journaled)
+            if ack_requested is not None:
+                row["ack_requested"] = bool(ack_requested)
             if delivering is not None:
                 row["delivering"] = bool(delivering)
             if recipients is not None:
@@ -700,9 +702,9 @@ class SendWorker:
             seeded = {t: {"outcome": None, "ack": ACK_PENDING if ack else ACK_NOT_REQUESTED} for t in deliver}
             self.state.update(mid, state=STATE_PENDING, journaled=True, delivering=True, recipients=seeded)
 
-        # `expected_recipients` is set only by a confirmed `@all` to #general (the nonce's recipients);
-        # `send_as_web` then compares the live members to it before the journal preflight. A stored channel's post
-        # addresses its roster and passes None. An exception escaping after the journal write reaches
+        # Confirmed channel broadcasts carry the nonce's recipient set for
+        # comparison before journal preflight. Other posts pass None.
+        # An exception escaping after the journal write reaches
         # `_run`, which reads the row's `journaled`.
         payload = sp_channels.send_as_web(
             job["key"], self.web_sender(), job["text"], ack, mid,
@@ -710,6 +712,10 @@ class SendWorker:
             expected_recipients=job.get("expected_recipients"))
         state = payload.get("state")
         if state == sp_channels.WEB_SENT:
+            if payload.get("reason") == "recorded, no notifications":
+                self.state.update(mid, state=STATE_PENDING, journaled=False, delivering=False,
+                                  recipients={}, ack_requested=False, note=payload["reason"])
+                return
             asked = bool(job["ack"])
             outcomes = payload.get("outcomes") or {}
             notes = payload.get("notes") or {}
@@ -841,22 +847,21 @@ class Chat:
 
         return self.gate.accept(build)
 
-    # -- confirmed @all to #general ------------------------------------------
+    # -- confirmed channel broadcasts ---------------------------------------
 
     @staticmethod
     def _digest(text):
         return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
-    def preview_all(self, text, recipients):
-        """The confirm nonce for an `@all` to #general addressed to ``recipients``. Accepts and charges nothing.
+    def preview_all(self, text, recipients, key=sp_constants.CHANNEL_GENERAL):
+        """A channel-bound nonce for an `@all` to ``recipients``. Charges nothing.
 
         The ACK request is part of the binding and is always true for an `@all`."""
         return self.gate.issue_nonce(
-            sp_constants.CHANNEL_GENERAL, self.state.typed, recipients, self._digest(text), True)
+            key, self.state.typed, recipients, self._digest(text), True)
 
-    def confirm_all(self, nonce, text):
+    def confirm_all(self, nonce, text, key=sp_constants.CHANNEL_GENERAL):
         """Accept a confirmed `@all`: ``(CONFIRM_OK, mid)``, ``(CONFIRM_STALE, None)`` or ``(CONFIRM_LIMITED, None)``."""
-        key = sp_constants.CHANNEL_GENERAL
 
         def build(recipients):
             mid = str(uuid.uuid4())

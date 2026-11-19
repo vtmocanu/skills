@@ -126,9 +126,9 @@ class GeneralBroadcastTests(GeneralBase):
         self.assertIn("hello everyone", tail)
         self.assertIn("delivery: recorded", tail)
         self.assertFalse(self.stamp_path().exists())
-        # A plain post is not rate limited and "@allies" is not the broadcast.
+        # A literal at-sign in a word is neither a mention nor a broadcast.
         for _ in range(2):
-            self.assertEqual(self.post("@allies assemble")[0], 0)
+            self.assertEqual(self.post("word@allies assemble")[0], 0)
         self.assertEqual(self.journal_entries(), [])
 
     def test_record_on_a_plain_post_journals_without_delivering(self):

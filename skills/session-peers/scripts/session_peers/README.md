@@ -29,6 +29,9 @@ the reply command included in a request envelope.
 | hooks | Hook installation, trust metadata, and startup reconciliation |
 | topics | Pull-only shared logs, retention, identity, and cursor commands |
 | channels | Channel store under the user-wide root, membership-first history, member liveness, and the `channel` commands |
+| channel_mentions | Literal-safe mention intent, without resolution or writes |
+| channel_reads | Per-reader progress and bounded human unread reminders, never ACKs |
+| channel_roles | Read-only current binding inventory for runtime-neutral lead admission and fan-out filtering |
 | webdata | Dashboard read model: bounded, read-only snapshots of channel history, journal ACK state and discovery, the poll cursor and the per-view JSON |
 | web | Dashboard HTTP server (loopback, token, GET only; one POST route in chat mode), the discovery worker and the `web` command; serves the static assets in `web/` (`index.html`, `app.css`, `app.js`); see Dashboard server below |
 | webchat | Chat mode state: the Browser feed log, status rows, `SendGate` (rate limits and queue capacity) and the single `SendWorker` |
@@ -120,9 +123,9 @@ checks in order, and each refusal has an empty `{}` body:
    `text` a non-empty string of at most `MAX_TEXT_CHARS` that encodes as UTF-8,
    `ack` a bool, `to` one `#` channel key or 1-64 distinct typed addresses with
    no `web:`; `confirm` a string of 1 to `CONFIRM_MAX` (128) characters, only
-   with `to` `#general` and an `@all` text.
-8. A plain `#general` post, or text matching `channels.ALL_RE` to any route but
-   `#general` (403). An `@all` to `#general` goes to `_post_all` after the 503
+   with a channel destination and a literal-safe `@all` token.
+8. A plain `#general` post, or a literal-safe `@all` to picked recipients is
+   refused (403). A channel `@all` goes to `_post_all` after the 503
    check (step 9): no `confirm` is a preview, a `confirm` is a confirm.
 9. Chat has started (503).
 10. `SendGate`, under one lock: the rate limits (1 per second, 30 per rolling
