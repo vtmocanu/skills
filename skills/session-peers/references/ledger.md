@@ -165,7 +165,9 @@ or relocating the ledger; an anchor mismatch reads unavailable.
 
 The dashboard reads committed HEAD through its token-protected channel ledger
 endpoint on selection and each live poll, even without new messages. It shows
-a real HTML table and observation time. Failed reads replace the cached table
+a compact Ownership pin with owner counts. Its toggle opens the real HTML
+table as an overlay, preserving history size and scroll. Pin tooltips show
+observation time; row timestamps have exact UTC tooltips. Failed reads replace the cached table
 with an unavailable notice. Read limits are one second, 1 MiB of Git output,
 256 items, 256 links total, and 1 MiB of rendered JSON. The request's existing
 byte allowance also applies. Exceeding a limit reads unavailable, never an

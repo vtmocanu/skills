@@ -714,6 +714,29 @@ class DeadlineTests(WebBase):
 
 
 class DiscoveryWorkerTests(WebBase):
+    def test_last_seen_is_a_positive_probe_receipt_kept_only_in_process(self):
+        self.ops_channel()
+        stamp = "2026-11-19T11:00:00+00:00"
+        with mock.patch.object(sp_channels, "member_liveness", return_value="live"), \
+                mock.patch.object(sp_runtime, "now_iso", return_value=stamp):
+            first = web.run_discovery()
+        self.assertEqual(first["last_seen"][self.me], stamp)
+        sessions = {s["member"]: s for s in webdata.state_view(first)["sessions"]}
+        self.assertEqual(sessions[self.me]["last_seen"], stamp)
+        for status in ("unverified", "gone"):
+            with self.subTest(status=status), mock.patch.object(sp_channels, "member_liveness", return_value=status):
+                kept = web.run_discovery(previous=first)
+                self.assertEqual(kept["last_seen"][self.me], stamp)
+                fresh = web.run_discovery()
+                self.assertNotIn(self.me, fresh["last_seen"], "a fresh process has no inferred receipt")
+                sessions = {s["member"]: s for s in webdata.state_view(fresh)["sessions"]}
+                self.assertNotIn("last_seen", sessions[self.me])
+        newer = "2026-11-19T11:01:00+00:00"
+        with mock.patch.object(sp_channels, "member_liveness", return_value="live"), \
+                mock.patch.object(sp_runtime, "now_iso", return_value=newer):
+            renewed = web.run_discovery(previous=kept)
+        self.assertEqual(renewed["last_seen"][self.me], newer)
+
     def setUp(self):
         super().setUp()
         self.other = self.home / ".codex"

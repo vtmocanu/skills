@@ -50,15 +50,27 @@ the same user. Connection, header and read-budget details are in the
   unverified`) badge cover the latest 25 entries of the channel; `unverified`
   appears when the read budget ran out before the ACK state could be
   established.
-  - **Order.** `#general` and the Browser lane are pinned. The other channels
-    follow by their newest send (newest first), then channels with no posts,
-    then channels whose activity is unknown; ties break by label, then key.
-    Only sends count (not joins, leaves or handovers), so a membership change
-    does not move a channel (an oversized entry, or a send pushed out of the
-    read window, can make a channel's activity unknown, which does move it). A channel whose newest send is stamped more than
-    300 s in the future counts as unknown. The channel you selected stays
-    selected and is scrolled into view whenever the rail reorders, on a poll or a
-    state refresh.
+  - **Active and Stale.** A channel is Active when its newest known message or
+    delivery is within the last 24 hours. The selected channel, this tab's unread
+    channel updates, pending deliveries/ACKs, and existing attention warnings
+    stay Active regardless of age. Selecting a channel clears this tab's unread
+    marker, not its pending delivery evidence. Unread markers are in memory,
+    not a shared read receipt. Membership changes alone do not count as activity.
+    `#general` stays first; the Browser lane keeps its existing pinned placement.
+    Buddy channels otherwise group normally.
+  - **Order.** Within each group, the newest known `last_post_ts` or
+    `last_delivery_ts` wins, with label/key ties. Delivery times come from outcome
+    records already read; poll receipt time is never invented as a delivery
+    time. The 24-hour window uses the browser's clock. Existing polls also age
+    quiet channels into Stale, without a new timer. The selected channel cannot
+    age out of Active while viewed and is kept in view when ordering changes.
+  - **Collapse.** Stale starts collapsed and has a `Stale (N)` toggle. When one
+    group is empty there is no separator or empty Active heading. The toggle
+    remains available for an all-Stale list. Channels and session cards remember
+    expansion independently in browser-local display preferences. Invalid or
+    unreadable preferences default to collapsed; failed writes still allow the
+    toggle to work in the current tab. Group Stale means age or liveness
+    uncertainty, not death; it is separate from an outdated buddy-name marker.
   - **Activity unknown.** A channel with no posts shows nothing; the
     "activity unknown" note appears only when its newest send could not be established: the read
     did not reach one within its bounds, met an oversized entry that may hide a
@@ -77,7 +89,17 @@ the same user. Connection, header and read-budget details are in the
   requested, are outside it); a recipient's journaled transport error is shown on its
   row, except one that only repeats a `refused: <reason>` (the reason shows once). Membership changes (joined, left, removed, handover, created) are
   entries too.
-- **Details panel.** Runtime, state and the typed address of a member. `Copy
+- **Details panel.** Runtime, state and the typed address of a member. Session
+  cards group as Active only when `liveness` is `live`; `unverified` and `gone`
+  cards belong to Stale, retaining their distinct badges. Each group sorts by
+  `last_seen` descending, with name/id ties and unknown times last. This optional
+  timestamp is the last positive discovery-probe receipt retained by the current
+  server process, not a model-activity timestamp. An uncertain/gone probe does
+  not overwrite a previous positive receipt. After server restart there is no
+  inferred history: a session never positively observed shows
+  `last seen: unknown`. No new store, timer, scan or history read is introduced.
+  Recipient pickers are unchanged. Restart the dashboard server after upgrading
+  to adopt these additive activity fields. `Copy
   address` is active only for a strict typed id (`cc:`, `codex:`, `oc:` form);
   otherwise it is disabled. A Codex member's reply budget is labelled "as last
   saved by the shim" (read from its state file; unknown when the thread's home
@@ -97,8 +119,10 @@ the same user. Connection, header and read-budget details are in the
   actor and member text in each channel's newest 200 entries, in batches with
   `Load more`.
 - **Live.** The page polls every 2 s (backing off after failures), remembers a
-  light or dark theme in `localStorage` (its only stored value; the default
-  follows the system), and has a phone layout.
+  light or dark theme, the two Stale-expansion booleans and channel-keyed
+  ownership-pin expansion choices in `localStorage`,
+  and has a phone layout. The theme default follows the system. No token,
+  message, peer identifier, session name or activity timestamp is stored there.
 
 `transport accepted` never means the model read the message; only an ACK
 (`inbox acks <id>`) does. A correlated `ask`/`dispatch` request and its
@@ -421,9 +445,18 @@ shares the journal before using `--chat`.
 ## Live repository ledger
 
 A channel owner can run `peers.py channel bind NAME --ledger` in a repository
-with a ledger. Its committed ownership table appears above that channel's
-history, independently of change-note messages. It refreshes on selection and
-each live poll, and shows its observation time. A failed, oversized, timed-out
+with a ledger. A fixed Ownership pin above history shows owner counts (largest
+first) and the unowned count. Wide summaries truncate with `+N more`; changed
+counts briefly highlight while collapsed, respecting reduced-motion preferences.
+Click, Enter or Space opens a compact table overlay without resizing history.
+Escape, an outside click or another pin click closes it. The overlay scrolls
+within 60% of the viewport; closed pins add no second scrolling region.
+Expansion is remembered per channel in this browser, default closed, and remains
+usable when storage is unavailable. Polls preserve the overlay and its scroll.
+Slugs truncate with full tooltips, redundant titles disappear, statuses use small
+badges, and relative update times retain exact UTC tooltips. It refreshes on
+selection and each live poll; the pin tooltip shows its observation time.
+A failed, oversized, timed-out
 or mismatched read shows unavailable instead of retaining a current label.
 The endpoint is `GET /api/ledger/CHANNEL`, under the same loopback, Host and
 token checks as other dashboard reads. It accepts no query or filesystem path.

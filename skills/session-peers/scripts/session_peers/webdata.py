@@ -1316,13 +1316,15 @@ def _member_state(liveness, activity):
     return activity if activity in ("working", "idle") else "unverified"
 
 
-def member_details(typed, liveness, activity=None, now=None, budget=None, home=None):
+def member_details(typed, liveness, activity=None, now=None, budget=None, home=None, last_seen=None):
     """The details panel data for one member; liveness, activity and a Codex member's home come from the caller.
 
     ``state`` is ``gone`` when liveness says so, else ``working`` or ``idle`` from
     ``activity``, else ``unverified``. A Codex member's shim state file (under ``home``) is charged to ``budget``;
     one that does not fit leaves ``reply_budget`` None and sets ``partial``. Without a ``home``
-    the budget is unknown: ``reply_budget`` None and ``budget_unknown`` true."""
+    the budget is unknown: ``reply_budget`` None and ``budget_unknown`` true.
+    ``last_seen`` is a positive discovery receipt retained by this process;
+    unknown is omitted, never inferred from session state or message activity."""
     typed = typed if isinstance(typed, str) else str(typed)
     kind, _sep, ident = typed.partition(":")
     out = {
@@ -1330,6 +1332,8 @@ def member_details(typed, liveness, activity=None, now=None, budget=None, home=N
         "liveness": liveness if liveness in ("live", "gone") else "unverified",
         "state": _member_state(liveness, activity),
     }
+    if isinstance(last_seen, str) and len(last_seen) <= 64 and 0 < _stamp(last_seen) and math.isfinite(_stamp(last_seen)):
+        out["last_seen"] = last_seen
     if kind == "codex":
         budget = budget if budget is not None else Budget()
         if not isinstance(home, str) or not home:
@@ -2092,6 +2096,18 @@ def _post_activity(snap, now):
     return ACTIVITY_UNKNOWN, None
 
 
+def _last_delivery(snap, now):
+    """Newest known outcome in the existing bounded snapshot; no extra read."""
+    latest, stamp = None, 0.0
+    for item in snap.items if snap is not None else ():
+        if item.get("kind") != sp_channels.EVENT_OUTCOME:
+            continue
+        at = _stamp(item.get("ts"))
+        if stamp < at <= now + FUTURE_SKEW:
+            latest, stamp = _ts_view(item.get("ts")), at
+    return latest
+
+
 def _row_order(row):
     """Sort key of a state row: #general, posted (newest first), none, unknown; then label, then key.
 
@@ -2220,6 +2236,7 @@ def state_view(discovery, budget=None, now=None, chat=None):
         if label is not None:
             row["label"], row["label_status"] = label["label"], label["status"]
         row["activity"], row["last_post_ts"] = _post_activity(snap, stamp_now)
+        row["last_delivery_ts"] = _last_delivery(snap, stamp_now)
         if omitted:
             row["omitted_members"] = omitted
             partial = True
@@ -2234,7 +2251,8 @@ def state_view(discovery, budget=None, now=None, chat=None):
                 seen_members.add(member["typed"])
                 details = member_details(
                     member["typed"], liveness.get(member["typed"]), activity.get(member["typed"]), now, budget,
-                    home=homes.get(member["typed"].partition(":")[2]))
+                    home=homes.get(member["typed"].partition(":")[2]),
+                    last_seen=(discovery.get("last_seen") or {}).get(member["typed"]))
                 partial = partial or bool(details.get("partial"))
                 if chat is not None and member["typed"].startswith("codex:"):
                     left = (discovery.get("replies_left") or {}).get(member["typed"])
