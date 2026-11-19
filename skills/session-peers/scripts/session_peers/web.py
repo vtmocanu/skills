@@ -446,9 +446,8 @@ class Server(http.server.ThreadingHTTPServer):
 
     def __init__(self, port=0, chat=False, clock=None):
         self.token = secrets.token_bytes(32).hex()
-        self.instance = secrets.token_hex(16)
-        from . import web_lifecycle
-        self.code_digest = web_lifecycle.digest()
+        self.instance = None
+        self.code_digest = None
         self.role_home = sp_storage.codex_home()  # capture before discovery's environment override
         from . import journal
         try:
@@ -660,7 +659,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         parts = self._parts()
         path = parts.path
         if path.startswith("/api/"):
-            if path == "/api/instance" and self.headers.get_all("X-Peers-Probe") is not None:
+            if path == "/api/instance" and self.server.instance is not None and self.headers.get_all("X-Peers-Probe") is not None:
                 from . import web_lifecycle
                 if not web_lifecycle.valid_probe(self.server.token, self._single("X-Peers-Probe"), self._single("X-Peers-Proof")):
                     raise _Refused(403)
@@ -901,7 +900,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         return number
 
     def _api(self, path, query):
-        if path == "/api/instance":
+        if path == "/api/instance" and self.server.instance is not None:
             self._query(query, ())
             payload = {"service": "session-peers-web", "pid": os.getpid(),
                        "instance": self.server.instance, "code_digest": self.server.code_digest,
@@ -1045,7 +1044,8 @@ def serve(server, ready=None):
         serving.start()
         if ready is not None:
             ready()
-        print("http://127.0.0.1:%d/#token=%s" % (server.port, server.token), flush=True)
+        else:
+            print("http://127.0.0.1:%d/#token=%s" % (server.port, server.token), flush=True)
         while not stopping:
             time.sleep(0.5)
     finally:

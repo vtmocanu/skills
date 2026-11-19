@@ -1,6 +1,7 @@
 """Opt-in, user-wide stable dashboard lifecycle. No service manager or remote listener."""
 
 import contextlib
+import errno
 import fcntl
 import hashlib
 import hmac
@@ -50,7 +51,7 @@ def locked():
         raise LifecycleError("dashboard state directory is not owned or is a symlink")
     directory.chmod(0o700)
     fd = private_open(directory / "lock", os.O_RDWR | os.O_CREAT)
-    deadline = time.monotonic() + WAIT
+    deadline = time.monotonic() + 2 * WAIT
     try:
         while True:
             try:
@@ -124,6 +125,19 @@ def url(cfg):
     return "http://127.0.0.1:%d/#token=%s" % (cfg["port"], cfg["token"])
 
 
+def distinct_port(port, chat=False):
+    other = read(root() / ("config.json" if chat else "chat.json"))
+    if other and other.get("port") == port:
+        raise LifecycleError("persistent chat and read-only dashboard ports must differ")
+
+
+def recovery(chat=False):
+    path = root() / ("chat-server.json" if chat else "server.json")
+    return ("Manually inspect %s and its recorded process/port. Only after independently confirming "
+            "the recorded server is stopped or stale, remove %s and retry. Keep the config to preserve "
+            "the URL; never signal an unverified PID." % (path, path))
+
+
 def digest():
     script = Path(__file__).resolve().parent.parent / "peers.py"
     assets = sorted(str(p) for p in (script.parent / "session_peers" / "web").rglob("*") if p.is_file())
@@ -174,7 +188,7 @@ def process_state(record):
         return "gone"
     pid = record.get("pid")
     if type(pid) is not int or pid <= 0 or record.get("pid_domain") != process.pid_domain():
-        raise LifecycleError("invalid dashboard pidfile; inspect %s" % (root() / "server.json"))
+        raise LifecycleError("invalid dashboard pidfile. " + recovery())
     if not process.pid_alive(pid):
         return "gone"
     actual, error = process.proc_start_checked(pid)
@@ -195,7 +209,7 @@ def stop(record, cfg):
     if state == "gone":
         return
     if state != "live" or not verified(record, cfg):
-        raise LifecycleError("cannot verify the recorded dashboard; refusing to signal its PID")
+        raise LifecycleError("cannot verify the recorded dashboard; refusing to signal its PID. " + recovery())
     os.kill(record["pid"], signal.SIGTERM)
     deadline = time.monotonic() + WAIT
     while time.monotonic() < deadline:
@@ -217,7 +231,7 @@ def cleanup(instance, chat=False):
 
 
 def ensure(cfg, fd):
-    log_fd = private_open(root() / "server.log", os.O_WRONLY | os.O_CREAT | os.O_APPEND)
+    log_fd = private_open(root() / "server.log", os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
     script = str(Path(__file__).resolve().parent.parent / "peers.py")
     try:
         child = subprocess.Popen([sys.executable, script, "web", "--managed-child", "--lock-fd", str(fd)],
@@ -225,26 +239,48 @@ def ensure(cfg, fd):
                                  start_new_session=True, pass_fds=(fd,))
     finally:
         os.close(log_fd)
-    deadline = time.monotonic() + WAIT
-    while time.monotonic() < deadline:
-        record = read(root() / "server.json")
-        if record and record.get("pid") == child.pid and process_state(record) == "live" and verified(record, cfg):
-            return
-        if child.poll() is not None:
-            raise LifecycleError("dashboard could not start on 127.0.0.1:%d (port may be held by another process); inspect %s"
-                                 % (cfg["port"], root() / "server.log"))
-        time.sleep(0.05)
-    raise LifecycleError("dashboard startup unverified; inspect %s, then retry --ensure" % (root() / "server.log"))
+    ready = False
+    try:
+        deadline = time.monotonic() + WAIT
+        while time.monotonic() < deadline:
+            record = read(root() / "server.json")
+            if record and record.get("pid") == child.pid and process_state(record) == "live" and verified(record, cfg):
+                ready = True
+                return
+            if child.poll() is not None:
+                raise LifecycleError("dashboard could not start on 127.0.0.1:%d (port may be held by another process); inspect %s"
+                                     % (cfg["port"], root() / "server.log"))
+            time.sleep(0.05)
+        raise LifecycleError("dashboard startup unverified on 127.0.0.1:%d; inspect %s, then retry --ensure"
+                             % (cfg["port"], root() / "server.log"))
+    finally:
+        if not ready:
+            # This unreaped Popen child is ours, not a PID recovered from disk. Kill also
+            # releases its inherited flock, so a slow/failed startup cannot strand every verb.
+            if child.poll() is None:
+                child.kill()
+            try:
+                child.wait(timeout=max(WAIT, 1.0))
+            except subprocess.TimeoutExpired as exc:
+                raise LifecycleError("startup child %d could not be reaped; inspect its process before retrying" % child.pid) from exc
+            with contextlib.suppress(OSError, ValueError, LifecycleError):
+                record = read(root() / "server.json")
+                if record and record.get("pid") == child.pid:
+                    cleanup(record.get("instance"))
 
 
 def command(args):
     with locked() as fd:
         path, cfg = config()
+        if args.port is not None:
+            distinct_port(args.port)
         if args.url and args.port is None:
             print(url(cfg))
             return 0
         record = read(root() / "server.json")
         state = process_state(record)
+        if state == "unverified":
+            raise LifecycleError("recorded dashboard process identity is unverified. " + recovery())
         if args.stop:
             stop(record, cfg)
             cleanup(record.get("instance") if record else None)
@@ -270,7 +306,7 @@ def command(args):
             state = "gone"
         if state != "gone":
             if state != "live" or not verified(record, cfg):
-                raise LifecycleError("recorded dashboard identity or health is unverified; no second server started")
+                raise LifecycleError("recorded dashboard identity or health is unverified; no second server started. " + recovery())
             if record.get("code_digest") != digest():
                 raise LifecycleError("dashboard runs older code; run web --ensure --restart (same port and token)")
         else:
@@ -287,18 +323,55 @@ def server_record(server):
             "port": server.port, "instance": server.instance, "code_digest": server.code_digest}
 
 
+def port_probe(port):
+    # No application bytes or credentials. Unknown errors are not evidence of a free port.
+    with socket.socket() as probe:
+        probe.settimeout(0.1)
+        result = probe.connect_ex(("127.0.0.1", port))
+        if result == 0 and probe.getpeername() != ("127.0.0.1", port):
+            return errno.EADDRNOTAVAIL
+        return result
+
+
 def stable_server(web, port, chat=False):
     class StableServer(web.Server):
-        allow_reuse_address = True  # restart the same URL after established connections close
-    return StableServer(port, chat=chat)
+        allow_reuse_address = True
+
+    deadline = time.monotonic() + WAIT
+    while True:
+        if port_probe(port) != errno.ECONNREFUSED:
+            raise LifecycleError("dashboard port 127.0.0.1:%d has a live or unverified holder; refusing to bind" % port)
+        # Reuse only after a refused connection: TIME_WAIT cannot accept a probe. This
+        # is not atomic with bind; a foreign listener appearing between them is an
+        # accepted narrow race. On Linux an existing reusable but non-listening
+        # reservation can also lose the port (its later listen fails loudly).
+        # Never treat a timeout/unknown probe as ECONNREFUSED.
+        try:
+            server = StableServer(port, chat=chat)
+            break
+        except OSError as exc:
+            if exc.errno != errno.EADDRINUSE or time.monotonic() >= deadline:
+                raise
+            time.sleep(0.05)  # a verified old instance may still be releasing this exact port
+    try:
+        if (server.server_address != ("127.0.0.1", port)
+                or server.socket.getsockname() != ("127.0.0.1", port) or port_probe(port) != 0):
+            raise LifecycleError("dashboard bind/probe did not verify the exact loopback address")
+        server.instance = secrets.token_hex(16)
+        server.code_digest = digest()
+        return server
+    except Exception:
+        server.server_close()
+        raise
 
 
 def persistent_chat(args, web):
     with locked():
         path, cfg = config(chat=True)
         if process_state(read(root() / "chat-server.json")) != "gone":
-            raise LifecycleError("a persistent chat dashboard is already running or unverified")
+            raise LifecycleError("a persistent chat dashboard is already running or unverified. " + recovery(chat=True))
         if args.port is not None:
+            distinct_port(args.port, chat=True)
             cfg["port"] = args.port
             write(path, cfg)
         server = stable_server(web, cfg["port"], chat=True)

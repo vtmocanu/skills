@@ -17,18 +17,30 @@ It starts a detached server or reuses the verified running instance, prints its
 URL and exits. It survives the launching session ending. No service manager or
 launchd is installed. State is shared across runtimes and `CODEX_HOME` values in
 `~/.codex/session-peers/web/`: directory 0700, config, pidfile, lock and log 0600.
-The config holds the read-only port and token. The private log can contain the
-bookmark URL; do not publish it.
+The config holds the read-only port and token. The managed log is truncated on
+each start and receives neither the bookmark URL nor its token; only the
+launcher prints the URL after verifying startup.
 
 - First creation tries port 8765, then the first free port above it, and records
-  that choice. A later foreign port holder causes a refusal, never a silent new
-  URL. `web --url --port N` changes the stored port only after the recorded
-  server is stopped; stored ports accept 1024-65535, not 0.
+  that choice. A foreign listening socket on the port, wildcard or loopback,
+  causes a refusal, never a silent new URL. A foreign socket that is bound but
+  not listening may lose the port on Linux (its later listen fails); it is never
+  silently intercepted. `web --url --port N` changes the stored port only after the recorded
+  server is stopped; stored ports accept 1024-65535, not 0, and cannot equal the
+  other persistent mode's port. An accepting or unverified listener is refused
+  before binding, including wildcard listeners. Socket reuse is enabled only
+  after a refused connection probe so TCP `TIME_WAIT` does not block a restart;
+  bind and post-bind checks must show exactly `127.0.0.1:PORT`. Probe and bind
+  are not atomic: a foreign listener appearing between them is a narrow accepted
+  race. Startup still has a 10-second budget, not a long TCP-teardown wait.
 - `web --url` prints the URL without starting or probing a server. First use
   initializes its config, including a temporary free-port check.
 - `web --stop` signals only the recorded PID after its process start/domain
   and token-authenticated instance check match. Missing or reused PIDs are stale,
   not kill targets; uncertain process or HTTP evidence refuses the signal.
+  The error names manual recovery: inspect the pidfile and recorded process/port;
+  only after independently confirming that server is stopped or stale, remove
+  the named pidfile and retry. Keep the config so the bookmark remains unchanged.
 - After an upgrade, `--ensure` refuses to silently reuse older code and names
   `web --ensure --restart`. Restart stops the verified instance and starts the
   installed code at the same port and token. The recorded digest covers loaded
@@ -37,11 +49,16 @@ bookmark URL; do not publish it.
 - `web --rotate-token` requires a stopped server, saves a new read-only token
   and prints the new URL without starting. Run `--ensure` to serve it. Old
   bookmarked tokens are then refused. Port/token changes are not implicit stops.
-- The authenticated `/api/instance` health route has no discovery work. Reuse
+- Only managed/persistent servers expose `/api/instance`; plain web does not
+  compute its code digest or expose the route. Health has no discovery work. Reuse
   also requires the pidfile and a read-only instance, not just a matching port.
   Health uses domain-separated request/response challenge proofs, so a foreign
   listener never receives the saved token. These proofs authorize no data route.
-  A bounded file lock serializes start/stop/restart across sessions.
+  A bounded file lock serializes start/stop/restart across sessions. Failed or
+  timed-out startup kills and reaps the launcher's own child, releasing its
+  inherited lock; it never signals a recovered, unverified PID for this cleanup.
+  Lock acquisition allows twice the 10-second startup budget so a concurrent
+  launcher can wait for slow startup or its cleanup.
 
 Plain `web` retains its original foreground, ephemeral behavior:
 

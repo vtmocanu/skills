@@ -87,8 +87,8 @@ User-facing behaviour is in `references/web.md`; the server's own guards are:
   DNS-rebinding guard. Read-only mode accepts GET; chat also accepts POST `/api/send`.
   A body on a GET is refused
   (400). `/`, `/app.css` and `/app.js` load without the token; every `/api/*`
-  route needs `X-Peers-Token` (403), except the instance-health route also accepts
-  domain-separated token proofs that authorize no data route.
+  route needs `X-Peers-Token` (403); the managed/persistent instance-health route
+  also accepts domain-separated token proofs that authorize no data route.
 - At most 16 connections at once; extra connections are closed unanswered. The
   request line and headers must arrive within 2 s and every connection's socket
   is cut after 10 s; its slot is held until the handler returns. The 8 MiB

@@ -8,11 +8,16 @@ import socket
 import stat
 import subprocess
 import select
+import time
+import errno
+import types
 import unittest
+import sys
 from unittest import mock
 
 from peer_tests.support import Base, new_uuid, sp_process
 from session_peers import web, web_lifecycle as lifecycle
+from peer_tests.test_web_server import WebBase
 
 
 class StableWebTests(Base):
@@ -73,6 +78,107 @@ class StableWebTests(Base):
         self.assertIsNone(lifecycle.health(cfg))
         self.assertIsNone(lifecycle.read(lifecycle.root() / "server.json"))
         self.owned = None
+
+    def test_managed_log_never_contains_the_token_and_is_truncated_on_start(self):
+        cfg = self.configured()
+        log = lifecycle.root() / "server.log"
+        log.write_text("old log content that must not accumulate\n")
+        self.launch()
+        text = log.read_text()
+        self.assertNotIn(cfg["token"], text)
+        self.assertNotIn("old log content", text)
+
+    def test_foreign_wildcard_listener_is_never_cobound(self):
+        with socket.socket() as foreign:
+            foreign.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            foreign.bind(("0.0.0.0", 0))
+            foreign.listen()
+            port = foreign.getsockname()[1]
+            rc, _out, err = self.call("--ensure", "--port", str(port))
+            self.assertEqual(rc, 1, err)
+            self.assertEqual(foreign.getsockname()[1], port)
+
+    def test_bound_wildcard_reservation_semantics_are_platform_explicit(self):
+        with socket.socket() as foreign:
+            foreign.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            foreign.bind(("0.0.0.0", 0))
+            port = foreign.getsockname()[1]
+            rc, _out, err = self.call("--ensure", "--port", str(port))
+            if sys.platform.startswith("linux"):
+                self.assertEqual(rc, 0, err)
+                with self.assertRaises(OSError) as refused:
+                    foreign.listen()
+                self.assertEqual(refused.exception.errno, errno.EADDRINUSE)
+            else:
+                self.assertEqual(rc, 1, err)
+            self.assertEqual(foreign.getsockname(), ("0.0.0.0", port))
+
+    def test_immediate_restart_after_stop_keeps_url_within_start_budget(self):
+        cfg, record = self.launch()
+        self.assertEqual(self.call("--stop")[0], 0)
+        self.owned = None
+        started = time.monotonic()
+        restarted, current = self.launch()
+        self.assertLess(time.monotonic() - started, lifecycle.WAIT)
+        self.assertEqual(restarted, cfg)
+        self.assertNotEqual(current["instance"], record["instance"])
+
+    def test_live_and_unknown_port_probes_refuse_before_server_construction(self):
+        class NeverServer:
+            def __init__(self, *_args, **_kw):
+                raise AssertionError("must not bind before a refused probe")
+        for code in (0, errno.ETIMEDOUT, errno.EACCES):
+            with mock.patch.object(lifecycle, "port_probe", return_value=code), \
+                    self.assertRaisesRegex(lifecycle.LifecycleError, "holder"):
+                lifecycle.stable_server(types.SimpleNamespace(Server=NeverServer), 8765)
+
+    def test_wrong_bound_address_is_closed_and_refused(self):
+        created = []
+        class WrongServer:
+            def __init__(self, *_args, **_kw):
+                self.server_address = ("0.0.0.0", 8765)
+                self.server_close = mock.Mock()
+                created.append(self)
+        with mock.patch.object(lifecycle, "port_probe", side_effect=[errno.ECONNREFUSED, 0]), \
+                self.assertRaisesRegex(lifecycle.LifecycleError, "exact loopback"):
+            lifecycle.stable_server(types.SimpleNamespace(Server=WrongServer), 8765)
+        created[0].server_close.assert_called_once()
+
+    def test_failed_start_kills_and_reaps_the_child_and_releases_inherited_lock(self):
+        cfg = self.configured()
+        real_popen = subprocess.Popen
+        children = []
+        def delayed(_args, **kw):
+            child = real_popen([sys.executable, "-c", "import time; time.sleep(25)"], **kw)
+            children.append(child)
+            self._children.append(child)
+            return child
+        with lifecycle.locked() as fd, mock.patch.object(lifecycle, "WAIT", 0.15), \
+                mock.patch.object(lifecycle.subprocess, "Popen", side_effect=delayed):
+            with self.assertRaises(lifecycle.LifecycleError):
+                lifecycle.ensure(cfg, fd)
+        self.assertEqual(len(children), 1)
+        self.assertIsNotNone(children[0].poll(), "timed-out child must not keep the inherited lock")
+        self.assertEqual(self.call("--url")[0], 0)
+
+    def test_lock_wait_allows_more_than_the_start_budget(self):
+        wait = lifecycle.WAIT
+        with mock.patch.object(lifecycle.time, "monotonic", side_effect=[0, 0.75 * wait, 1.25 * wait]), \
+                mock.patch.object(lifecycle.time, "sleep"), \
+                mock.patch.object(lifecycle.fcntl, "flock", side_effect=[BlockingIOError(), BlockingIOError(), None]) as lock:
+            with lifecycle.locked():
+                pass
+        self.assertEqual(lock.call_count, 3)
+
+    def test_unverified_identity_errors_explain_manual_recovery(self):
+        self.launch()
+        with mock.patch.object(lifecycle, "process_state", return_value="unverified"):
+            for args in (("--ensure",), ("--stop",), ("--rotate-token",)):
+                rc, _out, err = self.cli("web", *args)
+                self.assertEqual(rc, 1)
+                self.assertIn("server.json", err)
+                self.assertIn("remove", err)
+                self.assertIn("inspect", err.lower())
 
     def test_concurrent_ensure_launchers_return_one_server(self):
         launchers = [self.spawn("web", "--ensure", stderr=subprocess.PIPE) for _ in range(2)]
@@ -226,6 +332,13 @@ class StableWebTests(Base):
                      ("--chat", "--rotate-token"), ("--persist-token",), ("--restart",), ("--ensure", "--port", "0")):
             self.assertEqual(self.call(*args)[0], 2, args)
 
+    def test_explicit_ports_cannot_collide_across_persistent_modes(self):
+        readonly = self.configured()
+        with lifecycle.locked():
+            _path, chat = lifecycle.config(chat=True)
+        self.assertEqual(self.call("--chat", "--persist-token", "--port", str(readonly["port"]))[0], 1)
+        self.assertEqual(self.call("--url", "--port", str(chat["port"]))[0], 1)
+
     def test_persistent_chat_uses_its_own_url_and_refuses_the_read_only_token(self):
         readonly = self.configured()
         addresses = []
@@ -257,3 +370,12 @@ class StableWebTests(Base):
         path.symlink_to(target)
         self.assertEqual(self.call("--url")[0], 1)
         self.assertEqual(target.read_text(), "preserve me")
+
+
+class PlainWebLifecycleCompatibilityTests(WebBase):
+    def test_plain_server_does_not_compute_a_digest_or_expose_instance_health(self):
+        with mock.patch.object(lifecycle, "digest", side_effect=lifecycle.LifecycleError("unreadable code")) as digest:
+            plain = web.Server(0)
+            plain.server_close()
+            digest.assert_not_called()
+        self.assertEqual(self.api("/api/instance").status, 404)
