@@ -42,10 +42,11 @@ def parse(body):
     colons, and shed trailing sentence dots/colons. here/all are lowercase
     reserved tokens. Names outside this token grammar use full typed ids.
     """
-    tokens = []
+    tokens, seen = [], set()
     for match in _TOKEN.finditer(visible_text(body)):
         token = match[1].rstrip(".:")
-        if token and token not in tokens:
+        if token and token not in seen:
+            seen.add(token)
             tokens.append(token)
     return {"tokens": tokens, "all": "all" in tokens, "here": "here" in tokens,
             "names": [token for token in tokens if token not in ("all", "here")]}

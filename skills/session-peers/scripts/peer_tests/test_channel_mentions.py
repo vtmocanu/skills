@@ -13,6 +13,11 @@ class MentionGrammarTests(unittest.TestCase):
         result = subprocess.run([sys.executable, "-c", code], capture_output=True, timeout=3)
         self.assertEqual(result.returncode, 0, result.stderr.decode())
 
+    def test_many_distinct_mentions_finish_within_bounded_child(self):
+        code = "from session_peers.channel_mentions import parse; body=' '.join('@u%d'%i for i in range(80000)); assert len(body)<1048576; assert len(parse(body)['tokens'])==80000"
+        result = subprocess.run([sys.executable, "-c", code], capture_output=True, timeout=3)
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+
     def test_word_boundaries_typed_ids_and_sentence_punctuation(self):
         ident = "codex:11111111-1111-4111-8111-111111111111"
         body = "Hi @lead, (@here) and @" + ident + ". @lead: @all!"
