@@ -36,17 +36,34 @@
   var TYPED_RE = /^(?:cc|codex|web):[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$|^oc:ses_[A-Za-z0-9]{8,64}$/;
   var TOKEN_RE = /^#token=([A-Za-z0-9_-]{16,512})$/;
   var ALL_RE = /^@all(\s|$)/;
+  function broadcasts(text) {
+    var out = "", delimiter = 0, i = 0;
+    text = str(text);
+    while (i < text.length) {
+      if (text[i] === "`") {
+        var end = i + 1;
+        while (end < text.length && text[end] === "`") end++;
+        var count = end - i;
+        if (!delimiter) delimiter = count; else if (delimiter === count) delimiter = 0;
+        out += " ".repeat(count); i = end;
+      } else if (delimiter) { out += " "; i++; }
+      else if (text[i] === "\\" && (text[i + 1] === "@" || text[i + 1] === "`")) { out += "  "; i += 2; }
+      else { out += text[i]; i++; }
+    }
+    out = out.replace(/(?<![A-Za-z0-9+.-])(?:[A-Za-z][A-Za-z0-9+.-]*:\/\/|mailto:)\S+/g, " ")
+      .replace(/(?<![\p{L}\p{N}_.!#$%&'*+/=?^{}|~-])[\p{L}\p{N}_.!#$%&'*+/=?^{}|~-]+@[\p{L}\p{N}_.-]+/gu, " ");
+    var tokens = /(?:^|[^\p{L}\p{N}_@\\])@([\p{L}\p{N}_][\p{L}\p{N}_.:-]{0,255})/gu, match;
+    while ((match = tokens.exec(out))) if (match[1].replace(/[.:]+$/, "") === "all") return true;
+    return false;
+  }
   // Chat mode (POST /api/send): the server's limits, mirrored so the page can say no before asking.
   var SEND_PATH = "/api/send";
   var SEND_TO_MAX = 64;
   var TEXT_MAX = 1048576;
   var MID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-  // The composer's reason line (aria-describedby target) and the @all notes shown in it. Only an
-  // @all to #general is open (preview, then confirm, M2); the server refuses a plain #general post
-  // and an @all anywhere else with 403.
+  // Channel broadcasts require preview and confirmation. Direct picks cannot broadcast.
   var REASON_ID = "creason";
-  var ALL_WARN = "@all only works in #general: open #general to post it to every member";
-  var ALL_GENERAL = " reaches every #general member after you confirm the recipient list";
+  var ALL_WARN = "@all requires a channel destination and recipient confirmation";
   var GENERAL_ONLY_ALL = "In #general you can only post @all, which asks for a confirmation";
   var PREVIEW_409 = "Couldn't list the recipients (discovery pending or incomplete, or none or too many). Trying again may help, but a #general with more than 64 members is normally refused.";
   var CONFIRM_409 = "The preview expired or was used; preview again";
@@ -881,12 +898,16 @@
   function toText(entry, opts) {
     var general = (entry.channel || opts.channelKey) === "general";
     var rows = entry.delivery && Array.isArray(entry.delivery.recipients) ? entry.delivery.recipients : null;
-    if (rows && ALL_RE.test(str(entry.body))) return "@all, " + rows.length + " recipient" + (rows.length === 1 ? "" : "s");
+    if (rows && broadcastEntry(entry)) return "@all, " + rows.length + " recipient" + (rows.length === 1 ? "" : "s");
     if (general) return "#general";
     if (!rows) return null;
     if (!rows.length) return "nobody (recorded only)";
     var names = rows.slice(0, 4).map(function (r) { return nameOf(r.recipient); });
     return names.join(", ") + (rows.length > 4 ? " +" + (rows.length - 4) : "");
+  }
+
+  function broadcastEntry(entry) {
+    return entry.mention_all === true || (entry.mention_all === undefined && ALL_RE.test(str(entry.body)));
   }
 
   function renderSend(entry, opts) {
@@ -904,7 +925,7 @@
     } else {
       body.push(el("div", { class: "text" }, bodyNodes(entry.body)));
     }
-    if (entry.tally || (entry.delivery && ALL_RE.test(str(entry.body)) && entry.journaled)) body.push(renderTally(entry));
+    if (entry.tally || (entry.delivery && broadcastEntry(entry) && entry.journaled)) body.push(renderTally(entry));
     if (!opts.search) body.push(renderDelivery(entry.delivery));
     if (entry.coverage && typeof entry.coverage === "object") {
       var lines = [];
@@ -915,7 +936,10 @@
       });
       if (lines.length) body.push(el("ul", { class: "postcov" }, lines));
     }
-    return el("div", { class: "msg", "data-seq": typeof entry.seq === "number" ? entry.seq : null, tabindex: opts.focusTarget ? "-1" : null },
+    var viewer = S.state && S.state.viewer;
+    var mentioned = entry.mention_all === true || entry.mention_here === true ||
+      (typeof viewer === "string" && Array.isArray(entry.mentioned) && entry.mentioned.indexOf(viewer) >= 0);
+    return el("div", { class: "msg" + (mentioned ? " is-mentioned" : ""), "data-seq": typeof entry.seq === "number" ? entry.seq : null, tabindex: opts.focusTarget ? "-1" : null },
       el("div", { class: "avatar " + rt, "aria-hidden": "true" }, iconSvg(rt)),
       el("div", { class: "msgmain" },
         el("div", { class: "meta" },
@@ -1252,6 +1276,7 @@
     var state = str(row.state);
     var reason = typeof row.reason === "string" && row.reason ? row.reason : "no reason given";
     if (state === "queued") return "Queued (not yet recorded)";
+    if (state === "pending" && row.note === "recorded, no notifications") return "Recorded, no notifications";
     if (state === "pending" && rowNothingDelivered(row)) return NOTHING_DELIVERED;
     if (state === "pending") return row.delivering ? "Recorded, delivering…" : "Recorded";
     if (state === "not sent") return "Not sent: " + reason;
@@ -1326,7 +1351,7 @@
     var order = row.state === "queued" ? [] : rowOrder(row);
     // An @all post (this page's #general broadcast) also shows its tally as named chips, like an
     // @all entry in the channel history: who has ACKed and who has not, live from the row.
-    if (row.state === "pending" && row.ack_requested && row.kind === "channel" && ALL_RE.test(str(row.text))) {
+    if (row.state === "pending" && row.ack_requested && row.kind === "channel" && broadcasts(row.text)) {
       var counted = order.filter(function (typed) {
         var slot = slots[typed];
         return slot && typeof slot === "object" && (slot.ack === "acked" || (slot.ack !== "not requested" && !refusedState(slot.outcome)));
@@ -1662,8 +1687,8 @@
 
   // -- composer ------------------------------------------------------------
 
-  // The server refuses a plain #general post and an @all outside #general with 403 (the page blocks
-  // both before sending); an @all to #general goes through the preview and confirm round-trip.
+  // Channel broadcasts use preview/confirm; direct-recipient broadcasts and plain
+  // #general posts remain refused. Server errors never imply a send succeeded.
   var SEND_ERRORS = { 400: "The server could not accept this message", 403: "Refused by the server (token, origin, #general or @all)", 408: "The message reached the server too slowly",
     413: "Message too large", 415: "Refused: wrong content type", 429: "Too fast or queue full — try again", 503: "Chat is not running on the server" };
 
@@ -1771,7 +1796,7 @@
       var chanBox = el("input", { type: "checkbox", checked: C.channel, "data-focus": "pick:#" });
       S.focusables["pick:#"] = chanBox;
       on(chanBox, "change", function () { C.channel = !!chanBox.checked; updateComposerState(); });
-      out.push(el("label", { class: "who chanpick", title: "Every member gets it, and it is kept in the channel's history" },
+      out.push(el("label", { class: "who chanpick", title: "Kept in channel history; only mentions notify unless this channel delivers all" },
         chanBox, "Post to " + chanText(ctx.key)));
     }
     cands.forEach(function (c) {
@@ -1825,16 +1850,16 @@
     var ctx = composeContext();
     var blocked = blockedReason(ctx);
     var value = str(n.text.value);
-    // The @all gate: in #general only @all text can be sent (it previews the recipients first);
-    // anywhere else @all text waits, editable, until it no longer starts with @all.
+    // General remains broadcast-only in chat; stored channels may record quiet notes.
     var general = !blocked && ctx.kind === "general";
-    var allText = !blocked && ALL_RE.test(value);
+    var allText = !blocked && broadcasts(value);
+    var channelBroadcast = allText && ctx.kind === "channel" && C.channel;
     var plainGeneral = general && !allText && !!value.trim();
     n.text.disabled = !!blocked;
     var placeholder = general ? "Start with @all to reach every #general member" : "Ask, steer or brief a session";
     if (n.text.placeholder !== placeholder) n.text.placeholder = placeholder;
     // An @all always asks for ACKs: in #general the box shows that, checked and fixed.
-    if (general) {
+    if (general || channelBroadcast) {
       if (!C.ackForced) { C.ackSaved = !!n.ack.checked; C.ackForced = true; }
       n.ack.checked = true;
       n.ack.disabled = true;
@@ -1847,10 +1872,10 @@
     if (n.root.classList) {
       if (blocked) n.root.classList.add("is-blocked"); else n.root.classList.remove("is-blocked");
     }
-    var reasonKey = blocked ? "b|" + blocked : general && allText ? "all-general" : plainGeneral ? "plain-general" : allText ? "all-elsewhere" : "";
+    var reasonKey = blocked ? "b|" + blocked : (general || channelBroadcast) && allText ? "all-general" : plainGeneral ? "plain-general" : allText ? "all-elsewhere" : "";
     if (C.reasonKey !== reasonKey) {
       C.reasonKey = reasonKey;
-      fill(n.reason, blocked || (general && allText ? el("span", { class: "allwarn" }, el("b", null, "@all"), ALL_GENERAL)
+      fill(n.reason, blocked || ((general || channelBroadcast) && allText ? el("span", { class: "allwarn" }, el("b", null, "@all"), " reaches this channel after recipient preview and confirmation")
         : plainGeneral ? GENERAL_ONLY_ALL : allText ? el("span", { class: "allnote" }, ALL_WARN) : null));
       if (n.reason.classList) {
         if (reasonKey === "all-general") n.reason.classList.add("is-all"); else n.reason.classList.remove("is-all");
@@ -1861,8 +1886,8 @@
     C.boxes.forEach(function (b) { b.box.disabled = b.gone || !!blocked || (ctx.kind === "channel" && C.channel); });
     var to = blocked ? null : composeTo(ctx);
     var tooMany = Array.isArray(to) && to.length > SEND_TO_MAX;
-    n.send.disabled = !!blocked || (general ? !allText : allText) || C.busy || !!C.confirm || to === null || tooMany || !value.trim();
-    var label = C.busy ? (general ? "Previewing…" : "Sending…") : general && allText ? "Preview recipients" : "Send";
+    n.send.disabled = !!blocked || (general ? !allText : allText && !channelBroadcast) || C.busy || !!C.confirm || to === null || tooMany || !value.trim();
+    var label = C.busy ? (general || channelBroadcast ? "Previewing…" : "Sending…") : (general || channelBroadcast) && allText ? "Preview recipients" : "Send";
     if (n.send.textContent !== label) n.send.textContent = label;
     var msg = tooMany ? "At most " + SEND_TO_MAX + " recipients per send." : C.msg;
     var msgTone = tooMany ? "bad" : C.msgTone;
@@ -1898,8 +1923,8 @@
     var text = str(C.nodes.text.value);
     var to = blockedReason(ctx) ? null : composeTo(ctx);
     if (to === null || !text.trim() || (Array.isArray(to) && to.length > SEND_TO_MAX)) return Promise.resolve(false);
-    if (ctx.kind === "general") return ALL_RE.test(text) ? previewAll(text) : Promise.resolve(false);
-    if (ALL_RE.test(text)) return Promise.resolve(false);
+    if (broadcasts(text)) return typeof to === "string" ? previewAll(text, to) : Promise.resolve(false);
+    if (ctx.kind === "general") return Promise.resolve(false);
     var ack = !!C.nodes.ack.checked;
     C.busy = true;
     C.msg = null;
@@ -1931,9 +1956,9 @@
     });
   }
 
-  // -- @all to #general: preview, confirm dialog, confirm --------------------
+  // -- channel @all: preview, confirm dialog, confirm -----------------------
   //
-  // Send in #general POSTs the @all text without a nonce: a 200 lists the recipients and carries a
+  // A channel broadcast POSTs without a nonce: a 200 lists the recipients and carries a
   // single-use nonce bound to that exact set and text. The page shows the list in its own dialog
   // (never a native browser prompt), and Confirm POSTs the same text with the nonce. The dialog is
   // modal: #app is made inert, Tab stays inside, Esc cancels, and focus returns to the textarea.
@@ -1953,7 +1978,7 @@
     return { nonce: nonce, recipients: recipients, excluded: excluded, stale: data.stale === true, expires: expires };
   }
 
-  function previewAll(text) {
+  function previewAll(text, to) {
     var C = S.compose;
     C.busy = true;
     C.msg = null;
@@ -1961,11 +1986,11 @@
     updateComposerState();
     // The expiry counts from before the request left: the server's clock started no earlier.
     var sentAt = Date.now();
-    return postSend({ to: "#general", text: text, ack: true }).then(function (result) {
+    return postSend({ to: to || "#general", text: text, ack: true }).then(function (result) {
       C.busy = false;
       var preview = result.status === 200 ? readPreview(result.data) : null;
       if (preview) {
-        openConfirm(text, preview, sentAt);
+        openConfirm(text, preview, sentAt, to);
         updateComposerState();
         return true;
       }
@@ -1990,10 +2015,10 @@
 
   function buildConfirm(cf) {
     var n = cf.recipients.length;
-    var title = el("h2", null, "Post @all to #general?");
+    var title = el("h2", null, "Post @all to " + cf.to + "?");
     title.id = "dlgtitle";
     var desc = el("p", { class: "dlgdesc" }, "It goes to " + (n === 1 ? "this session" : "these " + n + " sessions") +
-      " as peer input from this browser, and each is asked for an ACK. If #general's members change before it is sent, nothing is sent.");
+      " as peer input from this browser, and each is asked for an ACK. If the channel's recipients change before it is sent, nothing is sent.");
     desc.id = "dlgdesc";
     var msg = el("div", { class: "dlgmsg", role: "status" });
     msg.id = "dlgmsg";
@@ -2028,9 +2053,9 @@
     return { root: scrim, panel: panel, lists: [quote, recList, exclList].filter(Boolean), cancel: cancel, confirm: confirmBtn, acts: acts, msg: msg, clock: clockNode, again: null };
   }
 
-  function openConfirm(text, preview, sentAt) {
+  function openConfirm(text, preview, sentAt, to) {
     var C = S.compose;
-    var cf = { nonce: preview.nonce, text: text, recipients: preview.recipients, excluded: preview.excluded, stale: preview.stale,
+    var cf = { nonce: preview.nonce, text: text, to: to || "#general", recipients: preview.recipients, excluded: preview.excluded, stale: preview.stale,
       deadline: sentAt + preview.expires * 1000, busy: false, expired: false, nodes: null };
     C.confirm = cf;
     cf.nodes = buildConfirm(cf);
@@ -2140,14 +2165,14 @@
     // The buttons disable while it is in flight: keep focus in the dialog, not on <body>.
     if (document.activeElement === cf.nodes.confirm || document.activeElement === cf.nodes.cancel) cf.nodes.panel.focus();
     updateConfirm(cf);
-    return postSend({ to: "#general", text: cf.text, ack: true, confirm: cf.nonce }).then(function (result) {
+    return postSend({ to: cf.to, text: cf.text, ack: true, confirm: cf.nonce }).then(function (result) {
       cf.busy = false;
       if (C.confirm !== cf) return false;
       var status = result.status;
       if (status === 202) {
         var data = result.data && typeof result.data === "object" ? result.data : {};
         var mid = typeof data.message_id === "string" && MID_RE.test(data.message_id) ? data.message_id : null;
-        if (mid) addLocalSend(mid, "#general", cf.text, true);
+        if (mid) addLocalSend(mid, cf.to, cf.text, true);
         if (C.nodes.text.value === cf.text) C.nodes.text.value = "";
         closeConfirm("Accepted " + clock(Date.now() / 1000) + " — status in #general", "ok");
         renderLanes();
@@ -3063,7 +3088,8 @@
       var page = S.pages[key];
       title = [chanText(key), labelMark(row)];
       var count = row && Array.isArray(row.members) ? row.members.length : 0;
-      sub = key === "general" ? count + " sessions, everyone" : count + " member" + (count === 1 ? "" : "s");
+      sub = (key === "general" ? count + " sessions, everyone" : count + " member" + (count === 1 ? "" : "s")) +
+        " · delivery: " + (row && row.deliver === "all" ? "all" : "mentions");
       var covRow = row ? { coverage: Object.assign(table(), row.coverage && typeof row.coverage === "object" ? row.coverage : {}) } : { coverage: table() };
       if (page && page.coverage && typeof page.coverage.native_claude === "boolean") covRow.coverage.native_claude = page.coverage.native_claude;
       cover = renderCoverage("channel", covRow);
@@ -3286,7 +3312,7 @@
     applyBrowser: applyBrowser, renderSendStatus: renderSendStatus, renderBrowserEntry: renderBrowserEntry, renderComposer: renderComposer,
     submitCompose: submitCompose, postSend: postSend, sendErrorText: sendErrorText, showBrowser: showBrowser, rowTally: rowTally,
     readPreview: readPreview, renderLedger: renderLedger, bodyNodes: bodyNodes, refreshLedger: refreshLedger,
-    channelGroups: channelGroups, sessionGroups: sessionGroups
+    channelGroups: channelGroups, sessionGroups: sessionGroups, broadcasts: broadcasts
   };
   // A read-only view of the model for tests and debugging: everything but the token.
   Object.defineProperty(root.PeersApp, "state", {

@@ -205,11 +205,10 @@ class ConfirmBindingTests(ConfirmBase):
 
     def test_the_same_text_to_a_stored_channel_with_the_same_roster_is_refused(self):
         nonce = self.nonce()
-        # A nonce belongs to #general; with `confirm` any other route is a malformed request.
-        self.assert_refused(self.confirm(nonce, to="#ops"), 400)
-        # Without `confirm`, an `@all` to a stored channel stays refused.
-        self.assert_refused(self.post("#ops", ALL_TEXT), 403)
-        self.assertEqual(self.chat.gate.nonces_outstanding, 1)
+        # A syntactically valid channel broadcast cannot reuse #general's nonce.
+        self.assert_refused(self.confirm(nonce, to="#ops"), 409)
+        self.assertEqual(self.post("#ops", ALL_TEXT).status, 200)
+        self.assertEqual(self.chat.gate.nonces_outstanding, 2)
         self.assert_no_all_traffic()
         self.assertEqual(self.confirm(nonce).status, 202)
 
@@ -301,7 +300,6 @@ class ConfirmBindingTests(ConfirmBase):
         text_only = {"to": "#general", "text": "hello", "ack": True, "confirm": nonce}
         cases = {
             "confirm on a plain post": json.dumps(text_only).encode(),
-            "confirm to a stored channel": self.confirm_body(nonce, to="#ops"),
             "confirm to a direct list": json.dumps({"to": [self.c1], "text": ALL_TEXT, "ack": True, "confirm": nonce}).encode(),
             "confirm not a string": json.dumps({"to": "#general", "text": ALL_TEXT, "ack": True, "confirm": 5}).encode(),
             "confirm null": json.dumps({"to": "#general", "text": ALL_TEXT, "ack": True, "confirm": None}).encode(),
@@ -319,12 +317,10 @@ class ConfirmBindingTests(ConfirmBase):
 
 
 class ConfirmStillRefusedTests(ConfirmBase):
-    def test_plain_general_and_at_all_elsewhere_stay_403(self):
+    def test_plain_general_and_direct_broadcasts_stay_403(self):
         cases = [
             ("#general", "hello"),
             ("#general", "@allx not an all"),
-            ("#ops", ALL_TEXT),
-            ("#ops", "@all"),
             ([self.c1], ALL_TEXT),
         ]
         for to, text in cases:

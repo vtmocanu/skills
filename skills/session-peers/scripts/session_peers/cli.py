@@ -433,6 +433,10 @@ def _register_channels(sub):
     csub = p_chan.add_subparsers(dest="channel_cmd")
     p_create = csub.add_parser("create", help="create a channel you own")
     p_create.add_argument("name", metavar="NAME")
+    p_create.add_argument("--deliver", choices=("mentions", "all"), default="mentions")
+    p_set = csub.add_parser("set", help="change delivery mode (owner only)")
+    p_set.add_argument("name", metavar="NAME")
+    p_set.add_argument("--deliver", choices=("mentions", "all"), required=True)
     p_create.add_argument(
         "--member", action="append", metavar="ADDR",
         help="add a session (typed id or name); repeatable",
@@ -450,6 +454,7 @@ def _register_channels(sub):
     p_remove.add_argument("name", metavar="NAME")
     p_remove.add_argument("member", metavar="ADDR")
     p_list = csub.add_parser("list", help="channels and your role in each")
+    p_unread = csub.add_parser("unread-summary", help=argparse.SUPPRESS)
     p_list.add_argument("--json", action="store_true", help="machine-readable output")
     p_members = csub.add_parser("members", help="members with liveness live/unverified/gone")
     p_members.add_argument("name", metavar="NAME")
@@ -457,13 +462,14 @@ def _register_channels(sub):
     p_tail = csub.add_parser("tail", help="print history entries after a cursor")
     p_tail.add_argument("name", metavar="NAME")
     p_tail.add_argument("--since", type=int, metavar="SEQ", help="print entries after SEQ")
+    p_tail.add_argument("--unread", action="store_true", help="read and advance only your channel cursor")
     p_tail.add_argument(
         "--limit", type=int, default=sp_constants.TOPIC_TAIL_DEFAULT, metavar="N",
         help="at most N entries (default %d, maximum %d)"
         % (sp_constants.TOPIC_TAIL_DEFAULT, sp_constants.TOPIC_TAIL_MAX),
     )
     p_tail.add_argument("--json", action="store_true", help="machine-readable output")
-    for parser in (p_create, p_join, p_bind, p_leave, p_remove, p_list, p_members, p_tail):
+    for parser in (p_create, p_set, p_join, p_bind, p_leave, p_remove, p_list, p_unread, p_members, p_tail):
         parser.set_defaults(func=sp_channels.cmd_channel)
     p_chan.set_defaults(func=sp_channels.cmd_channel, channel_cmd=None)
 

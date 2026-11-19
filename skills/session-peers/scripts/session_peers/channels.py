@@ -33,6 +33,7 @@ import uuid as uuidlib
 from . import constants as sp_constants, protocol as sp_protocol, runtime as sp_runtime
 from . import claude as sp_claude, codex as sp_codex, identity as sp_identity
 from . import journal as sp_journal, opencode as sp_opencode, topics as sp_topics
+from . import channel_mentions as sp_mentions
 
 EVENT_CREATED = "channel.created"
 EVENT_JOINED = "channel.joined"
@@ -53,6 +54,13 @@ STATE_IN_PROGRESS = "in progress"
 STATE_UNKNOWN = "unknown"
 STATE_UNVERIFIED = "unverified"
 STATE_ACKED = "acked"
+
+
+def delivery_mode(rec):
+    """Old records are quiet too; buddy channels always notify both peers."""
+    if rec.get("kind") == "buddy":
+        return "all"
+    return "all" if rec.get("deliver") == "all" else "mentions"
 ACK_NOT_REQUESTED = "ACK not requested (unverified)"
 ACK_NOT_REQUESTED_ASKED = "ACK not requested"
 
@@ -330,13 +338,15 @@ def read_history(key, since=None, limit=sp_constants.TOPIC_TAIL_DEFAULT):
     return sp_topics.topic_tail(topic_name(key), since=since, limit=limit, base=history_dir())
 
 
-def create_channel(name, owner, members=(), kind="named", display=None, reserved_ok=False):
+def create_channel(name, owner, members=(), kind="named", display=None, reserved_ok=False, deliver="mentions"):
     """Create a channel owned by ``owner`` (a typed id); the owner is a member.
 
     Membership is written before the ``channel.created`` entry. ``reserved_ok``
     lets the buddy flow create its own ``buddy-`` channels.
     """
     key = parse_name(name)
+    if deliver not in ("mentions", "all"):
+        raise ChannelError("delivery mode must be mentions or all")
     if not reserved_ok and (
         key == sp_constants.CHANNEL_GENERAL or key.startswith(sp_constants.CHANNEL_BUDDY_PREFIX)
     ):
@@ -363,6 +373,7 @@ def create_channel(name, owner, members=(), kind="named", display=None, reserved
         rec = {
             "key": key, "display": display or key, "kind": kind, "owner": owner,
             "members": roster, "created_at": sp_runtime.now_iso(),
+            "deliver": "all" if kind == "buddy" else deliver,
         }
         if kind == "buddy":
             rec["current_buddy"] = None  # buddy_channel_add sets it next, under the channel lock
@@ -864,6 +875,8 @@ def cmd_channel(args):
         "remove": _cmd_remove, "list": _cmd_list, "members": _cmd_members,
         "tail": _cmd_tail,
         "bind": _cmd_bind,
+        "set": _cmd_set,
+        "unread-summary": _cmd_unread_summary,
     }
     handler = handlers.get(getattr(args, "channel_cmd", None))
     if handler is None:
@@ -910,8 +923,24 @@ def _cmd_bind(args, me):
 def _cmd_create(args, me):
     exclude = me.partition(":")[2]
     members = [_canon_member(m, exclude=exclude) for m in args.member or []]
-    rec = create_channel(args.name, me, members)
+    rec = create_channel(args.name, me, members, deliver=args.deliver)
     print("created #%s (%d members)" % (rec["key"], len(rec["members"])))
+    return 0
+
+
+def _cmd_set(args, me):
+    key = stored_key(args.name)
+
+    def mutate(rec):
+        if rec["owner"] != me:
+            raise ChannelError("only the channel owner can change delivery mode")
+        if rec["kind"] == "buddy":
+            raise ChannelError("buddy channels always deliver all; their mode cannot be changed")
+        rec["deliver"] = args.deliver
+        return "channel.delivery", {"deliver": args.deliver}
+
+    change_membership(key, mutate, me)
+    print("#%s delivery: %s" % (key, args.deliver))
     return 0
 
 
@@ -929,6 +958,9 @@ def _general_marker(action, me):
 
 
 def _cmd_join(args, me):
+    if any(rec.get("kind") == "buddy" and rec.get("owner") != me and pair_of(rec)[1] == me
+           for rec in list_channels()):
+        print("note: bound buddies normally stay out of shared channels and talk to their lead; joining is still allowed")
     if parse_name(args.name) == sp_constants.CHANNEL_GENERAL:
         return _general_marker("join", me)
     key = stored_key(args.name)
@@ -1315,6 +1347,19 @@ def _cmd_list(args, me):
         if row["label_status"] != LABEL_CURRENT:
             line += "  " + row["label_status"]
         print(line)
+    from . import channel_reads
+    channel_reads.print_summary()
+    return 0
+
+
+def _cmd_unread_summary(_args, me):
+    from . import channel_reads
+    try:
+        lines = channel_reads.summaries(me)
+        if lines:
+            print("\n".join(lines))
+    except Exception:
+        return 1  # optional reminder, the parent deliberately emits nothing
     return 0
 
 
@@ -1386,6 +1431,21 @@ def describe_entry(entry):
 
 
 def _cmd_tail(args, me):
+    from . import channel_reads
+    if not getattr(args, "unread", False):
+        return _tail_output(args, me)
+    if args.since is not None:
+        raise ChannelError("--unread and --since cannot be combined")
+    key = parse_name(args.name)
+    if key != sp_constants.CHANNEL_GENERAL and me not in _require(key)["members"]:
+        raise ChannelError("only a member can advance its channel read cursor")
+    with channel_reads.locked(key, me):
+        args = copy.copy(args)
+        args.since = channel_reads.cursor(key, me)
+        return _tail_output(args, me)
+
+
+def _tail_output(args, me):
     key = parse_name(args.name)
     if key != sp_constants.CHANNEL_GENERAL:  # derived #general has history but no record
         _require(key)
@@ -1402,6 +1462,7 @@ def _cmd_tail(args, me):
     if args.json:
         entries = [dict(e, view=views[e["seq"]]) if e["seq"] in views else e for e in result["entries"]]
         print(json.dumps(dict(result, entries=entries, channel=key)))
+        _advance_read(args, key, me, result["next"])
         return 0
     gap = result["gap"]
     if gap:
@@ -1412,7 +1473,18 @@ def _cmd_tail(args, me):
             for line in describe_view(views[entry["seq"]]):
                 print(line)
     print("next: --since %d" % result["next"])
+    _advance_read(args, key, me, result["next"])
     return 0
+
+
+def _advance_read(args, key, me, seq):
+    if getattr(args, "unread", False):
+        from . import channel_reads
+        sys.stdout.flush()  # a failed output never marks unseen entries read
+        try:
+            channel_reads.advance(key, me, seq)
+        except OSError as exc:
+            raise ChannelError("output printed, but saving the read cursor failed; a later read may repeat entries: %s" % _reason(exc), 1) from exc
 
 
 # --------------------------------------------------------------------------
@@ -1660,6 +1732,8 @@ def cmd_handover(args):
     if not getattr(args, "json", False):
         from . import ledger
         ledger.print_summary()
+        from . import channel_reads
+        channel_reads.print_summary()
     return 1 if failed else 0
 
 
@@ -1942,7 +2016,45 @@ def send_channel(args):
         return exc.code
 
 
-def _prepare_send(key, sender, body, mid, record, authorised=False, pointer=None):
+def _mention_targets(body, members, cache):
+    """Resolve intent once, before writes; record canonical ids, never aliases."""
+    intent = sp_mentions.parse(body)
+    named = []
+    for token in intent["names"]:
+        member = _resolve_mention(token)
+        if member not in members:
+            raise ChannelError("mentioned %s is not a member of this channel; nothing was recorded or sent" % token)
+        if member not in named:
+            named.append(member)
+    targets = list(members) if intent["all"] else list(named)
+    if intent["here"]:
+        for member in members:
+            if member_liveness(member, cache) == "live" and member not in targets:
+                targets.append(member)
+    mentioned = list(members) if intent["all"] or intent["here"] else named
+    return intent, targets, mentioned
+
+
+def _resolve_mention(token):
+    try:
+        return sp_journal._norm(token)
+    except ValueError:
+        pass
+    browsers = [rec for rec in sp_claude.claude_record_by_name(token, include_web=True)
+                if sp_claude.is_web_record(rec)]
+    try:
+        found = sp_identity.resolve_typed(token)
+    except sp_codex.ResolveNotFound:
+        found = None
+    except (sp_codex.ResolveError, ValueError) as exc:
+        raise ChannelError("cannot resolve mention @%s: %s" % (token, exc)) from exc
+    if len(browsers) + int(found is not None) != 1:
+        raise ChannelError("mention @%s is unknown or ambiguous; use a full typed member id" % token)
+    return (sp_journal._norm("web:" + browsers[0]["sessionId"]) if browsers else
+            sp_journal._norm("%s:%s" % (found["kind"], found["uuid"])))
+
+
+def _prepare_send(key, sender, body, mid, record, authorised=False, pointer=None, quiet_record=False):
     """Everything a send decides before it writes: members, liveness, caps, size and the journal preflight.
 
     Shared by the CLI ``_send`` and ``send_as_web``. Raises ChannelError and
@@ -1952,25 +2064,34 @@ def _prepare_send(key, sender, body, mid, record, authorised=False, pointer=None
     """
     members, coverage, gaps = _members_for(key, sender, authorised)
     general = key == sp_constants.CHANNEL_GENERAL
-    is_all = ALL_RE.match(body) is not None
+    cache = {}
+    rec = {} if general else _require(key)
+    mode = delivery_mode(rec)
+    intent, targets, mentioned = _mention_targets(body, members, cache)
+    is_all = intent["all"]
     journaled = record or is_all
     pointer = journaled if pointer is None else bool(pointer)
-    # A plain #general post is only recorded; everything else is delivered.
-    delivers = is_all or not general
     others = [m for m in members if m != sender]
-
-    cache = {}
-    if general and not journaled:
-        gone, live = [], []
-    else:
-        gone = [m for m in others if member_liveness(m, cache) == "gone"]
-        live = [m for m in others if m not in gone]
+    plain_general = general and not intent["tokens"]
+    selected = others if mode == "all" or (plain_general and record) else [m for m in others if m in targets]
+    recorded = {m: "recorded (not mentioned)" for m in others if m not in selected}
+    if mode == "mentions" and intent["here"] and not is_all:
+        for member in others:
+            if member in mentioned and member not in selected:
+                recorded[member] = "recorded (@here requires live evidence)"
+    if plain_general:
+        recorded = {}  # retain #general's existing record-only JSON and explicit ACK journal semantics
+    delivers = bool(selected) and not plain_general
+    if quiet_record and mode == "mentions" and not selected:
+        journaled, pointer = False, False
+    gone = [m for m in selected if member_liveness(m, cache) == "gone"]
+    live = [m for m in selected if m not in gone]
     if (is_all or (general and record)) and len(live) > ALL_MAX_RECIPIENTS:
         raise ChannelError(
             "#%s would address %d recipients; at most %d are allowed per post "
             "(limit ALL_MAX_RECIPIENTS); nothing was journaled or sent"
             % (key, len(live), ALL_MAX_RECIPIENTS))
-    snapshot = others if delivers else list(live)
+    snapshot = selected if delivers else list(live)
     _check_size(key, mid, sender, live if delivers else [], body, pointer)
 
     deliver, excluded = list(live), []
@@ -1984,7 +2105,8 @@ def _prepare_send(key, sender, body, mid, record, authorised=False, pointer=None
     return types.SimpleNamespace(
         key=key, sender=sender, body=body, mid=mid, coverage=coverage, gaps=gaps, general=general,
         is_all=is_all, journaled=journaled, pointer=pointer, delivers=delivers, snapshot=snapshot,
-        gone=gone, live=list(live), deliver=deliver, excluded=excluded)
+        gone=gone, live=list(live), deliver=deliver, excluded=excluded,
+        recorded=recorded, mentioned=mentioned, mention_all=is_all, mention_here=intent["here"], mode=mode)
 
 
 def _record_journal(plan):
@@ -2021,6 +2143,9 @@ def _append_send(plan, extra=None):
         "delivery": delivery, "recipients": list(plan.snapshot),
         "excluded": [{"member": m, "reason": r} for m, r in plan.excluded],
         "opencode_coverage": plan.coverage,
+        "mentioned": list(plan.mentioned), "mention_all": plan.mention_all,
+        "mention_here": plan.mention_here, "delivery_mode": plan.mode,
+        "recorded": dict(plan.recorded),
         **({"discovery_incomplete": plan.gaps} if plan.gaps else {}),
         **(extra or {}),
     }
@@ -2077,7 +2202,7 @@ def _send(args):
 
     lock = _append_send(plan)
     try:
-        payload = {"status": "recorded", "channel": key, "message_id": mid, "outcomes": {}}
+        payload = {"status": "recorded", "channel": key, "message_id": mid, "outcomes": dict(plan.recorded)}
         if plan.journaled:
             payload["journal"] = {"message_id": mid, "recorded": True}
         if plan.coverage is not None:
@@ -2087,7 +2212,7 @@ def _send(args):
         if lock is None:
             if not plan.delivers:
                 # Journaled for the resolvable members, delivered to none.
-                payload["outcomes"] = {m: OUTCOME_RECORDED for m in plan.deliver}
+                payload["outcomes"].update({m: OUTCOME_RECORDED for m in plan.deliver})
                 for member, reason in plan.excluded:
                     payload["outcomes"][member] = OUTCOME_REFUSED + reason
                     payload.setdefault("notes", {})[member] = ACK_NOT_REQUESTED
@@ -2168,7 +2293,7 @@ def _fan_out(args, lock, payload, as_json, send, members):
     """`_deliver_all` for the CLI: fold the result into ``payload`` and report it."""
     key, _sender, mid, _body, journaled = send
     outcomes, notes, update_failed, problem = _deliver_all(args, lock, send, members)
-    payload["outcomes"] = outcomes
+    payload["outcomes"].update(outcomes)
     if notes:
         payload["notes"] = notes
     accepted = [o for o in outcomes.values() if not o.startswith(OUTCOME_REFUSED)]
@@ -2245,21 +2370,27 @@ def send_as_web(key, web_sender, body, ack, mid, deliver_guard=None, expected_re
         try:
             sender = "web:%s" % sp_identity.parse_address("web:%s" % web_sender["sid"])["uuid"]
             key = parse_name(key)
-            is_all = ALL_RE.match(body) is not None
+            is_all = sp_mentions.parse(body)["all"]
             if key == sp_constants.CHANNEL_GENERAL and not (expected_recipients is not None and is_all):
                 return refuse("#general is not open to browser posts")
             ask = bool(ack) or is_all
-            plan = _prepare_send(key, sender, body, mid, True, authorised=True, pointer=ask)
+            if is_all and expected_recipients is None:
+                return refuse("@all requires a recipient preview and confirmation")
+            plan = _prepare_send(key, sender, body, mid, True, authorised=True, pointer=ask, quiet_record=True)
+            ask = ask and plan.journaled
+            payload["outcomes"] = dict(plan.recorded)
             payload["recipients"] = list(plan.snapshot)
             payload["excluded"] = [{"member": m, "reason": r} for m, r in plan.excluded]
             if expected_recipients is not None and sorted(plan.live) != sorted(expected_recipients):
                 return refuse("recipients changed, preview again")
-            _record_journal(plan)
+            if plan.journaled:
+                _record_journal(plan)
         except (ChannelError, sp_journal.JournalError, ValueError, KeyError, TypeError, OSError) as exc:
             return refuse(exc)
-        if on_journaled is not None:
+        if plan.journaled and on_journaled is not None:
             on_journaled(list(plan.deliver))
-        _failpoint("send_after_journal")
+        if plan.journaled:
+            _failpoint("send_after_journal")
         try:
             lock = _append_send(plan, {"ack_requested": ask})
         except ChannelError as exc:
@@ -2267,6 +2398,7 @@ def send_as_web(key, web_sender, body, ack, mid, deliver_guard=None, expected_re
     try:
         if lock is None:
             payload["state"] = WEB_SENT
+            payload["reason"] = "recorded, no notifications"
             return payload
         outcomes, notes, update_failed, problem = _deliver_all(
             _web_member_args(web_sender), lock, (key, sender, mid, body, True),
@@ -2276,7 +2408,7 @@ def send_as_web(key, web_sender, body, ack, mid, deliver_guard=None, expected_re
         if lock is not None:
             lock.abandon()  # a no-op after a normal release; after a crash the file stays, as for a dead sender
     payload["state"] = WEB_SENT
-    payload["outcomes"] = outcomes
+    payload["outcomes"].update(outcomes)
     if notes:
         payload["notes"] = notes
     if update_failed:

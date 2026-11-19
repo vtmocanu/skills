@@ -1382,7 +1382,7 @@ test("chat: in #general the composer takes @all only: plain text shows the reaso
   typeText(t, "@all freeze main")
   const warn = elementsOf(composer(t)).find((n) => n.attributes.class === "allwarn")
   assert.ok(warn, "the mock's .allwarn")
-  assert.equal(warn.textContent, "@all reaches every #general member after you confirm the recipient list")
+  assert.equal(warn.textContent, "@all reaches this channel after recipient preview and confirmation")
   assert.ok(reasonNode(t).classList.contains("is-all"))
   assert.equal(sendButton(t).disabled, false)
   assert.equal(sendButton(t).textContent, "Preview recipients")
@@ -1814,7 +1814,7 @@ test("chat: a direct send queued from a channel is followed in Browser; the lane
 
 // ---------------------------------------------------------------- chat mode: U5 review follow-ups
 
-const ALL_WARN = "@all only works in #general: open #general to post it to every member"
+const ALL_WARN = "@all requires a channel destination and recipient confirmation"
 const reasonNode = (t) => elementsOf(composer(t)).find((n) => n.attributes.class === "creason")
 
 async function readyToSend(t, text = "please rebase") {
@@ -1887,11 +1887,11 @@ test("chat: @all text outside #general shows the note (.allnote), disables Send 
   textareaOf(t).dispatch("keydown", { key: "Enter", ctrlKey: true })
   await settle()
   assert.equal(t.sends.length, 0)
-  for (const text of ["@all", "@all\tnow"]) {
+  for (const text of ["@all", "@all\tnow", " @all is mid-text"]) {
     typeText(t, text)
     assert.equal(sendButton(t).disabled, true, JSON.stringify(text))
   }
-  for (const text of ["freeze merges", "@allison please", " @all is mid-text"]) {
+  for (const text of ["freeze merges", "@allison please", "`@all is code`", "https://example.invalid/@all"]) {
     typeText(t, text)
     assert.equal(sendButton(t).disabled, false, JSON.stringify(text))
     assert.ok(!elementsOf(composer(t)).some((n) => n.attributes.class === "allnote"), text)
@@ -2959,6 +2959,49 @@ test("collapsed pin emphasizes changed counts without timers; malformed or unava
   assert.ok(pin.ownerTokens[0].classList.contains("pin-changed"))
   pin.button.dispatch("click")
   assert.ok(pin.popup)
+})
+
+test("mention grammar keeps literal emails, URLs and backticks out of broadcast previews", () => {
+  const { app } = load()
+  for (const text of ["person@example.invalid", "person+@all", "https://example.invalid/@all", "`@all`",
+    "```\n@all\n```", "unclosed `@all", String.raw`\@all`, "word@all", "@@all", "@allison", "@ALL"]) {
+    assert.equal(app.broadcasts(text), false, text)
+  }
+  for (const text of ["please @all review", "(@all)", "@all.", "@all:", "`literal` @all"]) {
+    assert.equal(app.broadcasts(text), true, text)
+  }
+  assert.equal(app.broadcasts("x".repeat(200000) + " https://example.invalid/@all"), false)
+})
+
+test("viewer highlighting uses frozen typed mentions; an unknown viewer highlights only broadcasts", () => {
+  const t = load()
+  t.app.setState({ ...stateFixture(), viewer: CC_A })
+  const entry = { ...sendEntry(1, "please review"), mentioned: [CC_A] }
+  assert.ok(t.app.renderEntry(entry).attributes.class.includes("is-mentioned"))
+  t.app.setState({ ...stateFixture(), viewer: CODEX_B })
+  assert.ok(!t.app.renderEntry(entry).attributes.class.includes("is-mentioned"))
+  t.app.setState({ ...stateFixture(), viewer: null })
+  assert.ok(!t.app.renderEntry(entry).attributes.class.includes("is-mentioned"))
+  for (const flag of ["mention_all", "mention_here"]) {
+    assert.ok(t.app.renderEntry({ ...entry, [flag]: true }).attributes.class.includes("is-mentioned"))
+  }
+})
+
+test("stored-channel broadcasts preview and confirm the same channel; direct picks still cannot broadcast", async () => {
+  const t = allBoot()
+  await t.app.ready
+  await t.app.selectChannel("ops")
+  setBox(pickBoxes(t)[0], true) // Post to #ops, not individual recipients
+  typeText(t, "please @all review")
+  assert.equal(sendButton(t).disabled, false)
+  assert.equal(sendButton(t).textContent, "Preview recipients")
+  await t.app.submitCompose()
+  assert.equal(t.sends[0].body.to, "#ops")
+  assert.ok(dialogOf(t).textContent.includes("Post @all to #ops?"))
+  okButton(t).dispatch("click")
+  await settle()
+  assert.equal(t.sends[1].body.to, "#ops")
+  assert.equal(t.sends[1].body.confirm, NONCE)
 })
 
 test("ledger panel is a real table, escapes labels and refuses unsafe links", () => {

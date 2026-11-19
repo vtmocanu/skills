@@ -2941,7 +2941,7 @@ class WebdataActivityTests(WebdataBase):
 
     def test_a_pending_send_maps_to_its_channel_through_the_cursor_not_the_row_position(self):
         self.tid, _rollout = self.one_thread()
-        sp_channels.create_channel("qa", self.me, ["codex:" + self.tid])
+        sp_channels.create_channel("qa", self.me, ["codex:" + self.tid], deliver="all")
         sp_channels.create_channel("aa", self.me, [])  # sorts before qa but has no send
         with mock.patch.object(sp_channels, "_failpoint", WebdataPendingSendTests.hook):
             with self.assertRaises(RuntimeError):

@@ -125,6 +125,7 @@ main{display:flex;flex-direction:column;min-width:0;min-height:0}
 .older{align-self:center;border:1px solid var(--line);background:var(--raised);border-radius:999px;padding:4px 14px;font-size:13px;cursor:pointer;color:var(--ink-2)}
 .older:hover{color:var(--ink);border-color:var(--ink-3)}
 .msg{display:grid;grid-template-columns:36px minmax(0,1fr);gap:10px;max-width:760px}
+.msg.is-mentioned{border-left:3px solid var(--mention);padding-left:8px;background:var(--panel)}
 .avatar{width:36px;height:36px;border-radius:10px;display:grid;place-items:center;color:var(--ink);border:1px solid var(--line);background:var(--raised)}
 .avatar svg{width:20px;height:20px}
 .avatar.claude{background:var(--claude-bg)} .avatar.codex{background:var(--codex-bg)} .avatar.oc{background:var(--oc-bg)} .avatar.web{background:var(--human-bg)}

@@ -1086,9 +1086,14 @@ def entry_view(entry, delivery=None, general=False):
         body = data.get("body") if isinstance(data.get("body"), str) else ""
         out.update(body=body, sender=_ident(data.get("sender")), message_id=_ident(data.get("message_id")),
                    journaled=bool(data.get("journaled")), verdict=detect_verdict(body))
+        out["mentioned"] = [_ident(m) for m in data.get("mentioned", [])[:sp_constants.CHANNEL_MAX_MEMBERS]
+                            if isinstance(m, str)] if isinstance(data.get("mentioned"), list) else []
+        intent = sp_channels.sp_mentions.parse(body) if "mention_all" not in data and not data.get("targeted") else {}
+        out["mention_all"] = data.get("mention_all") is True or intent.get("all") is True
+        out["mention_here"] = data.get("mention_here") is True or intent.get("here") is True
         if delivery is not None:
             out["delivery"] = delivery
-            if sp_channels.ALL_RE.match(body) and not data.get("targeted"):
+            if out["mention_all"] and not data.get("targeted"):
                 out["tally"] = ack_tally(delivery["recipients"])
         if general:
             gaps = data.get("discovery_incomplete")
@@ -1202,7 +1207,8 @@ def channel_page(key, before=None, limit=PAGE_MAX, budget=None, members=None, no
             partial = True
     if record is not None:
         info.update(display=record["display"], kind=record["kind"], owner=record["owner"],
-                    members=list(record["members"][:sp_constants.CHANNEL_MAX_MEMBERS]))
+                    members=list(record["members"][:sp_constants.CHANNEL_MAX_MEMBERS]),
+                    deliver=sp_channels.delivery_mode(record))
     elif not general:  # listed but its record does not read, or the budget skipped it
         info["unreadable"] = True
         partial = True
@@ -2133,7 +2139,7 @@ def _channel_labels(discovery, records):
         list(readable.values()), discovery.get("label_names") or {}, discovery.get("label_liveness") or {})
 
 
-def state_view(discovery, budget=None, now=None, chat=None):
+def state_view(discovery, budget=None, now=None, chat=None, viewer=None):
     """Metadata for the page's first load: sessions, channels (#general first), the starting cursor.
 
     ``discovery`` is supplied by the caller: ``general`` = ``(members, opencode_coverage, gaps)`` from
@@ -2230,6 +2236,7 @@ def state_view(discovery, budget=None, now=None, chat=None):
             "key": key, "name": key, "display": record["display"], "kind": record["kind"], "owner": record["owner"],
             "members": _members_of(roster, liveness, activity, names), "handover_chain": chain,
             "alert": alert, "coverage": cover,
+            "deliver": sp_channels.delivery_mode(record),
         }
         label = ({"label": "#" + GENERAL, "status": sp_channels.LABEL_CURRENT} if key == GENERAL
                  else labels.get(key))
@@ -2270,6 +2277,7 @@ def state_view(discovery, budget=None, now=None, chat=None):
         sessions.insert(0, browser_session)
     result = {
         "sessions": sessions, "channels": rows, "cursor": cursor, "partial": partial,
+        "viewer": chat["peer"] if chat is not None else viewer,
         "discovery": {"stale": bool(discovery.get("stale")), "pending": bool(discovery.get("pending"))},
     }
     if chat is not None:

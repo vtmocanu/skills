@@ -2,8 +2,8 @@
 
 import re
 
-_URL = re.compile(r"(?:[A-Za-z][A-Za-z0-9+.-]*://|mailto:)\S+")
-_EMAIL = re.compile(r"[\w.!#$%&'*+/=?^{}|~-]+@[\w.-]+", re.UNICODE)
+_URL = re.compile(r"(?<![A-Za-z0-9+.-])(?:[A-Za-z][A-Za-z0-9+.-]*://|mailto:)\S+")
+_EMAIL = re.compile(r"(?<![\w.!#$%&'*+/=?^{}|~-])[\w.!#$%&'*+/=?^{}|~-]+@[\w.-]+", re.UNICODE)
 _TOKEN = re.compile(r"(?<![\w@\\])@([\w][\w.:-]{0,255})", re.UNICODE)
 
 

@@ -1,11 +1,18 @@
 """Mention grammar and quiet-delivery intent, with no live sessions."""
 
 import unittest
+import subprocess
+import sys
 
 from session_peers import channel_mentions
 
 
 class MentionGrammarTests(unittest.TestCase):
+    def test_large_nonmention_prefix_finishes_within_bounded_child(self):
+        code = "from session_peers.channel_mentions import parse; assert parse('x'*200000+' https://example.invalid/@all')['tokens'] == []"
+        result = subprocess.run([sys.executable, "-c", code], capture_output=True, timeout=3)
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+
     def test_word_boundaries_typed_ids_and_sentence_punctuation(self):
         ident = "codex:11111111-1111-4111-8111-111111111111"
         body = "Hi @lead, (@here) and @" + ident + ". @lead: @all!"

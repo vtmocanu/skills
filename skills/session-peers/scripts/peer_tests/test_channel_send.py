@@ -54,7 +54,9 @@ class ChannelSendBase(ChannelBase):
         return listener, "cc:" + sid
 
     def channel(self, name, *members, owner=None):
-        return sp_channels.create_channel(name, owner or self.me, list(members))
+        # These transport/journal fixtures intentionally exercise all-member fan-out.
+        # Quiet defaults and mention filtering have their own acceptance tests.
+        return sp_channels.create_channel(name, owner or self.me, list(members), deliver="all")
 
     def send(self, *extra, name="ops", message="freeze main"):
         rc, out, err = self.cli("send", "--to", "#" + name, "--message", message, "--json", *extra)
@@ -84,7 +86,7 @@ class ChannelSendTests(ChannelSendBase):
     def test_example_1_codex_accepted_and_idle_opencode_not_woken(self):
         self.sender_cc()
         tid, _rollout = self.one_thread()
-        self.ok("create", "ops", "--member", "codex:" + tid, "--member", "oc:" + OC_B)
+        self.ok("create", "ops", "--deliver", "all", "--member", "codex:" + tid, "--member", "oc:" + OC_B)
         rc, out, err = self.cli("send", "--to", "#ops", "--message", "freeze main")
         self.assertEqual(rc, 0, err)
         self.assertIn("codex:%s: transport accepted" % tid, out)
@@ -1208,7 +1210,7 @@ class BrowserPostTests(BrowserPostHelpers, ChannelSendBase):
         self.assertEqual(sp_channels.delivery_rows(
             {"recipients": ["cc:a"], "journaled": True, "ack_requested": True}, "complete",
             {"cc:a": "transport accepted"}, {"cc:a": "pending"})[0]["ack"], "pending")
-        result = self.post(body="@all heads up", ack=False)
+        result = self.post(body="@all heads up", ack=False, expected_recipients=self.members)
         self.assertEqual(result["state"], "sent")
         self.assertIn("peers.py ack", self.queue_calls()[0][4])
         self.assertIs(self.send_entries()[0]["data"]["ack_requested"], True)
@@ -1247,8 +1249,8 @@ class BrowserPostTests(BrowserPostHelpers, ChannelSendBase):
 
     def test_a_refused_at_all_journal_write_gives_the_allowance_back(self):
         with mock.patch.object(sp_journal, "record_message", side_effect=sp_journal.JournalFull("full")):
-            self.assertEqual(self.post(body="@all hi")["state"], "not sent")
-        self.assertEqual(self.post(body="@all hi")["state"], "sent")
+            self.assertEqual(self.post(body="@all hi", expected_recipients=self.members)["state"], "not sent")
+        self.assertEqual(self.post(body="@all hi", expected_recipients=self.members)["state"], "sent")
 
     def test_a_history_failure_after_the_journal_write_is_journaled_not_sent_and_not_retried(self):
         real = sp_channels.append_history

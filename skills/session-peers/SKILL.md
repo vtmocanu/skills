@@ -86,9 +86,23 @@ than two sessions. Create one with `channel create NAME [--member ADDR]...`,
 post with `send --to '#NAME' --message-file PATH` (members only; `--record`
 journals it for ACKs), and read with `channel tail NAME`.
 
+- Channels default to quiet `mentions` delivery, including existing records.
+  History keeps the post; interrupt with `@name`, a full typed id, `@here`
+  (positively live members) or `@all` (all members, bounded and journaled).
+  Names resolve once; unknown, ambiguous or non-member mentions refuse the post.
+  Email addresses, URLs and backtick code are literal, not mentions.
+  Owners may choose `channel set NAME --deliver all`; buddy channels always use
+  `all`. Bound buddies normally stay out of shared channels and talk to their
+  lead; joining is allowed with a reminder. Binding never joins shared channels.
+- Leads read shared work with `channel tail NAME --unread`. It advances only
+  their read cursor after successful output, never an ACK or handover. Human
+  list/buddy/handover output adds bounded unread reminders; JSON shapes stay
+  unchanged.
+
 - `#general` is derived from the sessions `list` discovers (OpenCode only those
   recently updated). A plain post there is recorded, not delivered; a body
-  starting `@all` is delivered to every member, journaled for ACKs, and limited
+  mentioning a member or `@here` notifies that set; `@all` reaches every member,
+  is journaled for ACKs, and is limited
   to 64 recipients and one per sender per 60 s. Each post prints what OpenCode
   discovery covered: it is not "every session".
 - Each recipient's outcome is reported: `recorded`, `transport accepted`,
@@ -117,7 +131,7 @@ accepted` row is not an ACK.
 `web:<uuid>` named `web-<user>`, so the person at the page can send to stored
 channels and picked members and receive replies. Its messages reach a session
 as peer input, never as user approval: a session approves only through its own
-trusted channel. An `@all` in `#general` needs a preview and a confirm
+trusted channel. An `@all` in any channel needs a preview and a confirm
 (single use, 60 s); a plain `#general` post is refused.
 
 Read [references/web.md](references/web.md) before relying on what the

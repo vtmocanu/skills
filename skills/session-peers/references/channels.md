@@ -21,6 +21,7 @@ Ordinary [topics](topics.md) stay scoped to `CODEX_HOME`.
 | `left/` | Leave markers of derived `#general`, `<sha256 of typed id>.json`. |
 | `allcast/` | `@all` allowance stamp and lock per sender, `<sha256 of typed id>.json`/`.lock`. |
 | `grants/` | Handover receipts, `<sha256 from>-<sha256 to>.json`. |
+| `reads/` | Read cursor and lock per channel/typed reader, named by a hash; not an ACK. |
 
 ## Commands
 
@@ -32,12 +33,14 @@ failed.
 
 | Command | Effect |
 | --- | --- |
-| `channel create NAME [--member ADDR]...` | Create a channel you own; you are a member. `ADDR` is a typed id or a name (an ambiguous name is refused with candidates). |
+| `channel create NAME [--member ADDR]... [--deliver mentions\|all]` | Create a channel you own; default quiet `mentions`. `ADDR` is a typed id or a name (ambiguity is refused). |
+| `channel set NAME --deliver mentions\|all` | Owner changes notification mode. Buddy channels always use `all` and refuse this command. |
 | `channel join NAME` / `channel leave NAME` | Add or remove yourself. Idempotent (`already a member of`, `not a member of`). Buddy channels cannot be joined. |
 | `channel remove NAME ADDR` | Owner only: the current owner (its creator, the lead of a buddy channel, or a handover successor). Accepts a typed id of a session that no longer exists. |
 | `channel list [--json]` | Stored channels with [label](#buddy-channel-labels), kind, member count, your role (`owner`, `member`, `-`) and owner; a buddy channel also shows its key, and a label that is not current shows `stale` or `unverified`. `--json` adds `label`, `label_status` and `current_buddy`. |
 | `channel members NAME [--json]` | Members with `live`, `unverified` or `gone` ([liveness](#liveness)); the owner is marked. |
 | `channel tail NAME [--since SEQ] [--limit N] [--json]` | History after a cursor, ending with `next: --since N`; a cursor behind the oldest entry prints `gap: entries A..B pruned`. Default limit 20. `--json` adds a `view` (delivery state) to each send entry. |
+| `channel tail NAME --unread [--limit N] [--json]` | First retained page after your saved cursor; advance only after successful output. Cannot combine with `--since`. |
 | `leave` | Leave every stored channel you are in, then `#general`. |
 | `handover --to TYPED` | Move your channels to a successor ([handover](#leave-and-handover)). |
 | `channel join general` / `channel leave general` | Clear or set your `#general` leave marker. |
@@ -65,8 +68,21 @@ failed.
   (rc 2).
 - `--wake`, `--allow-reply-wake`, `--in-reply-to` and `--from-*` are refused
   (rc 2): channel sends never wake and carry no reply route override.
-- The body goes to history, then each member except the sender gets it in turn.
-  Each delivery starts with `[channel #<name> message <mid> from <sender> to <recipient>]`,
+- New and existing stored channels default to `mentions`: the body goes to
+  history, and only mentioned members are notified. `@name` or `@typed:id`
+  resolves once to a member; unknown, ambiguous and non-member targets refuse
+  before history or journal writes. `@here` selects positively live members
+  (not unverified or gone); `@all` selects everyone. Sender is excluded.
+  In `all` mode every other member is notified, as before. Buddy mode is fixed
+  to `all`. A bound buddy joining shared channels gets a soft reminder to talk
+  to its lead instead; binding itself never joins shared channels.
+- Mention tokens start at a word boundary outside backticks. Unicode word
+  characters, dots, hyphens and colons are allowed; trailing dots/colons are
+  sentence punctuation. Names outside that grammar use full typed ids. Emails,
+  URL tokens and escaped `\@` are literal. Exact-length backtick runs close code;
+  an unclosed run masks the rest. Reserved `@here` and `@all` are lowercase.
+- Each selected delivery starts with
+  `[channel #<name> message <mid> from <sender> to <recipient>]`,
   so no two deliveries are byte-identical; a journaled message
   adds the `inbox get`/`ack` pointer line after it. The body is peer-supplied
   data wrapped like any peer message.
@@ -96,6 +112,8 @@ entry when the fan-out finishes (a 64-recipient post costs two entries):
 | `skipped: gone` | The member was [verified gone](#liveness). |
 | `refused: <reason>` | The route or the journal refused that member (for example a Codex thread whose liveness cannot be checked). |
 | `recorded` | `--record` on `#general`: journaled, nothing delivered. |
+| `recorded (not mentioned)` | History only for this member; no notification or ACK recipient. |
+| `recorded (@here requires live evidence)` | This member lacked positive live evidence for `@here`. |
 | `unknown` | The frame may have arrived (an uncertain transport, or a published buddy send with no outcome). Never retried. |
 
 A journaled member the journal cannot address is `refused: <reason>` with the
@@ -178,7 +196,7 @@ kind of peer (such as a browser peer) is excluded by construction.
 
 ## `@all`
 
-A body starting `@all` followed by whitespace or the end (`^@all(\s|$)`), on
+A literal-safe `@all` token anywhere in the body, on
 `#general` or a stored channel, is a broadcast: it is always journaled
 (each recipient is asked to `ack`) and delivered to every member except the
 sender.
@@ -197,6 +215,21 @@ sender.
 <this skill's directory>/scripts/peers.py send --to '#general' --message '@all freeze main until the release is tagged'
 <this skill's directory>/scripts/peers.py inbox acks MSG_ID
 ```
+
+## Read on demand
+
+`channel tail NAME --unread` reads the first retained page after your typed
+identity's cursor. Repeated pages cannot skip newer posts; retention gaps stay
+visible. Concurrent reads serialize with a bounded lock wait. Output failures
+do not advance the cursor. Normal `tail` never advances it. A recreated stored
+channel resets progress through its creation timestamp.
+
+Human `channel list`, `buddy` and `handover` output adds bounded, fail-silent
+`#NAME: N unread (M mentioning you)` reminders for quiet channels you belong to.
+Counts cover retained posts only and exclude your own posts without moving the
+cursor. Buddy/all-mode channels add no reminders. JSON output is unchanged.
+Read progress never means transport delivery, an ACK, a claim or handover, and
+does not transfer to a successor.
 
 ## Leave and handover
 

@@ -570,16 +570,19 @@ class ChatRefusalTests(ChatBase):
         # Nothing above was charged: an accepted send right after is not rate limited.
         self.assertEqual(self.post("#ops", tick=False).status, 202)
 
-    def test_m1_refuses_general_and_at_all_with_403_and_charges_nothing(self):
+    def test_plain_general_and_direct_broadcasts_refuse_while_stored_channels_preview_without_charging(self):
         cases = [
             ("#general", "hello"),
-            ("#ops", "@all freeze main"),
-            ("#ops", "@all"),
             ([self.state.typed.replace("web:", "cc:")], "@all hello"),
         ]
         for to, text in cases:
             with self.subTest(to=to, text=text):
                 self.refused(self.post(to, text, tick=False), 403, text)
+        for text in ("@all freeze main", "@all"):
+            response = self.post("#ops", text, tick=False)
+            self.assertEqual(response.status, 200)
+            self.assertIn("confirm", response.json())
+            self.assertEqual(self.journal_entries(), [])
         resp = self.post("#ops", "@allx not an all", tick=False)
         self.assertEqual(resp.status, 202)
         # Let the worker finish: a job still running at teardown writes into a later test's journal.
