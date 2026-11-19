@@ -2731,6 +2731,62 @@ test("an older ledger response cannot replace a newer committed view", async () 
   assert.equal(env.app.state.ledgers.general.commit, "b".repeat(40))
 })
 
+test("a ledger render exception shows unavailable and the next poll still runs", async () => {
+  const env = bootFixture({ "/api/ledger/": ledgerFixture() })
+  await env.app.ready
+  env.routes["/api/changes"] = quiet("POLL1")
+  const create = env.document.createElement
+  let failures = 0
+  env.document.createElement = (tag) => {
+    if (tag === "table") { failures++; throw new Error("injected ledger rendering failure") }
+    return create(tag)
+  }
+  try {
+    await env.app.pollOnce().catch(() => {})
+    assert.ok(failures > 0, "the ledger render was exercised")
+    assert.equal(env.app.state.polling, false)
+    assert.equal(env.app.state.ledgers.general.state, "unavailable")
+    assert.ok(env.document.byId.ledgerhost.textContent.includes("Ledger unavailable"))
+  } finally {
+    env.document.createElement = create
+  }
+  const before = env.calls.filter((c) => c.url.startsWith("/api/changes")).length
+  env.routes["/api/changes"] = quiet("POLL2", { channels: { general: { entries: [sendEntry(2, "channel still updates")] } } })
+  await env.app.pollOnce()
+  assert.equal(env.calls.filter((c) => c.url.startsWith("/api/changes")).length, before + 1)
+  assert.equal(env.app.state.cursor, "POLL2")
+  assert.equal(env.app.state.ledgers.general.state, "current")
+  assert.ok(env.document.byId.stream.textContent.includes("channel still updates"))
+})
+
+test("the panel region accepts role and aria-label through el", () => {
+  const { app } = load()
+  const node = app.renderLedger(ledgerFixture())
+  assert.equal(node.attributes.role, "region")
+  assert.equal(node.attributes["aria-label"], "Repository ownership ledger")
+})
+
+test("an unexpected ledger paint rejection also releases the polling flag", async () => {
+  const env = bootFixture({ "/api/ledger/": ledgerFixture() })
+  await env.app.ready
+  env.routes["/api/changes"] = quiet("PAINT1")
+  const get = env.document.getElementById
+  env.document.getElementById = function (id) {
+    if (id === "ledgerhost") throw new Error("injected host lookup failure")
+    return get.call(this, id)
+  }
+  try {
+    await assert.rejects(env.app.pollOnce(), /injected host lookup failure/)
+    assert.equal(env.app.state.polling, false)
+  } finally {
+    env.document.getElementById = get
+  }
+  const before = env.calls.filter((c) => c.url.startsWith("/api/changes")).length
+  env.routes["/api/changes"] = quiet("PAINT2")
+  await env.app.pollOnce()
+  assert.equal(env.calls.filter((c) => c.url.startsWith("/api/changes")).length, before + 1)
+})
+
 const orderOf = async (stamps) => {
   const rows = stamps.map((ts, i) => lblRow("r" + i, "#r" + i, "posted", ts))
   const t = bootFixture({ "/api/state": orderState(rows) })

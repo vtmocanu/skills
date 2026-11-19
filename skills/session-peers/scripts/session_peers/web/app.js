@@ -506,6 +506,19 @@
     return panel;
   }
 
+  function paintLedger(key) {
+    var host = $("ledgerhost");
+    if (!host) return;
+    try {
+      fill(host, key ? renderLedger(S.ledgers[key]) : null);
+    } catch (_err) {
+      if (key) S.ledgers[key] = { state: "unavailable" };
+      // Do not use el() for the fallback: element/attribute creation may be
+      // exactly what failed. Keep this optional panel out of the history path.
+      host.textContent = "Ledger unavailable. The ownership table could not be rendered.";
+    }
+  }
+
   function refreshLedger() {
     if (S.view !== "conv") return Promise.resolve();
     var key = S.selected;
@@ -516,7 +529,7 @@
     }, function () {
       if (S.ledgerGen[key] === generation) S.ledgers[key] = { state: "unavailable" };
     }).then(function () {
-      if (S.view === "conv" && S.selected === key) fill($("ledgerhost"), renderLedger(S.ledgers[key]));
+      if (S.view === "conv" && S.selected === key) paintLedger(key);
     });
   }
 
@@ -2556,7 +2569,7 @@
         renderLive();
         if (S.view === "conv") renderMain({});
         return false;
-      }).then(function (result) { S.polling = false; return result; });
+      }).finally(function () { S.polling = false; });
     }
     S.polling = true;
     return api("/api/changes?since=" + encodeURIComponent(S.cursor)).then(function (data) {
@@ -2588,8 +2601,8 @@
       renderLive();
       return false;
     }).then(function (result) {
-      return refreshLedger().then(function () { S.polling = false; return result; });
-    });
+      return refreshLedger().then(function () { return result; });
+    }).finally(function () { S.polling = false; });
   }
 
   // The token was refused: polling ends, and the composer (chat mode) disables with its reason.
@@ -2755,7 +2768,7 @@
 
   function renderMain(opts) {
     opts = opts || {};
-    fill($("ledgerhost"), S.view === "conv" ? renderLedger(S.ledgers[S.selected]) : null);
+    paintLedger(S.view === "conv" ? S.selected : null);
     var stream = $("stream");
     var stick = stream && typeof stream.scrollHeight === "number" ? stream.scrollHeight - stream.scrollTop - (stream.clientHeight || 0) < 48 : true;
     var prevTop = stream ? stream.scrollTop : 0;
