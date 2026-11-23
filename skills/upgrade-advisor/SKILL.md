@@ -7,7 +7,7 @@ description: Evaluates whether and how to upgrade a tool, framework, library, or
 
 ## Document Location
 
-This document is located at: `~/stuff/gitrepos/gh/vtmocanu/skills/upgrade-advisor/SKILL.md` (public repo: github.com/vtmocanu/skills)
+This document is located at: `~/stuff/gitrepos/gh/vtmocanu/skills/skills/upgrade-advisor/SKILL.md` (public repo: github.com/vtmocanu/skills)
 
 > **Note**: This is the source of truth. The installed copy at `~/.claude/skills/upgrade-advisor/SKILL.md` is derived from this file by the `npx skills` package manager; edit here, then run `npx skills update` to re-pull it. Never edit the installed copy.
 
@@ -66,6 +66,10 @@ Listing the N/A items explicitly matters: it's the difference between "I checked
 
 The tool doesn't upgrade in isolation. Verify the target version against everything that depends on it: theme/plugin `min_version` and peer-dependency ranges, framework support matrices, the toolchain's own version floor, sibling pins that must move together. A target that breaks a required plugin is blocked even if the tool itself is clean.
 
+Plugins built against the platform's internals are not covered by the platform's release notes: check each plugin's own compatibility with the target and have its update ready for the same maintenance window. Also check whether the target **absorbs a plugin** (moves it into core, renames its domain, deletes the custom copy, or gates installs behind a new consent step): read the "new components/integrations" sections, not only "breaking changes", and diff your plugin names against the new built-in list.
+
+For a **layered system** (OS/base, platform core, plugins, managed devices), order the plan by dependency: base, then core, then plugins that couple to core, then long-running device work (firmware transfers) last. Anything that restarts a shared service can abort a long operation running through it.
+
 ### 6. Weigh blast radius before recommending *apply*
 
 Match caution to reversibility. Hard-to-recover targets (OTA-only firmware, production DB engines, a base image baked into many downstream builds) get **build/compile/test-first, then apply**. Cheap-to-revert targets (a dev CLI, a lockfile bump behind CI) can move directly. State which regime applies.
@@ -108,4 +112,6 @@ Lead with the verdict, then the evidence:
 - **Not upgrading is a valid outcome.** Installable + grep-clean but no fix you need, no feature you'd use, and non-trivial blast radius → recommend `stay put` and say why. Don't manufacture a reason to bump.
 - **A thin changelog isn't a clean one.** If release notes are sparse or the project tagged without them, fall back to the compare view (`github.com/OWNER/REPO/compare/vA...vB`) or the commit log — breaking changes sometimes live only in commits.
 - **Deprecation ≠ removal.** It's a warning with a runway — record the version it's removed in, migrate on your schedule, don't panic-fix.
+- **New names can collide with yours.** A release that adds a component, module or keyword can invalidate an existing id or name, and no grep across the delta flags it. Validate or compile the real config on the target version before applying; for schema-driven tools also check your ids against the new component list.
+- **"Missing after the upgrade" needs a same-window baseline.** Compare against the same time window before the change (night vs day, weekday vs weekend) before calling it a regression; restored or cached state can hide a source that never reports in that window.
 - **A new or fixed alert fires on old news.** An upgrade that ships default-on alert rules — or repairs a dead one — pages you on any latent condition that was always present but unwatched. Evaluate bundled rules against live signal *during* the eval; a "safe bump" that adds monitoring is not automatically a quiet one.
