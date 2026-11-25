@@ -210,6 +210,8 @@ Add `--show-fixes` to preview rewrites, or `--fix-safe` for high-confidence ones
 
 agnix reads a `<placeholder>` inside an inline-code span that wraps onto the next line as an `Unclosed XML tag` error; the same span on one line passes. Keep each inline-code span on one line, or write the placeholder as `UPPER_CASE`.
 
+agnix (0.18.0) reports a backslash-escaped double quote inside a quoted string (typically a path in a `python3 -c` or `ssh '...'` one-liner, in a code block or inline code) as `Windows path separator detected ... [fixable]`. It is a false positive: do not apply its fix, which rewrites the backslash and breaks the command. Rewrite the snippet as a quoted heredoc (`python3 - <<'PY'`), which needs no escaping and lints clean.
+
 **Errors must be fixed before commit; warnings are advisory** — fix the real ones. **Pre-existing warnings count**: when a file is open for a real edit, surface warnings that predate your change and propose fixing them in the same commit, rather than re-committing a file with the same warning count forever.
 
 **Agnix does not catch historical noise.** After it passes, sweep every edited `SKILL.md`, reference, template, and asset for the instruction-only rule above. Remove pre-existing noise surfaced by the edit.
